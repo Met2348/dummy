@@ -83,7 +83,7 @@ flowchart TD
 - `*_minimal.py`：**手写最小实现**（不依赖 peft，看清算法本质）
 - `*_peft.py`：**peft 调包对照**（看清生产实践）
 
-建议先读 minimal 再看 peft，最后跑一致性测试 `code/tests/test_*_consistency.py`。
+建议先读 minimal 再看 peft，最后跑一致性测试 `src/tests/test_*_consistency.py`。
 
 ### 跑 notebook
 ```powershell
@@ -95,10 +95,10 @@ jupyter lab
 
 ### 跑一致性测试
 ```powershell
-python code/tests/test_prompt_consistency.py
-python code/tests/test_prefix_consistency.py
-python code/tests/test_p_tuning_consistency.py
-python code/tests/test_p_tuning_v2_consistency.py
+python src/tests/test_prompt_consistency.py
+python src/tests/test_prefix_consistency.py
+python src/tests/test_p_tuning_consistency.py
+python src/tests/test_p_tuning_v2_consistency.py
 ```
 
 ## 7. 目录结构
@@ -112,7 +112,7 @@ prompt-tuning-family/
 │   ├── 03-p-tuning-2021.pdf
 │   └── 04-p-tuning-v2-2022.pdf
 ├── lectures/                     # 中文 PPT 风格教学
-├── code/                         # PyTorch 实现
+├── src/                         # PyTorch 实现
 │   ├── common.py                 # 共用工具
 │   ├── *_minimal.py              # 手写最小实现
 │   ├── *_peft.py                 # peft 调包对照
