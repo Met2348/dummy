@@ -93,22 +93,133 @@ pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision
 
 无 GPU：跳过 torch 重装，主线代码仍可在 CPU 上跑（QLoRA/LoftQ 的 GPU 选做 cell 会自动 SKIP）。
 
-## 横向对比表（占位，Phase 11 填充完整版）
+## 横向对比表（完整版）
 
-完整的 12 方法横向对比表（参数量 / 主战场 / 学习率 / 训练复杂度 / 部署）将在最后一个 Phase 完成后写入此处。
+### 1. 参数量与主战场
 
-## 与 prompt-tuning-family 的衔接
+| 方法 | 年份 | $\Delta W$ 形式 | 参数 (GPT-2, $r=8$) | 占 base | 典型 $r$ | 主战场 |
+|------|------|----------------|---------------------|---------|---------|--------|
+| Full FT | — | $W \mathrel{+}= \Delta W$ | 124,439,808 | 100% | — | 通用（昂贵）|
+| **LoRA** | 2021 | $BA$ | 294,912 | 0.236% | 4-64 | 通用 |
+| **rsLoRA** | 2023 | $BA$ ($\alpha/\sqrt r$) | 294,912 | 0.236% | 64-256 | 大 $r$ 稳定 |
+| **LoRA+** | 2024 | $BA$（$\eta_B = 16 \eta_A$） | 294,912 | 0.236% | 4-64 | 加速收敛 |
+| **AdaLoRA** | 2023 | $P \Lambda Q^T$ + 重要性 | 442,512 | 0.354% | 12→8 | 自适应分秩 |
+| **PiSSA** | 2024 | $BA$ (SVD top-r 初始化) | 294,912 | 0.236% | 8-128 | 加速收敛 |
+| **OLoRA** | 2024 | $BA$ (QR top-r 初始化) | 294,912 | 0.236% | 8-128 | 正交初始化 |
+| **VeRA** | 2024 | $\Lambda_d \odot B \Lambda_b A$（A、B 冻结共享）| 30,720 ($r=256$) | 0.025% | 256-1024 | 极致压缩 |
+| **LoHa** | 2021 | $(B_1 A_1) \odot (B_2 A_2)$ | 589,824 | 0.472% | 4-8 | 高等效秩（$r^2$）|
+| **LoKr** | 2023 | $B \otimes A$ | 23,808 (factor=32, $r=4$) | 0.019% | factor=8-48 | Stable Diffusion |
+| **QLoRA** | 2023 | NF4($W$) + $BA$ | 294,912 | 0.236% | 64 | 大模型省显存 |
+| **LoftQ** | 2023 | NF4($W - BA^*$) + $BA^*$ | 294,912 | 0.236% | 8-64 | 量化精度 |
+| **DoRA** | 2024 | $\boldsymbol{m} \cdot \frac{W_0 + BA}{\|W_0+BA\|_c}$ | 304,128 | 0.244% | 8-64 | 接近全参 FT |
+
+### 2. 训练特性
+
+| 方法 | 学习率 | 训练复杂度 | 收敛速度 | 推理时延 | peft 支持 |
+|------|--------|------------|---------|----------|-----------|
+| LoRA | 1e-4 | 低 | 慢 | 0（合并）| ✅ `LoraConfig` |
+| rsLoRA | 1e-4 | 低 | 慢 | 0 | ✅ `use_rslora` |
+| LoRA+ | $\eta_B = 16 \eta_A$ | 低 | **快**（2× LoRA）| 0 | 需手写 optimizer |
+| AdaLoRA | 5e-4 | 中（正交正则） | 中 | 0（剪枝后）| ✅ `AdaLoraConfig` |
+| PiSSA | 1e-4 | 中（SVD 预处理）| **快**（2× LoRA） | 0 | ✅ `init_lora_weights="pissa"` |
+| OLoRA | 1e-4 | 中（QR 预处理） | 中 | 0 | ✅ `init_lora_weights="olora"` |
+| VeRA | 1e-2 | 低 | 中 | 0 | ✅ `VeraConfig` |
+| LoHa | 1e-4 | 中（双路径） | 中 | 0 | ✅ `LoHaConfig`（不支持 GPT-2 Conv1D）|
+| LoKr | 1e-4 | 中（Kronecker） | 中 | 0 | ✅ `LoKrConfig`（不支持 GPT-2 Conv1D）|
+| QLoRA | 2e-4 | 中（运行时反量化） | 慢 | 反量化开销 5-10% | ✅ + bitsandbytes |
+| LoftQ | 2e-4 | 中（T 次 SVD 预处理）| **快** | 反量化开销 | ✅ `init_lora_weights="loftq"` |
+| DoRA | 1e-4 | 中（norm + detach） | **快** | 0 | ✅ `use_dora=True` |
+
+### 3. 一致性测试矩阵（minimal vs peft）
+
+| 方法 | 测试类型 | logits 误差 | 状态 |
+|------|---------|-------------|------|
+| LoRA | 强一致 | **0.00e+00** | ✅ bit 精确 |
+| rsLoRA | 单元（scaling 公式） | — | ✅ |
+| LoRA+ | 单元（学习率比例） | — | ✅ |
+| AdaLoRA | 弱一致（实现细节差异） | — | ✅ 6 单元测试 |
+| PiSSA | 强一致 (重建 W_0) | **1.19e-07** | ✅ 浮点 round-off |
+| OLoRA | 强一致 (重建 W_0) | **1.19e-07** | ✅ |
+| VeRA | 强一致 (共享 A/B) | — | ✅ data_ptr 共享验证 |
+| LoHa | 强一致 (rank ≤ r²) | **rank=16 = r²** | ✅ |
+| LoKr | 强一致 (Kronecker shape) | — | ✅ |
+| NF4 fake-quant | GPU 对比 bitsandbytes | **0.0** | ✅ 完美一致 |
+| QLoRA | 强一致 (训练时 base 不变) | **0.0** | ✅ |
+| LoftQ | 单调收敛 | 25.49 → 23.95 | ✅ |
+| DoRA | 强一致 (初始 W = W_0) | **0.0** | ✅ |
+
+### 4. 工程选型决策树
+
+```
+你的问题是什么？
+│
+├─ 65B 大模型 + 24GB GPU？        → QLoRA ⭐⭐⭐
+├─ 极致省参数 (< 1K per layer)？  → VeRA / Prompt Tuning
+├─ Stable Diffusion 风格微调？    → LoKr ⭐⭐⭐
+├─ 追求接近全参 FT 质量？         → DoRA ⭐⭐⭐
+├─ 自适应秩分配？                 → AdaLoRA
+├─ 快速收敛 (科研迭代)？          → PiSSA ⭐⭐
+├─ 量化 + 高质量初始化？          → LoftQ
+├─ 多任务（1000 用户/任务）？     → VeRA + 共享 A/B
+├─ 大 r 训练不稳？                → rsLoRA ($\alpha/\sqrt r$)
+└─ 训练慢？                       → LoRA+ ($\eta_B \gg \eta_A$)
+```
+
+## 全专题学习目标自测
+
+读完本专题后，你应该能回答：
+
+1. **公式题**：写出 LoRA 公式 $h = W_0 x + \frac{\alpha}{r} BA x$ 的逐项含义（$B$、$A$、$\alpha$、$r$ 各代表什么）
+2. **公式题**：证明 $\Delta W = BA$（LoRA）与 $\Delta W = P \Lambda Q^T$（AdaLoRA）在 $r$ 相同下表达力等价
+3. **公式题**：推导 PiSSA 的 $B = U_{:r} \sqrt{\Sigma_{:r}}, A = \sqrt{\Sigma_{:r}} V_{:r}^T$ 满足 $BA = W_0^{\text{top}r}$
+4. **公式题**：解释 NF4 在 $\mathcal{N}(0, 1)$ 输入上比 INT4 误差小（信息论角度）
+5. **公式题**：写出 DoRA 的反向公式 $\frac{\partial \mathcal{L}}{\partial \boldsymbol{m}}$
+6. **设计题**：为什么 LoKr 在 Stable Diffusion 上比 NLP 更有效？
+7. **设计题**：DoRA 的 magnitude 用 column-wise 还是 row-wise？两者的取舍
+8. **对比题**：在何种场景下 VeRA 比 LoRA 更优？反之呢？
+9. **对比题**：QLoRA vs LoftQ 在 7B vs 65B 模型上的差异为什么不同
+10. **实践题**：在 LLaMA-2-7B 上估算 QLoRA + DoRA (QDoRA) 的显存占用
+
+## 与 prompt-tuning-family 的衔接（跨专题对比）
 
 LoRA 家族与上一专题（prompt-tuning-family）形成"两条主线"：
 
 - **prompt-based**（输入侧）：Prompt Tuning、Prefix Tuning、P-Tuning v1/v2
 - **weight-based**（权重侧，本专题）：LoRA、AdaLoRA、PiSSA、VeRA、LoHa、LoKr、QLoRA、LoftQ、DoRA
 
-完整学习后应能回答：
+### 跨专题工程选型（meta-comparison）
 
-1. 在 65B 大模型 + 24GB 消费 GPU 上做 NLU 微调，选哪个？
-2. 在 GPT-2 small 上做 NER 序列标注，选哪个？
-3. 极致省参数（< 1K per layer），选哪个？
-4. 既要省显存又要高质量，选哪个？
+| 问题 | 选 prompt-based | 选 weight-based |
+|------|-----------------|-----------------|
+| **65B 大模型 + 24GB GPU 微调** | ❌（无量化路径） | ⭐ QLoRA |
+| **NLU 分类（小模型 RoBERTa）** | ⭐ P-Tuning v2 | LoRA 也可 |
+| **NER 序列标注** | ⭐ P-Tuning v2（独家） | LoRA |
+| **NLG 生成（GPT-2/3）** | Prefix Tuning | ⭐ LoRA / DoRA |
+| **极致省参数（< 1K per layer）** | ⭐ Prompt Tuning（7.7K 全模型）| VeRA（30K，但参数效率更高）|
+| **不占 context window** | ❌（必占 prompt 长度）| ⭐ 全部 |
+| **可合并权重 0 推理时延** | ❌ | ⭐ LoRA/PiSSA/DoRA |
+| **多任务（千个用户）** | Prompt Tuning（仅 input emb）| ⭐ VeRA（共享 A/B）|
 
-这些跨专题对比将作为本专题闭环时的 meta-comparison。
+### 选哪条主线？
+
+- **Prompt-based 主线**适合：参数极致少、prompt 可解释性强、只在 input 侧加工
+- **Weight-based 主线**适合：性能优先、可合并权重、量化兼容、工程友好
+
+实践推荐：**先 LoRA**，慢的话上 **PiSSA**，大模型必上 **QLoRA**，质量优先用 **DoRA**。
+
+## 下一步可学的专题
+
+- **长上下文**：LongLoRA / PI / YaRN（4k → 128k context）
+- **对齐**：RLHF / DPO / SimPO（回到书本主线 §3）
+- **混合专家**：MoE / Mixtral / DeepSeek
+- **推理优化**：vLLM / FlashAttention / Continuous Batching
+
+## Git 里程碑
+
+| Tag | Commit | 内容 |
+|-----|--------|------|
+| `lora-base` | `b464682` | LoRA + rsLoRA + LoRA+（含 mini training）|
+| `lora-svd-trio` | `e1dde69` | AdaLoRA + PiSSA + VeRA（SVD 三剑客）|
+| `lora-shape` | `ae74fcd` | LoHa + LoKr（Hadamard / Kronecker）|
+| `lora-quant` | `23d45a7` | QLoRA + LoftQ（量化二人组）|
+| `lora-family-complete` | _本次_ | DoRA + 完整 README |
