@@ -5,8 +5,6 @@ import pytest
 
 pytest.importorskip("trafilatura")
 
-from learning.data_curation_pkg import cc_extract  # type: ignore
-# fallback：直接 import 路径
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

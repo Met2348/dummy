@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -24,6 +25,7 @@ def test_minimal_param_count():
 
 def test_three_way_param_match():
     print("\n[Test 2] 三轨参数量一致")
+    pytest.importorskip("adapters")
     from ia3_adapters import build_ia3_model_adapters
     from ia3_peft import build_ia3_model_peft
     torch.manual_seed(42)
@@ -45,6 +47,7 @@ def test_three_way_param_match():
 
 def test_initial_forward_equals_base():
     print("\n[Test 3] 三方初始 forward = base GPT-2")
+    pytest.importorskip("adapters")
     from transformers import GPT2LMHeadModel
     base = GPT2LMHeadModel.from_pretrained("gpt2").eval()
 

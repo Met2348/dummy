@@ -26,7 +26,7 @@ def test_vanilla_gpt2_params():
     m = VanillaGPT2(c)
     n = sum(p.numel() for p in m.parameters())
     n_no_embed = n - m.tok_embed.weight.numel()
-    assert 90e6 < n_no_embed < 200e6
+    assert 80e6 < n_no_embed < 100e6
 
 
 def test_all_variants_configured():

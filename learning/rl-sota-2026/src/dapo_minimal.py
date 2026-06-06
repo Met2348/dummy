@@ -84,7 +84,7 @@ def overlong_shaping(
         rewards: (B*k,)
         response_lens: (B*k,)
     """
-    over = (response_lens > target_len).float()
+    over = (response_lens >= target_len).float()
     penalty_factor = torch.sigmoid((target_len - response_lens.float()) / alpha)
     # over 段用 penalty，未 over 段保留原 reward
     return rewards * (1 - over) + rewards * penalty_factor * over

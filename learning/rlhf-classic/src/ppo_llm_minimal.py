@@ -71,9 +71,10 @@ def build_token_rewards(
     """token-level reward = -β·KL_t + δ(t=last)·RM."""
     kl = log_p_act - log_p_ref          # KL approx
     rewards = -beta * kl                # 每步 KL 罚
-    last_idx = response_mask.long().sum(dim=1) - 1
     for b in range(rewards.size(0)):
-        rewards[b, last_idx[b]] += raw_rewards[b]
+        idx = response_mask[b].nonzero(as_tuple=False).flatten()
+        if idx.numel() > 0:
+            rewards[b, idx[-1]] += raw_rewards[b]
     return rewards * response_mask
 
 

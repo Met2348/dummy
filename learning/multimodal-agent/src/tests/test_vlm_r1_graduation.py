@@ -84,8 +84,8 @@ def test_lagrangian_lambda_increases_on_violation():
 
 def test_maxmin_keeps_min():
     r = maxmin_rlhf(torch.tensor([0.9, 0.3]), torch.tensor([0.4, 0.8]))
-    assert r[0].item() == 0.4
-    assert r[1].item() == 0.3
+    assert abs(r[0].item() - 0.4) < 1e-6
+    assert abs(r[1].item() - 0.3) < 1e-6
 
 
 # ===== Graduation Capstone =====

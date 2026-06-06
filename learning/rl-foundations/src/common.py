@@ -76,14 +76,16 @@ def compute_gae(
     """
     T = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
-    gae = 0.0
-    next_value = last_value
+    gae = torch.zeros_like(rewards[0])
+    next_value = torch.as_tensor(last_value, dtype=values.dtype, device=values.device)
+    if next_value.ndim == 0 and values[0].ndim > 0:
+        next_value = next_value.expand_as(values[0])
     for t in reversed(range(T)):
         mask = 1.0 - dones[t].float()
         delta = rewards[t] + gamma * next_value * mask - values[t]
         gae = delta + gamma * lam * mask * gae
         advantages[t] = gae
-        next_value = values[t].item()
+        next_value = values[t]
     returns = advantages + values
     return advantages, returns
 

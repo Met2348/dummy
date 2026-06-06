@@ -54,7 +54,7 @@ def heuristic_score(text: str) -> dict:
         reasons.append("js_residue")
 
     # 5. 词数
-    if n_words < 50:
+    if n_words < 30:
         reasons.append("too_few_words")
 
     # 6. 平均字长 5-15

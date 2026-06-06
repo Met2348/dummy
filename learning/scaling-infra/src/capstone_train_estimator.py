@@ -72,8 +72,8 @@ def estimate(spec: TrainSpec, gpu_hour_usd: float = 1.5) -> TrainPlan:
         ("ZeRO-3/FSDP", (w + g + opt) / spec.n_gpu + activ),
         ("FSDP + grad ckpt",
          (w + g + opt) / spec.n_gpu + activ * 0.2),
-        ("TP=8 + FSDP",
-         (w + g + opt) / (spec.n_gpu * 8) + activ / 8),
+        ("TP=8 + FSDP + grad ckpt",
+         (w + g + opt) / (spec.n_gpu * 8) + activ * 0.2 / 8),
     ]
 
     selected = None

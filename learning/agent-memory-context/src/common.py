@@ -1,15 +1,21 @@
 """Common dataclasses & helpers for agent-memory-context."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+import hashlib
 import math
 import re
 import time
 
 
+def _stable_bucket(token: str, dim: int) -> int:
+    digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little") % dim
+
+
 def hash_embed(text: str, dim: int = 32) -> list[float]:
     vec = [0.0] * dim
     for tok in re.findall(r"\w+", text.lower()):
-        vec[hash(tok) % dim] += 1.0
+        vec[_stable_bucket(tok, dim)] += 1.0
     norm = math.sqrt(sum(v * v for v in vec))
     if norm == 0:
         return vec

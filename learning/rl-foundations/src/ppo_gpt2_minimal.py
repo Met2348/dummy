@@ -78,9 +78,10 @@ def build_token_rewards(
     kl = log_p_act - log_p_ref                  # per-token
     rewards = -beta * kl                        # 起手全是 KL penalty
     # 末端 token 位加上 raw_rewards
-    last_idx = response_mask.long().sum(dim=1) - 1  # (B,) response 最后一 token
     for b in range(rewards.size(0)):
-        rewards[b, last_idx[b]] += raw_rewards[b]
+        idx = response_mask[b].nonzero(as_tuple=False).flatten()
+        if idx.numel() > 0:
+            rewards[b, idx[-1]] += raw_rewards[b]
     rewards = rewards * response_mask           # 把 prompt 段的 reward 清零
     return rewards
 

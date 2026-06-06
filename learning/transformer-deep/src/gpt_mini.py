@@ -114,11 +114,13 @@ class GPTMini(nn.Module):
         x:     (b, t) token ids
         cache: optional list of (k, v) per layer for KV cache
         """
+        return_cache = cache is not None
         h = self.tok_embed(x)
         b, t = x.shape
         # causal mask 大小取决于 (t_q, t_kv)
-        new_caches = [] if cache is None or len(cache) == 0 else None
         if cache is None:
+            cache = [None] * self.cfg.n_layer
+        elif len(cache) == 0:
             cache = [None] * self.cfg.n_layer
         cached_len = cache[0][0].shape[-2] if cache[0] is not None else 0
         full_kv_len = cached_len + t
@@ -133,7 +135,7 @@ class GPTMini(nn.Module):
             new_caches.append(new_c)
         h = self.norm_f(h)
         logits = self.lm_head(h)
-        if cache[0] is None:
+        if not return_cache:
             return logits
         return logits, new_caches
 

@@ -17,7 +17,7 @@ def adaptive_lambda(response_lens: torch.Tensor,
                     lam_max: float = 0.99,
                     alpha: float = 0.1) -> torch.Tensor:
     """λ 随 log|y| 增长."""
-    log_lens = response_lens.float().clamp(min=1).log()
+    log_lens = response_lens.double().clamp(min=1).log()
     return (lam_min + alpha * log_lens).clamp(lam_min, lam_max)
 
 

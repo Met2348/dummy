@@ -67,7 +67,7 @@ def write_jsonl_gz(items: Iterable[dict], out_path: str | Path) -> int:
     return n
 
 
-DEMO_HTML = b"""<!DOCTYPE html><html><head><title>Test</title></head>
+DEMO_HTML = """<!DOCTYPE html><html><head><title>Test</title></head>
 <body><nav>Home | About | Login</nav>
 <article><h1>Why Cats Sleep So Much</h1>
 <p>Cats sleep on average 12-16 hours per day. The reason is that as predators,
@@ -77,7 +77,7 @@ biological inheritance persists even in fully domesticated house cats today.</p>
 released during deep sleep cycles, which is why young animals need extensive
 rest periods.</p></article>
 <footer>Copyright 2024 ExampleSite</footer>
-</body></html>"""
+</body></html>""".encode("utf-8")
 
 
 def run_demo() -> None:

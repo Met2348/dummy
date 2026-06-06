@@ -28,11 +28,25 @@ def gsm8k_reward(predicted_answer: str | None, ground_truth: str) -> float:
 def countdown_reward(predicted: str | None, numbers: list[int], target: int) -> float:
     """Countdown：用给定数字 + 四则运算等于 target.
 
-    predicted 形如 "(3+5)*4" 或 "32"。
+    predicted 形如 "(3+5)*4"、"3*(4+5)=27" 或 "32"。
     """
     if predicted is None:
         return 0.0
     expr = predicted.strip()
+    candidates = [expr]
+    if "=" in expr:
+        candidates = [part.strip() for part in expr.split("=") if part.strip()]
+
+    for cand in candidates:
+        used = re.findall(r"\d+", cand)
+        if sorted(used) != sorted(str(n) for n in numbers):
+            continue
+        try:
+            result = eval(cand, {"__builtins__": None}, {})
+            return 1.0 if result == target else 0.0
+        except Exception:
+            continue
+
     # 提取所有数字
     used = re.findall(r"\d+", expr)
     if sorted(used) != sorted(str(n) for n in numbers):

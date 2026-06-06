@@ -40,7 +40,7 @@ def precompute_rope(head_dim: int, seq_len: int, base: float = 10000.0):
     freqs = torch.outer(pos, inv_freq)
     cos = freqs.cos()
     sin = freqs.sin()
-    return cos, sin
+    return torch.cat([cos, cos], dim=-1), torch.cat([sin, sin], dim=-1)
 
 
 def rotate_half(x):

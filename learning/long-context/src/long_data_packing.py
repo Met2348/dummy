@@ -13,7 +13,14 @@ def pack_documents(docs: list, max_len: int = 8192) -> list:
 
     返回 list[list[doc]]，每个内层 list 拼接长度 ≤ max_len.
     """
-    sorted_docs = sorted(docs, key=lambda d: -len(d))
+    chunks = []
+    for d in docs:
+        if len(d) <= max_len:
+            chunks.append(d)
+            continue
+        for start in range(0, len(d), max_len):
+            chunks.append(d[start:start + max_len])
+    sorted_docs = sorted(chunks, key=lambda d: -len(d))
     batches = []
     for d in sorted_docs:
         placed = False

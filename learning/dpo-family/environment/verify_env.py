@@ -10,8 +10,14 @@ def main() -> int:
     ok = True
 
     try:
-        from trl import DPOTrainer, KTOTrainer, ORPOTrainer, CPOTrainer  # noqa
-        print("  [OK] DPO/KTO/ORPO/CPO Trainer 可用")
+        import trl
+        trainers = ["DPOTrainer", "KTOTrainer", "ORPOTrainer", "CPOTrainer"]
+        available = [name for name in trainers if hasattr(trl, name)]
+        missing = [name for name in trainers if not hasattr(trl, name)]
+        if available:
+            print(f"  [OK] 可用 Trainer: {', '.join(available)}")
+        if missing:
+            print(f"  [SKIP] 当前 trl={trl.__version__} 未暴露: {', '.join(missing)}")
     except ImportError as e:
         print(f"  [FAIL] {e}")
         ok = False

@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -84,6 +85,7 @@ def test_mini_training():
 
 def test_param_match_adapters_lib():
     print("\n[Test 4] minimal vs adapters 库参数量一致")
+    pytest.importorskip("adapters")
     from houlsby_adapters import build_houlsby_model
     from pfeiffer_adapters import build_pfeiffer_model
     torch.manual_seed(42)

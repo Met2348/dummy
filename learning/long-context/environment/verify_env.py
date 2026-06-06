@@ -30,9 +30,9 @@ def part_c():
     try:
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
         from rope_yarn import yarn_cos_sin
-        cos, sin = yarn_cos_sin(t=128, dim=64, base=10000.0, factor=4.0,
-                                 original_max_pos=2048)
-        print(f"  [OK] YaRN cos {cos.shape}")
+        cos, sin, scale = yarn_cos_sin(t=128, dim=64, base=10000.0, factor=4.0,
+                                       original_max_pos=2048)
+        print(f"  [OK] YaRN cos {cos.shape}, attn_scale={scale:.4f}")
         return True
     except Exception as e:
         print(f"  [FAIL] {e}")

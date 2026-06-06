@@ -54,7 +54,7 @@ def part_c() -> bool:
             spm.SentencePieceTrainer.train(
                 input=text_path,
                 model_prefix=f"{td}/m",
-                vocab_size=200,
+                vocab_size=64,
                 model_type="bpe",
                 num_threads=1,
             )

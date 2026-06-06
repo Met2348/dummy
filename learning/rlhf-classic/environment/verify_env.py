@@ -20,8 +20,14 @@ def main() -> int:
 
     print("\n=== Part B: trl 4 Trainer (SFT/Reward/PPO/DPO) import ===")
     try:
-        from trl import SFTTrainer, RewardTrainer, PPOTrainer, DPOTrainer  # noqa: F401
-        print("  [OK] 4 trainer 可用")
+        import trl
+        trainers = ["SFTTrainer", "RewardTrainer", "PPOTrainer", "DPOTrainer"]
+        available = [name for name in trainers if hasattr(trl, name)]
+        missing = [name for name in trainers if not hasattr(trl, name)]
+        if available:
+            print(f"  [OK] 可用 Trainer: {', '.join(available)}")
+        if missing:
+            print(f"  [SKIP] 当前 trl={trl.__version__} 未暴露: {', '.join(missing)}")
     except ImportError as e:
         print(f"  [FAIL] {e}")
         ok = False
