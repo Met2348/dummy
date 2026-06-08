@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 
-import pytest
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -74,7 +74,9 @@ def test_mini_training():
 
 def test_param_count_match_lib():
     print("\n[Test 3] minimal vs adapters 库参数量（近似一致）")
-    pytest.importorskip("adapters")
+    if importlib.util.find_spec("adapters") is None:
+        print("  [SKIP] adapters 库未安装，跳过 optional library path")
+        return
     from adapterfusion_adapters import build_fusion_model
     torch.manual_seed(42)
     minimal = AdapterFusionGPT2(n_adapters=3, r=16)

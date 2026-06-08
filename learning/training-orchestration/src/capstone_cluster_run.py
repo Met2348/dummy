@@ -1,4 +1,4 @@
-"""Capstone: 24h cluster simulation — 64 nodes × 8 GPU, mixed jobs + faults."""
+"""Capstone: 24h cluster simulation with 64 nodes, 8 GPUs each, and faults."""
 from __future__ import annotations
 from common import make_cluster, Job, JobState
 from slurm_scheduler import fifo_with_backfill, release
@@ -23,7 +23,7 @@ def simulate_24h(n_nodes: int = 64, gpus_per_node: int = 8) -> dict:
     cluster = make_cluster(n_nodes, gpus_per_node)
     jobs = synth_workload()
 
-    # Single scheduling pass at t=0 (mock — real Slurm runs continuously)
+    # Single scheduling pass at t=0. A real Slurm loop runs continuously.
     scheduled = fifo_with_backfill(jobs, cluster)
     completed = [j for j in scheduled if j.state == JobState.RUNNING]
     n_unscheduled = len(jobs) - len(scheduled)

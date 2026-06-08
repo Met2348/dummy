@@ -28,7 +28,7 @@ def halving_doubling(n_gpus: int, bytes_total: int, link: Link) -> float:
 
 def pick_algorithm(n_gpus: int, bytes_total: int, link: Link) -> str:
     """NCCL-like crossover heuristic."""
-    if bytes_total < 1024:           # tiny → tree
+    if bytes_total < 1024:           # tiny: tree
         return "tree"
     if n_gpus <= 8:                  # NVLink ring is king
         return "ring"
@@ -39,7 +39,7 @@ def _self_test() -> None:
     from common import LINKS
     nvl = LINKS["nvlink4"]
     ib = LINKS["ib_ndr"]
-    # 1 GB on 8 GPUs over NVLink — ring should be very fast
+    # 1 GB on 8 GPUs over NVLink should be very fast.
     r = ring_allreduce(8, int(1e9), nvl)
     assert r < 50_000, r       # <50 ms
     # Latency-bound regime (1 KB)

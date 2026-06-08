@@ -64,7 +64,7 @@ class KVCache:
             return 0
         shared = prefix_blocks[:n_blocks_to_share]
         self.seq_to_blocks.setdefault(seq_id, [])
-        # 不重新分配 — 直接复用 block ids
+        # Reuse block ids instead of allocating new blocks.
         self.seq_to_blocks[seq_id] = shared + self.seq_to_blocks.get(seq_id, [])
         return len(shared)
 

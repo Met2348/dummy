@@ -1,4 +1,4 @@
-"""Vector add — the 'hello world' of CUDA kernels."""
+"""Vector add: the "hello world" of CUDA kernels."""
 from __future__ import annotations
 from common import launch_config
 

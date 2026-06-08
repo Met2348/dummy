@@ -39,6 +39,27 @@ _TASKS: List[Dict] = [
 ]
 
 
+def estimate_pass_at_k(n: int, c: int, k: int) -> float:
+    """Unbiased HumanEval pass@k estimator from Chen et al. 2021.
+
+    Args:
+        n: total sampled completions for one task
+        c: completions that pass the hidden tests
+        k: number of draws being evaluated
+    """
+    if not (0 <= c <= n):
+        raise ValueError("c must be between 0 and n")
+    if not (1 <= k <= n):
+        raise ValueError("k must be between 1 and n")
+    if n - c < k:
+        return 1.0
+
+    fail_prob = 1.0
+    for i in range(n - c + 1, n + 1):
+        fail_prob *= 1.0 - k / i
+    return 1.0 - fail_prob
+
+
 def build_prompts() -> List[Dict]:
     out = []
     for t in _TASKS:
@@ -65,28 +86,27 @@ def run_humaneval(model: ModelFn) -> List[CodeResult]:
 
 
 def run_passk(model: ModelFn, k: int = 4) -> Dict:
-    """Pass@1 + pass@k via repeated sampling.
+    """Pass@1 + pass@k via repeated sampling and the paper estimator.
 
-    Mock model is deterministic, so all k draws agree.
+    Mock models are usually deterministic, but the aggregation mirrors
+    HumanEval: sample n completions, count c correct, then estimate pass@k.
     """
-    n_correct_at_1 = 0
-    n_any_correct = 0
+    pass1_values = []
+    passk_values = []
     n_tasks = 0
     for d in build_prompts():
-        results_for_task = []
+        correct = 0
         for _ in range(k):
             text = model(d["prompt"], 256)
             code = extract_code(text)
             err = safe_exec(code, d["tests"])
-            results_for_task.append(err is None)
+            correct += int(err is None)
         n_tasks += 1
-        if results_for_task[0]:
-            n_correct_at_1 += 1
-        if any(results_for_task):
-            n_any_correct += 1
+        pass1_values.append(estimate_pass_at_k(k, correct, 1))
+        passk_values.append(estimate_pass_at_k(k, correct, k))
     return {
-        "pass@1": n_correct_at_1 / max(1, n_tasks),
-        f"pass@{k}": n_any_correct / max(1, n_tasks),
+        "pass@1": sum(pass1_values) / max(1, n_tasks),
+        f"pass@{k}": sum(passk_values) / max(1, n_tasks),
     }
 
 
@@ -102,6 +122,11 @@ def _self_test() -> int:
     # passk
     pk = run_passk(oracle, k=4)
     assert pk["pass@1"] == 1.0 and pk["pass@4"] == 1.0
+    # pass@k estimator examples
+    assert estimate_pass_at_k(10, 0, 5) == 0.0
+    assert estimate_pass_at_k(10, 10, 5) == 1.0
+    assert abs(estimate_pass_at_k(10, 3, 1) - 0.3) < 1e-12
+    assert abs(estimate_pass_at_k(10, 1, 5) - 0.5) < 1e-12
     return 0
 
 

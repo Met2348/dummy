@@ -1,4 +1,4 @@
-"""DRA verifier — check each claim is supported by some source."""
+"""DRA verifier - check each claim is supported by some source."""
 from __future__ import annotations
 from dra.common import Draft, Note, Verified, DRACost
 from dra.tools.dra_tools import KB

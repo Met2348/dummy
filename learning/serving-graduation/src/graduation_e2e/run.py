@@ -1,4 +1,4 @@
-"""Entry point — `python -m graduation_e2e.run --out report/`."""
+"""Entry point - `python -m graduation_e2e.run --out report/`."""
 from __future__ import annotations
 
 import argparse

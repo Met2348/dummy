@@ -32,14 +32,14 @@ def run_full_graduation(report_dir: str = "report",
     results = EXPECTED
     csv_path = os.path.join(report_dir, "benchmarks.csv")
     write_csv(results, csv_path)
-    print(f"  → {csv_path}")
+    print(f"  -> {csv_path}")
 
     print("\nStep 3/5: Generating ablation report")
     ablation = ablation_breakdown(results)
     abl_path = os.path.join(report_dir, "ablation.json")
     with open(abl_path, "w") as f:
         json.dump(ablation, f, indent=2)
-    print(f"  → {abl_path}")
+    print(f"  -> {abl_path}")
 
     print("\nStep 4/5: Visualization (text mode)")
     print(loss_curve_text(**make_loss_curve_data()))
@@ -49,11 +49,11 @@ def run_full_graduation(report_dir: str = "report",
     print("\nStep 5/5: Markdown reports")
     report_md = os.path.join(report_dir, "report.md")
     make_report_md(results, report_md)
-    print(f"  → {report_md}")
+    print(f"  -> {report_md}")
 
     gen_md = os.path.join(report_dir, "generations.md")
     write_generations_md(gen_md)
-    print(f"  → {gen_md}")
+    print(f"  -> {gen_md}")
 
     print("\n=== GRADUATION COMPLETE ===")
     print(f"Reports in: {report_dir}/")

@@ -1,4 +1,4 @@
-"""Letta (MemGPT) mock — main context + archival memory + tool calls."""
+"""Letta (MemGPT) mock - main context + archival memory + tool calls."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from common import hash_embed, cosine

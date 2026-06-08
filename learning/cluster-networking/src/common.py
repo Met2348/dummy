@@ -1,4 +1,4 @@
-"""Network primitives — link, switch, fabric."""
+"""Network primitives: link, switch, fabric."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -28,10 +28,10 @@ def time_to_send(bytes_total: int, link: Link) -> float:
 
 
 def _self_test() -> None:
-    # 1 GB on NVLink 4 → ~2.22 ms
+    # 1 GB on NVLink 4 is about 2.22 ms.
     t = time_to_send(int(1e9), LINKS["nvlink4"])
     assert 2000 < t < 2500, t
-    # IB NDR same payload → ~20 ms (9x slower per direction)
+    # IB NDR for the same payload is about 20 ms.
     t_ib = time_to_send(int(1e9), LINKS["ib_ndr"])
     assert t_ib > 8 * t, (t, t_ib)
     print(f"[OK] cluster_networking.common (1GB NVLink {t:.0f}us, IB {t_ib:.0f}us)")

@@ -42,12 +42,12 @@ MODULE_TIMELINE = [
 DECISION_TREE = """
 question: 我有这个场景，选哪个 ckpt？
 
-├── 知识 QA (轻量) → lora 或 phi_tiny
-├── 推理 / 数学 → r1_tiny (思考链) 或 phi_tiny (简洁)
-├── 安全敏感 (客服 / 政务) → dpo + 4-layer defense
-├── 多模态 → 需 VLM 训 ckpt (本系列未覆盖, 见 Module 4 multimodal-agent)
-├── 长 ctx (RAG) → 需长 ctx 训 ckpt (见 Module 3 long-context)
-└── 紧凑端侧 → phi_tiny (270M 强于 vanilla GPT-2 124M)
+- 知识 QA (轻量) -> lora 或 phi_tiny
+- 推理 / 数学 -> r1_tiny (思考链) 或 phi_tiny (简洁)
+- 安全敏感 (客服 / 政务) -> dpo + 4-layer defense
+- 多模态 -> 需 VLM 训 ckpt (本系列未覆盖, 见 Module 4 multimodal-agent)
+- 长 ctx (RAG) -> 需长 ctx 训 ckpt (见 Module 3 long-context)
+- 紧凑端侧 -> phi_tiny (270M 强于 vanilla GPT-2 124M)
 """
 
 
@@ -64,7 +64,7 @@ WHAT_I_CAN_DO = """
 - 训练侧: PEFT + RL + R1
 - 部署侧: vLLM + quantization + cost engineering
 - 安全侧: 红队 + 防御 + 合规
-- 评测侧: bench × judge × Arena
+- 评测侧: bench x judge x Arena
 """
 
 
@@ -76,7 +76,7 @@ def gen_portfolio() -> str:
 
     parts: List[str] = ["# 25-topic LLM Learning Portfolio",
                         "",
-                        "> 2026-06-05 · Module 6 收官，全系列完结",
+                        "> 2026-06-05 - Module 6 收官，全系列完结",
                         "",
                         "## 25 专题时间线", ""]
     n = 0
@@ -124,7 +124,7 @@ def _self_test() -> int:
     assert "选型决策树" in md
     assert "r1_tiny" in md and "phi_tiny" in md
     # Count topics enumerated (lines containing `topic-name` backticks under timeline)
-    # Module 1+3+4+5 = 25 prior topics; Module 6 = 7 new (including this graduation) → 32 total
+    # Module 1+3+4+5 = 25 prior topics; Module 6 = 7 new (including this graduation) -> 32 total
     topic_lines = [line for line in md.split("\n")
                     if line.strip() and line.strip()[0].isdigit() and "`" in line
                     and line.strip().split(".", 1)[0].isdigit()]

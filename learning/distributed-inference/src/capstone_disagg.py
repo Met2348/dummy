@@ -1,4 +1,4 @@
-"""Capstone — 3-config disaggregated benchmark."""
+"""Capstone - 3-config disaggregated benchmark."""
 from __future__ import annotations
 
 from typing import List, Dict

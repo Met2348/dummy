@@ -60,7 +60,7 @@ def compile_literal(literal: str) -> Fsm:
 
 
 def compile_digits_n(n: int) -> Fsm:
-    """`\\d{n}` — exactly n digits."""
+    """`\\d{n}`: exactly n digits."""
     states = [State(i) for i in range(n + 1)]
     delta: Dict[Tuple[int, str], int] = {}
     for i in range(n):
@@ -87,7 +87,7 @@ def compile_concat(*fsms: Fsm) -> Fsm:
             # for each transition from prev_accept, we redirect to base
             # (assumes previous FSM had a single accept state, which our
             # compilers guarantee)
-            # We simply move forward — start of next is `base`.
+            # We simply move forward; start of next is `base`.
             for (s, c), t in list(f.delta.items()):
                 if s == 0:
                     new_delta[(prev_accept, c)] = t + base

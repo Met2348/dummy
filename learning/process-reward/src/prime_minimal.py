@@ -47,7 +47,7 @@ def prime_advantage(
 
 
 if __name__ == "__main__":
-    print("PRIME minimal — implicit PRM 从 outcome 自动学\n" + "=" * 50)
+    print("PRIME minimal - implicit PRM 从 outcome 自动学\n" + "=" * 50)
     torch.manual_seed(0)
     B, T = 2, 12
     log_p_actor = torch.randn(B, T) - 1

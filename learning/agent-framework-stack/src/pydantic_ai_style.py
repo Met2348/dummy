@@ -1,4 +1,4 @@
-"""Pydantic AI-style typed agent mock — schema-validated output with retry."""
+"""Pydantic AI-style typed agent mock - schema-validated output with retry."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -13,7 +13,7 @@ class TypedField:
 
 
 class TypedSchema:
-    """Mini BaseModel — declares fields and validates dicts."""
+    """Mini BaseModel - declares fields and validates dicts."""
     fields: list[TypedField] = []
 
     @classmethod

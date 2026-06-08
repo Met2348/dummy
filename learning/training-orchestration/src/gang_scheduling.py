@@ -1,4 +1,4 @@
-"""Gang scheduling — all-or-nothing for distributed training."""
+"""Gang scheduling: all-or-nothing for distributed training."""
 from __future__ import annotations
 from common import Job, Node, JobState
 

@@ -1,4 +1,4 @@
-"""Semantic memory — KG triples + vector store."""
+"""Semantic memory - KG triples + vector store."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from common import hash_embed, cosine

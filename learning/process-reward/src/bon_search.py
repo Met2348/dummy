@@ -60,5 +60,5 @@ if __name__ == "__main__":
     gt = "7"
     result = bon_compare_strategies(answers, rm_scores, gt)
     for k, (ans, ok) in result.items():
-        mark = "✓" if ok else "✗"
-        print(f"  {k:14s} → {ans}  {mark}")
+        mark = "OK" if ok else "FAIL"
+        print(f"  {k:14s} -> {ans}  {mark}")

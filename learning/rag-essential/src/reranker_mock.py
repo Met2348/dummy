@@ -1,4 +1,4 @@
-"""Mock reranker — token-overlap weighted cross-encoder simulation."""
+"""Mock reranker - token-overlap weighted cross-encoder simulation."""
 from __future__ import annotations
 from common import RetrievalResult, tokenize
 

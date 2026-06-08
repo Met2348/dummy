@@ -95,5 +95,5 @@ if __name__ == "__main__":
     path = best_path(final)
     print("最优路径:")
     for s in path:
-        print(f"  → {s}")
+        print(f"  -> {s}")
     print(f"\n root visits = {final.visits}")

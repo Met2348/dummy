@@ -1,7 +1,7 @@
-"""Capstone — ReAct loop with 4 mock tools.
+"""Capstone - ReAct loop with 4 mock tools.
 
 Task: 'Find the 2025 most popular LLM name, then compute name_length * 3.'
-Expected final answer: 18  (Claude → 6 chars → 6*3=18)
+Expected final answer: 18  (Claude -> 6 chars -> 6*3=18)
 """
 from __future__ import annotations
 from common import Trace, make_pattern_llm
@@ -17,16 +17,16 @@ CAPSTONE_QUESTION = (
 
 # Mock LLM scripted to use search_mock + calculator.
 CAPSTONE_LLM_RULES = [
-    # First reasoning round → search
+    # First reasoning round -> search
     (r"Thought 1:",
      "Thought: I need to find the 2025 most popular LLM first.\n"
      "Action 1: search_mock(\"2025 most popular LLM\")\n"),
-    # Second reasoning round → compute 6 * 3
-    (r"Thought 2:",
+    # Second reasoning round -> compute 6 * 3
+    (r"Observation 1:[\s\S]*Claude[\s\S]*Thought 2:",
      "Thought: Claude has 6 characters, so 6*3.\n"
      "Action 2: calculator(\"6 * 3\")\n"),
-    # Third reasoning round → final
-    (r"Thought 3:",
+    # Third reasoning round -> final
+    (r"Observation 2:[\s\S]*18[\s\S]*Thought 3:",
      "Thought: Got 18, final.\n"
      "Final Answer: 18\n"),
     # Fallback
@@ -41,7 +41,7 @@ def run_capstone() -> Trace:
 
 def to_md(trace: Trace) -> str:
     lines = [
-        "# ReAct Capstone — agent-foundations\n",
+        "# ReAct Capstone - agent-foundations\n",
         f"**Question:** {trace.question}\n",
         "## Trace\n",
         "| # | Thought | Action | Observation |",

@@ -1,4 +1,4 @@
-"""Thinking budget forcing — early-stop / Wait injection."""
+"""Thinking budget forcing - early-stop / Wait injection."""
 from __future__ import annotations
 
 from dataclasses import dataclass

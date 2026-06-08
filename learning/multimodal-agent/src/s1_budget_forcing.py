@@ -1,4 +1,4 @@
-"""s1 (Stanford 2025.01) — Budget Forcing for Test-Time Scaling.
+"""s1 Budget Forcing for Test-Time Scaling.
 
 idea: 推理时若模型早 stop（产 </think>），强行注入 "Wait" 让它继续想.
 配 budget 控制：min_think_tokens / max_think_tokens.
@@ -67,11 +67,11 @@ if __name__ == "__main__":
 
     out, status = budget_force_decode_mock(short, 30, 100, mock_continue)
     print(f"[short input]: status={status}")
-    print(f"  → {out[:80]}...")
+    print(f"  -> {out[:80]}...")
 
     out, status = budget_force_decode_mock(long_text, 30, 50, mock_continue)
     print(f"\n[long input]: status={status}")
-    print(f"  → think len after truncate ≈ 50")
+    print(f"  -> think len after truncate is about 50")
 
     stats = analyze_budget_distribution([short, long_text])
     print(f"\nDistribution: {stats}")

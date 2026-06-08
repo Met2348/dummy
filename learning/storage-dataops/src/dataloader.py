@@ -1,4 +1,4 @@
-"""Dataloader pipeline — fetch / decode / collate, with prefetch model."""
+"""Dataloader pipeline: fetch, decode, collate, and prefetch model."""
 from __future__ import annotations
 from dataclasses import dataclass
 

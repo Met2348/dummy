@@ -1,4 +1,4 @@
-"""Fault tolerance — MTBF + ckpt strategy = wasted time formula."""
+"""Fault tolerance: MTBF plus checkpoint strategy."""
 from __future__ import annotations
 from dataclasses import dataclass
 import math
@@ -19,7 +19,7 @@ class FaultModel:
 
 
 def optimal_ckpt_interval(ckpt_cost_s: float, mtbf_hours: float) -> float:
-    """T_opt = sqrt(2 * C * M) — classic Young's formula (1974)."""
+    """T_opt = sqrt(2 * C * M), the classic Young formula (1974)."""
     mtbf_s = mtbf_hours * 3600
     return math.sqrt(2 * ckpt_cost_s * mtbf_s)
 
@@ -37,10 +37,10 @@ def expected_wasted_pct(ckpt_cost_s: float, ckpt_interval_s: float,
 def _self_test() -> None:
     fm = FaultModel(n_gpus=1024)
     mtbf = fm.cluster_mtbf_hours()
-    # 1024 GPU + 1 fabric → very low MTBF
+    # 1024 GPU plus 1 fabric gives a very low MTBF.
     assert mtbf < 24, mtbf
 
-    # ckpt cost 1s, MTBF 8.5h → optimal ~248s = ~4 min
+    # Checkpoint cost 1s and MTBF 8.5h gives about 248s, roughly 4 min.
     t_opt = optimal_ckpt_interval(1.0, 8.5)
     assert 200 < t_opt < 300, t_opt
 

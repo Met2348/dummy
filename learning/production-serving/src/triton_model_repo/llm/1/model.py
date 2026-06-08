@@ -1,5 +1,5 @@
 """Triton Python backend skeleton for an LLM."""
-# Reference shape only — actual deployment swaps `mock_generate` for vllm.
+# Reference shape only - actual deployment swaps `mock_generate` for vllm.
 import numpy as np
 
 

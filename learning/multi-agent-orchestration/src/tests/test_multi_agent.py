@@ -18,6 +18,7 @@ MODULES = [
     "message_bus",
     "conflict_resolution",
     "cost_analyzer",
+    "camel_role_play",
     "capstone_coding_crew",
 ]
 

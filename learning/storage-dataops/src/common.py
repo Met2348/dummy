@@ -1,4 +1,4 @@
-"""Storage layers — local NVMe / Lustre / S3 / RAM."""
+"""Storage layers: local NVMe, Lustre, S3, and RAM."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -30,10 +30,10 @@ def time_to_read(bytes_total: int, tier: Storage) -> float:
 
 
 def _self_test() -> None:
-    # 100 GB shard from Lustre → 0.2 s + 0.5 ms = 0.2 s
+    # 100 GB shard from Lustre is about 0.2 s plus 0.5 ms.
     t = time_to_read(int(100e9), TIERS["lustre"])
     assert 0.15 < t < 0.25, t
-    # Same from S3 → 100 s + 50 ms = ~100 s
+    # Same from S3 is about 100 s plus 50 ms.
     t_s3 = time_to_read(int(100e9), TIERS["s3"])
     assert t_s3 > 200 * t, (t, t_s3)
     print(f"[OK] storage_dataops.common (100GB Lustre {t:.2f}s, S3 {t_s3:.0f}s)")

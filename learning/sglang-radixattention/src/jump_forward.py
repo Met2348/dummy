@@ -1,4 +1,4 @@
-"""Jump-Forward Decoding — skip steps when grammar forces a unique path."""
+"""Jump-Forward Decoding: skip steps when grammar forces a unique path."""
 from __future__ import annotations
 
 from typing import List, Tuple

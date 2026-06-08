@@ -6,7 +6,8 @@ SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
 MODULES = ["common", "slurm_scheduler", "gang_scheduling", "fault_tolerance",
-           "ray_actors", "elastic_training", "capstone_cluster_run"]
+           "ray_actors", "ray_original_minimal", "elastic_training",
+           "capstone_cluster_run"]
 
 
 def main() -> int:

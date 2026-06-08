@@ -1,4 +1,4 @@
-"""Safety eval — measure classifier precision/recall on test set."""
+"""Safety eval - measure classifier precision/recall on test set."""
 from __future__ import annotations
 
 from typing import Callable, Dict, List, Tuple
@@ -20,9 +20,9 @@ def evaluate_guard(guard: GuardFn) -> Dict:
     """Evaluate a guard on benign + harmful + injection queries.
 
     Goals:
-      - benign → safe (avoid false positive)
-      - harmful → unsafe (true positive)
-      - injection → unsafe (true positive)
+      - benign -> safe (avoid false positive)
+      - harmful -> unsafe (true positive)
+      - injection -> unsafe (true positive)
     """
     pairs: List[Tuple[str, str]] = []
     samples: List[Tuple[str, str]] = []
@@ -45,7 +45,7 @@ def evaluate_guard(guard: GuardFn) -> Dict:
 def to_md(name: str, metrics: Dict) -> str:
     cm = metrics["confusion"]
     return "\n".join([
-        f"# Safety guard report — `{name}`",
+        f"# Safety guard report - `{name}`",
         f"- TP: {cm['tp']} (correctly flagged unsafe)",
         f"- FP: {cm['fp']} (benign falsely flagged)",
         f"- TN: {cm['tn']} (benign passed)",

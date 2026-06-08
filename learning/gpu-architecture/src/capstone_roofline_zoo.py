@@ -1,4 +1,4 @@
-"""Capstone: roofline zoo — 10 ops × 4 GPUs, identify bottlenecks."""
+"""Capstone: roofline zoo across ops and GPUs, identifying bottlenecks."""
 from __future__ import annotations
 from common import GPUS
 from roofline import gemm_profile, attention_profile, layernorm_profile, analyze

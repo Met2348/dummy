@@ -1,6 +1,6 @@
 """Plan-and-Execute pattern.
 
-Planner LLM lists steps once → Executor runs them in order.
+Planner LLM lists steps once -> Executor runs them in order.
 """
 from __future__ import annotations
 from typing import Callable
@@ -45,7 +45,7 @@ def plan_execute(
 
 
 def make_simple_executor(tools: dict[str, Tool]) -> Callable[[str, dict], str]:
-    """Naive executor — keyword match step to tool."""
+    """Naive executor - keyword match step to tool."""
     def execute(step: str, prior: dict) -> str:
         s = step.lower()
         if "search" in s or "find" in s:

@@ -1,4 +1,4 @@
-"""Agent inference — naive vs radix-cached, multi-turn.
+"""Agent inference - naive vs radix-cached, multi-turn.
 
 Naively each turn re-prefills the entire history.  With radix caching only
 the new user input + tool output needs prefilling.

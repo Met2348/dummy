@@ -1,4 +1,4 @@
-"""Warp-level primitives — shuffle, ballot, reduce."""
+"""Warp-level primitives: shuffle, ballot, reduce."""
 from __future__ import annotations
 
 WARP_SIZE = 32
@@ -16,7 +16,7 @@ def shfl_down_sync(values: list[int], delta: int) -> list[int]:
 
 
 def warp_reduce_sum(values: list[int]) -> int:
-    """Tree reduction via shuffle — log2(32) = 5 steps."""
+    """Tree reduction via shuffle. log2(32) = 5 steps."""
     v = list(values)
     delta = WARP_SIZE // 2
     while delta > 0:

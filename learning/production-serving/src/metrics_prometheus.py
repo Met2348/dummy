@@ -1,4 +1,4 @@
-"""Prometheus-style metrics — vendored counters so tests don't require the lib."""
+"""Prometheus-style metrics - vendored counters so tests don't require the lib."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

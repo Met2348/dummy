@@ -73,7 +73,7 @@ def aggregate_step_scores(step_logits: torch.Tensor, mode: str = "min_last") -> 
 
 
 if __name__ == "__main__":
-    print("PRM minimal — smoke test\n" + "=" * 50)
+    print("PRM minimal - smoke test\n" + "=" * 50)
     import torch.nn as nn
 
     class TinyLM(nn.Module):

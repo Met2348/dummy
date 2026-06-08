@@ -43,7 +43,7 @@ def _self_test() -> None:
     pick = select(demo, budget_usd=20e6, max_days=60)
     assert pick is not None
     assert pick.gpu.name in ("H100", "H200", "B200")
-    # Tight budget + tight time → no solution
+    # Tight budget plus tight time gives no solution.
     impossible = select(demo, budget_usd=100_000, max_days=1)
     assert impossible is None
     print(f"[OK] topology_selector (picked {pick.total_gpus()}x {pick.gpu.name} "

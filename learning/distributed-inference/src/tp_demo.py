@@ -1,4 +1,4 @@
-"""Tensor parallel — column / row split linear, TP-MLP.
+"""Tensor parallel - column / row split linear, TP-MLP.
 
 Simulates TP=N on a single CPU/GPU by computing each shard locally and
 summing/concatenating, then verifies bit-exact equality with the unsharded
@@ -13,7 +13,7 @@ import torch
 
 @dataclass
 class ColumnSplitLinear:
-    """Y = X · W, where W [in, out] is column-split across `n_shards`."""
+    """Y = X @ W, where W [in, out] is column-split across `n_shards`."""
     W: torch.Tensor      # full [in, out]
     n_shards: int
 

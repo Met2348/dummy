@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 
-import pytest
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -85,7 +85,9 @@ def test_mini_training():
 
 def test_param_match_adapters_lib():
     print("\n[Test 4] minimal vs adapters 库参数量一致")
-    pytest.importorskip("adapters")
+    if importlib.util.find_spec("adapters") is None:
+        print("  [SKIP] adapters 库未安装，跳过 optional library path")
+        return
     from houlsby_adapters import build_houlsby_model
     from pfeiffer_adapters import build_pfeiffer_model
     torch.manual_seed(42)

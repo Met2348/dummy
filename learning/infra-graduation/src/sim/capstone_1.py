@@ -1,6 +1,6 @@
 """Capstone-1: end-to-end mini-cluster simulator.
 
-Given 3 model sizes × 3 cluster sizes × 2 fabrics = 18 scenarios,
+Given 3 model sizes, 3 cluster sizes, and 2 fabrics = 18 scenarios,
 report time-to-train and TCO.
 """
 from __future__ import annotations
@@ -50,10 +50,10 @@ def run() -> list[dict]:
 def _self_test() -> None:
     rows = run()
     assert len(rows) == 18
-    # 8B-1T on 8 H100 → years (educational: 8 GPU is laughable for 1T tokens)
+    # 8B-1T on 8 H100 takes years in this toy model.
     small = next(r for r in rows if r["model"] == "8B-1T" and "8x H100" in r["cluster"])
     assert small["days"] > 50, small
-    # 405B-10T on 4096 H100 → realistic (~150-300 days)
+    # 405B-10T on 4096 H100 lands in a realistic educational range.
     big = next(r for r in rows if r["model"] == "405B-10T" and "4096x H100" in r["cluster"])
     assert 50 < big["days"] < 500, big
     # B200 same N should be faster than H100 (2-3x speedup)
@@ -61,7 +61,7 @@ def _self_test() -> None:
     b_4k = next(r for r in rows if r["model"] == "405B-10T" and "4096x B200" in r["cluster"])
     assert b_4k["days"] < h_4k["days"], (b_4k, h_4k)
     print(f"[OK] capstone_1 (18 scenarios; 8B/8GPU {small['days']}d; "
-          f"405B/4k H100 {h_4k['days']}d → B200 {b_4k['days']}d)")
+          f"405B/4k H100 {h_4k['days']}d -> B200 {b_4k['days']}d)")
 
 
 if __name__ == "__main__":

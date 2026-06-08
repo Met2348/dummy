@@ -35,8 +35,13 @@ def asymmetric_clip_loss(
 # ===== Trick 2: Dynamic Sampling =====
 
 def is_group_useful(rewards: torch.Tensor) -> bool:
-    """Group 是否有对有错（advantage 非零）."""
-    return 0 < rewards.sum() < len(rewards)
+    """Group 是否有对有错（advantage 非零）.
+
+    论文的 rule reward 是 +1/-1；本仓库有些 toy rollout 用 1/0。
+    统一按 reward > 0 判断 correct，这样两种编码都可用。
+    """
+    correct = rewards > 0
+    return bool(correct.any() and (~correct).any())
 
 
 def dynamic_sampling_rollout(rollout_fn, prompt, k_min: int = 8, k_max: int = 32):
@@ -75,19 +80,30 @@ def response_level_loss(per_token_loss: torch.Tensor,
 def overlong_shaping(
     rewards: torch.Tensor,
     response_lens: torch.Tensor,
-    target_len: int = 4096,
-    alpha: float = 200.0,
+    expected_len: int = 16384,
+    cache_len: int = 4096,
 ) -> torch.Tensor:
-    """长度超过 target_len 时 reward 用 sigmoid soft penalty 衰减.
+    """DAPO Soft Overlong Punishment.
+
+    Paper formula:
+        penalty = 0                              if len <= expected_len
+        penalty = (expected_len - len)/cache_len if expected_len < len <= max_len
+        penalty = -1                             if len > max_len
+
+    shaped reward = rule reward + penalty.
 
     args:
         rewards: (B*k,)
         response_lens: (B*k,)
     """
-    over = (response_lens >= target_len).float()
-    penalty_factor = torch.sigmoid((target_len - response_lens.float()) / alpha)
-    # over 段用 penalty，未 over 段保留原 reward
-    return rewards * (1 - over) + rewards * penalty_factor * over
+    lens = response_lens.float()
+    max_len = expected_len + cache_len
+    penalty = torch.zeros_like(rewards, dtype=torch.float32)
+
+    in_cache = (lens > expected_len) & (lens <= max_len)
+    penalty[in_cache] = (expected_len - lens[in_cache]) / max(cache_len, 1)
+    penalty[lens > max_len] = -1.0
+    return rewards.float() + penalty
 
 
 # ===== 测试 / 演示 =====
@@ -110,9 +126,10 @@ def _self_test():
 
     # 2. Dynamic sampling
     print(f"\nGroup useful?")
-    print(f"  [1,1,1,1] → {is_group_useful(torch.tensor([1.0, 1, 1, 1]))}")  # False
-    print(f"  [0,0,0,0] → {is_group_useful(torch.tensor([0.0, 0, 0, 0]))}")  # False
-    print(f"  [1,0,1,0] → {is_group_useful(torch.tensor([1.0, 0, 1, 0]))}")  # True
+    print(f"  [1,1,1,1] -> {is_group_useful(torch.tensor([1.0, 1, 1, 1]))}")  # False
+    print(f"  [0,0,0,0] -> {is_group_useful(torch.tensor([0.0, 0, 0, 0]))}")  # False
+    print(f"  [1,0,1,0] -> {is_group_useful(torch.tensor([1.0, 0, 1, 0]))}")  # True
+    print(f"  [1,-1,1,-1] -> {is_group_useful(torch.tensor([1.0, -1, 1, -1]))}")  # True
 
     # 3. Token-level vs response-level
     per_token = torch.tensor([
@@ -132,11 +149,11 @@ def _self_test():
     # 4. Overlong Shaping
     rewards = torch.tensor([1.0, 1.0, 1.0])
     lens = torch.tensor([2000.0, 4096.0, 6000.0])
-    shaped = overlong_shaping(rewards, lens, target_len=4096, alpha=200)
+    shaped = overlong_shaping(rewards, lens, expected_len=4096, cache_len=2000)
     print(f"\nOverlong shaping rewards: {shaped.tolist()}")
-    print("  short 2000 → 保留 1.0")
-    print("  exact 4096 → sigmoid(0) = 0.5")
-    print("  long 6000 → 接近 0")
+    print("  short 2000 -> no penalty")
+    print("  exact 4096 -> no penalty")
+    print("  long 6000 -> near 0 after linear penalty")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""mamba-ssm 库 wrapper — 与 naive 对照."""
+"""mamba-ssm library wrapper - compare with naive implementation."""
 from __future__ import annotations
 
 import torch

@@ -13,7 +13,7 @@ class ConstrainedSampler:
     state: int = 0
 
     def legal_token_mask(self) -> List[bool]:
-        """Return |V| bool list — True for tokens that keep us legal."""
+        """Return |V| bool list; True for tokens that keep us legal."""
         mask: List[bool] = []
         for tok in self.vocab:
             s = self.state

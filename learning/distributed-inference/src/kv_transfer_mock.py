@@ -1,4 +1,4 @@
-"""KV transfer cost helpers — bandwidth-only model."""
+"""KV transfer cost helpers - bandwidth-only model."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ def kv_payload_bytes(seq_len: int, n_kv_heads: int, head_dim: int, dtype_bytes: 
 def streaming_overlap(prefill_ms: float, transfer_ms: float, decode_ms: float) -> float:
     """Streaming: send each layer's KV as soon as it's produced.
 
-    Effective wall-clock ≈ max(prefill, transfer) + decode (the second of two
+    Effective wall-clock is about max(prefill, transfer) + decode (the second of two
     overlapping streams determines TTFT).
     """
     return max(prefill_ms, transfer_ms) + decode_ms

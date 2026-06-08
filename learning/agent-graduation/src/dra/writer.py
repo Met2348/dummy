@@ -1,4 +1,4 @@
-"""DRA writer — synthesize markdown report from notes."""
+"""DRA writer - synthesize markdown report from notes."""
 from __future__ import annotations
 from dra.common import Note, Draft, Citation, DRACost
 
@@ -60,7 +60,7 @@ def _self_test() -> None:
         "speculative decoding",
         "GPTQ AWQ quantization",
     ], cost)
-    draft = write_report("LLM inference 2026", notes, cost)
+    draft = write_report("LLM inference", notes, cost)
     assert "# Report" in draft.markdown
     assert "## References" in draft.markdown
     assert len(draft.citations) >= 2

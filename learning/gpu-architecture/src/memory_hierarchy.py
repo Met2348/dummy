@@ -1,4 +1,4 @@
-"""GPU memory hierarchy — registers → SMEM → L2 → HBM."""
+"""GPU memory hierarchy: registers, SMEM, L2, HBM."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -37,14 +37,14 @@ def recommend_tier(working_set_bytes: int, reuse_count: int) -> MemTier:
 
 
 def _self_test() -> None:
-    # Small reused buffer → registers
+    # Small reused buffer: registers.
     t = recommend_tier(1024, reuse=100) if False else recommend_tier(1024, 100)
     assert t.name == "registers"
-    # 100KB reused 5x → SMEM
+    # 100KB reused 5 times: SMEM.
     assert recommend_tier(100 * 1024, 5).name == "shared_memory"
-    # 10MB → L2
+    # 10MB: L2.
     assert recommend_tier(10 * 1024 * 1024, 1).name == "L2_cache"
-    # 100MB → HBM
+    # 100MB: HBM.
     assert recommend_tier(100 * 1024 * 1024, 1).name == "HBM3"
     # Latency monotone increasing
     lats = [t.latency_cycles for t in H100_HIERARCHY]

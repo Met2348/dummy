@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 
 
 MOCK_KB = {
-    "react": "ReAct (Yao 2022) — Thought-Action-Observation loop pattern.",
-    "rag": "RAG (Lewis 2020) — retrieve-augment-generate pipeline.",
-    "mcp": "MCP (Anthropic 2024.11) — Model Context Protocol over JSON-RPC.",
-    "graphrag": "GraphRAG (Microsoft 2024) — entity graph + community summary.",
-    "langgraph": "LangGraph — StateGraph + reducers + checkpoint.",
+    "react": "ReAct (Yao 2022) - Thought-Action-Observation loop pattern.",
+    "rag": "RAG (Lewis 2020) - retrieve-augment-generate pipeline.",
+    "mcp": "MCP (mock course entry) - JSON-RPC-style tool interface.",
+    "graphrag": "GraphRAG (mock course entry) - entity graph + community summary.",
+    "langgraph": "LangGraph - StateGraph + reducers + checkpoint.",
 }
 
 

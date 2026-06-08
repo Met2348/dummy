@@ -59,7 +59,7 @@ def to_md(scores: Dict[str, Dict[str, float]]) -> str:
     dims = list(SCORERS.keys()) + ["avg"]
     head = "| ckpt | " + " | ".join(dims) + " |"
     sep = "|---|" + "---:|" * len(dims)
-    lines = ["# mini-HELM 5-ckpt × 4-dim", "", head, sep]
+    lines = ["# mini-HELM 5-ckpt x 4-dim", "", head, sep]
     for key, s in scores.items():
         row = [f"{s[d]:.2f}" for d in dims]
         lines.append(f"| {key} | " + " | ".join(row) + " |")

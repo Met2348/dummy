@@ -1,4 +1,4 @@
-"""Capstone — 32-concurrent ReAct agent server with radix-cache stats.
+"""Capstone: 32-concurrent ReAct agent server with radix-cache stats.
 
 Pieces composed:
 - RadixTree                (radix_tree.py)
@@ -45,7 +45,7 @@ def mock_tool(action: str) -> str:
     if "calc" in a:
         return "= 42"
     if "weather" in a:
-        return "rainy, 18°C"
+        return "rainy, 18C"
     if "python" in a:
         return "stdout: ok"
     return "no-op"

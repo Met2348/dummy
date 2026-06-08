@@ -74,9 +74,9 @@ if __name__ == "__main__":
     ]
     labels = auto_label_steps(q, steps, mock_rollout, n_per_step=10)
     for lbl in labels:
-        marker = {"good": "✓", "neutral": "?", "bad": "✗"}[lbl.label]
+        marker = {"good": "OK", "neutral": "?", "bad": "BAD"}[lbl.label]
         print(f"  {marker} [{lbl.label:7s}] rate={lbl.success_rate:.1%} | {lbl.step_text[:50]}")
 
     out = to_prm_training_jsonl(q, labels)
     print(f"\nPRM 训练样本（JSON 格式）:\n  keys: {list(out.keys())}")
-    print("  → 可拼接成 1k-10k 条，训出 PRM。")
+    print("  -> 可拼接成 1k-10k 条，训出 PRM。")

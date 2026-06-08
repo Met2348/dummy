@@ -1,4 +1,4 @@
-"""Checkpoint strategies — full / sharded / async / DCP."""
+"""Checkpoint strategies: full, sharded, async, and DCP."""
 from __future__ import annotations
 from dataclasses import dataclass
 from common import Storage
@@ -27,11 +27,11 @@ def sharded_checkpoint(model_bytes: int, n_gpus: int, tier: Storage) -> CkptCost
 def async_sharded(model_bytes: int, n_gpus: int, tier: Storage) -> CkptCost:
     """torch.distributed.checkpoint async: per-rank stage to host RAM via PCIe (independent).
 
-    The blocking time is the PCIe stage (each GPU independent → per-rank divide).
-    Background write to Lustre happens during compute → not counted as blocking.
+    The blocking time is the PCIe stage, with each GPU independent.
+    Background write to Lustre happens during compute and is not counted.
     """
     per_rank_bytes = model_bytes // n_gpus
-    pcie_per_rank_gb_s = 32.0       # PCIe Gen5 x16 ≈ 64 GB/s, halved for safety
+    pcie_per_rank_gb_s = 32.0       # PCIe Gen5 x16 about 64 GB/s, halved.
     stage_s = per_rank_bytes / 1e9 / pcie_per_rank_gb_s
     return CkptCost(stage_s, model_bytes, blocking=False)
 

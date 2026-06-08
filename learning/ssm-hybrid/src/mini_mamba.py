@@ -1,4 +1,4 @@
-"""Mini-Mamba — capstone 130M-scale (toy 32M for demo)."""
+"""Mini-Mamba - capstone 130M-scale idea, toy 32M for demo."""
 from __future__ import annotations
 
 from dataclasses import dataclass

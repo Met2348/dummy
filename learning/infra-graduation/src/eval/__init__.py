@@ -1,1 +1,1 @@
-"""Infra eval — MLPerf-style mock."""
+"""Infra eval package for MLPerf-style mock scoring."""

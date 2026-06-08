@@ -1,4 +1,4 @@
-"""Graduation report — runs compare, writes markdown + JSON to a directory."""
+"""Graduation report - runs compare, writes markdown + JSON to a directory."""
 from __future__ import annotations
 
 import json

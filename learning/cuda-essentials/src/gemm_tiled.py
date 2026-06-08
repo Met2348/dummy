@@ -1,4 +1,4 @@
-"""Tiled GEMM — the canonical CUDA optimization story."""
+"""Tiled GEMM: the canonical CUDA optimization story."""
 from __future__ import annotations
 
 
@@ -18,7 +18,7 @@ def gemm_naive(A: list[list[float]], B: list[list[float]]) -> list[list[float]]:
 
 
 def gemm_tiled(A: list[list[float]], B: list[list[float]], tile: int = 16) -> list[list[float]]:
-    """Block-tiled — load A[i..i+T, k..k+T] and B[k..k+T, j..j+T] into SMEM once per K-step."""
+    """Block-tiled GEMM with shared-memory-style reuse per K step."""
     M, K = len(A), len(A[0])
     _, N = len(B), len(B[0])
     C = [[0.0] * N for _ in range(M)]
@@ -62,7 +62,7 @@ def _self_test() -> None:
         for j in range(N):
             assert abs(C1[i][j] - C2[i][j]) < 1e-9, (i, j)
 
-    # Traffic comparison — larger problem
+    # Traffic comparison on a larger problem.
     naive_b = hbm_traffic_naive(1024, 1024, 1024)
     tiled_b = hbm_traffic_tiled(1024, 1024, 1024, tile=32)
     speedup = naive_b / tiled_b

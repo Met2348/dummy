@@ -1,4 +1,4 @@
-"""MLPerf Training mock — 5 tasks × time-to-target scoring."""
+"""MLPerf Training mock: 5 tasks by time-to-target scoring."""
 from __future__ import annotations
 from dataclasses import dataclass
 from sim.common import ClusterBlueprint, GPU_CATALOG, FABRIC_CATALOG, STORAGE_CATALOG

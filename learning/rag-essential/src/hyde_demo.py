@@ -1,4 +1,4 @@
-"""HyDE — Hypothetical Document Embedding (Gao 2022)."""
+"""HyDE - Hypothetical Document Embedding (Gao 2022)."""
 from __future__ import annotations
 from typing import Callable
 from common import hash_embed, cosine, Doc, RetrievalResult
@@ -25,7 +25,7 @@ def make_hypothesis_llm() -> Callable[[str], str]:
         for key, expansion in expansions.items():
             if key in q_low:
                 return expansion
-        return query + " — relevant 2024-2025 technique in retrieval-augmented generation."
+        return query + " - relevant retrieval-augmented generation technique."
 
     return llm
 

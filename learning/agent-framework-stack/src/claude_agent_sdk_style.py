@@ -1,4 +1,4 @@
-"""Claude Agent SDK-style — built-in tools + permission modes + hooks."""
+"""Claude Agent SDK-style - built-in tools + permission modes + hooks."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
@@ -82,7 +82,7 @@ def query(
                 continue
         if mode == "plan":
             result.messages.append({"role": "tool", "name": tool_name,
-                                     "content": "(plan mode — not executed)"})
+                                     "content": "(plan mode - not executed)"})
             continue
         try:
             tool_out = tools[tool_name](step.get("args", {}))

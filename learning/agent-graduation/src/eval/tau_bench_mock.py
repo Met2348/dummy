@@ -1,4 +1,4 @@
-"""τ-bench mock — 5 tasks with user simulators."""
+"""Tau-bench style mock with five tasks and user simulators."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
@@ -57,10 +57,10 @@ TASKS: list[TauTask] = [
     ),
     TauTask(
         name="research-report",
-        goal="Produce report on 2026 LLM inference optimization",
+        goal="Produce report on modern LLM inference optimization",
         required_actions=["plan", "search", "write", "verify"],
         user_messages=[
-            "Write a brief report on 2026 LLM inference optimization techniques.",
+            "Write a brief report on modern LLM inference optimization techniques.",
         ],
     ),
 ]

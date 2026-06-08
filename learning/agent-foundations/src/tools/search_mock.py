@@ -1,4 +1,4 @@
-"""Mock search — returns canned results based on keyword."""
+"""Mock search - returns canned results based on keyword."""
 from __future__ import annotations
 import sys
 import os
@@ -8,11 +8,11 @@ from common import Tool, ActionResult
 
 
 CANNED = {
-    "popular llm": "Claude (most cited 2025 LLM, per Stanford AI Index)",
+    "popular llm": "Claude (mock result; 6-character name for capstone arithmetic)",
     "best embedding": "text-embedding-3-large (OpenAI, 2024) and voyage-3 (Voyage AI, 2024)",
-    "react agent": "ReAct (Yao 2022) — Thought/Action/Observation loop",
+    "react agent": "ReAct (Yao 2022) - Thought/Action/Observation loop",
     "mcp protocol": "Model Context Protocol (Anthropic, 2024-11)",
-    "graphrag": "GraphRAG (Microsoft 2024) — entity-graph + community summary",
+    "graphrag": "GraphRAG (Microsoft 2024) - entity-graph + community summary",
 }
 
 

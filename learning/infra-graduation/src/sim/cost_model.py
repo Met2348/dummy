@@ -1,4 +1,4 @@
-"""TCO model — capex + opex + power."""
+"""TCO model: capex, opex, and power."""
 from __future__ import annotations
 from sim.common import ClusterBlueprint
 

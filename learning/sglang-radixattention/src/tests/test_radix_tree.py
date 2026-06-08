@@ -54,9 +54,9 @@ def test_acquire_release_refcount():
 
 
 def test_evict_removes_zero_ref_leaf():
-    """Evict frees ≥3 tokens; the older insert is the LRU victim."""
+    """Evict frees at least 3 tokens; the older insert is the LRU victim."""
     tree = RadixTree()
-    tree.insert([1, 2, 3, 4])           # inserted first → smaller last_access
+    tree.insert([1, 2, 3, 4])           # inserted first: smaller last_access
     tree.insert([10, 11, 12])           # newer
     freed = tree.evict(want_tokens=3)
     assert freed >= 3

@@ -9,6 +9,7 @@ MODULES = [
     "common",
     "vector_store",
     "letta_mock",
+    "memgpt_virtual_context",
     "mem0_mock",
     "episodic_memory",
     "semantic_memory",

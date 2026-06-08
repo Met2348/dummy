@@ -1,4 +1,4 @@
-"""DRA retriever — per sub-question, search + fetch."""
+"""DRA retriever - per sub-question, search plus fetch."""
 from __future__ import annotations
 from dra.common import Note, DocSnippet, DRACost
 from dra.tools.dra_tools import search_tool, fetch_tool

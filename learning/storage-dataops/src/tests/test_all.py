@@ -5,8 +5,8 @@ import os
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
-MODULES = ["common", "dataloader", "sharding", "checkpoint",
-           "webdataset_style", "capstone_ckpt_recovery"]
+MODULES = ["common", "dataloader", "data_loading_original_minimal", "sharding",
+           "checkpoint", "webdataset_style", "capstone_ckpt_recovery"]
 
 
 def main() -> int:

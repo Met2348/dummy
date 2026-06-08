@@ -1,4 +1,4 @@
-"""Capstone-1 — R1-tiny mock deployment.
+"""Capstone-1 - R1-tiny mock deployment.
 
 Simulates loading a Module-4 reasoning-r1 checkpoint, quantising it via
 Module-5 AWQ, and serving it through a streaming OpenAI-compatible endpoint.

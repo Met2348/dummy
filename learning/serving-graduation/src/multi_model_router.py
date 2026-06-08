@@ -1,4 +1,4 @@
-"""Multi-model router — pick model tier based on query complexity."""
+"""Multi-model router - pick model tier based on query complexity."""
 from __future__ import annotations
 
 from dataclasses import dataclass

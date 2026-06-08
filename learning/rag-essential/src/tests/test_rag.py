@@ -19,6 +19,7 @@ MODULES = [
     "rag_fusion",
     "self_rag",
     "ragas_metrics",
+    "rag_original_minimal",
     "capstone_rag_compare",
 ]
 

@@ -1,4 +1,4 @@
-"""Vercel AI SDK-style — generateText/streamText with multi-step tool loop."""
+"""Vercel AI SDK-style - generateText/streamText with multi-step tool loop."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterator

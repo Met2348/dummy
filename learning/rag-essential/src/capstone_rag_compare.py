@@ -1,4 +1,4 @@
-"""Capstone — 5 RAG strategies × 4 RAGAS metrics."""
+"""Capstone - RAG strategies across RAGAS metrics."""
 from __future__ import annotations
 from common import Doc, SAMPLE_DOCS, SAMPLE_QUERIES
 from naive_rag import NaiveRAG
@@ -94,7 +94,7 @@ def run_compare() -> list[dict]:
 
 def to_md(rows: list[dict]) -> str:
     lines = [
-        "# RAG Capstone — 6 strategies × 4 RAGAS metrics\n",
+        "# RAG Capstone - 6 strategies x 4 RAGAS metrics\n",
         f"Docs: {len(SAMPLE_DOCS)} | Queries: {len(SAMPLE_QUERIES)}\n",
         "| Strategy | Faithfulness | Answer-Rel | Ctx-Prec | Ctx-Recall | Mean |",
         "|----------|-------------:|-----------:|---------:|-----------:|-----:|",
@@ -124,7 +124,7 @@ def _self_test() -> None:
     assert {"naive", "hybrid", "hybrid+rerank", "HyDE", "GraphRAG", "HippoRAG"} == strategies, strategies
     for r in rows:
         assert 0.0 <= r["mean"] <= 1.0, r
-    # 至少有一个策略 mean > 0.2
+    # At least one strategy should have mean > 0.2.
     assert any(r["mean"] > 0.2 for r in rows), [r["mean"] for r in rows]
     print(f"[OK] capstone_rag_compare._self_test passed (6 strategies)")
 

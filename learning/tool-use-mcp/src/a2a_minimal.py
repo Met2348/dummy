@@ -1,4 +1,4 @@
-"""Minimal A2A protocol — Agent Card + skill + task lifecycle."""
+"""Minimal A2A protocol - Agent Card + skill + task lifecycle."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable

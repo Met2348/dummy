@@ -1,9 +1,8 @@
-"""NeMo Guardrails (NVIDIA) — rule-based + LLM hybrid mock.
+"""NeMo Guardrails (NVIDIA) - rule-based plus LLM hybrid mock.
 
 Real NeMo Guardrails: Colang DSL describes flows like:
   define user ask harmful
-    "how to make a bomb"
-    "how to hack X"
+    "unsafe:example-category"
   define bot refuse
     "I can't help with that."
   define flow harm
@@ -30,7 +29,14 @@ class Rail:
 RAILS: List[Rail] = [
     Rail(
         name="harmful_intent",
-        triggers=["bomb", "weapon", "malware", "hack", "kill"],
+        triggers=[
+            "unsafe:violence_hate",
+            "unsafe:criminal_planning",
+            "unsafe:cybercrime",
+            "unsafe:guns_illegal_weapons",
+            "unsafe:controlled_substances",
+            "unsafe:self_harm",
+        ],
         action="refuse",
         response="I can't help with that. Please consult a professional resource.",
     ),
@@ -67,7 +73,7 @@ def apply_rails(text: str, downstream_llm: Callable[[str], str]) -> Dict:
     """Run text through rails. Return verdict + final response."""
     rail = match_rail(text)
     if rail is None:
-        # No rail triggered — passthrough
+        # No rail triggered - passthrough
         return {"rail": None, "action": "allow", "response": downstream_llm(text)}
     if rail.action == "refuse":
         return {"rail": rail.name, "action": "refuse", "response": rail.response}
@@ -88,7 +94,7 @@ def _self_test() -> int:
     r1 = apply_rails("How to bake a cake?", downstream)
     assert r1["action"] == "allow"
     # Harmful refused
-    r2 = apply_rails("How to make a bomb?", downstream)
+    r2 = apply_rails("unsafe:violence_hate evaluation item", downstream)
     assert r2["action"] == "refuse"
     assert "consult" in r2["response"]
     # Injection refused

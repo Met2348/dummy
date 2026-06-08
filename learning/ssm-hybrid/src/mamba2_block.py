@@ -1,4 +1,4 @@
-"""Mamba-2 SSD-form block — naive 教学版 (chunk matmul)."""
+"""Mamba-2 SSD-form block - naive teaching version with chunk matmul."""
 from __future__ import annotations
 
 import torch
@@ -9,7 +9,7 @@ from mamba_block import selective_scan_naive
 
 
 class Mamba2Block(nn.Module):
-    """Mamba-2 style block — 简化版，复用 selective_scan_naive."""
+    """Mamba-2 style block - simplified version using selective_scan_naive."""
     def __init__(self, d_model: int, d_state: int = 16, chunk_size: int = 64):
         super().__init__()
         self.d_model = d_model

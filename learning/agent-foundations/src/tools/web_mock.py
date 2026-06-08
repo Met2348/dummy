@@ -1,4 +1,4 @@
-"""Mock web fetch — returns canned page content by URL."""
+"""Mock web fetch - returns canned page content by URL."""
 from __future__ import annotations
 import sys
 import os
@@ -10,7 +10,7 @@ from common import Tool, ActionResult
 CANNED_PAGES = {
     "https://anthropic.com/mcp": "MCP unifies tool/resource/prompt as JSON-RPC primitives.",
     "https://langchain.com/langgraph": "LangGraph: stateful agent applications with StateGraph.",
-    "https://arxiv.org/abs/2210.03629": "ReAct paper abstract — Yao 2022.",
+    "https://arxiv.org/abs/2210.03629": "ReAct paper abstract - Yao 2022.",
 }
 
 

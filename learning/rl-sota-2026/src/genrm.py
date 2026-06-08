@@ -63,7 +63,7 @@ def compare_scalar_vs_genrm(scalar_rm_fn, genrm_judge_fn, samples: list[tuple[st
 
 
 if __name__ == "__main__":
-    print("GenRM minimal — mock\n" + "=" * 50)
+    print("GenRM minimal - mock\n" + "=" * 50)
     def mock_scalar_rm(q, a):
         return 0.6 if "7" in a else 0.3
 
@@ -79,7 +79,7 @@ if __name__ == "__main__":
     ]
     compare_scalar_vs_genrm(mock_scalar_rm, mock_judge, samples)
     print("\nGenRM 优势:")
-    print("  ✓ 可解释 (输出 critique)")
-    print("  ✓ 利用 LLM 推理能力 (强 base 强 RM)")
-    print("  ✗ 推理慢 ~10x")
-    print("  ✗ judge 模型本身需要训")
+    print("  OK 可解释 (输出 critique)")
+    print("  OK 利用 LLM 推理能力 (强 base 强 RM)")
+    print("  COST 推理慢 ~10x")
+    print("  COST judge 模型本身需要训")

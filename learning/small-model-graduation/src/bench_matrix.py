@@ -1,4 +1,4 @@
-"""Bench matrix - run 6 metric × 5 ckpt."""
+"""Bench matrix - run 6 metrics over 5 checkpoints."""
 from __future__ import annotations
 
 import csv
@@ -42,10 +42,10 @@ def ablation_breakdown(results: dict) -> dict:
     E = results.get("E", EXPECTED["E"])
 
     return {
-        "data (A→B)": {m: B[m] - A[m] for m in METRICS},
-        "arch (B→C)": {m: C[m] - B[m] for m in METRICS},
-        "long_ctx (C→D)": {m: D[m] - C[m] for m in METRICS},
-        "curriculum (C→E)": {m: E[m] - C[m] for m in METRICS},
+        "data (A->B)": {m: B[m] - A[m] for m in METRICS},
+        "arch (B->C)": {m: C[m] - B[m] for m in METRICS},
+        "long_ctx (C->D)": {m: D[m] - C[m] for m in METRICS},
+        "curriculum (C->E)": {m: E[m] - C[m] for m in METRICS},
     }
 
 
@@ -80,8 +80,8 @@ def make_report_md(results: dict, output: str) -> None:
     md.append("\n## 结论")
     md.append("- 数据质量贡献 ~5pp HellaSwag (从 A 到 B)")
     md.append("- 架构 + size 贡献 ~8pp HellaSwag (从 B 到 C)")
-    md.append("- 长 ctx 阶段贡献 0pp benchmark, +75pp NIAH (C → D)")
-    md.append("- 五部曲全开贡献 +15pp HellaSwag, +5pp MMLU (A → E)")
+    md.append("- 长 ctx 阶段贡献 0pp benchmark, +75pp NIAH (C -> D)")
+    md.append("- 五部曲全开贡献 +15pp HellaSwag, +5pp MMLU (A -> E)")
 
     Path(output).write_text("\n".join(md), encoding="utf-8")
 
@@ -101,5 +101,5 @@ if __name__ == "__main__":
     write_csv(EXPECTED, "/tmp/bench.csv")
     print("CSV written")
     make_report_md(EXPECTED, "/tmp/report.md")
-    print("Report written → /tmp/report.md")
+    print("Report written -> /tmp/report.md")
     print(json.dumps(ablation_breakdown(EXPECTED), indent=2))

@@ -6,7 +6,8 @@ SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
 MODULES = ["common", "allreduce_algos", "fabric_topology",
-           "nccl_collectives", "sharp_inline", "capstone_cluster_sim"]
+           "nccl_collectives", "sharp_inline", "nccl_original_minimal",
+           "capstone_cluster_sim"]
 
 
 def main() -> int:

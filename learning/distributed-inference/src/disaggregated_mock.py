@@ -1,4 +1,4 @@
-"""Disaggregated Prefill/Decode mock — single-process simulator."""
+"""Disaggregated Prefill/Decode mock - single-process simulator."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -43,7 +43,7 @@ def disagg(w: WorkloadConfig, hw: HardwareConfig, cross_node: bool = False) -> d
     transfer = kv_transfer_ms(w.prompt_len, hw2)
     decode = w.out_len * hw.decode_ms_per_token
     ttft = prefill + transfer
-    # prefill GPU can pipeline next request while decode GPU runs old → overlap
+    # Prefill GPUs can pipeline the next request while decode GPUs run old ones.
     total = (prefill + transfer + decode) * w.n_reqs / 8
     tput = w.n_reqs * w.out_len / (total / 1000.0)
     cfg = "disagg-remote" if cross_node else "disagg-near"

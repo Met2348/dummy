@@ -5,8 +5,9 @@ import os
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
-MODULES = ["common", "roofline", "memory_hierarchy", "tensor_core",
-           "nvlink_topology", "sm_occupancy", "capstone_roofline_zoo"]
+MODULES = ["common", "roofline", "roofline_original_minimal",
+           "memory_hierarchy", "tensor_core", "nvlink_topology",
+           "sm_occupancy", "capstone_roofline_zoo"]
 
 
 def main() -> int:

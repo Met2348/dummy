@@ -70,13 +70,13 @@ def run_ablation_grid():
          "clip_higher": True, "dynamic_sampling": True,
          "token_level": True, "overlong": True},
     ]
-    print(f"{'config':35s} {'acc':6s} {'Δ':7s} {'len':7s} {'aha%':6s}")
+    print(f"{'config':35s} {'acc':6s} {'delta':7s} {'len':7s} {'aha%':6s}")
     print("-" * 70)
     baseline = None
     for cfg in configs:
         name = cfg.pop("name")
         out = mock_ablation_run(cfg)
-        delta = "—" if baseline is None else f"+{(out['accuracy']-baseline)*100:.1f}pp"
+        delta = "-" if baseline is None else f"+{(out['accuracy']-baseline)*100:.1f}pp"
         baseline = baseline or out["accuracy"]
         print(f"{name:35s} {out['accuracy']:.1%} {delta:7s} "
               f"{out['mean_length']:.0f}     {out['aha_freq']:.1%}")
@@ -92,7 +92,7 @@ def smoke_test_dapo_components():
     L = asymmetric_clip_loss(log_p_new, log_p_old, A, mask, 0.2, 0.28)
     print(f"  Clip-Higher loss = {L.mean().item():.4f}")
     # Dynamic Sampling
-    print(f"  Group useful [1,0,1,0] → {is_group_useful(torch.tensor([1.0, 0, 1, 0]))}")
+    print(f"  Group useful [1,0,1,0] -> {is_group_useful(torch.tensor([1.0, 0, 1, 0]))}")
     # Token-level vs Response-level
     per_token = torch.tensor([[1.0]*3 + [0]*2, [1.0]*5])
     mask = torch.tensor([[1.0]*3 + [0]*2, [1.0]*5])
@@ -105,7 +105,7 @@ def smoke_test_dapo_components():
 
 
 if __name__ == "__main__":
-    print("Capstone — DAPO 4 件套消融实验 (mock)\n" + "=" * 70)
+    print("Capstone - DAPO 4 件套消融实验 (mock)\n" + "=" * 70)
     run_ablation_grid()
     smoke_test_dapo_components()
-    print("\n→ 实际训练: 每 config 200 step on baseline ckpt, 5090 24GB 每跑 1h.")
+    print("\n-> 实际训练: 每 config 200 step on baseline ckpt, 5090 24GB 每跑 1h.")

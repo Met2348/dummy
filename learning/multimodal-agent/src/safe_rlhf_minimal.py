@@ -1,10 +1,10 @@
-"""Safe-RLHF (PKU 2023) — Lagrangian 多目标优化.
+"""Safe-RLHF Lagrangian multi-objective optimization.
 
 idea: helpful 与 harmless 双 reward, Lagrangian 拉格朗日松弛求平衡.
 
-L = E[R_helpful] - λ · max(0, c_harmless - R_harmless)
+L = E[R_helpful] - lambda * max(0, c_harmless - R_harmless)
 其中 c_harmless 是 harmless 约束 (e.g. 期望 0.8 以上).
-λ 自动调节: 若违反约束 λ↑, 满足则 λ↓.
+lambda 自动调节: 若违反约束就上升, 满足则下降.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class LagrangianSafeRLHF:
         return -(r_helpful - self.lam * violation).mean()
 
     def update_lambda(self, r_harmless: torch.Tensor):
-        """λ 上升若 harmless 不足，下降若超出."""
+        """Increase lambda if harmless is too low, decrease otherwise."""
         gap = self.c - r_harmless.mean().item()
         self.lam = (self.lam + self.lr_lambda * gap).clamp(min=0)
 
@@ -55,9 +55,9 @@ if __name__ == "__main__":
         safe.update_lambda(r_safe)
         if step % 10 == 0:
             print(f"  step {step:3d}: L={L.item():+.3f} R_h={r_h.mean():.2f} "
-                  f"R_safe={r_safe.mean():.2f} λ={safe.lam.item():.3f}")
-    print("\n趋势: harmless 上升 → λ 下降; 不达标时 λ 上升强制收敛.")
+                  f"R_safe={r_safe.mean():.2f} lambda={safe.lam.item():.3f}")
+    print("\nTrend: harmless rises -> lambda falls; below target -> lambda rises.")
 
     print("\n[MaxMin-RLHF 对比]")
     r_max = maxmin_rlhf(torch.tensor([0.9, 0.3]), torch.tensor([0.4, 0.8]))
-    print(f"  helpful=[0.9, 0.3], harmless=[0.4, 0.8] → maxmin={r_max.tolist()}")
+    print(f"  helpful=[0.9, 0.3], harmless=[0.4, 0.8] -> maxmin={r_max.tolist()}")

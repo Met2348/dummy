@@ -1,4 +1,4 @@
-"""Capstone — 4-attack × 3-target ASR matrix — TEACHING MOCK.
+"""Capstone - 4-attack x 3-target ASR matrix - TEACHING MOCK.
 
 Shows the canonical "red-team report card" format used in safety papers.
 """
@@ -16,13 +16,13 @@ def make_target_zoo() -> Dict[str, TargetFn]:
         "strong_safety": make_safe_target("strong", jb_keys=[]),
         "weak_safety": make_safe_target(
             "weak",
-            # 3 known triggers — multiple methods can find them
-            jb_keys=["{!}", " certainly", "[OVERRIDE]"],
+            # 3 known toy triggers - multiple methods can find them
+            jb_keys=["<toy_trigger>", "<toy_h>", "[TOY_PREFIX]"],
         ),
         "no_safety": make_safe_target(
             "no_safety",
-            # any token in the SEED_TEMPLATE triggers — basically broken
-            jb_keys=["DAN", "Disregard"],
+            # any token in the seed template triggers - basically broken
+            jb_keys=["BoundaryTester", "seed prompt"],
         ),
     }
 

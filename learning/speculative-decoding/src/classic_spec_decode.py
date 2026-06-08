@@ -55,7 +55,7 @@ def speculative_decode_step(
             else:
                 accepted.append(sample_from([r / s for r in residual], rng))
             return accepted
-    # all accepted → bonus sample from p_target[k]
+    # All drafted tokens were accepted, so draw one bonus token from p_target[k].
     accepted.append(sample_from(p_target[len(drafted_ids)], rng))
     return accepted
 

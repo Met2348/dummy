@@ -1,4 +1,4 @@
-"""Minimal GraphRAG mock — entity extraction + community detection + summary."""
+"""Minimal GraphRAG mock - entity extraction plus community detection plus summary."""
 from __future__ import annotations
 from common import Doc, tokenize, hash_embed, cosine, RetrievalResult, Chunk
 

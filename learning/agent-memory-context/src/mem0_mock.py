@@ -1,4 +1,4 @@
-"""Mem0 mock — extract / update / retrieve."""
+"""Mem0 mock - extract / update / retrieve."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from common import hash_embed, cosine, tokenize

@@ -1,14 +1,14 @@
-"""Capstone — full MCP stack: server with 3 tools + client discover + 4 calls."""
+"""Capstone - full MCP stack: server with 3 tools + client discover + 4 calls."""
 from __future__ import annotations
 from mcp_server import MCPServer
 from mcp_client import MCPClient
 
 
 KB = {
-    "MCP": "Model Context Protocol — JSON-RPC 2.0 standard from Anthropic (2024.11).",
-    "A2A": "Agent-to-Agent protocol — Google 2025 interop standard.",
+    "MCP": "Model Context Protocol - JSON-RPC-style tool interface (mock course entry).",
+    "A2A": "Agent-to-Agent protocol - interop concept used in this mock course entry.",
     "ReAct": "Thought-Action-Observation loop (Yao 2022).",
-    "GraphRAG": "Microsoft 2024 — entity graph + community summary RAG.",
+    "GraphRAG": "Graph-based RAG - entity graph + community summary pattern.",
 }
 
 
@@ -79,7 +79,7 @@ def run_capstone() -> dict:
 
 def to_md(result: dict) -> str:
     lines = [
-        "# MCP Capstone — Topic 3 tool-use-mcp\n",
+        "# MCP Capstone - Topic 3 tool-use-mcp\n",
         "## Handshake",
         f"- protocolVersion: {result['init']['protocolVersion']}",
         f"- serverInfo: {result['init']['serverInfo']['name']} {result['init']['serverInfo']['version']}",

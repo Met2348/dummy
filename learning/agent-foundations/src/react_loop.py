@@ -1,4 +1,4 @@
-"""ReAct loop — Yao 2022.
+"""ReAct loop - Yao 2022.
 
 Thought-Action-Observation cycle until Final Answer or max_steps.
 """
@@ -71,7 +71,7 @@ def _self_test() -> None:
 
     llm = make_pattern_llm([
         (r"Thought 1:", "Thought: Need to compute.\nAction 1: calculator(2+3)\n"),
-        (r"Thought 2:", "Thought: Got 5.\nFinal Answer: 5\n"),
+        (r"Observation 1:[\s\S]*5[\s\S]*Thought 2:", "Thought: Got 5.\nFinal Answer: 5\n"),
     ])
     trace = react_loop("What is 2+3?", llm, ALL_TOOLS)
     assert trace.final == "5", trace

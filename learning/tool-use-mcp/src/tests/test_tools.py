@@ -7,6 +7,7 @@ sys.path.insert(0, SRC)
 
 MODULES = [
     "common",
+    "toolformer_toy",
     "openai_tools",
     "mcp_protocol",
     "mcp_server",

@@ -1,4 +1,4 @@
-"""Capstone: numerically stable softmax kernel — naive → online (FlashAttn style)."""
+"""Capstone: numerically stable softmax kernel, naive vs online."""
 from __future__ import annotations
 import math
 
@@ -39,7 +39,7 @@ def _self_test() -> None:
     assert abs(sum(a) - 1.0) < 1e-9
     assert abs(sum(b) - 1.0) < 1e-9
 
-    # Numerical stability — large values
+    # Numerical stability with large values.
     big = [1000.0, 1001.0, 1002.0]
     try:
         bn = softmax_naive(big)

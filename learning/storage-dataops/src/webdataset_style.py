@@ -1,4 +1,4 @@
-"""WebDataset-style tar shard reader — sequential I/O is king."""
+"""WebDataset-style tar shard reader: sequential I/O is king."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -34,10 +34,10 @@ def _self_test() -> None:
     shard = TarShard(n_samples=10000, bytes_per_sample=100_000)   # 1GB shards
     sp = speedup(shard, 1_000_000, bw_gb_s=500.0, iops=500_000)
     assert sp > 5.0, sp
-    # Larger shard (more samples per tar) → bigger speedup (amortizes IOPS overhead)
+    # Larger shard amortizes IOPS overhead.
     big_shard = TarShard(n_samples=100_000, bytes_per_sample=100_000)
     sp2 = speedup(big_shard, 1_000_000, bw_gb_s=500.0, iops=500_000)
-    # With same total size but bigger shards, BW-bound side stays same → speedup unchanged
+    # With same total size, BW-bound time stays unchanged in this model.
     # The real win: small shards have IOPS overhead we model as constant; here linear regime.
     assert sp2 > 5.0, sp2
     print(f"[OK] webdataset (small shards {sp:.1f}x, large shards {sp2:.1f}x)")

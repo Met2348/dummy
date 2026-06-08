@@ -1,6 +1,8 @@
 # guide_FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
 
-> 原论文: [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)
+<!-- manual-deep-guide -->
+
+> 原论文: FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
 >
 > 本地原文 PDF: `learning/kernel-engineering/paper/01_flashattention.pdf`
 >
@@ -10,186 +12,461 @@
 >
 > 类型: paper
 
-## 0. 导读定位
+## 0. 这篇论文到底改变了什么
 
-这份 guide 的目标不是给你一张“论文推荐卡”，而是承担一次认真初读: 先把论文放回历史背景，再把核心方法、关键公式、实验逻辑和本仓库代码连起来。它不会逐字搬运原文，但会尽量把论文真正想表达的内容用中文重建出来。
+FlashAttention 改变的是我们看待 attention 性能瓶颈的方式。过去很多长上下文论文把焦点放在 FLOPs: 怎么把 `N x N` attention 近似成更少计算。FlashAttention 说: 真正拖慢现代 GPU 的，经常不是算不动，而是 HBM 读写太多。
 
-这篇材料的核心地位: FlashAttention 是 LLM kernel 工程的标志性论文：真正瓶颈是 HBM 读写，而不只是 FLOPs。
-
-## 1. 背景和 story
-
-标准 attention 会显式生成 N x N 注意力矩阵，长序列时显存和内存带宽成本爆炸。
-
-这篇论文出现之前，常见做法通常有三个特点: 第一，问题已经能被某些工程方法解决；第二，这些方法在规模、成本、稳定性、可解释性或泛化上遇到了瓶颈；第三，社区缺少一个足够简单、足够可复用的抽象。作者的贡献不是凭空发明一个名词，而是把这个瓶颈重新表述成一个可以优化的技术问题。
-
-你读这篇论文时要不断追问:
-
-- 原方法最痛的约束是什么。
-- 作者把约束转化成了什么建模假设。
-- 新方法省掉了什么，又额外引入了什么。
-- 论文的实验证据是否真的支持这个交换。
-
-## 2. 必须先掌握的概念
-
-- IO awareness
-- tiling
-- online softmax
-- SRAM/HBM
-- exact attention
-
-这些概念的关系可以这样理解: 它们不是词表，而是一条因果链。背景里的瓶颈会逼出核心概念，核心概念会变成方法设计，方法设计再落到公式、系统结构或训练流程里，最后由实验验证。
-
-一个好的读法是把每个概念写成三句话:
-
-1. 它解决什么问题。
-2. 它依赖什么假设。
-3. 如果它失效，模型或系统会出现什么症状。
-
-## 3. 论文主张
-
-算法按块读取 Q/K/V，在片上 SRAM 做局部计算，并用 online softmax 合并块结果。设计理由是避免把完整注意力矩阵写回 HBM。
-
-这段主张背后的设计理由可以拆成四层:
-
-1. **对象层**: 论文到底在改模型、数据、优化目标、推理系统、评测协议，还是安全策略。
-2. **约束层**: 它主要受限于计算、显存、标注、人类偏好、延迟、上下文长度、分布偏移，还是可复现性。
-3. **机制层**: 作者引入的新结构如何改变信息流、梯度流、资源流或决策流。
-4. **证据层**: 论文用什么实验说明这个机制确实工作，而不是只在一个漂亮样例里工作。
-
-读设计时要特别留心这些判断:
-
-- 它优化的是训练、推理、显存、数据、评测还是安全风险。
-- 它把复杂度转移到了哪里，例如更多调度逻辑、更多数据假设、更多超参或更强硬件依赖。
-- 它和 naive baseline 的差别是否能用一两句话讲清楚。
-- 如果把核心模块拿掉，论文的实验是否会明显变差。
-
-## 4. 方法逐层拆解
-
-你可以把这篇论文的方法读成一个输入到输出的管线。
-
-**输入是什么**: 输入可能是 token 序列、偏好对、检索查询、GPU kernel、请求流、训练数据、benchmark item，或者安全策略。不要抽象地说“输入数据”，要能说清楚输入张量、样本、请求或系统事件的单位。
-
-**中间状态是什么**: 论文真正创新的地方通常在中间状态。例如低秩矩阵、adapter hidden state、KV block table、reward score、router assignment、process step score、candidate solution set、prefix tree、memory page。中间状态决定了方法的可解释性和工程成本。
-
-**输出是什么**: 输出可能是 logits、动作、奖励、排序、路由、压缩权重、通过/拒绝标签、benchmark score 或调度决策。读论文时要把输出和评价指标对齐，否则很容易把训练目标和真实目标混在一起。
-
-对这篇论文来说，最重要的设计线索是: 算法按块读取 Q/K/V，在片上 SRAM 做局部计算，并用 online softmax 合并块结果。设计理由是避免把完整注意力矩阵写回 HBM。
-
-## 5. 数学和公式怎么读
-
-重点读 online softmax 的 m_i 和 l_i 更新：分块时仍保持数值稳定，最终结果与标准 softmax attention 等价。
-
-建议你在纸上重写关键公式，并标出每个张量或变量的形状、单位和约束。读不懂公式时，不要先背符号，先问:
-
-- 这个公式是在给谁打分。
-- 它限制了哪个变量不能乱跑。
-- 它节省的是参数、显存、计算、延迟还是标注。
-- 它是在精确计算，还是在近似一个无法直接计算的目标。
-
-如果论文有 loss function，优先拆解正负样本、baseline/reference、normalizer、temperature/beta/clip epsilon 这类项。如果论文是系统论文，优先拆解延迟、吞吐、带宽、显存、通信量和调度约束。如果论文是评测论文，优先拆解评分函数、样本构造、聚合方式和置信区间。
-
-## 6. 论文内容按“问题-方法-证据”重建
-
-**问题**: 标准 attention 会显式生成 N x N 注意力矩阵，长序列时显存和内存带宽成本爆炸。
-
-**方法**: 算法按块读取 Q/K/V，在片上 SRAM 做局部计算，并用 online softmax 合并块结果。设计理由是避免把完整注意力矩阵写回 HBM。
-
-**公式或机制**: 重点读 online softmax 的 m_i 和 l_i 更新：分块时仍保持数值稳定，最终结果与标准 softmax attention 等价。
-
-**证据**: 实验展示训练速度和显存下降，尤其长序列更明显。证据链要看 IO 复杂度分析 + kernel benchmark + 端到端训练。
-
-把这四段连起来，就是论文自己的 story。你应该能把它讲成下面这种形式:
-
-> 过去的方法因为某个约束变得不够好；作者提出一个更明确的机制；这个机制通过某个公式、结构或系统策略落地；实验用某些 baseline、ablation 和指标证明它确实改善了目标。
-
-如果讲不出这条链，就说明你还停留在“知道论文名”的阶段。
-
-## 7. 实验证据链条
-
-实验展示训练速度和显存下降，尤其长序列更明显。证据链要看 IO 复杂度分析 + kernel benchmark + 端到端训练。
-
-证据链不要只看最终表格。建议按这个顺序读:
-
-1. baseline 是否足够强。
-2. ablation 是否证明关键设计真的有用。
-3. 指标是否对应真实目标。
-4. 失败案例或限制条件是否被诚实讨论。
-5. 结论能否迁移到你本机的小实验。
-
-对新手来说，最危险的误读是看到一个主表格就以为论文被证明了。更好的读法是把实验分成三类:
-
-- **主结果**: 证明方法在目标任务上有竞争力。
-- **消融实验**: 证明每个设计组件有贡献。
-- **敏感性/限制实验**: 说明方法在什么条件下会退化。
-
-如果论文没有充分 ablation，你要在笔记里明确写下“这部分证据不足”。如果论文有强 ablation，你要把它转化成本仓库里的一个小实验。
-
-## 8. 局限性和后续工作
-
-这篇论文的价值不等于它解决了全部问题。你应该主动寻找局限:
-
-- 它是否依赖特定数据分布、模型规模、硬件、benchmark 或人工标注。
-- 它是否把成本转移到了预处理、调参、调度、存储、人工审核或部署复杂度。
-- 它是否只证明了平均指标，没有证明尾部风险、鲁棒性或长期稳定性。
-- 它是否可能在更大规模或不同任务上出现反直觉退化。
-
-后续阅读里列出的工作，通常就是社区沿着这些局限继续推进的结果。
-
-## 9. 和本仓库的连接
-
-- `learning/kernel-engineering/lectures/04-flashattention.md`
-- `learning/transformer-deep/src/flash_attn_naive.py`
-
-学习动作:
-
-1. 先读对应 lecture，写下你认为的核心问题。
-2. 再读本 guide，画出技术路线和证据链。
-3. 打开 source，找到与论文机制对应的最小实现。
-4. 实现一个最小改动实验，例如改 rank、改 batch、改 reward、改 cache block size、改 routing 策略、改 head 数、改 prompt 模板或改评测聚合方式。
-5. 写 5 句话复盘: 改了什么，为什么，指标怎么变，是否符合论文直觉，哪里不符合。
-
-## 10. 复现/实验建议
-
-一个 30-60 分钟的最小实验应该满足:
-
-- 不需要下载巨大模型或数据。
-- 只改一个关键变量。
-- 有一个明确指标。
-- 能对应论文里的某个 claim。
-- 实验失败也能解释一个概念。
-
-对这篇论文，优先围绕这些方向设计实验:
-
-- 复现核心公式或核心调度逻辑。
-- 改掉一个关键超参，看输出或指标变化。
-- 构造一个 toy case，观察方法相对 naive baseline 的差异。
-- 把论文里的 ablation 缩小成本仓库单元测试级别。
-
-## 11. 读完必须能闭卷回答
-
-- 这篇论文要解决的原始痛点是什么。
-- 它的核心假设是什么，什么时候可能不成立。
-- 它的最小公式或最小系统图是什么。
-- 它的实验到底证明了什么，没有证明什么。
-- 如果让你在本仓库复现一个玩具版，你会改哪个文件、看哪个指标。
-- 它和后续相关工作的关系是什么: 后续是在扩展它、修补它、替代它，还是把它工程化。
-
-## 12. 后续阅读
-
-- FlashAttention-2
-- FlashAttention-3
-- Triton
-- CUTLASS
-
-## 13. AI agent 学习提示词
-
-可以把下面这段直接丢给 agent，但要自己先读一遍论文摘要、方法图和实验主表:
+核心主张:
 
 ```text
-我正在读《FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness》。请你不要泛泛总结。
-请按“背景痛点 -> 核心方法 -> 关键公式/系统机制 -> 实验证据 -> 局限性 -> 本仓库最小实验”的顺序考我。
-一次只问 1 个问题，等我回答后指出错误，并要求我把答案和代码文件对应起来。
-最后请让我用 200 字闭卷复述这篇论文的贡献。
+标准 attention 慢，不只是因为 O(N^2) FLOPs，
+更是因为它把 S=QK^T 和 P=softmax(S) 这两个 N x N 矩阵写回 HBM。
+
+FlashAttention 用 tiling + online softmax，
+在 SRAM 里按块计算 exact attention，
+避免 materialize N x N attention matrix。
 ```
 
-真正掌握的标志是: 你能离开 guide，把这篇论文画成一张机制图，并用本仓库的一个小实验解释图里最关键的箭头。
+它是 exact attention，不是近似 attention。输出数学上等价于:
+
+```text
+O = softmax(Q K^T / sqrt(d)) V
+```
+
+区别在实现路径: 标准实现先造完整 `S` 和 `P`；FlashAttention 只在片上 SRAM 里处理小块，并维护每行 softmax 的运行统计量。
+
+## 1. 回到 2022 年的语境
+
+Transformer 想要长上下文，attention 的 `N x N` 成本会爆。很多方法尝试 sparse、low-rank、kernelized attention，把计算复杂度降到近线性。但论文指出，这些方法常常没有带来真实 wall-clock speedup，因为它们忽略了 memory access overhead。
+
+GPU 有层级内存:
+
+- HBM: 容量大，慢一些。A100 约 40-80GB，带宽约 1.5-2.0TB/s。
+- On-chip SRAM: 容量很小，很快。A100 每个 SM 约 192KB，估计带宽约 19TB/s。
+
+现代 GPU 计算速度增长很快，很多操作变成 memory-bound。Softmax、dropout、mask、layer norm 这类操作往往不是算术量大，而是反复读写内存贵。
+
+FlashAttention 的关键品味是 IO-aware:
+
+```text
+不要只数 FLOPs。
+要数 HBM <-> SRAM 之间搬了多少数据。
+```
+
+## 2. 原论文阅读地图
+
+建议按下面顺序读:
+
+1. Abstract: 抓住 IO-aware、exact attention、tiling、HBM/SRAM。
+2. Figure 1: 看为什么不写 `N x N` attention matrix 能带来 GPT-2 attention 7.6x speedup。
+3. Section 2.1: 看 GPU memory hierarchy 和 compute-bound / memory-bound。
+4. Section 2.2: 看标准 attention 如何 materialize `S` 和 `P`。
+5. Section 3.1: 看 tiling、online softmax、recomputation。
+6. Algorithm 1: 看 Q/K/V blocks、`m/l/O` 的更新。
+7. Theorem 1/2: 看 correctness、O(N) extra memory 和 IO complexity。
+8. Section 3.3: 看 block-sparse FlashAttention。
+9. Section 4: 看 BERT、GPT-2、LRA、Path-X、runtime/memory benchmark。
+
+如果只读一页，读 Algorithm 0 和 Algorithm 1 的对比。一个写 `S/P` 到 HBM，一个不写。
+
+## 3. 标准 Attention 到底慢在哪里
+
+给定:
+
+```text
+Q: [N, d]
+K: [N, d]
+V: [N, d]
+```
+
+标准 attention:
+
+```text
+S = Q K^T / sqrt(d)      # [N, N]
+P = softmax(S)           # [N, N]
+O = P V                  # [N, d]
+```
+
+标准实现的 HBM 路径:
+
+```text
+1. read Q, K
+2. compute S
+3. write S to HBM
+4. read S
+5. compute P = softmax(S)
+6. write P to HBM
+7. read P, V
+8. compute O
+9. write O to HBM
+```
+
+`S` 和 `P` 是 `N x N`。当 `N=4096` 时，每个 head 就有 16M 个元素；训练还要为 backward 保存中间值，dropout/mask 又会进一步增加读写。
+
+所以标准 attention 的显存和 IO 瓶颈不是抽象的“复杂度很高”，而是非常具体:
+
+```text
+把 N x N 的注意力分数和概率矩阵来回写 HBM。
+```
+
+## 4. FlashAttention 的方法图
+
+```text
+HBM:
+  Q [N,d], K [N,d], V [N,d]
+
+for each K/V block:
+  load K_j, V_j -> SRAM
+
+  for each Q block:
+    load Q_i and running state O_i, m_i, l_i -> SRAM
+    compute S_ij = Q_i K_j^T
+    update online softmax stats
+    update O_i
+    write O_i, m_i, l_i -> HBM
+
+final:
+  O_i already normalized / or normalized at block finalization
+```
+
+更直观地看:
+
+```text
+standard:
+  Q,K -> S[N,N] -> P[N,N] -> O
+          write     write
+          HBM       HBM
+
+flash:
+  Q_i,K_j,V_j blocks -> SRAM -> update O_i,m_i,l_i
+  never materialize full S or P
+```
+
+FlashAttention 多次读某些 Q/O blocks，但避免写读巨大的 `N x N` 中间矩阵。因为 SRAM 快很多，这个 trade-off 是赚的。
+
+## 5. Online Softmax 是关键数学
+
+Softmax 的困难在于一行需要看到所有 columns:
+
+```text
+softmax(x)_i = exp(x_i - max(x)) / sum_j exp(x_j - max(x))
+```
+
+如果按块读 `x`，怎么知道全局 `max(x)` 和 denominator？答案是维护两个运行量:
+
+```text
+m = running max
+l = running sum of exp scores under current max
+```
+
+当来了新 block `s_block`:
+
+```text
+m_new = max(m, max(s_block))
+l_new = exp(m - m_new) * l
+        + sum(exp(s_block - m_new))
+```
+
+旧的 denominator 要按新 max 重新缩放，因为 softmax 为了数值稳定一直在减最大值。
+
+输出 numerator 也要一起缩放:
+
+```text
+o_new =
+  exp(m - m_new) * o_old
+  + exp(s_block - m_new) @ V_block
+
+O = o_final / l_final
+```
+
+这就是本地 `attention_flash` 里的三个状态:
+
+```python
+m = -math.inf
+l = 0.0
+o = [0.0] * d
+```
+
+每看到一个 K/V block，就更新 `m/l/o`。最终 `o/l` 等于完整 softmax attention 的输出。
+
+## 6. 一行 Q 的张量级别例子
+
+假设:
+
+```text
+N = 8
+d = 4
+block_n = 3
+```
+
+对第 `i` 行 query:
+
+```text
+Q_i:        [d]
+K_block:    [block_n, d]
+V_block:    [block_n, d]
+s_block:    [block_n]
+p_block:    [block_n]
+o:          [d]
+m:          scalar
+l:          scalar
+```
+
+块顺序:
+
+```text
+K/V 0: tokens 0,1,2
+K/V 1: tokens 3,4,5
+K/V 2: tokens 6,7
+```
+
+FlashAttention 对每个 block 只暂时产生 `s_block`，不生成完整 `[N]` 分数行，更不生成 `[N,N]` 矩阵。
+
+本地代码:
+
+```python
+s_block = [
+    sum(Q[i][k] * K[j][k] for k in range(d)) * scale
+    for j in range(j_start, j_end)
+]
+m_new = max(m, max(s_block))
+rescale = exp(m - m_new)
+l = l * rescale
+o = [v * rescale for v in o]
+```
+
+这段是导读里最该手写的代码。写出来，FlashAttention 就从“神奇 CUDA kernel”变成了可以理解的数学算法。
+
+## 7. Backward 为什么要 recompute
+
+训练时标准 attention 会保存 `S` 和 `P`，方便 backward 算梯度。但这正是 `O(N^2)` memory 的来源。
+
+FlashAttention 选择保存:
+
+```text
+O: [N,d]
+m: [N]
+l: [N]
+```
+
+Backward 时再按块从 `Q/K/V` recompute `S_block` 和 `P_block`。这会多做一些 FLOPs，但避免从 HBM 读写完整 `N x N` attention matrix。
+
+这是一种 selective gradient checkpointing，但和普通 checkpointing 的区别是: 它不是盲目用算力换显存，而是针对 GPU memory hierarchy 精确地减少 HBM IO，所以往往反而更快。
+
+## 8. IO 复杂度
+
+论文给出:
+
+```text
+standard attention HBM accesses:
+  Theta(N*d + N^2)
+
+FlashAttention HBM accesses:
+  Theta(N^2 * d^2 / M)
+
+M = SRAM size
+```
+
+并且 Theorem 1 说明 Algorithm 1 返回的就是:
+
+```text
+softmax(QK^T)V
+```
+
+同时只需要 `O(N)` additional memory beyond inputs and output。
+
+直觉:
+
+- 标准 attention 的大项是 `N^2`，来自 `S/P`。
+- FlashAttention 的大项取决于 SRAM 能装多大的 block。
+- SRAM 越大，block 越大，需要反复扫描的次数越少，HBM access 越少。
+
+论文还给出 lower bound: 对一段 SRAM size 范围，exact attention 不可能在所有 M 上渐近地比这个 HBM access 更好。这说明 FlashAttention 不只是工程 hack，而是接近 IO 最优的 exact attention 设计。
+
+## 9. 为什么 FLOPs 变多还更快
+
+FlashAttention backward 会 recompute attention blocks，因此 FLOPs 可能增加。但 wall-clock 仍更快，因为:
+
+```text
+GPU FLOPs 很便宜；
+HBM traffic 很贵；
+softmax/dropout/mask 这些操作 memory-bound；
+避免 N x N HBM traffic 的收益大于 recompute 的代价。
+```
+
+这就是 IO-aware 和 FLOP-aware 的差别。一个算法少算一点 FLOPs，但读写很多 HBM，可能更慢；一个算法多算一点，但数据停留在 SRAM，可能更快。
+
+## 10. Kernel Fusion
+
+标准 attention 可能分成多个 kernel:
+
+```text
+matmul QK
+mask
+softmax
+dropout
+matmul PV
+```
+
+每个 kernel 都会读写 HBM。FlashAttention 把这些放进一个 CUDA kernel:
+
+```text
+load Q/K/V block
+matmul
+mask
+softmax update
+dropout if needed
+matmul with V
+write O/state
+```
+
+这种融合避免了中间结果反复出入 HBM。论文也指出，普通 PyTorch/TensorFlow 这类高层接口很难精细控制这种 memory movement，所以需要底层 CUDA kernel。
+
+## 11. Block-Sparse FlashAttention
+
+FlashAttention 本身是 exact dense attention。论文还扩展到 block-sparse:
+
+```text
+只计算 sparse mask 中非零的 attention blocks。
+```
+
+如果非零 block 比例是 `s`，HBM 访问的大项会按 `s` 缩小。论文报告 block-sparse FlashAttention 能比 FlashAttention 再快 2-4x，并能扩到 64K sequence length。
+
+但要分清楚:
+
+- FlashAttention: exact attention，结果等价标准 attention。
+- Block-sparse FlashAttention: sparse approximate attention，依赖 sparsity mask。
+
+很多人把这两个混在一起，会误以为 FlashAttention 是近似算法，这是错的。
+
+## 12. 实验证据链
+
+论文的证据不只看 kernel microbenchmark，还看训练和模型质量:
+
+- Attention compute: GPT-2 attention 上相对 PyTorch attention 最高 7.6x speedup。
+- BERT-large: sequence length 512，相比 MLPerf 1.1 training speed record 有 15% end-to-end wall-clock speedup。
+- GPT-2: sequence length 1K，相比 HuggingFace/Megatron baseline 训练约 3x faster。
+- Long Range Arena: sequence length 1K-4K，约 2.4x faster。
+- GPT-2 perplexity: 长上下文带来约 0.7 perplexity improvement。
+- Long-document classification: 长上下文带来 6.4 points lift。
+- Path-X: sequence length 16K，达到 better-than-chance，报告 61.4% accuracy。
+- Path-256: sequence length 64K，block-sparse FlashAttention 报告 63.1% accuracy。
+- General attention benchmark: 常见 sequence length 128 到 2K 上，FlashAttention up to 3x faster，并可扩展到 64K。
+
+读实验时要看两条线:
+
+1. Kernel 层: HBM access 减少是否真的变成 runtime speedup。
+2. Model 层: 更长 context 是否真的提升任务质量。
+
+FlashAttention 两条都给了证据。
+
+## 13. 与本仓库代码怎么对上
+
+本地文件:
+
+- `src/flash_attention.py`: Python 教学版，展示 naive attention 和 online softmax attention 等价。
+- `src/triton_style.py`: 帮你理解 tile/block/program 的 Triton 风格思维。
+- `src/fused_mlp.py`: 另一个 fusion pattern，帮助理解 memory-bound 操作为什么要融合。
+- `src/capstone_attn_speedup.py`: capstone 里可以测 attention 加速/内存差异。
+- `lectures/04-flashattention.md`: 课程版把 FA-2 的 loop 写得更接近 GPU kernel。
+
+建议先跑:
+
+```text
+python learning/kernel-engineering/src/flash_attention.py
+```
+
+它会比较:
+
+```text
+attention_naive(Q,K,V)
+attention_flash(Q,K,V, block_n=3)
+```
+
+并断言两者数值一致。这个小测试非常重要: 它证明“分块 + online softmax”不是近似，而是 exact。
+
+## 14. 极简代码: online softmax
+
+```python
+import math
+
+def update(m, l, o, scores, values):
+    m_new = max(m, max(scores))
+    old_scale = math.exp(m - m_new) if m != -math.inf else 0.0
+
+    l = l * old_scale
+    o = [x * old_scale for x in o]
+
+    for s, v in zip(scores, values):
+        p = math.exp(s - m_new)
+        l += p
+        for k in range(len(o)):
+            o[k] += p * v[k]
+
+    return m_new, l, o
+```
+
+完整处理完所有 blocks 后:
+
+```python
+output = [x / l for x in o]
+```
+
+如果你能解释 `old_scale = exp(m - m_new)`，就真正理解了 online softmax 的数值稳定性。
+
+## 15. AI 学习者最容易卡住的点
+
+1. `S` 和 `P` 不存，不代表不计算 `QK^T`。
+   - FlashAttention 仍会按块计算 scores，只是不把完整矩阵写回 HBM。
+
+2. Exact 不等于没有近似误差之外的数值差异。
+   - 数学目标相同，但 floating point 加法顺序不同，可能有微小数值差异。
+
+3. O(N^2) FLOPs 还在。
+   - Dense FlashAttention 没有把计算复杂度变线性；它减少的是 memory IO 和 activation memory。
+
+4. SRAM 不是显存。
+   - SRAM 是片上小而快的存储；HBM 是 GPU 大显存。
+
+5. Backward recompute 不是倒退。
+   - 多算一点换少搬很多数据，实际更快。
+
+## 16. 现代意义
+
+今天几乎所有高性能 LLM 训练/推理栈都吸收了 FlashAttention 的思想:
+
+- 长上下文训练离不开 memory-efficient exact attention。
+- Triton/CUDA kernel engineering 变成 LLM 工程核心能力。
+- 后续 FlashAttention-2/3 继续优化并行化、work partition、Hopper 特性和 FP8。
+- vLLM、PagedAttention、MLA、Ring Attention 等系统工作也都在继续围绕 memory movement 做文章。
+
+FlashAttention 最重要的教育意义是: LLM 性能工程不是只看算法复杂度，也不是只看模型结构。真正的瓶颈常常在数据如何穿过硬件层级。
+
+## 17. 闭卷掌握检查
+
+1. 标准 attention 为什么要 materialize `S` 和 `P`？
+2. `S` 和 `P` 的 shape 是什么？为什么是 HBM 瓶颈？
+3. FlashAttention 是 exact 还是 approximate？
+4. HBM 和 SRAM 的容量/带宽差别是什么？
+5. Online softmax 里 `m` 和 `l` 分别代表什么？
+6. 当新 block 的 max 变大时，为什么旧的 `l/o` 要乘 `exp(m_old - m_new)`？
+7. Backward 为什么可以不保存 `P`，而是 recompute？
+8. Standard attention 和 FlashAttention 的 HBM access 复杂度分别是什么？
+9. 为什么 FLOPs 更多也可能更快？
+10. Block-sparse FlashAttention 和 dense FlashAttention 有什么区别？
+11. 论文有哪些 model-level 证据说明长上下文带来质量提升？
+12. 本地 `attention_flash` 为什么能和 `attention_naive` 输出一致？
+
+## 18. 用 AI agent 学这篇的正确方式
+
+不要让 agent 只说“FlashAttention 用 tiling 加速 attention”。更好的 prompt 是:
+
+```text
+我正在读 FlashAttention。请你先让我写出标准 attention 的 S/P/O shape。
+然后画出哪些矩阵会被写入 HBM。
+接着用 N=8,d=4,block_n=3 带我手算一行 Q 的 online softmax 更新。
+每一步都问我 m,l,o 的 shape 和含义。
+最后让我解释为什么多做 recompute 反而更快，以及为什么 dense FlashAttention 是 exact attention。
+```
+
+真正掌握这篇论文的标志是: 你能从 HBM/SRAM 层级解释 attention 为什么慢，能手写 online softmax 的 `m/l/o` 更新，能说明 `N x N` 矩阵没有 materialize 但 attention 仍然 exact，也能把 kernel speedup 和长上下文模型质量提升连接起来。

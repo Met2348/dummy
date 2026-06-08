@@ -1,6 +1,6 @@
 """Mock comparison: SGLang vs vLLM on 5 representative scenarios.
 
-No real engine called — we instrument the mock Stream's `n_forwards` field
+No real engine called; we instrument the mock Stream's `n_forwards` field
 to count how many model forwards would happen.  RadixAttention's gain is
 modelled as: shared prefix prefill happens **once** instead of `n_forks` times.
 """

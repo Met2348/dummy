@@ -1,4 +1,4 @@
-"""Capstone — 4-bench joint runner producing a markdown report.
+"""Capstone - 4-bench joint runner producing a markdown report.
 
 Combines: MMLU + BBH + TruthfulQA + commonsense, all on the same model.
 Output: per-bench accuracy + overall summary + ASCII bar chart.
@@ -31,7 +31,7 @@ def ascii_bar(value: float, width: int = 20) -> str:
 def to_md(results: Dict[str, float], model_label: str = "test_model") -> str:
     avg = sum(results.values()) / max(1, len(results))
     lines = [
-        f"# Eval pipeline report — `{model_label}`",
+        f"# Eval pipeline report - `{model_label}`",
         "",
         "| benchmark | accuracy | bar |",
         "|---|---:|---|",
@@ -43,9 +43,9 @@ def to_md(results: Dict[str, float], model_label: str = "test_model") -> str:
         f"**Overall average:** {avg:.3f} ({avg*100:.1f}%)",
         "",
         "## Notes",
-        "- mmlu/bbh/commonsense: 4-option chance ≈ 25%",
-        "- mmlu_pro: 10-option chance ≈ 10%",
-        "- truthfulqa: anti-imitation bias, higher acc ≠ truer; check error patterns",
+        "- mmlu/bbh/commonsense: 4-option chance ~ 25%",
+        "- mmlu_pro: 10-option chance ~ 10%",
+        "- truthfulqa: anti-imitation bias, higher acc != truer; check error patterns",
     ])
     return "\n".join(lines)
 

@@ -1,4 +1,4 @@
-"""MetaGPT-style SOP pipeline: PM → Architect → Engineer → QA."""
+"""MetaGPT-style SOP pipeline: PM to Architect to Engineer to QA."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable

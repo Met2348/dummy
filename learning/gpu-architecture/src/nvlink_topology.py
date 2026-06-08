@@ -1,4 +1,4 @@
-"""NVLink topology — DGX H100 (8-GPU NVSwitch) vs GB200 NVL72."""
+"""NVLink topology: DGX H100 (8-GPU NVSwitch) vs GB200 NVL72."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 

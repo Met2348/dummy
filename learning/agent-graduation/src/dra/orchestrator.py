@@ -1,4 +1,4 @@
-"""DRA orchestrator — Capstone-1 entry point."""
+"""DRA orchestrator - Capstone-1 entry point."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from dra.common import DRACost, Plan, Note, Draft, Verified
@@ -9,7 +9,7 @@ from dra.verifier import verify_draft
 from dra.tools.dra_tools import file_write_tool
 
 
-CAPSTONE_QUERY = "Write a brief report on 2026 LLM inference optimization techniques."
+CAPSTONE_QUERY = "Write a brief report on modern LLM inference optimization techniques."
 
 
 @dataclass
@@ -40,7 +40,7 @@ run_capstone_1 = run_dra
 
 def to_md(run: DRARun) -> str:
     lines = [
-        "# Deep Research Agent — Capstone-1\n",
+        "# Deep Research Agent - Capstone-1\n",
         f"**Query:** {run.query}\n",
         "## Plan",
         f"- {len(run.plan.sub_questions)} sub-questions",

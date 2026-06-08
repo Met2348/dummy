@@ -1,6 +1,6 @@
-"""Reflexion — Shinn 2023.
+"""Reflexion - Shinn 2023.
 
-Actor (ReAct) + Evaluator + Self-reflect → verbal memory → next attempt.
+Actor (ReAct) + Evaluator + Self-reflect -> verbal memory -> next attempt.
 """
 from __future__ import annotations
 from typing import Callable
@@ -25,7 +25,7 @@ def evaluator_correct_answer(trace: Trace, expected: str) -> float:
 
 
 def make_reflect_llm(canned_reflections: list[str]) -> Callable[[str], str]:
-    """Mock reflection LLM — returns canned reflection per attempt."""
+    """Mock reflection LLM - returns canned reflection per attempt."""
     idx = [0]
 
     def llm(prompt: str) -> str:

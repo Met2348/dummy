@@ -1,4 +1,4 @@
-"""Mock Computer Use — screenshot + click/type actions."""
+"""Mock Computer Use - screenshot + click/type actions."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 

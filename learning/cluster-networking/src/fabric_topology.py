@@ -1,4 +1,4 @@
-"""Fat-tree / dragonfly fabric — model bisection bandwidth."""
+"""Fat-tree / dragonfly fabric: model bisection bandwidth."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -29,7 +29,7 @@ class Dragonfly:
         return self.n_groups * self.nodes_per_group
 
     def avg_hops(self) -> float:
-        """Avg hops for random traffic: 2 intra + 1 inter ≈ 3 expected."""
+        """Avg hops for random traffic: 2 intra + 1 inter, about 3."""
         return 3.0 if self.n_groups > 1 else 1.0
 
 

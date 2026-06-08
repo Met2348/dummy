@@ -51,7 +51,7 @@ def value_pretraining_loss(values: torch.Tensor, returns: torch.Tensor) -> torch
 
 
 if __name__ == "__main__":
-    print("VAPO minimal — Length-Adaptive GAE\n" + "=" * 50)
+    print("VAPO minimal - Length-Adaptive GAE\n" + "=" * 50)
     torch.manual_seed(0)
     B, T = 3, 50
     rewards = torch.zeros(B, T)
@@ -61,7 +61,7 @@ if __name__ == "__main__":
     lens = torch.tensor([10.0, 30.0, 200.0])
     lams = adaptive_lambda(lens)
     print(f"response lens: {lens.tolist()}")
-    print(f"adaptive λ   : {[round(l, 4) for l in lams.tolist()]}")
+    print(f"adaptive lambda: {[round(l, 4) for l in lams.tolist()]}")
     adv = length_adaptive_gae(rewards, values, dones, lens)
     print(f"advantage[:, -3:]:\n{adv[:, -3:]}")
-    print("\n关键: 长 response 用 λ→0.99 (更 bootstrap)，短用 λ→0.5 (outcome-heavy)")
+    print("\n关键: 长 response 用 lambda close to 0.99; 短 response 用较小 lambda")

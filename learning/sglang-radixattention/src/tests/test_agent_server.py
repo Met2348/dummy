@@ -11,7 +11,7 @@ def test_agent_server_completes():
 
 
 def test_radix_hit_rate_high_with_shared_system_prompt():
-    """32 agents sharing the same long SYSTEM_PROMPT → hit_rate ≥ 0.70."""
+    """32 agents sharing the same long SYSTEM_PROMPT should hit at least 0.70."""
     m = run_server(n_agents=32, max_steps=3)
     j = metrics_json(m)
     assert j["radix_hit_rate"] >= 0.70, f"hit_rate {j['radix_hit_rate']} too low"

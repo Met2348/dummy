@@ -12,6 +12,7 @@ MODULES = [
     "sim.topology_selector",
     "sim.capstone_1",
     "eval.mlperf_mock",
+    "eval.mlperf_original_minimal",
     "portfolio_v3",
 ]
 

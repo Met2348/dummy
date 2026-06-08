@@ -73,7 +73,7 @@ def run_red_team() -> Dict[str, Dict[str, float]]:
 
 def to_md(matrix: Dict[str, Dict[str, float]]) -> str:
     attacks = list(ATTACKS.keys())
-    lines = ["# Red-team ASR (5 ckpt × 3 attacks)", "",
+    lines = ["# Red-team ASR (5 ckpt x 3 attacks)", "",
              "| ckpt | " + " | ".join(attacks) + " | mean |",
              "|---|" + "---:|" * (len(attacks) + 1)]
     for key, row in matrix.items():

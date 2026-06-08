@@ -1,11 +1,11 @@
-"""DRA planner — decompose query to sub-questions."""
+"""DRA planner - decompose query to sub-questions."""
 from __future__ import annotations
 from dra.common import Plan
 
 
 SUB_QUESTION_TEMPLATES = {
     "llm inference": [
-        "What are major LLM inference engines in 2026?",
+        "What are major LLM inference engines used in modern serving stacks?",
         "How do PagedAttention and RadixAttention compare?",
         "What is speculative decoding and how much speedup does it give?",
         "What quantization methods are most popular?",
@@ -39,17 +39,17 @@ def plan_query(query: str) -> Plan:
     return Plan(
         sub_questions=[
             f"What is {query}?",
-            f"How does {query} work in 2026?",
+            f"How does {query} work in modern LLM systems?",
             f"What are major implementations?",
             f"What are limitations?",
-            f"What are 2025-2026 trends?",
+            f"What are recent engineering trends?",
         ],
         rationale="Generic 5-step decomposition fallback.",
     )
 
 
 def _self_test() -> None:
-    p = plan_query("Write a brief report on 2026 LLM inference optimization techniques.")
+    p = plan_query("Write a brief report on modern LLM inference optimization techniques.")
     assert len(p.sub_questions) == 5
     assert "inference" in p.rationale or "Decomposed" in p.rationale
     assert any("Paged" in s or "Speculative" in s or "FlashAttention" in s for s in p.sub_questions)

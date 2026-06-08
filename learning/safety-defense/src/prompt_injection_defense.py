@@ -1,4 +1,4 @@
-"""Prompt injection defense — privilege separation + parsing."""
+"""Prompt injection defense - privilege separation plus parsing."""
 from __future__ import annotations
 
 import re

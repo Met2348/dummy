@@ -22,7 +22,7 @@ def main() -> int:
             __import__(pkg)
             print(f"[OK] {pkg} available")
         except ImportError:
-            print(f"[INFO] {pkg} not installed — only needed for real bench")
+            print(f"[INFO] {pkg} not installed - only needed for real bench")
 
     print("\n[SUCCESS] Topic 3 environment ready.")
     return 0

@@ -1,4 +1,4 @@
-"""Mamba block — naive selective scan (无 CUDA kernel).
+"""Mamba block - naive selective scan without a CUDA kernel.
 
 教学版，性能差但数学等价于 mamba-ssm CUDA kernel。
 """

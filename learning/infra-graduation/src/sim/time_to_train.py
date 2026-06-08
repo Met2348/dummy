@@ -69,7 +69,7 @@ def _self_test() -> None:
     est = time_to_train_days(llama70b, bp)
     # Sanity: 70B-15T on 512 H100 is ~1 year (real Llama-3 used 24k H100 for 1 week)
     assert 200 < est["wall_days"] < 800, est
-    print(f"[OK] sim.time_to_train ({est['cluster']} → 70B-15T in {est['wall_days']}d)")
+    print(f"[OK] sim.time_to_train ({est['cluster']} -> 70B-15T in {est['wall_days']}d)")
 
 
 if __name__ == "__main__":

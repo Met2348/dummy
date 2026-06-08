@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 
-import pytest
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -84,7 +84,9 @@ def test_serial_vs_parallel_diff():
 
 def test_param_match_lib():
     print("\n[Test 4] minimal vs adapters 库")
-    pytest.importorskip("adapters")
+    if importlib.util.find_spec("adapters") is None:
+        print("  [SKIP] adapters 库未安装，跳过 optional library path")
+        return
     from parallel_adapters import build_parallel_model
     torch.manual_seed(42)
     minimal = ParallelAdapterGPT2(r=16)

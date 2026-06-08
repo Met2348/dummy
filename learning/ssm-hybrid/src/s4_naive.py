@@ -1,4 +1,4 @@
-"""S4 naive (LTI SSM) — 教学版 recurrent + convolution 对照."""
+"""S4 naive (LTI SSM) - teaching recurrent/convolution contrast."""
 from __future__ import annotations
 
 import torch

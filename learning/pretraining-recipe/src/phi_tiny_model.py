@@ -78,7 +78,13 @@ class GroupedQueryAttention(nn.Module):
         repeat = self.n_head // self.n_kv_head
         k = k.repeat_interleave(repeat, dim=1)
         v = v.repeat_interleave(repeat, dim=1)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        if hasattr(F, "scaled_dot_product_attention"):
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
+            mask = torch.ones(T, T, device=x.device, dtype=torch.bool).tril()
+            scores = scores.masked_fill(~mask, float("-inf"))
+            out = F.softmax(scores, dim=-1) @ v
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.o_proj(out)
 

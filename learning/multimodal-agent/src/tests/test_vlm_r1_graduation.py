@@ -13,6 +13,15 @@ sys.path.insert(0, str(REPO_SRC))
 from vlm_r1_minimal import (
     counting_reward, grounding_reward, format_reward_vlm, combined_vlm_reward,
 )
+from vision_r1_original_minimal import (
+    MultimodalQA,
+    PTSTStage,
+    build_cold_start_sample,
+    group_relative_advantages,
+    grpo_clipped_surrogate_terms,
+    hard_format_result_reward,
+    score_stage_group,
+)
 from s1_budget_forcing import analyze_budget_distribution, budget_force_decode_mock
 from safe_rlhf_minimal import LagrangianSafeRLHF, maxmin_rlhf
 from capstone_graduation import MOCK_RESPONSES, GROUND_TRUTH, correctness, export_for_notebook
@@ -39,7 +48,7 @@ def test_grounding_zero_overlap():
 
 
 def test_grounding_partial_overlap_below_th():
-    # half overlap → IoU = ~0.33, below 0.5 threshold → return soft value
+    # Half overlap means IoU is about 0.33, below the threshold.
     r = grounding_reward([0, 0, 100, 100], [50, 0, 150, 100])
     assert 0 < r < 0.5
 
@@ -53,6 +62,54 @@ def test_combined_keys_present():
     r = combined_vlm_reward("<think>3 cubes</think><answer>3</answer>", 3)
     assert {"format", "accuracy", "total"} == set(r.keys())
     assert r["total"] > 0.9
+
+
+# ===== Vision-R1 paper mechanisms =====
+
+def test_vision_r1_cold_start_bridging_keeps_visual_facts():
+    item = MultimodalQA(
+        image_facts=("AF is 10 units.", "AD is 3.5 units.", "BD option is A."),
+        question="Find BD. Options: A 3, B 3.5, C 6, D 7.",
+        answer="A",
+    )
+    sample = build_cold_start_sample(item)
+    assert "AF is 10 units" in sample.detailed_description
+    assert "BD option is A" in sample.detailed_description
+    assert hard_format_result_reward(sample.response, "A") == 1.0
+
+
+def test_hard_format_result_reward_requires_both_conditions():
+    good = "<think>check geometry</think><answer>Final Answer:C</answer>"
+    bad_format = "Final Answer:C"
+    wrong = "<think>check geometry</think><answer>Final Answer:D</answer>"
+    assert hard_format_result_reward(good, "C") == 1.0
+    assert hard_format_result_reward(bad_format, "C") == 0.0
+    assert hard_format_result_reward(wrong, "C") == 0.0
+
+
+def test_group_advantage_and_grpo_terms_are_shaped():
+    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    adv = group_relative_advantages(rewards)
+    assert adv.shape == rewards.shape
+    assert abs(adv.mean().item()) < 1e-6
+
+    terms = grpo_clipped_surrogate_terms(
+        logp_new=torch.tensor([-1.0, -1.2, -0.8, -1.4]),
+        logp_old=torch.tensor([-1.1, -1.1, -0.9, -1.3]),
+        logp_ref=torch.tensor([-1.0, -1.0, -1.0, -1.0]),
+        rewards=rewards,
+    )
+    assert {"advantages", "ratio", "kl", "objective_terms"} == set(terms)
+    assert terms["objective_terms"].shape == rewards.shape
+
+
+def test_ptst_stage_filters_length_before_rewarding():
+    short_good = "<think>short correct</think><answer>Final Answer:A</answer>"
+    long_good = "<think>" + " token" * 12 + "</think><answer>Final Answer:A</answer>"
+    wrong = "<think>short wrong</think><answer>Final Answer:B</answer>"
+    stage = PTSTStage("toy", max_tokens=5, group_size=8, steps=1)
+    rewards = score_stage_group([short_good, long_good, wrong], "A", stage)
+    assert rewards.tolist() == [1.0, 0.0]
 
 
 # ===== s1 =====

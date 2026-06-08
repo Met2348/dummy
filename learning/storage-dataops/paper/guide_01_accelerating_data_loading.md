@@ -1,196 +1,637 @@
 # guide_Accelerating Data Loading in Deep Neural Network Training
 
+<!-- manual-deep-guide -->
+
 > 原论文: [Accelerating Data Loading in Deep Neural Network Training](https://arxiv.org/abs/1910.01196)
 >
 > 本地原文 PDF: `learning/storage-dataops/paper/01_accelerating_data_loading.pdf`
 >
-> 作者: Mohan et al.
+> 本地导读 PDF: `learning/storage-dataops/paper/guide_01_accelerating_data_loading.pdf`
 >
-> 年份: 2019
+> 作者: Chih-Chieh Yang, Guojing Cong
 >
-> 类型: paper
+> 机构: IBM T. J. Watson Research Center
+>
+> 版本: arXiv v1, 2019-10-02, HiPC 2019
 
-## 0. 导读定位
+## 0. 这篇 guide 怎么读
 
-这份 guide 的目标不是给你一张“论文推荐卡”，而是承担一次认真初读: 先把论文放回历史背景，再把核心方法、关键公式、实验逻辑和本仓库代码连起来。它不会逐字搬运原文，但会尽量把论文真正想表达的内容用中文重建出来。
+这篇论文讲的不是“写一个更漂亮的 PyTorch DataLoader”。它真正研究的是:
 
-这篇材料的核心地位: 训练吞吐常被数据加载拖慢；这篇是理解 dataloader、缓存、预处理和 GPU 饥饿问题的好入口。
+> 当分布式训练扩到很多节点时，数据加载为什么会成为训练扩展性的下界，以及怎样用缓存和 locality-aware loading 降低带宽需求。
 
-## 1. 背景和 story
+如果你只看 GPU kernel、all-reduce、mixed precision，会很容易忽略 data path。可是在大规模训练里，一个 step 的时间可以拆成:
 
-模型训练不只是 GPU 算；如果 CPU 解码、磁盘 I/O 或网络存储跟不上，GPU 会空转。
+- computation time: forward/backward。
+- communication time: gradient synchronization。
+- data loading time: 从存储读样本、解码、增强、组 batch。
 
-这篇论文出现之前，常见做法通常有三个特点: 第一，问题已经能被某些工程方法解决；第二，这些方法在规模、成本、稳定性、可解释性或泛化上遇到了瓶颈；第三，社区缺少一个足够简单、足够可复用的抽象。作者的贡献不是凭空发明一个名词，而是把这个瓶颈重新表述成一个可以优化的技术问题。
+前两项经常被论文和工程团队重点优化，第三项容易被一句“我们提前 cache 了数据”带过。但本文的核心判断是: cache 到本地 SSD/DRAM 或预处理数据并不总是可行。真实 HPC/大集群里，很多训练仍然要从网络文件系统或数据服务器持续读数据。
 
-你读这篇论文时要不断追问:
+读完这篇 guide，你应该能解释:
 
-- 原方法最痛的约束是什么。
-- 作者把约束转化成了什么建模假设。
-- 新方法省掉了什么，又额外引入了什么。
-- 论文的实验证据是否真的支持这个交换。
+- 为什么普通 loader 在小规模能被 prefetch 隐藏，大规模却会暴露。
+- 为什么 `D / R` 是常规数据加载的扩展性下界。
+- multiprocessing、multithreading、software cache 分别解决哪一段 overhead。
+- locality-aware data loading 为什么不改变同步 mini-batch SGD 的全局梯度。
+- 为什么 load imbalance 需要补一点点数据搬运，而这个搬运远小于常规方案。
+- 实验里 34x、55x、60x、120x 分别来自什么场景。
 
-## 2. 必须先掌握的概念
+## 1. 当时的历史语境
 
-- data pipeline
-- prefetching
-- augmentation
-- I/O bottleneck
-- GPU utilization
+2017 到 2019 年左右，分布式图像训练速度快速下降。ImageNet-1K + ResNet-50 从小时级被推进到分钟级。大家的注意力集中在:
 
-这些概念的关系可以这样理解: 它们不是词表，而是一条因果链。背景里的瓶颈会逼出核心概念，核心概念会变成方法设计，方法设计再落到公式、系统结构或训练流程里，最后由实验验证。
+- 更快的 GPU/加速器。
+- cuDNN、MKL-DNN 这类优化库。
+- mixed precision。
+- 更好的 all-reduce 和 layer-wise synchronization。
+- 大 batch 训练和学习率技巧。
 
-一个好的读法是把每个概念写成三句话:
+这些方向都在降低 computation time 和 communication time。可是大规模训练的另一个事实是: 节点越多，每个 epoch 的模型计算越分散，但所有 learner 合起来仍然要消费同一个 dataset。存储系统的全局供给能力不是无限增长的。
 
-1. 它解决什么问题。
-2. 它依赖什么假设。
-3. 如果它失效，模型或系统会出现什么症状。
+作者的切入点很直接: 如果数据加载跟不上，GPU 等数据，整体 epoch time 就不再随节点数下降。此时继续加 GPU 可能只是在更贵地空转。
 
-## 3. 论文主张
+这和 MLPerf 的思想正好衔接: end-to-end time-to-quality 不能只看 GPU 算力。数据路径、存储路径、CPU decode/augmentation 都是训练系统能力的一部分。
 
-论文分析数据加载各阶段瓶颈，并讨论二进制格式、预取、缓存、加速增强等手段。设计理由是让输入流水线跟上训练循环。
+## 2. 论文主张
 
-这段主张背后的设计理由可以拆成四层:
+论文提出四个贡献:
 
-1. **对象层**: 论文到底在改模型、数据、优化目标、推理系统、评测协议，还是安全策略。
-2. **约束层**: 它主要受限于计算、显存、标注、人类偏好、延迟、上下文长度、分布偏移，还是可复现性。
-3. **机制层**: 作者引入的新结构如何改变信息流、梯度流、资源流或决策流。
-4. **证据层**: 论文用什么实验说明这个机制确实工作，而不是只在一个漂亮样例里工作。
+- 分析现有 data loader 的 performance 和 scalability 问题。
+- 用 multiprocessing、multithreading、software cache 改善 data loading cost。
+- 提出 analytical model，解释为什么 storage I/O rate 会限制扩展性。
+- 提出 locality-aware data loading，用缓存位置重排 batch，减少 storage 和远程 cache 的总数据搬运。
 
-读设计时要特别留心这些判断:
+摘要里最醒目的数字是:
 
-- 它优化的是训练、推理、显存、数据、评测还是安全风险。
-- 它把复杂度转移到了哪里，例如更多调度逻辑、更多数据假设、更多超参或更强硬件依赖。
-- 它和 naive baseline 的差别是否能用一两句话讲清楚。
-- 如果把核心模块拿掉，论文的实验是否会明显变差。
+- 在 256 nodes、1,024 learners 上，data loading 可超过 30x speedup。
+- ImageNet-1K classification 中，优化让 per-epoch training cost 相比常规 distributed training 有 92% improvement。
 
-## 4. 方法逐层拆解
+但不要只记数字。更重要的是它告诉你一个系统设计原则:
 
-你可以把这篇论文的方法读成一个输入到输出的管线。
+> 当消费者数量扩大而数据源带宽不随之线性增长时，必须减少数据移动量，而不仅仅是让每个 worker 更会搬数据。
 
-**输入是什么**: 输入可能是 token 序列、偏好对、检索查询、GPU kernel、请求流、训练数据、benchmark item，或者安全策略。不要抽象地说“输入数据”，要能说清楚输入张量、样本、请求或系统事件的单位。
+## 3. 原论文结构地图
 
-**中间状态是什么**: 论文真正创新的地方通常在中间状态。例如低秩矩阵、adapter hidden state、KV block table、reward score、router assignment、process step score、candidate solution set、prefix tree、memory page。中间状态决定了方法的可解释性和工程成本。
+建议按下面顺序读:
 
-**输出是什么**: 输出可能是 logits、动作、奖励、排序、路由、压缩权重、通过/拒绝标签、benchmark score 或调度决策。读论文时要把输出和评价指标对齐，否则很容易把训练目标和真实目标混在一起。
+- Abstract/Introduction: 读数据加载被忽视的原因，以及 30x/92% 的 claim。
+- Section II Background: 读 mini-batch SGD、step/epoch、data-parallel learners、三段训练成本。
+- Figure 1: 这是动机图，说明节点增加后 waiting for data 开始占主导。
+- Section III: 读 multiprocessing、multithreading、caching 分别优化什么。
+- Figure 2/3: 读单 learner timeline 和 batch-level/sample-level 并行。
+- Section IV: 慢读性能模型，这是论文的理论骨架。
+- Section V: 慢读 locality-aware data loading、等价性证明、load imbalance 和 Algorithm 1。
+- Section VI: 读实验环境、ImageNet/UCF101/MuMMI、Figure 7 到 Figure 12、Table I。
+- Conclusion: 读作者如何概括数据加载对 large-scale HPC DNN training 的基础性作用。
 
-对这篇论文来说，最重要的设计线索是: 论文分析数据加载各阶段瓶颈，并讨论二进制格式、预取、缓存、加速增强等手段。设计理由是让输入流水线跟上训练循环。
+## 4. 背景: 同步 mini-batch SGD 的数据路径
 
-## 5. 数学和公式怎么读
-
-吞吐可近似为 1 / max(T_gpu, T_load)。只优化 GPU kernel 而 T_load 更大时，端到端速度不会变。
-
-建议你在纸上重写关键公式，并标出每个张量或变量的形状、单位和约束。读不懂公式时，不要先背符号，先问:
-
-- 这个公式是在给谁打分。
-- 它限制了哪个变量不能乱跑。
-- 它节省的是参数、显存、计算、延迟还是标注。
-- 它是在精确计算，还是在近似一个无法直接计算的目标。
-
-如果论文有 loss function，优先拆解正负样本、baseline/reference、normalizer、temperature/beta/clip epsilon 这类项。如果论文是系统论文，优先拆解延迟、吞吐、带宽、显存、通信量和调度约束。如果论文是评测论文，优先拆解评分函数、样本构造、聚合方式和置信区间。
-
-## 6. 论文内容按“问题-方法-证据”重建
-
-**问题**: 模型训练不只是 GPU 算；如果 CPU 解码、磁盘 I/O 或网络存储跟不上，GPU 会空转。
-
-**方法**: 论文分析数据加载各阶段瓶颈，并讨论二进制格式、预取、缓存、加速增强等手段。设计理由是让输入流水线跟上训练循环。
-
-**公式或机制**: 吞吐可近似为 1 / max(T_gpu, T_load)。只优化 GPU kernel 而 T_load 更大时，端到端速度不会变。
-
-**证据**: 实验展示不同数据格式和 pipeline 策略对训练吞吐的影响，帮助判断何时该改存储/loader。
-
-把这四段连起来，就是论文自己的 story。你应该能把它讲成下面这种形式:
-
-> 过去的方法因为某个约束变得不够好；作者提出一个更明确的机制；这个机制通过某个公式、结构或系统策略落地；实验用某些 baseline、ablation 和指标证明它确实改善了目标。
-
-如果讲不出这条链，就说明你还停留在“知道论文名”的阶段。
-
-## 7. 实验证据链条
-
-实验展示不同数据格式和 pipeline 策略对训练吞吐的影响，帮助判断何时该改存储/loader。
-
-证据链不要只看最终表格。建议按这个顺序读:
-
-1. baseline 是否足够强。
-2. ablation 是否证明关键设计真的有用。
-3. 指标是否对应真实目标。
-4. 失败案例或限制条件是否被诚实讨论。
-5. 结论能否迁移到你本机的小实验。
-
-对新手来说，最危险的误读是看到一个主表格就以为论文被证明了。更好的读法是把实验分成三类:
-
-- **主结果**: 证明方法在目标任务上有竞争力。
-- **消融实验**: 证明每个设计组件有贡献。
-- **敏感性/限制实验**: 说明方法在什么条件下会退化。
-
-如果论文没有充分 ablation，你要在笔记里明确写下“这部分证据不足”。如果论文有强 ablation，你要把它转化成本仓库里的一个小实验。
-
-## 8. 局限性和后续工作
-
-这篇论文的价值不等于它解决了全部问题。你应该主动寻找局限:
-
-- 它是否依赖特定数据分布、模型规模、硬件、benchmark 或人工标注。
-- 它是否把成本转移到了预处理、调参、调度、存储、人工审核或部署复杂度。
-- 它是否只证明了平均指标，没有证明尾部风险、鲁棒性或长期稳定性。
-- 它是否可能在更大规模或不同任务上出现反直觉退化。
-
-后续阅读里列出的工作，通常就是社区沿着这些局限继续推进的结果。
-
-## 9. 和本仓库的连接
-
-- `learning/storage-dataops/lectures/02-dataloader.md`
-- `learning/storage-dataops/src/dataloader.py`
-
-学习动作:
-
-1. 先读对应 lecture，写下你认为的核心问题。
-2. 再读本 guide，画出技术路线和证据链。
-3. 打开 source，找到与论文机制对应的最小实现。
-4. 实现一个最小改动实验，例如改 rank、改 batch、改 reward、改 cache block size、改 routing 策略、改 head 数、改 prompt 模板或改评测聚合方式。
-5. 写 5 句话复盘: 改了什么，为什么，指标怎么变，是否符合论文直觉，哪里不符合。
-
-## 10. 复现/实验建议
-
-一个 30-60 分钟的最小实验应该满足:
-
-- 不需要下载巨大模型或数据。
-- 只改一个关键变量。
-- 有一个明确指标。
-- 能对应论文里的某个 claim。
-- 实验失败也能解释一个概念。
-
-对这篇论文，优先围绕这些方向设计实验:
-
-- 复现核心公式或核心调度逻辑。
-- 改掉一个关键超参，看输出或指标变化。
-- 构造一个 toy case，观察方法相对 naive baseline 的差异。
-- 把论文里的 ablation 缩小成本仓库单元测试级别。
-
-## 11. 读完必须能闭卷回答
-
-- 这篇论文要解决的原始痛点是什么。
-- 它的核心假设是什么，什么时候可能不成立。
-- 它的最小公式或最小系统图是什么。
-- 它的实验到底证明了什么，没有证明什么。
-- 如果让你在本仓库复现一个玩具版，你会改哪个文件、看哪个指标。
-- 它和后续相关工作的关系是什么: 后续是在扩展它、修补它、替代它，还是把它工程化。
-
-## 12. 后续阅读
-
-- WebDataset
-- DALI
-- sharding
-- checkpointing
-- cloud storage
-
-## 13. AI agent 学习提示词
-
-可以把下面这段直接丢给 agent，但要自己先读一遍论文摘要、方法图和实验主表:
+论文默认讨论 data-parallel synchronous mini-batch SGD。每个 learner 拿一份模型，流程是:
 
 ```text
-我正在读《Accelerating Data Loading in Deep Neural Network Training》。请你不要泛泛总结。
-请按“背景痛点 -> 核心方法 -> 关键公式/系统机制 -> 实验证据 -> 局限性 -> 本仓库最小实验”的顺序考我。
-一次只问 1 个问题，等我回答后指出错误，并要求我把答案和代码文件对应起来。
-最后请让我用 200 字闭卷复述这篇论文的贡献。
+for each training step:
+    1. all learners receive the same global mini-batch index sequence
+    2. each learner takes a disjoint slice
+    3. each learner loads samples for its local batch
+    4. each learner runs forward/backward
+    5. all learners all-reduce gradients
+    6. all learners update weights with the same global gradients
 ```
 
-真正掌握的标志是: 你能离开 guide，把这篇论文画成一张机制图，并用本仓库的一个小实验解释图里最关键的箭头。
+这里有两个关键概念:
+
+- step: 训练一个 global mini-batch。
+- epoch: 数据集被完整消费一轮。
+
+普通实现通常把 global mini-batch sequence 按 block 切给各个 learner。比如 12 个样本、3 个 learner，每个 learner 固定拿 4 个。
+
+```text
+global batch: [0 1 2 3 4 5 6 7 8 9 10 11]
+
+regular split:
+    learner 0: [0 1 2 3]
+    learner 1: [4 5 6 7]
+    learner 2: [8 9 10 11]
+```
+
+如果这些样本都在远程文件系统中，那么每一步所有 learner 都按这个切片去读。节点越多，读请求越多，总消费速度越高，存储系统越容易被打满。
+
+## 5. 现有 loader 为什么小规模看起来没问题
+
+单 learner 下，如果 data loading 和 compute 串行，GPU 会等数据:
+
+```text
+load batch 0 -> compute batch 0 -> load batch 1 -> compute batch 1
+```
+
+常规优化是 prefetch，让后台 worker 提前准备后续 batch:
+
+```text
+worker:  load batch 1   load batch 2   load batch 3
+main:    compute batch 0 compute batch 1 compute batch 2
+```
+
+只要 loader 准备 batch 的速度快于 GPU 消费速度，data loading overhead 就能被隐藏。
+
+问题出在 scale-up:
+
+- computation time 随节点数增加而下降，因为更多 GPU 分摊计算。
+- preprocessing time 也会先下降，因为更多 CPU worker 参与处理。
+- 但 storage system 的总 I/O rate 有上限。
+
+于是某个规模以后，训练不再被 GPU compute 限制，而被“全局供数速度”限制。
+
+## 6. Figure 1 的直觉
+
+作者在 LLNL Lassen 上训练 ImageNet-1K + ResNet50，每个节点 4 learners，local batch size 固定 128，节点越多 global batch 越大。
+
+Figure 1 展示:
+
+- 2、4、8 nodes 时，waiting for data 很小，性能随节点数扩展。
+- 到 16 nodes 以后，data waiting 开始明显。
+- 节点继续增加，training time 还在下降，但 data loading cost 无法完全隐藏，最后主导 epoch cost。
+
+这张图的含义是: 数据加载不是单机小优化，而是分布式训练扩展性问题。
+
+## 7. Section III 的三类优化
+
+**Multiprocessing**
+
+PyTorch DataLoader 可以启动多个 background worker processes。主进程通过 queue 提交 batch-loading requests，worker 并行读样本和做 preprocessing。多 worker 能 overlap 多个 batch 的加载。
+
+适合解决:
+
+- batch 之间并行。
+- I/O 请求并发。
+- 多进程绕过一部分 Python GIL 限制。
+
+**Multithreading**
+
+在一个 worker 内，一个 batch 的多个 sample 可以并行 decode/transform。作者修改 PyTorch loader，在 worker 里用 `ThreadPoolExecutor.map()` 并行处理 samples。
+
+注意 caveat: Python GIL 可能限制多线程，只有当 I/O 和图像变换调用 native library 并释放 GIL 时，多线程才明显有效。ImageNet JPEG decode 和 image transform 在实验中能受益。
+
+**Caching**
+
+mini-batch SGD 每个 epoch 都会重复消费同一个 dataset，只是顺序随机。因此有 temporal locality。
+
+可以用:
+
+- local DRAM cache: 最快，但容量有限。
+- local SSD cache: 慢于内存，但容量更大。
+- distributed cache: 所有节点 local cache 加起来，形成 aggregate cache。
+
+普通 distributed cache 能减少从 storage system 读取，但如果每个 learner 仍然必须拿“指定切片”，它可能要从其他 learner 的 cache 拉很多样本。也就是说，它缓解 storage I/O，但不一定减少 total data movement。
+
+## 8. 性能模型: 常规 loader 的下界
+
+论文定义:
+
+- `D`: dataset samples 数。
+- `p`: compute nodes 数。
+- `V`: 每个 compute node 的最大 training rate。
+- `R`: storage system 的最大 I/O rate。
+- `U`: 每个 compute node 的最大 preprocessing rate。
+
+用 samples/sec 表示，单 epoch 的三项是:
+
+```text
+training_time = D / (p * V)
+sample_io_time = D / R
+preprocessing_time = D / (p * U)
+data_loading_time = D / R + D / (p * U)
+true_epoch_time = max(training_time, data_loading_time)
+```
+
+关键是 `D / R` 不随 `p` 下降。节点越多，`D / (p * V)` 和 `D / (p * U)` 都下降，但 `D / R` 是 storage 的常数下界。
+
+如果假设 `U` 远大于 `V`，可以近似只比较 training time 和 sample I/O time:
+
+```text
+if D / (p * V) >= D / R:
+    p <= R / V
+    compute dominates
+else:
+    p > R / V
+    storage I/O dominates
+```
+
+直觉:
+
+```text
+small p:
+    true_epoch_time ~= D / (p * V)
+    adding nodes helps
+
+large p:
+    true_epoch_time ~= D / R
+    adding nodes no longer helps
+```
+
+这就是 Figure 1 的理论解释。
+
+## 9. Distributed caching 的不足
+
+设:
+
+- `a`: aggregate cache 覆盖整个 dataset 的比例。
+- `Rc`: 从 remote caches 读取样本的 I/O rate。
+
+论文给出 distributed caching 的 sample I/O time:
+
+```text
+sample_io_time
+  = (1 - a) * D / R
+  + a * D / Rc * (p - 1) / p
+```
+
+第一项是 cache miss，从 storage system 读。第二项是 cached samples 但在别的节点上，需要通过节点间网络搬。
+
+当 `p` 很大时:
+
+```text
+(p - 1) / p ~= 1
+```
+
+也就是说，即使整个 dataset 都在 aggregate cache 里，常规 distributed cache 仍然可能要在节点之间搬接近一个 dataset 的数据量。它不再压 storage，但仍然压 interconnect。
+
+## 10. Locality-aware data loading 的核心想法
+
+普通方法强制每个 learner 拿 global batch 的固定 block。locality-aware 方法放松这个固定切片:
+
+> 只要一个 global mini-batch 的所有样本都参与本 step，样本在 learner 之间怎么分配并不影响同步 SGD 的全局梯度。
+
+例子:
+
+```text
+global batch has 12 samples
+target local batch per learner = 4
+
+cache ownership:
+    learner red   owns 2 samples in this batch
+    learner green owns 6 samples
+    learner blue  owns 4 samples
+
+locality-aware before balance:
+    red:   2
+    green: 6
+    blue:  4
+
+balance:
+    move 2 samples from green to red
+
+data moved:
+    2 / 12 = 16.7% of regular loading volume
+```
+
+这对应原文 Figure 4/5。重点不是“完全不搬数据”，而是“只搬为 load balance 所需的一小部分”。
+
+## 11. 为什么梯度等价
+
+设 global batch 是同一个样本集合。普通 Reg 方法把 batch block-distribute 给 learners；Loc 方法按 cache locality 重新分配，可能 local batch size 不同。
+
+只要每个样本的 per-sample gradient 都被算一次，all-reduce 后的总梯度就是这些 per-sample gradients 的和。
+
+```text
+regular:
+    global_grad = sum(grad(x) for x in global_batch)
+
+locality-aware:
+    global_grad = sum(grad(x) for x in permuted_global_batch)
+
+because addition is commutative:
+    both sums are equal
+```
+
+论文 Theorem 1 更形式化地说明: 在同一 random number sequence 下，distributed minibatch SGD 用 Reg 和 Loc 在相同步数后产生相同的 weights。
+
+重要 caveat:
+
+- 如果 batch normalization 按整个 global batch 计算统计量，等价性成立。
+- 如果 batch normalization 按每个 local partition 计算 mean/variance，Loc 的 local partition 可能不同，统计量会变。作者认为影响类似换了一个 random permutation，并用实验验证 accuracy 差异很小。
+
+## 12. Load imbalance 和 Algorithm 1
+
+Locality-aware 方法可能让每个 learner 找到的本地样本数量不同。同步 SGD 里，local batch 太大的 learner 会成为 straggler，因此需要 balance。
+
+论文把问题抽象成:
+
+- 有些 learner 有 surplus。
+- 有些 learner 有 deficit。
+- surplus learner 给 deficit learner 发送一些样本。
+- 目标是减少 message 数和数据搬运。
+
+Algorithm 1 使用两个 heap:
+
+- `Hs`: surplus heap，按 surplus 从大到小。
+- `Hd`: deficit heap，按 deficit 从大到小。
+
+每次取最大 surplus 和最大 deficit，移动二者较小值，然后更新 heap。
+
+```text
+while surplus exists:
+    src = largest surplus learner
+    dst = largest deficit learner
+    moved = min(src.surplus, dst.deficit)
+    schedule transfer(src, dst, moved)
+    update both heaps
+```
+
+复杂度:
+
+```text
+O(p log p)
+```
+
+论文 Theorem 2 说明这是 2-approximation algorithm。直觉是最多发送 `p - 1` 条消息，而最优下界约 `p / 2` 条。
+
+论文还用 balls-in-bins 模型和 simulation 说明 imbalance 通常不大。Figure 6 里 local batch size 32、64、128 的 median imbalance roughly 是:
+
+- 32: 6.9%。
+- 64: 4.8%。
+- 128: 3.4%。
+
+这说明 locality-aware 的额外 balance traffic 通常是 batch 的小比例。
+
+## 13. Locality-aware 的 I/O 模型
+
+设:
+
+- `Rb`: load balancing data movement 的 I/O rate。
+- `b`: load balancing traffic ratio，相对 dataset size。
+
+locality-aware sample I/O time:
+
+```text
+sample_io_time
+  = (1 - a) * D / R
+  + a * D * b / Rb
+```
+
+和 distributed cache 比较:
+
+```text
+distributed cache:
+    second term ~= a * D / Rc
+
+locality-aware:
+    second term ~= a * D * b / Rb
+```
+
+当 `b` 很小，比如 0.03 到 0.07，locality-aware 的数据搬运量就远小于普通 distributed cache。它的胜利点不是 remote cache 更快，而是根本少搬。
+
+## 14. 本仓库的最小代码对应
+
+这次新增:
+
+- `learning/storage-dataops/src/data_loading_original_minimal.py`
+
+它包含:
+
+- `CostModel`: 对应公式 `D/(pV)`、`D/R`、`D/(pU)` 和 `max(...)`。
+- `distributed_cache_io_time`: 对应论文 equation 7。
+- `locality_aware_io_time`: 对应论文 equation 8。
+- `sample_distribution`: 给定 batch 和 cache owner，统计每个 learner 拥有多少样本。
+- `balance_transfers`: surplus-to-deficit greedy balance，对应 Algorithm 1 的 toy 版。
+- `partitions_equivalent`: 用 per-sample gradient sum 验证 Reg 和 Loc 的全局梯度等价。
+
+最小示例:
+
+```python
+batch = list(range(12))
+owner = {
+    0: 0, 1: 0,
+    2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1,
+    8: 2, 9: 2, 10: 2, 11: 2,
+}
+
+counts = sample_distribution(batch, owner, n_nodes=3)
+transfers = balance_transfers(counts, target_per_node=4)
+
+assert counts == [2, 6, 4]
+assert transfers == [(1, 0, 2)]
+```
+
+这段正好对应 Figure 5: learner 1 多 2 个样本，发给 learner 0，搬运量是 `2 / 12`。
+
+## 15. 实验设置
+
+作者在 Lawrence Livermore National Lab 的 Lassen 上做实验:
+
+- up to 256 nodes。
+- 每节点 2 个 IBM POWER9 processors，44 CPU cores total。
+- 256 GB system memory。
+- 4 Nvidia V100 GPUs，每 GPU 16 GB。
+- InfiniBand EDR interconnect。
+- IBM Spectrum Scale GPFS 并行文件系统。
+
+主要数据集:
+
+- ImageNet-1K: 约 1.28M JPEG images，总大小约 150 GB。
+- UCF101-RGB: 约 2.5M images，平均 24.2 KB。
+- UCF101-FLOW: 约 5M images，平均 4.6 KB。
+- MuMMI: 892 GB，约 7M files，每个 131 KB，numpy array，无需额外 preprocessing。
+
+这个设置很重要，因为不同数据格式触发不同瓶颈:
+
+- JPEG 有 decode/transform，multithreading 有价值。
+- numpy frame 不需要 preprocessing，瓶颈更纯粹是 I/O 和数据移动。
+
+## 16. 实验证据链条
+
+**Evidence 1: Figure 7, 单 learner loader 优化**
+
+作者在 ImageNet-1K 上测试 worker/thread 组合。多 workers 和多 threads 通常都提高 sample loading rate。最大 loading rate 约 800 samples/sec。多线程能用较少 workers 达到更好性能，避免 worker 数太多带来的进程开销。
+
+**Evidence 2: Figure 8, ImageNet data loading scalability**
+
+常规 PyTorch loader 在 scale up 后加载成本不再下降，因为有效 I/O bandwidth 被打满。locality-aware loader 因为复用 cache 并减少搬运，随 learner 数增加仍然更可扩。
+
+在 256 nodes、1,024 learners 上，locality-aware loader 对 ImageNet-1K data loading 达到接近 34x speedup。
+
+多线程也有效:
+
+- 常规 loader: multithreaded runs 快 24% 到 71%。
+- locality-aware loader: multithreaded runs 快 105% 到 113%。
+
+但关键结论是: multithreading 只能提高单 learner/loading pipeline 性能，不能解决常规 loader 的全局 I/O scaling 下界。
+
+**Evidence 3: Figure 9/10, UCF101**
+
+UCF101-RGB 和 UCF101-FLOW 的数据加载实验显示 locality-aware 方法在不同 scale 下更好:
+
+- RGB: 2.8x 到 55.5x speedup。
+- FLOW: 2.2x 到 60.6x speedup。
+
+其中常规 loader 的曲线还会受到其他 GPFS jobs 干扰，说明共享并行文件系统环境下，数据加载性能不仅取决于自己的代码，也取决于集群整体 I/O 竞争。
+
+**Evidence 4: Figure 11, MuMMI**
+
+MuMMI 是 892 GB、约 7M files 的大数据集，文件已经是 numpy array，不需要 preprocessing。因此 multithreading 对它影响不大。
+
+locality-aware loading 的 speedup 更明显:
+
+- 16 nodes: 18x。
+- 32 nodes: 35x。
+- 64 nodes: 70x。
+- 128 nodes: 120x。
+
+这个实验说明，当 preprocessing 不再是瓶颈时，减少数据搬运量本身就是主要收益。
+
+**Evidence 5: Table I, accuracy 不被明显破坏**
+
+ImageNet-1K + ResNet50 训练 90 epochs，对比 regular loader 和 locality-aware loader:
+
+- 16 nodes, batch 8192: 76.67% vs 76.81%。
+- 32 nodes, batch 16384: 75.33% vs 75.12%。
+- 64 nodes, batch 32768: 68.69% vs 69.54%。
+
+作者强调差异小于 1%，说明 locality-aware batch 重排没有明显破坏 validation accuracy。64 nodes 绝对精度偏低是因为大 batch accuracy 本来需要 LARS 和复杂 LR tuning，作者没有把目标放在追最高精度上。
+
+**Evidence 6: Figure 12, 实际 GPU training**
+
+在 ImageNet-1K + ResNet50 的实际训练中:
+
+- 16 nodes 时，GPU training time 主导，两个 loader epoch time 接近。
+- 32/64 nodes 时，常规 loader 受 `D/R` 下界限制，epoch time 下降受阻。
+- locality-aware loader 继续随节点数受益。
+- 64 nodes、256 learners 上，per-epoch 约 1.9x speedup。
+
+Conclusion 里还总结: 应用于实际 ImageNet classification 时，使用该 data loader 大约给 1,024 learners 带来 2x speedup，并保持可比 validation accuracy。
+
+## 17. 局限性
+
+第一，方法依赖重复访问同一 dataset 的 temporal locality。如果数据是严格 streaming、每个样本只看一次，cache 的意义会下降。
+
+第二，方法依赖可查询的 cache directory。论文假设 cache location 可复制到所有 learners，并且 first epoch 后不做 cache replacement。动态数据集或频繁 eviction 会增加复杂度。
+
+第三，locality-aware 等价性对 batch normalization 有 caveat。如果 BN 不是 global batch 统计，而是 local batch 统计，重排会改变 local statistics。
+
+第四，locality-aware 会改变每个 learner 的 local batch size，需要 balance。虽然论文说明 imbalance 小，但极小 local batch、非均匀 sample sizes 或强 skew 分布可能增加 straggler 风险。
+
+第五，prototype 基于 PyTorch，并非框架无关产品。作者也把未来工作放在通用软件包、SSD hierarchical cache 和更多 ML optimization methods 上。
+
+第六，实验集中在特定 HPC 环境和数据集。GPFS、InfiniBand、V100、ImageNet/UCF101/MuMMI 的结论不能无脑外推到所有云对象存储或 LLM token 数据管道。
+
+## 18. 现代意义
+
+今天做 LLM 训练时，你会遇到同样问题，只是样本从 JPEG/video frame 变成 token shard、document chunk、multi-modal sample 或 RL rollout。
+
+这篇论文给你的判断框架仍然有效:
+
+- 先把 step time 拆成 compute、communication、data loading。
+- 如果 data loading 能被 overlap 隐藏，优化 GPU/kernel 更有价值。
+- 如果 data loading 暴露，先判断瓶颈是 storage I/O、decode/tokenization、augmentation、collate，还是 distributed shuffle。
+- 如果扩展到更多节点后速度 plateau，检查是否出现 `D/R` 这样的全局带宽下界。
+- 如果缓存命中率高但网络仍忙，检查是否是“数据已经在集群里但被搬错地方”。
+- 如果要改 sampling 或 shard assignment，必须证明不改变训练语义，或者明确质量影响。
+
+对现代 LLM dataops 的映射:
+
+- WebDataset/tar shards: 减少小文件 IOPS，提升顺序读。
+- Streaming dataset: 改善远端对象存储读取，但要管理 shuffle 和重复性。
+- Local NVMe cache: 类似本文 local cache。
+- Dataset sharding by rank/node: 类似 locality-aware 的精神，减少跨节点搬运。
+- Async checkpoint: 同样是把存储 I/O 从训练关键路径上移开。
+
+## 19. 本仓库学习路径
+
+相关 lecture:
+
+- `learning/storage-dataops/lectures/02-dataloader.md`
+
+相关代码:
+
+- `learning/storage-dataops/src/data_loading_original_minimal.py`
+- `learning/storage-dataops/src/dataloader.py`
+- `learning/storage-dataops/src/sharding.py`
+- `learning/storage-dataops/src/webdataset_style.py`
+- `learning/storage-dataops/src/checkpoint.py`
+- `learning/storage-dataops/src/capstone_ckpt_recovery.py`
+
+建议 30 到 60 分钟实验:
+
+1. 运行测试:
+
+```powershell
+.venv\Scripts\python.exe learning\storage-dataops\src\tests\test_all.py
+```
+
+2. 打开 `data_loading_original_minimal.py`。
+3. 把 `storage_rate` 从 `100_000` 改成 `1_000_000`，观察 regular epoch plateau 如何移动。
+4. 把 `balance_ratio` 从 `0.05` 改成 `0.30`，观察 locality-aware 相对 distributed cache 的优势如何变小。
+5. 改 Figure 5 toy batch 的 cache owner，让 counts 变成 `[0, 8, 4]`，观察 balance transfers 和 imbalance ratio。
+6. 在 `dataloader.py` 里把 `decode_jpeg` 的时间减半，观察瓶颈 stage 是否改变。
+
+预期观察:
+
+- storage_rate 越高，普通 loader 能扩到更大 `p`。
+- balance_ratio 越大，locality-aware 搬运越多，收益越低。
+- local batch 越不均衡，load balancing traffic 越高。
+- 优化非瓶颈 stage 不一定改善整体 throughput。
+
+## 20. 常见误读
+
+**误读 1: 加 DataLoader workers 就能解决大规模数据加载。**
+
+不对。workers/threads 能提高单节点 loader throughput，但不能消除全局 storage I/O 下界。
+
+**误读 2: 数据都 cache 了就没有问题。**
+
+不对。普通 distributed cache 可能仍然要跨节点搬接近整个 dataset 的数据。locality-aware 的核心是减少 total movement。
+
+**误读 3: Locality-aware 改了每个 learner 的样本，所以训练不等价。**
+
+不一定。同步 SGD all-reduce 后看的是 global batch gradient sum。只要 global batch 样本集合相同，重排不改变总梯度。BN 等局部统计是 caveat。
+
+**误读 4: 本文只适合图像，不适合 LLM。**
+
+不对。具体 decode/augmentation 是图像场景，但 `D/R` 下界、cache locality、shard placement、数据搬运最小化对 LLM token data pipeline 仍然成立。
+
+**误读 5: 数据加载优化一定提高最终精度。**
+
+不对。它主要降低 time/epoch 或 time-to-quality。精度只需要不被破坏，Table I 的重点也是 comparable accuracy。
+
+## 21. 用 AI agent 学这篇论文
+
+推荐提示词:
+
+```text
+我正在读 Accelerating Data Loading in Deep Neural Network Training。
+请一次只问一个问题，并要求我把答案映射到公式或代码:
+1. 为什么普通 loader 的 epoch time 会在大规模下 plateau？
+2. multiprocessing、multithreading、caching 分别解决什么？
+3. 请我写出 regular、distributed cache、locality-aware 的 I/O 公式。
+4. 为什么 locality-aware 不改变同步 SGD 的 global gradient？
+5. Algorithm 1 的 surplus/deficit balance 如何工作？
+6. 请让我在 data_loading_original_minimal.py 里改 storage_rate 或 balance_ratio 并预测输出。
+```
+
+也可以让 agent 做 debug 教练:
+
+```text
+假设我的 LLM 训练 GPU utilization 只有 55%。
+请按本文思路帮我排查: storage I/O、decode/tokenization、collate、
+prefetch、cache hit、rank sharding、global bandwidth plateau。
+每一步都要给一个可观测指标和一个最小实验。
+```
+
+## 22. 闭卷掌握检查
+
+1. 大规模同步 mini-batch SGD 的 step 包含哪些阶段？
+2. 为什么 prefetch 可以隐藏 data loading？什么时候隐藏不了？
+3. 写出 `training_time`、`data_loading_time` 和 `true_epoch_time`。
+4. 为什么 `D / R` 会成为常规 loader 的扩展性下界？
+5. Multiprocessing 和 multithreading 的并行粒度有什么不同？
+6. Distributed cache 为什么仍然可能产生大量跨节点数据搬运？
+7. Locality-aware data loading 和普通 block split 的核心区别是什么？
+8. 为什么 locality-aware 方法的 global gradient 和 regular 方法相同？
+9. Batch normalization 为什么是一个 caveat？
+10. Algorithm 1 如何用 surplus/deficit heap 做 balance？
+11. Figure 6 的 imbalance 数字说明什么？
+12. ImageNet、UCF101、MuMMI 三组实验分别验证了什么？
+13. Table I 为什么重要？它证明了什么，没有证明什么？
+14. 在本仓库里，哪个函数对应 equation 7？哪个函数对应 equation 8？哪个函数对应 Figure 5 的搬运比例？
+
+真正掌握的标志是: 你能看到一个训练集群 utilization 下降，就把问题拆成 compute、communication、storage I/O、preprocess、cache locality 和 load balance，而不是只盯 GPU 峰值。

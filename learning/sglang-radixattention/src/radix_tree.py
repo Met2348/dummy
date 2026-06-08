@@ -1,8 +1,8 @@
 """Educational radix tree backing SGLang's RadixAttention.
 
 Nodes hold a *segment* of token ids (radix-compressed); when a new request
-shares a partial prefix we split the segment.  KV is modelled as integer slot
-ids — a real engine would map these to PagedKvPool blocks.
+shares a partial prefix we split the segment. KV is modelled as integer slot
+ids; a real engine would map these to PagedKvPool blocks.
 """
 from __future__ import annotations
 
@@ -57,11 +57,11 @@ class RadixTree:
             while j < len(seg) and i + j < len(prefix) and seg[j] == prefix[i + j]:
                 j += 1
             if j < len(seg):
-                # partial match through this child → split here
+                # Partial match through this child: split here.
                 node = child
                 i += j
                 return node, i
-            # full child consumed → continue from grandchildren
+            # Full child consumed: continue from grandchildren.
             node = child
             i += j
         return node, i
@@ -85,7 +85,7 @@ class RadixTree:
             last_access=node.last_access,
             refcount=node.refcount,
         )
-        # rewire parent → head
+        # Rewire parent to head.
         node.parent.children[head_tokens[0]] = head
         # mutate node into tail
         node.token_ids = tail_tokens

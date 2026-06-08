@@ -1,4 +1,4 @@
-"""Educational SGLang-frontend mock — supports gen/select/fork primitives.
+"""Educational SGLang-frontend mock: supports gen/select/fork primitives.
 
 A Stream owns a prompt buffer and a `vars` dict keyed by gen-name.  fork()
 shallow-copies the stream so multiple branches inherit the same prefix.
@@ -62,7 +62,7 @@ class Select:
 
 
 def function(fn):
-    """Decorator analogous to @sgl.function — creates a Stream and runs fn."""
+    """Decorator analogous to @sgl.function; creates a Stream and runs fn."""
     def wrapper(*args, generator=None, **kwargs):
         s = Stream(generator=generator) if generator else Stream()
         fn(s, *args, **kwargs)

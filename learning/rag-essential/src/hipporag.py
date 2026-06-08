@@ -1,4 +1,4 @@
-"""HippoRAG mock — entity graph + personalized PageRank."""
+"""HippoRAG mock - entity graph plus personalized PageRank."""
 from __future__ import annotations
 from common import Doc, RetrievalResult, Chunk
 from graph_rag import extract_entities

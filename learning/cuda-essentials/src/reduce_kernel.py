@@ -1,10 +1,10 @@
-"""Reduce kernel — naive vs Brent's vs warp-shuffle."""
+"""Reduce kernel: naive vs Brent's vs warp-shuffle."""
 from __future__ import annotations
 from warp_primitives import warp_reduce_sum, WARP_SIZE
 
 
 def reduce_naive(data: list[float]) -> float:
-    """Sequential — baseline (no parallel)."""
+    """Sequential baseline with no parallelism."""
     s = 0.0
     for x in data:
         s += x
@@ -12,7 +12,7 @@ def reduce_naive(data: list[float]) -> float:
 
 
 def reduce_brent_kung(data: list[float]) -> float:
-    """Tree reduction — log2 steps, each halves active threads."""
+    """Tree reduction with log2 steps, each halving active threads."""
     v = list(data)
     stride = 1
     while stride < len(v):

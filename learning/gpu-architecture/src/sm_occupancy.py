@@ -1,4 +1,4 @@
-"""SM occupancy calculator — H100 132 SM, 2048 threads/SM."""
+"""SM occupancy calculator: H100 132 SM, 2048 threads/SM."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -36,13 +36,13 @@ def occupancy(threads_per_block: int, regs_per_thread: int,
 
 
 def _self_test() -> None:
-    # Good kernel: 256 threads, 32 regs, 16 KB SMEM → high occupancy
+    # Good kernel: 256 threads, 32 regs, 16 KB SMEM gives high occupancy.
     good = occupancy(256, 32, 16.0)
     assert good["occupancy"] >= 0.5, good
-    # Register-hungry: 256 threads, 128 regs → reg bottleneck
+    # Register-hungry: 256 threads, 128 regs gives a register bottleneck.
     bad_regs = occupancy(256, 128, 16.0)
     assert bad_regs["bottleneck"] == "regs", bad_regs
-    # SMEM-hungry: 100 KB SMEM → smem bottleneck
+    # SMEM-hungry: 100 KB SMEM gives an smem bottleneck.
     bad_smem = occupancy(256, 32, 100.0)
     assert bad_smem["bottleneck"] == "smem", bad_smem
     print(f"[OK] sm_occupancy (good kernel occ {good['occupancy']:.2f})")

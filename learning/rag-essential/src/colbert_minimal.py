@@ -1,4 +1,4 @@
-"""Minimal ColBERT — per-token embeddings + MaxSim aggregation."""
+"""Minimal ColBERT - per-token embeddings plus MaxSim aggregation."""
 from __future__ import annotations
 from common import hash_embed, cosine, tokenize, Chunk, RetrievalResult, Doc
 from chunker import sentence_chunk, to_chunk_objects

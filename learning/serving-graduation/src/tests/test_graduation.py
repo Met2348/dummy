@@ -1,4 +1,4 @@
-"""Graduation tests — agent + budget + router + R1 deploy + 5-line E2E."""
+"""Graduation tests - agent + budget + router + R1 deploy + 5-line E2E."""
 import sys, pathlib, tempfile, os
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -11,6 +11,12 @@ from r1_tiny_deploy.serve import MockR1Model, run_demo, QUESTIONS
 from graduation_e2e.ckpts import load_all, CKPTS, QUESTION
 from graduation_e2e.compare import run_compare, to_md
 from graduation_e2e.report import write_report
+from serving_scorecard import (
+    GraduationSLO,
+    effective_goodput,
+    rank_candidates,
+    score_report,
+)
 
 
 # ---- Agent inference -----
@@ -152,3 +158,32 @@ def test_write_report_creates_md_and_json():
         assert "report.json" in paths
         for name in paths:
             assert os.path.exists(os.path.join(d, name))
+
+
+# ---- Graduation scorecard -----
+
+def test_scorecard_marks_wrong_or_slow_outputs_as_not_good():
+    scores = score_report(run_compare(), GraduationSLO(max_ttft_ms=70, max_tpot_ms=8))
+    by_ckpt = {s.ckpt: s for s in scores}
+
+    assert by_ckpt["vanilla"].passes is False
+    assert by_ckpt["r1_zero"].passes is False
+    assert by_ckpt["lora"].passes is True
+    assert by_ckpt["dpo"].passes is True
+    assert by_ckpt["phi_tiny"].passes is True
+
+
+def test_scorecard_goodput_is_request_rate_times_attainment():
+    scores = score_report(run_compare(), GraduationSLO(max_ttft_ms=70, max_tpot_ms=8))
+    summary = effective_goodput(scores, request_rate_rps=2.0)
+
+    assert summary["attainment"] == 0.6
+    assert summary["goodput_rps"] == 1.2
+
+
+def test_rank_candidates_prefers_cheapest_passing_model():
+    scores = score_report(run_compare(), GraduationSLO(max_ttft_ms=70, max_tpot_ms=8))
+    ranked = rank_candidates(scores)
+
+    assert ranked[0].ckpt == "lora"
+    assert ranked[0].passes is True

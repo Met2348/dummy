@@ -1,4 +1,4 @@
-"""Mock VLM serving — image encoder + LLM offline."""
+"""Mock VLM serving - image encoder + LLM offline."""
 from __future__ import annotations
 
 from dataclasses import dataclass

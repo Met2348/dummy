@@ -1,4 +1,4 @@
-"""Prompt Injection — Direct & Indirect — TEACHING MOCK.
+"""Prompt Injection - direct and indirect - TEACHING MOCK.
 
 Direct PI: user input contains "Ignore previous, do X" type instruction.
 Indirect PI (IPI): instruction is hidden in tool output / web page

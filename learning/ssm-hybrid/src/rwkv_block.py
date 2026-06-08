@@ -1,4 +1,4 @@
-"""RWKV-style block — 简化教学版 (无 RWKV-7 完整 channel mix)."""
+"""RWKV-style block - simplified teaching version without full RWKV-7 channel mix."""
 from __future__ import annotations
 
 import torch

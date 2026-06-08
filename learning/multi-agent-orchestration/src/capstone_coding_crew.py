@@ -1,4 +1,4 @@
-"""Capstone — 3-agent hierarchical coding crew (PM + Engineer + Reviewer)."""
+"""Capstone - 3-agent hierarchical coding crew (PM + Engineer + Reviewer)."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from cost_analyzer import CostReport

@@ -29,14 +29,14 @@ def stride_access(stride_words: int) -> list[int]:
 
 
 def _self_test() -> None:
-    # Stride 1 (consecutive 4-byte words) → 0 conflicts
+    # Stride 1: consecutive 4-byte words, 0 conflicts.
     assert count_conflicts(stride_access(1)) == 0
-    # Stride 32 (every lane same bank) → 31-way conflict
+    # Stride 32: every lane hits the same bank, giving a 31-way conflict.
     assert count_conflicts(stride_access(32)) == 31
-    # Stride 2 (even lanes 0,2,4,... even banks; odd 16-,18-,...) → 2-way for each used bank
+    # Stride 2: two lanes collide on each used bank.
     conf_s2 = count_conflicts(stride_access(2))
     assert conf_s2 > 0, "stride 2 conflicts"
-    # Broadcast: all lanes read same word → 0 conflicts
+    # Broadcast: all lanes read the same word, so there are 0 conflicts.
     assert count_conflicts([4] * 32) == 0
     print(f"[OK] shared_memory (stride2 conflicts {conf_s2})")
 

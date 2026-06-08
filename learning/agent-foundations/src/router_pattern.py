@@ -1,4 +1,4 @@
-"""Router pattern — LLM picks a sub-handler."""
+"""Router pattern - LLM picks a sub-handler."""
 from __future__ import annotations
 from typing import Callable
 
@@ -27,7 +27,7 @@ def embedding_router(
     handler_fns: dict[str, Callable[[str], str]],
     embed_fn: Callable[[str], list[float]],
 ) -> tuple[str, str]:
-    """Embedding router — pick handler with highest cosine to its description."""
+    """Embedding router - pick handler with highest cosine to its description."""
     q_emb = embed_fn(question)
     best_name = ""
     best_score = -1.0

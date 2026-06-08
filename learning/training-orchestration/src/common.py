@@ -1,4 +1,4 @@
-"""Cluster job model — Slurm/K8s/Ray flavor agnostic."""
+"""Cluster job model for Slurm/K8s/Ray style orchestration."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum

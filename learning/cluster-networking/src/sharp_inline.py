@@ -1,4 +1,4 @@
-"""SHARP (in-network reduction) — Mellanox/Nvidia switch offload."""
+"""SHARP (in-network reduction): Mellanox/Nvidia switch offload."""
 from __future__ import annotations
 from common import Link
 
@@ -24,10 +24,10 @@ def speedup_vs_ring(n_gpus: int, bytes_total: int, link: Link) -> float:
 def _self_test() -> None:
     from common import LINKS
     ib = LINKS["ib_ndr"]
-    # 64-GPU 100 MB → SHARP should win
+    # 64-GPU 100 MB: SHARP should win.
     sp = speedup_vs_ring(64, int(1e8), ib)
     assert sp > 1.0, sp
-    # Larger N → bigger win (ring has 2*(N-1) hops, SHARP stays 2)
+    # Larger N gives a bigger win because ring has 2*(N-1) hops and SHARP stays 2.
     sp_big = speedup_vs_ring(512, int(1e8), ib)
     assert sp_big > sp, (sp, sp_big)
     print(f"[OK] sharp_inline (64-GPU speedup {sp:.1f}x, 512-GPU {sp_big:.1f}x)")

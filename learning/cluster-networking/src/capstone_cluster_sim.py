@@ -1,4 +1,4 @@
-"""Capstone: simulate gradient all-reduce across 4 fabrics × 4 cluster sizes."""
+"""Capstone: simulate gradient all-reduce across fabrics and cluster sizes."""
 from __future__ import annotations
 from common import LINKS
 from allreduce_algos import ring_allreduce, halving_doubling
@@ -13,7 +13,7 @@ SCENARIOS = [
     (512, LINKS["ib_xdr"]),
 ]
 
-# 70B model in BF16 → 140 GB gradient
+# 70B model in BF16 gives a 140 GB gradient.
 GRADIENT_BYTES = int(140e9)
 
 

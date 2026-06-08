@@ -1,4 +1,4 @@
-"""Capstone — 3-layer memory chatbot: 10-turn recall test."""
+"""Capstone - 3-layer memory chatbot: 10-turn recall test."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from common import reset_mock_time

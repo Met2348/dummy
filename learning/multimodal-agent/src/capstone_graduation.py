@@ -1,4 +1,4 @@
-"""⭐⭐⭐ 毕业 Capstone — 五线综合在同一道 GSM8K 题上对照.
+"""Graduation capstone: five learning paths on one GSM8K problem.
 
 5 个 model:
     1. Vanilla GPT-2 (base)
@@ -37,7 +37,14 @@ MOCK_RESPONSES = {
         "explanation": "Adapter 加层，结构化推理但同 LoRA",
     },
     "4_dpo": {
-        "response": "To find Janet's earnings:\n1. Start: 16 eggs\n2. She eats 3, but eating doesn't matter for sales\n3. She sells 6 eggs at $2 each\n4. Earnings = 6 × $2 = $12\nAnswer: $12",
+        "response": (
+            "To find Janet's earnings:\n"
+            "1. Start: 16 eggs\n"
+            "2. She eats 3, but eating does not matter for sales\n"
+            "3. She sells 6 eggs at $2 each\n"
+            "4. Earnings = 6 * $2 = $12\n"
+            "Answer: $12"
+        ),
         "explanation": "DPO 对齐后回答更人类偏好（解释清晰）",
     },
     "5_r1_zero": {
@@ -45,9 +52,9 @@ MOCK_RESPONSES = {
 Let me analyze. Janet has 16 eggs. She eats 3 (these are gone, not sold).
 She sells 6 of the remaining.
 Wait, the question asks about money from selling. So I only need to count sales.
-6 eggs × $2/egg = $12.
-Let me verify: she has 16-3-6 = 7 eggs left over, sold 6, ate 3. Total 16. ✓
-Money = 6 × 2 = 12.
+6 eggs * $2/egg = $12.
+Let me verify: she has 16-3-6 = 7 eggs left over, sold 6, ate 3. Total 16.
+Money = 6 * 2 = 12.
 </think>
 <answer>#### 12</answer>""",
         "explanation": "R1-Zero 涌现自检 (Wait, verify) + 严格 format",
@@ -60,14 +67,14 @@ def correctness(response: str, gt: str) -> bool:
 
 
 def print_capstone_comparison():
-    print(f"五线综合 — 毕业作品\n{'=' * 70}")
+    print(f"五线综合 - 毕业作品\n{'=' * 70}")
     print(f"\n题目:\n  {GSM8K_PROBLEM}")
     print(f"\nGround truth: {GROUND_TRUTH}")
     print(f"\n{'─' * 70}")
 
     for key, data in MOCK_RESPONSES.items():
         ok = correctness(data["response"], GROUND_TRUTH)
-        mark = "✓" if ok else "✗"
+        mark = "PASS" if ok else "FAIL"
         print(f"\n[{key}]  {mark} correct")
         print(f"Response: {data['response'][:200]}{'...' if len(data['response']) > 200 else ''}")
         print(f"Explanation: {data['explanation']}")
@@ -78,7 +85,7 @@ def print_capstone_comparison():
     print("  2. LoRA:      格式 OK，推理浅 (weight 扰动)")
     print("  3. Adapter:   类似 LoRA (structure 扰动)")
     print("  4. DPO:       人类偏好风格强 (distribution 改)")
-    print("  5. R1-Zero:   长 CoT + aha + 严格 format (trajectory 改) ⭐")
+    print("  5. R1-Zero:   长 CoT + aha + 严格 format (trajectory 改)")
 
 
 def export_for_notebook():
@@ -103,7 +110,7 @@ def export_for_notebook():
 if __name__ == "__main__":
     print_capstone_comparison()
     print(f"\n{'=' * 70}")
-    print("🎓 毕业作品完成 — 整个 RL+对齐+推理系列收官 🎓")
+    print("毕业作品完成 - 整个 RL+对齐+推理系列收官")
     print("\n88 方法 / 90 lecture / ~101h 学完")
     print("PEFT (Prompt/LoRA/Adapter) + RLHF + DPO + Process Reward + R1 + SOTA + 多模态/Agent")
     print(f"{'=' * 70}")

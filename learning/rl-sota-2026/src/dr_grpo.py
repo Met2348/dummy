@@ -45,7 +45,7 @@ def compare_grpo_vs_dr():
     print(f"  rewards: {rewards.tolist()}")
     print(f"  GRPO  A: {[round(a, 3) for a in A_g.tolist()]}")
     print(f"  Dr.GRPO A: {[round(a, 3) for a in A_dr.tolist()]}")
-    print("  → Dr.GRPO 对 outlier 不敏感，正常样本的 advantage 不被压扁")
+    print("  -> Dr.GRPO 对 outlier 不敏感，正常样本的 advantage 不被压扁")
 
 
 if __name__ == "__main__":

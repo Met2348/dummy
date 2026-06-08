@@ -1,4 +1,4 @@
-"""Multi-Query / RAG-Fusion — rewrite query N ways and RRF."""
+"""Multi-Query / RAG-Fusion - rewrite query N ways and RRF."""
 from __future__ import annotations
 from typing import Callable
 from common import Doc, RetrievalResult

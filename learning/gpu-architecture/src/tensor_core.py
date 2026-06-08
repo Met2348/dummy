@@ -1,4 +1,4 @@
-"""Tensor Core MMA shape model — H100 wgmma / B200 tcgen05."""
+"""Tensor Core MMA shape model: H100 wgmma / B200 tcgen05."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -31,7 +31,7 @@ def flops_per_cycle(shape: MMAShape) -> int:
 
 
 def pick_shape(target_m: int, target_n: int, dtype: str, isa: list[MMAShape]) -> MMAShape:
-    """Pick the MMA shape that best tiles target_m × target_n."""
+    """Pick the MMA shape that best tiles target_m by target_n."""
     valid = [s for s in isa if s.dtype == dtype]
     if not valid:
         raise ValueError(f"no shape for dtype {dtype}")

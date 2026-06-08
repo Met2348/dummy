@@ -36,7 +36,7 @@ def main() -> int:
     print(f"=== {len(MODULES) - len(failed)}/{len(MODULES)} modules passed ===")
     if failed:
         for short, msg in failed:
-            print(f"  FAIL: {short} → {msg}")
+            print(f"  FAIL: {short} -> {msg}")
         return 1
     return 0
 

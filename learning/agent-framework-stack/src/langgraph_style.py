@@ -1,4 +1,4 @@
-"""LangGraph-style — Topic 4 mock 加 interrupt + time travel."""
+"""LangGraph-style - Topic 4 mock with interrupt and time travel."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Any

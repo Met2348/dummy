@@ -1,195 +1,602 @@
 # guide_Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena
 
+<!-- manual-deep-guide -->
+
 > 原论文: [Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena](https://arxiv.org/abs/2306.05685)
 >
 > 本地原文 PDF: `learning/eval-graduation/paper/01_judging_llm_as_a_judge_mt_bench_chatbot_arena.pdf`
 >
-> 作者: Zheng et al.
+> 作者: Zheng et al., LMSYS
 >
 > 年份: 2023
 >
 > 类型: paper
 
-## 0. 导读定位
+## 0. 为什么毕业专题还要读这篇
 
-这份 guide 的目标不是给你一张“论文推荐卡”，而是承担一次认真初读: 先把论文放回历史背景，再把核心方法、关键公式、实验逻辑和本仓库代码连起来。它不会逐字搬运原文，但会尽量把论文真正想表达的内容用中文重建出来。
+这篇论文在 `llm-judge-arena` 专题里可以读成“LLM-as-a-judge 和 Chatbot Arena 的基础论文”。但在 `eval-graduation` 里，它的角色不一样: 它是你做最终评测 portfolio 的方法论地基。
 
-这篇材料的核心地位: 它把开放式对话评测推向 pairwise arena 和 LLM judge，是毕业项目里 mini-arena 的源头。
+毕业项目要回答的问题不是“哪个模型在一个榜上最高”，而是:
 
-## 1. 背景和 story
+- 这个模型知道多少。
+- 这个模型会不会推理。
+- 这个模型是不是安全。
+- 这个模型响应成本和延迟如何。
+- 用户在开放式对话里更喜欢哪一个。
+- 自动 judge 的结论能不能被审计。
+- 最后这份评测能不能说服别人，而不只是说服你自己。
 
-开放式聊天很难用标准答案评分，人工评测贵，自动指标又弱。LLM judge 和 arena 解决了规模化比较问题。
+Zheng et al. 2023 给你的关键思想是: 对开放式 chat assistant，标准答案评测不够，人类偏好又贵，因此需要把 controlled benchmark、crowdsourced arena、LLM judge、human agreement、bias audit 组合成一套评测系统。`eval-graduation` 正是在这个思想上，把 mini-HELM、mini-Arena、red-team、defense 和 portfolio 串起来。
 
-这篇论文出现之前，常见做法通常有三个特点: 第一，问题已经能被某些工程方法解决；第二，这些方法在规模、成本、稳定性、可解释性或泛化上遇到了瓶颈；第三，社区缺少一个足够简单、足够可复用的抽象。作者的贡献不是凭空发明一个名词，而是把这个瓶颈重新表述成一个可以优化的技术问题。
-
-你读这篇论文时要不断追问:
-
-- 原方法最痛的约束是什么。
-- 作者把约束转化成了什么建模假设。
-- 新方法省掉了什么，又额外引入了什么。
-- 论文的实验证据是否真的支持这个交换。
-
-## 2. 必须先掌握的概念
-
-- MT-Bench
-- Chatbot Arena
-- pairwise comparison
-- Elo
-- LLM judge bias
-
-这些概念的关系可以这样理解: 它们不是词表，而是一条因果链。背景里的瓶颈会逼出核心概念，核心概念会变成方法设计，方法设计再落到公式、系统结构或训练流程里，最后由实验验证。
-
-一个好的读法是把每个概念写成三句话:
-
-1. 它解决什么问题。
-2. 它依赖什么假设。
-3. 如果它失效，模型或系统会出现什么症状。
-
-## 3. 论文主张
-
-系统收集模型对同一问题的回答，让人类或强模型做 pairwise 判断，再用 Elo/胜率估计能力。
-
-这段主张背后的设计理由可以拆成四层:
-
-1. **对象层**: 论文到底在改模型、数据、优化目标、推理系统、评测协议，还是安全策略。
-2. **约束层**: 它主要受限于计算、显存、标注、人类偏好、延迟、上下文长度、分布偏移，还是可复现性。
-3. **机制层**: 作者引入的新结构如何改变信息流、梯度流、资源流或决策流。
-4. **证据层**: 论文用什么实验说明这个机制确实工作，而不是只在一个漂亮样例里工作。
-
-读设计时要特别留心这些判断:
-
-- 它优化的是训练、推理、显存、数据、评测还是安全风险。
-- 它把复杂度转移到了哪里，例如更多调度逻辑、更多数据假设、更多超参或更强硬件依赖。
-- 它和 naive baseline 的差别是否能用一两句话讲清楚。
-- 如果把核心模块拿掉，论文的实验是否会明显变差。
-
-## 4. 方法逐层拆解
-
-你可以把这篇论文的方法读成一个输入到输出的管线。
-
-**输入是什么**: 输入可能是 token 序列、偏好对、检索查询、GPU kernel、请求流、训练数据、benchmark item，或者安全策略。不要抽象地说“输入数据”，要能说清楚输入张量、样本、请求或系统事件的单位。
-
-**中间状态是什么**: 论文真正创新的地方通常在中间状态。例如低秩矩阵、adapter hidden state、KV block table、reward score、router assignment、process step score、candidate solution set、prefix tree、memory page。中间状态决定了方法的可解释性和工程成本。
-
-**输出是什么**: 输出可能是 logits、动作、奖励、排序、路由、压缩权重、通过/拒绝标签、benchmark score 或调度决策。读论文时要把输出和评价指标对齐，否则很容易把训练目标和真实目标混在一起。
-
-对这篇论文来说，最重要的设计线索是: 系统收集模型对同一问题的回答，让人类或强模型做 pairwise 判断，再用 Elo/胜率估计能力。
-
-## 5. 数学和公式怎么读
-
-重点是 Bradley-Terry/Elo：P(A beats B)=sigmoid(s_A-s_B)。分数是相对能力，不是绝对真理。
-
-建议你在纸上重写关键公式，并标出每个张量或变量的形状、单位和约束。读不懂公式时，不要先背符号，先问:
-
-- 这个公式是在给谁打分。
-- 它限制了哪个变量不能乱跑。
-- 它节省的是参数、显存、计算、延迟还是标注。
-- 它是在精确计算，还是在近似一个无法直接计算的目标。
-
-如果论文有 loss function，优先拆解正负样本、baseline/reference、normalizer、temperature/beta/clip epsilon 这类项。如果论文是系统论文，优先拆解延迟、吞吐、带宽、显存、通信量和调度约束。如果论文是评测论文，优先拆解评分函数、样本构造、聚合方式和置信区间。
-
-## 6. 论文内容按“问题-方法-证据”重建
-
-**问题**: 开放式聊天很难用标准答案评分，人工评测贵，自动指标又弱。LLM judge 和 arena 解决了规模化比较问题。
-
-**方法**: 系统收集模型对同一问题的回答，让人类或强模型做 pairwise 判断，再用 Elo/胜率估计能力。
-
-**公式或机制**: 重点是 Bradley-Terry/Elo：P(A beats B)=sigmoid(s_A-s_B)。分数是相对能力，不是绝对真理。
-
-**证据**: 论文比较 GPT-4 judge 与人工偏好的一致性，并展示 arena 排名；同时也暴露位置偏见、长度偏见等问题。
-
-把这四段连起来，就是论文自己的 story。你应该能把它讲成下面这种形式:
-
-> 过去的方法因为某个约束变得不够好；作者提出一个更明确的机制；这个机制通过某个公式、结构或系统策略落地；实验用某些 baseline、ablation 和指标证明它确实改善了目标。
-
-如果讲不出这条链，就说明你还停留在“知道论文名”的阶段。
-
-## 7. 实验证据链条
-
-论文比较 GPT-4 judge 与人工偏好的一致性，并展示 arena 排名；同时也暴露位置偏见、长度偏见等问题。
-
-证据链不要只看最终表格。建议按这个顺序读:
-
-1. baseline 是否足够强。
-2. ablation 是否证明关键设计真的有用。
-3. 指标是否对应真实目标。
-4. 失败案例或限制条件是否被诚实讨论。
-5. 结论能否迁移到你本机的小实验。
-
-对新手来说，最危险的误读是看到一个主表格就以为论文被证明了。更好的读法是把实验分成三类:
-
-- **主结果**: 证明方法在目标任务上有竞争力。
-- **消融实验**: 证明每个设计组件有贡献。
-- **敏感性/限制实验**: 说明方法在什么条件下会退化。
-
-如果论文没有充分 ablation，你要在笔记里明确写下“这部分证据不足”。如果论文有强 ablation，你要把它转化成本仓库里的一个小实验。
-
-## 8. 局限性和后续工作
-
-这篇论文的价值不等于它解决了全部问题。你应该主动寻找局限:
-
-- 它是否依赖特定数据分布、模型规模、硬件、benchmark 或人工标注。
-- 它是否把成本转移到了预处理、调参、调度、存储、人工审核或部署复杂度。
-- 它是否只证明了平均指标，没有证明尾部风险、鲁棒性或长期稳定性。
-- 它是否可能在更大规模或不同任务上出现反直觉退化。
-
-后续阅读里列出的工作，通常就是社区沿着这些局限继续推进的结果。
-
-## 9. 和本仓库的连接
-
-- `learning/eval-graduation/lectures/05-mini-arena.md`
-- `learning/eval-graduation/src/mini_arena.py`
-
-学习动作:
-
-1. 先读对应 lecture，写下你认为的核心问题。
-2. 再读本 guide，画出技术路线和证据链。
-3. 打开 source，找到与论文机制对应的最小实现。
-4. 实现一个最小改动实验，例如改 rank、改 batch、改 reward、改 cache block size、改 routing 策略、改 head 数、改 prompt 模板或改评测聚合方式。
-5. 写 5 句话复盘: 改了什么，为什么，指标怎么变，是否符合论文直觉，哪里不符合。
-
-## 10. 复现/实验建议
-
-一个 30-60 分钟的最小实验应该满足:
-
-- 不需要下载巨大模型或数据。
-- 只改一个关键变量。
-- 有一个明确指标。
-- 能对应论文里的某个 claim。
-- 实验失败也能解释一个概念。
-
-对这篇论文，优先围绕这些方向设计实验:
-
-- 复现核心公式或核心调度逻辑。
-- 改掉一个关键超参，看输出或指标变化。
-- 构造一个 toy case，观察方法相对 naive baseline 的差异。
-- 把论文里的 ablation 缩小成本仓库单元测试级别。
-
-## 11. 读完必须能闭卷回答
-
-- 这篇论文要解决的原始痛点是什么。
-- 它的核心假设是什么，什么时候可能不成立。
-- 它的最小公式或最小系统图是什么。
-- 它的实验到底证明了什么，没有证明什么。
-- 如果让你在本仓库复现一个玩具版，你会改哪个文件、看哪个指标。
-- 它和后续相关工作的关系是什么: 后续是在扩展它、修补它、替代它，还是把它工程化。
-
-## 12. 后续阅读
-
-- AlpacaEval 2
-- Arena-Hard
-- JudgeBench
-- Prometheus
-
-## 13. AI agent 学习提示词
-
-可以把下面这段直接丢给 agent，但要自己先读一遍论文摘要、方法图和实验主表:
+所以本 guide 不会简单重复上一专题的 LLM judge 基础，而是把原论文转化为一个毕业级评测设计:
 
 ```text
-我正在读《Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena》。请你不要泛泛总结。
-请按“背景痛点 -> 核心方法 -> 关键公式/系统机制 -> 实验证据 -> 局限性 -> 本仓库最小实验”的顺序考我。
-一次只问 1 个问题，等我回答后指出错误，并要求我把答案和代码文件对应起来。
-最后请让我用 200 字闭卷复述这篇论文的贡献。
+capability matrix
+    plus
+preference arena
+    plus
+safety red-team
+    plus
+defense evaluation
+    plus
+portfolio report
 ```
 
-真正掌握的标志是: 你能离开 guide，把这篇论文画成一张机制图，并用本仓库的一个小实验解释图里最关键的箭头。
+这就是你学完整个 LLM 全栈仓库后，向别人证明“我真的能评模型”的方式。
+
+## 1. 论文在毕业项目里的定位
+
+原论文的核心事实仍然要记住:
+
+- MT-Bench: 80 个高质量多轮开放问题，8 类，每类 10 个。
+- Chatbot Arena: 匿名双模型对战平台，一个月收集约 30K votes。
+- LLM-as-a-judge: 用 GPT-4 等强模型做 pairwise comparison、single answer grading 或 reference-guided grading。
+- 主要结论: GPT-4 judge 与人类偏好的一致率超过 80%, 达到人类之间一致率水平。
+- 主要风险: position bias、verbosity bias、self-enhancement bias、math/reasoning 误判。
+- 主要缓解: swap positions、few-shot judge、CoT judge、reference-guided judge、完整多轮 conversation prompt。
+
+毕业专题要把这些点变成一个工程判断: 如果你要给 5 个 checkpoint 写最终评测报告，不能只跑一个 benchmark，也不能只问 GPT-4 谁好。你要设计一个有证据链的评测矩阵。
+
+本仓库 `learning/eval-graduation/src/` 做了这个最小闭环:
+
+- `mini_helm.py`: 能力/安全/效率矩阵。
+- `mini_arena.py`: pairwise preference 和 BT/Elo ranking。
+- `mini_red_team.py`: 攻击成功率矩阵。
+- `mini_defense.py`: 防御前后 ASR 变化。
+- `portfolio.py`: 把所有结果汇总成 portfolio README。
+
+## 2. 从论文到毕业评测矩阵
+
+论文强调 hybrid evaluation。传统 benchmark 和偏好 benchmark 测的不是同一件事。
+
+传统 benchmark 擅长:
+
+- 知识正确性。
+- 数学和代码任务。
+- 可自动判分的封闭任务。
+- 标准化横向比较。
+
+MT-Bench/Arena 擅长:
+
+- 开放式对话质量。
+- 多轮上下文理解。
+- 指令遵循。
+- 人类主观偏好。
+- 风格、清晰度、帮助性。
+
+毕业项目要做的是把这两类合起来。`mini_helm.py` 对应能力矩阵，`mini_arena.py` 对应偏好矩阵，`mini_red_team.py` 和 `mini_defense.py` 对应安全矩阵。最后 `portfolio.py` 把结果写成可展示的报告。
+
+一个毕业评测系统应该长这样:
+
+```text
+checkpoints
+  vanilla
+  lora
+  dpo
+  r1_tiny
+  phi_tiny
+       |
+       v
+capability eval
+  knowledge / reasoning / safety / efficiency
+       |
+       v
+preference eval
+  pairwise battles / BT-Elo ranking
+       |
+       v
+safety eval
+  red-team ASR / defense reduction
+       |
+       v
+portfolio
+  tables / radar / leaderboard / decision tree / narrative
+```
+
+这张图就是论文思想在仓库里的毕业形态。
+
+## 3. 为什么不能只看一个平均分
+
+论文 Table 8 告诉我们: MT-Bench 和 MMLU/TruthfulQA 是互补的。Vicuna 这类模型可以通过少量高质量对话数据迅速提升对话偏好分，但这不等于它的知识能力、推理能力、安全性都同步提升。
+
+毕业项目里同样如此。假设一个 checkpoint:
+
+- Arena 里胜率高，因为回答长、语气好。
+- Reasoning 上错。
+- Safety 上泄漏。
+- Latency 很慢。
+
+如果你只报告一个综合平均分，它可能看起来不错，但部署风险很大。更好的做法是拆成维度:
+
+```text
+knowledge
+reasoning
+safety
+efficiency
+preference
+robustness
+```
+
+本仓库的 `mini_helm.py` 就是这个思想的极简版。它用 4 个维度评价 5 个 checkpoint:
+
+- knowledge: 能否回答 Paris。
+- reasoning: 能否给出 GSM8K-style 正确答案 18。
+- safety: 是否拒绝 harmful query。
+- efficiency: 根据 latency_ms 映射到 0 到 1。
+
+这很 toy，但训练的是正确习惯: 评测先分维度，再解释 tradeoff。
+
+## 4. MT-Bench 教你的多轮评测原则
+
+MT-Bench 的 80 个问题都不是单纯问答，而是两轮。第二轮经常要求模型引用第一轮结果、改写前文、遵循额外格式、继续推理。
+
+毕业项目里，这对应一个原则: 评模型不能只测 first response。很多模型第一轮会给漂亮答案，第二轮开始丢上下文、违反约束、重复前文或者误解用户指代。
+
+一个 graduation eval 至少应该包含:
+
+- 单轮知识问答。
+- 多轮 follow-up。
+- 格式约束。
+- 反事实或改写约束。
+- 安全上下文变化。
+- 代码/数学中的结果复核。
+
+论文 Section 3.5 还有一个重要教训: 多轮 judge prompt 要把完整 conversation 给 judge。否则 judge 可能搞错“第二个例子”引用的是哪一个 assistant 自己的前文。本仓库的毕业项目虽然是 toy，但你以后做真实评测时必须记住这个坑。
+
+## 5. Arena 教你的偏好评测原则
+
+Chatbot Arena 的核心是匿名 pairwise battle。它不像 MT-Bench 一样固定所有问题，而是在真实用户提问中收集偏好。
+
+毕业项目里，Arena 思想对应:
+
+```text
+same prompt
+model A response
+model B response
+judge or human vote
+aggregate pairwise outcomes
+```
+
+为什么 pairwise 有用? 因为开放式回答很难给绝对分。让人或 judge 在两个答案里选一个，通常比直接给 1 到 10 分更稳定。
+
+但 pairwise 也有成本:
+
+- 模型数量增加时，所有组合数量增长很快。
+- 每个 pair 需要足够多题目和顺序交换。
+- judge 可能有 position bias 和 verbosity bias。
+- leaderboard 需要统计模型和置信区间。
+
+`mini_arena.py` 用 round-robin 方式跑 5 个 checkpoint。它的 judge 是 toy 的 `_length_quality_judge`，会偏好非空、完整推理、长度适中，并惩罚明显 harmful leak。这不是论文真实 judge，但它让你看到一个完整 Arena pipeline:
+
+```text
+load 5 ckpts
+generate responses
+run pairwise battles
+swap order
+fit BT model
+convert to Elo
+render leaderboard
+```
+
+## 6. LLM judge 不能当黑箱真理
+
+原论文最值得毕业项目吸收的不是“GPT-4 judge 很强”，而是“GPT-4 judge 很强但必须审计”。
+
+四类偏差要记住:
+
+1. Position bias: judge 偏好 A 或 B 的位置。
+2. Verbosity bias: judge 偏好更长但不一定更好的回答。
+3. Self-enhancement bias: judge 可能偏好自己模型风格。
+4. Math/reasoning failure: judge 可能被候选错误推理带偏。
+
+论文里几个关键数字:
+
+- GPT-4 default prompt 在 position bias 测试中 consistency 为 65.0%。
+- GPT-4 在 repetitive list verbosity attack 上 failure rate 为 8.7%, 但 Claude-v1 和 GPT-3.5 都是 91.3%。
+- 数学 judge 默认 prompt 有 14/20 failure，CoT prompt 降到 6/20，reference-guided 降到 3/20。
+- MT-Bench 上 GPT-4 pairwise 与 human 的 non-tie agreement 约 85%。
+- Chatbot Arena 上 GPT-4 pairwise 与 human 的 non-tie agreement 约 87%。
+
+这些数字共同说明: GPT-4 judge 可以规模化近似人类偏好，但它不是无偏裁判。毕业 portfolio 里如果用了 judge，必须写明你怎样控制偏差。
+
+## 7. 毕业评测里的 bias audit checklist
+
+你可以把论文里的偏差研究转成一张 checklist:
+
+```text
+Position bias:
+  - 是否交换 A/B 顺序?
+  - 交换后结论是否一致?
+  - 不一致时是否记为 tie?
+
+Verbosity bias:
+  - 是否记录 response length?
+  - 是否比较 raw win rate 和 length-controlled win rate?
+  - 长答案是否真的提供新信息?
+
+Reasoning/math:
+  - 是否有 reference answer?
+  - 是否用工具或单元测试验证?
+  - 是否避免 judge 被错误候选带偏?
+
+Multi-turn:
+  - judge 是否看到完整 conversation?
+  - follow-up 的指代对象是否清楚?
+
+Safety:
+  - helpfulness judge 是否会奖励危险细节?
+  - safety score 是否独立于 preference score?
+```
+
+本仓库 `mini_arena.py` 已经做了顺序交换，`mini_red_team.py` 和 `mini_defense.py` 把 safety 单独拎出来。这就是把论文里的 bias mindset 变成毕业工程。
+
+## 8. BT/Elo 在毕业项目里的正确用法
+
+原论文主证据更多是 win rate 和 agreement，后续 Arena leaderboard 常用 Elo 或 Bradley-Terry。`eval-graduation/src/mini_arena.py` 自己实现了一个 BT 拟合。
+
+BT 模型假设每个 checkpoint 有一个潜在能力分 `s_i`:
+
+```text
+P(i beats j) = exp(s_i) / (exp(s_i) + exp(s_j))
+```
+
+给定 pairwise battles 后，用最大似然估计 `s_i`。然后用一个 scale 转成 Elo-like rating:
+
+```text
+elo_i = 1500 + scale * s_i
+```
+
+毕业项目里要谨慎解释 Elo:
+
+- 它是相对偏好分，不是绝对能力。
+- 它依赖题目分布和 judge。
+- 样本量少时不稳定。
+- 如果 battle 接近完全可分，分数可能非常极端。
+- 真实系统应报告置信区间或 bootstrap。
+
+所以 portfolio 里 Elo 应该配合 mini-HELM、red-team 和 defense，而不是单独作为最终结论。
+
+## 9. Red-team 和 Defense 为什么必须进毕业评测
+
+原论文 discussion 里承认它主要强调 helpfulness，较少覆盖 safety、honesty 和 harmlessness。毕业评测不能重复这个局限。
+
+`mini_red_team.py` 做了一个最小安全评测:
+
+- direct attack。
+- persona-wrap attack。
+- multi-turn echo attack。
+- 指标是 ASR, attack success rate。
+
+`mini_defense.py` 做了一个最小防御管线:
+
+- input classifier 先拦截危险 query。
+- checkpoint 生成回答。
+- output classifier 再拦截危险输出。
+- 比较防御前后 ASR。
+
+这就是从论文走到毕业项目的关键升级: 你不仅评“谁更好用”，还要评“谁更容易被打穿，以及防御是否真的降低风险”。
+
+## 10. Portfolio 是评测的最终产品
+
+论文公开 MT-Bench questions、expert votes、arena conversations，是为了让别人复查和继续研究。毕业项目也一样，最后不是口头说“我跑了评测”，而是交付一份 portfolio。
+
+本仓库 `portfolio.py` 生成的报告包含:
+
+- 32 topics 时间线。
+- 5 checkpoint 元数据。
+- mini-HELM 4 维表。
+- r1_tiny 的 ASCII radar。
+- mini-Arena leaderboard。
+- red-team ASR 矩阵。
+- defense 前后 ASR 变化。
+- checkpoint 选型决策树。
+- “我能做什么”的能力画像。
+
+这份 portfolio 的价值在于它把学习成果转成可展示证据。它不是论文导读，而是你的工程名片。
+
+## 11. 从论文证据链到毕业报告证据链
+
+原论文证据链:
+
+```text
+existing benchmarks miss human preference
+        |
+        v
+MT-Bench and Chatbot Arena collect preference data
+        |
+        v
+LLM judge approximates human preference
+        |
+        v
+biases are measured and partially mitigated
+        |
+        v
+hybrid evaluation is recommended
+```
+
+毕业报告证据链:
+
+```text
+I have several checkpoints from earlier modules
+        |
+        v
+mini-HELM shows capability/safety/efficiency dimensions
+        |
+        v
+mini-Arena shows pairwise preference ranking
+        |
+        v
+red-team shows attack surface
+        |
+        v
+defense eval shows mitigation effect
+        |
+        v
+portfolio explains tradeoffs and deployment choices
+```
+
+你要能把这两条链对应起来。论文是方法论，仓库代码是毕业作品。
+
+## 12. 数据结构视角
+
+毕业项目里的核心数据结构不是一个分数，而是一组矩阵。
+
+Checkpoint metadata:
+
+```text
+ckpt = {
+  key,
+  name,
+  params_M,
+  latency_ms,
+  reasoning_quality,
+  safety_level
+}
+```
+
+mini-HELM result:
+
+```text
+scores[ckpt][dimension] = value in [0, 1]
+dimensions = knowledge, reasoning, safety, efficiency
+```
+
+Arena battle:
+
+```text
+battle = {
+  qkey,
+  a,
+  b,
+  winner: A / B / tie
+}
+```
+
+Red-team matrix:
+
+```text
+asr[ckpt][attack_name] = 0 or 1
+attacks = direct, persona_wrap, multi_turn
+```
+
+Defense report:
+
+```text
+report = {
+  no_defense: asr_matrix,
+  with_defense: asr_matrix
+}
+```
+
+Portfolio:
+
+```text
+portfolio = narrative + tables + radar + leaderboard + decision_tree
+```
+
+当你能画出这些结构，说明你已经从“读论文”走到“能设计评测系统”。
+
+## 13. 本仓库学习路径
+
+建议按这个顺序走:
+
+1. 读 `learning/eval-foundations/paper/guide_01_helm.md`，理解 holistic evaluation。
+2. 读 `learning/llm-judge-arena/paper/guide_01_mt_bench_chatbot_arena.md`，理解 LLM judge 和 Arena 基础。
+3. 读本 guide，把同一论文转成 graduation/capstone 方法论。
+4. 跑 `mini_helm.py`，看 5 checkpoint 的多维矩阵。
+5. 跑 `mini_arena.py`，看 pairwise battle 到 Elo。
+6. 跑 `mini_red_team.py`，看安全攻击成功率。
+7. 跑 `mini_defense.py`，看防御前后变化。
+8. 跑 `portfolio.py`，生成最终报告。
+
+命令:
+
+```powershell
+python learning\eval-graduation\src\tests\test_graduation.py
+python learning\eval-graduation\src\mini_helm.py
+python learning\eval-graduation\src\mini_arena.py
+python learning\eval-graduation\src\mini_red_team.py
+python learning\eval-graduation\src\mini_defense.py
+python learning\eval-graduation\src\portfolio.py
+```
+
+## 14. 代码样例: 一个最小毕业评测循环
+
+```python
+from mini_helm import run_mini_helm
+from mini_arena import run_capstone_arena
+from mini_red_team import run_red_team
+from mini_defense import compare_defense
+
+helm = run_mini_helm()
+arena = run_capstone_arena()
+red_team = run_red_team()
+defense = compare_defense()
+
+print(helm["r1_tiny"])
+print(arena["ranking"])
+print(red_team["vanilla"])
+print(defense["with_defense"]["vanilla"])
+```
+
+这段代码背后的问题是:
+
+- `r1_tiny` 能力强在哪里，弱在哪里。
+- Arena 排名是否和 mini-HELM 平均分一致。
+- `vanilla` 为什么 red-team ASR 高。
+- defense 是否把风险降下来。
+
+如果你能解释不一致，就说明你真的懂评测。比如一个模型 Arena 高但 safety 低，不是 bug，而是维度不同。
+
+## 15. 30-60 分钟毕业实验
+
+实验 A: 改 checkpoint latency
+
+```text
+1. 找到 ckpt_zoo metadata。
+2. 把 r1_tiny latency 从 80ms 改成 150ms。
+3. 运行 mini_helm.py。
+4. 看 efficiency 和 avg 如何变化。
+5. 写一句解释: 能力强但延迟高时，是否适合端侧部署?
+```
+
+实验 B: 改 Arena judge
+
+```text
+1. 打开 mini_arena.py 的 _length_quality_judge。
+2. 增加一个对过长回答的惩罚。
+3. 运行 mini_arena.py。
+4. 看 r1_tiny 和 phi_tiny 排名是否变化。
+5. 写一句解释: judge rubric 改变为何会改变 leaderboard?
+```
+
+实验 C: 改 red-team attack
+
+```text
+1. 在 mini_red_team.py 增加一个 attack_obfuscation。
+2. 让它模拟更隐晦的 harmful query。
+3. 运行 test_graduation.py。
+4. 观察 ASR 矩阵是否变化。
+5. 写一句解释: 安全评测为什么不能只有 direct attack?
+```
+
+实验 D: 改 portfolio 叙事
+
+```text
+1. 运行 portfolio.py。
+2. 打开生成的 markdown。
+3. 增加一段 deployment recommendation。
+4. 用数据支持你为什么推荐 dpo 或 phi_tiny。
+5. 检查推荐是否同时考虑 ability, safety, latency。
+```
+
+## 16. AI agent 应该怎样辅助毕业评测
+
+在这个专题里，AI agent 最适合做三件事:
+
+第一，当 evaluator designer。让它帮你审计评测矩阵有没有漏维度。
+
+第二，当 skeptical reviewer。让它攻击你的 portfolio 结论，比如“为什么 Arena 第一不等于安全可部署”。
+
+第三，当 oral examiner。让它根据你的表格追问 tradeoff。
+
+推荐提示词:
+
+```text
+我正在做 LLM eval graduation portfolio。
+请你不要只看平均分。
+请按 reviewer 模式检查我的评测设计:
+1. 是否覆盖 capability, preference, safety, efficiency。
+2. 每个指标是否有数据结构和计算方式。
+3. judge 是否可能有 position/verbosity/math bias。
+4. 有没有 red-team 和 defense 前后对比。
+5. 最终推荐是否被数据支持。
+一次只指出一个最严重问题，并要求我用本仓库代码定位。
+```
+
+另一个闭卷训练提示词:
+
+```text
+请考我 MT-Bench/Arena 论文如何支撑 eval-graduation。
+一次只问一个问题。
+每个问题都必须让我把论文概念对应到 mini_helm.py,
+mini_arena.py, mini_red_team.py, mini_defense.py 或 portfolio.py。
+如果我只背论文数字，请追问毕业评测设计。
+```
+
+## 17. 常见误读
+
+误读一: eval graduation 就是把所有分数平均。
+
+更准确: 毕业评测要展示 tradeoff。平均分可以辅助，但不能替代维度分析。
+
+误读二: Arena 第一就是最好模型。
+
+更准确: Arena 是偏好排名，依赖 judge、题目分布、样本量和偏差控制。安全、成本和能力仍要单独看。
+
+误读三: 有 LLM judge 就不用 reference。
+
+更准确: 论文显示数学/推理 judge 可能被错误答案带偏。能给 reference 或工具验证时，应该给。
+
+误读四: safety 可以被 helpfulness judge 顺便覆盖。
+
+更准确: safety 必须单独评。一个危险细节丰富的回答可能被 helpfulness judge 奖励。
+
+误读五: portfolio 是最后装饰。
+
+更准确: portfolio 是最终交付物。它把代码、指标、证据链和决策建议组织成可被别人审阅的文档。
+
+## 18. 现代意义
+
+这篇论文在毕业专题里的现代意义是: 它让你知道评测 LLM 不是单点打分，而是一套可审计的证据系统。
+
+今天的 LLM 全栈工程师如果只能训练模型、部署模型，却不能证明模型什么时候好、什么时候危险、什么时候太贵，就还没有完成闭环。`eval-graduation` 的意义就是把前面所有专题拉回现实:
+
+- PEFT 后模型有没有真的提升。
+- RLHF/DPO/R1 后用户是否更喜欢。
+- Serving 优化后是否牺牲质量。
+- Safety defense 是否真的降低 ASR。
+- Portfolio 是否能把结果说清楚。
+
+MT-Bench 和 Chatbot Arena 提供了偏好评测的语言，HELM 提供了多维评测的语言，red-team 提供了风险评测的语言。毕业项目把它们合成一份工程证明。
+
+## 19. 闭卷掌握检查
+
+读完后你应该能闭卷回答:
+
+1. 为什么同一篇 MT-Bench/Arena 论文在 `llm-judge-arena` 和 `eval-graduation` 中读法不同。
+2. 毕业评测为什么不能只看 Arena 排名。
+3. MT-Bench 的多轮设计对 graduation eval 有什么启发。
+4. Chatbot Arena 的匿名 pairwise battle 如何变成 mini-Arena。
+5. GPT-4 judge 的 position、verbosity、math/reasoning 风险分别是什么。
+6. 为什么 safety 要独立于 helpfulness 评测。
+7. `mini_helm.py` 的 4 个维度分别是什么。
+8. `mini_arena.py` 如何从 pairwise battles 拟合 Elo-like ranking。
+9. `mini_red_team.py` 的 ASR 矩阵是什么意思。
+10. `mini_defense.py` 为什么要比较 defense 前后。
+11. `portfolio.py` 为什么是最终交付物，而不是附属文件。
+12. 如果一个模型 Arena 排名第一但 red-team ASR 高，你会怎样写部署建议。
+13. 如果 judge 偏好长回答，你会怎样改 rubric 或加 length control。
+14. 如何让 AI agent 帮你审查 portfolio，而不是替你写空泛总结。
+
+真正掌握的标志是: 你能从 5 个 checkpoint 出发，设计一份包含能力、偏好、安全、效率和部署建议的评测 portfolio，并能解释每一个分数背后的假设和风险。

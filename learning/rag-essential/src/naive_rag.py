@@ -35,7 +35,7 @@ def _self_test() -> None:
     q, expected = SAMPLE_QUERIES[0]  # "Who founded Anthropic?"
     results = rag.search(q, k=5)
     assert len(results) == 5
-    # 至少一个结果含 "Anthropic"
+    # At least one result should mention Anthropic.
     assert any("Anthropic" in r.chunk.text for r in results), \
         [r.chunk.text for r in results]
     print("[OK] naive_rag._self_test passed")

@@ -49,7 +49,7 @@ def test_constrained_sampler_commit_advances():
 
 
 def test_jump_forward_skips_unique_path():
-    """Literal-only FSM: every char forced — jump should consume all of it."""
+    """Literal-only FSM: every char forced; jump should consume all of it."""
     fsm = compile_literal('{"name":"')
     forced, new_state = jump_forward(fsm, state=0)
     assert forced == '{"name":"'

@@ -1,4 +1,4 @@
-"""Capstone-2 — τ-bench mock eval with 5 dimensions × 5 tasks."""
+"""Capstone-2 Tau-bench style mock eval with five dimensions and five tasks."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from eval.tau_bench_mock import TASKS, TauTask, AgentTranscript, simulate_mock_agent
@@ -91,7 +91,7 @@ def run_capstone_2() -> list[TaskScore]:
 
 def to_md(scores: list[TaskScore]) -> str:
     lines = [
-        "# τ-bench Mock Eval — Capstone-2\n",
+        "# Tau-bench Mock Eval - Capstone-2\n",
         "| Task | Goal | Tool | Safety | Eff | Cost | Mean |",
         "|------|-----:|-----:|-------:|----:|-----:|-----:|",
     ]

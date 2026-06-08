@@ -1,4 +1,4 @@
-"""Capstone — same search+summary task in 3 framework styles."""
+"""Capstone - same search+summary task in 3 framework styles."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from common import mock_search, mock_summarize, FrameworkRun
@@ -24,7 +24,7 @@ def run_langchain_style() -> FrameworkRun:
     )
     output = chain.invoke(CAPSTONE_QUERY)
     return FrameworkRun(framework="LangChain LCEL", loc=8, output=output,
-                        abstraction_level="Runnable chain via |")
+                        abstraction_level="Runnable chain via pipe")
 
 
 def run_vercel_style() -> FrameworkRun:

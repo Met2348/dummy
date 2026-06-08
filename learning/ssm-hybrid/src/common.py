@@ -1,4 +1,4 @@
-"""SSM 共用工具 — discretization helpers."""
+"""Shared SSM discretization helpers."""
 from __future__ import annotations
 
 import torch

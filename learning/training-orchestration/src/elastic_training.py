@@ -1,4 +1,4 @@
-"""Torchrun-style elastic — rendezvous + dynamic membership."""
+"""Torchrun-style elastic rendezvous and dynamic membership."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 
@@ -64,7 +64,7 @@ def _self_test() -> None:
     # Leave: world shrinks but quorum holds
     assert leave(rdv, 0)
     assert rdv.is_quorum()
-    # Mass leave → no quorum
+    # Mass leave leaves no quorum.
     for i in range(1, 14):
         leave(rdv, i)
     assert not rdv.is_quorum()

@@ -1,4 +1,4 @@
-"""Calculator tool — safe arithmetic eval (no builtins)."""
+"""Calculator tool - safe arithmetic eval (no builtins)."""
 from __future__ import annotations
 import re
 import sys

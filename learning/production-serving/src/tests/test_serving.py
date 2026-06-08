@@ -14,6 +14,14 @@ from cost_calc import (
     cache_hit_savings, cost_aware_route,
 )
 from trtllm_build import TrtLlmBuildConfig
+from clipper_original_minimal import (
+    AdaptiveBatcher,
+    ModelContainer,
+    PredictionCache,
+    best_effort_ensemble,
+    exp3_probabilities,
+    exp3_update,
+)
 
 
 # ---- OpenAI compat -----
@@ -165,3 +173,55 @@ def test_trtllm_build_cli_contains_required_flags():
     assert "--checkpoint_dir ./ckpt" in cli
     assert "--max_batch_size 32" in cli
     assert "--use_paged_context_fmha enable" in cli
+
+
+# ---- Clipper paper mechanisms -----
+
+def test_prediction_cache_lru_hit_and_evict():
+    cache = PredictionCache(capacity=2)
+    cache.put("m1", "x1", "y1")
+    cache.put("m1", "x2", "y2")
+
+    assert cache.fetch("m1", "x1") == "y1"
+
+    cache.put("m1", "x3", "y3")
+    assert cache.fetch("m1", "x2") is None
+    assert cache.fetch("m1", "x1") == "y1"
+
+
+def test_adaptive_batcher_increases_then_backs_off():
+    batcher = AdaptiveBatcher(slo_ms=20.0, max_batch_size=4)
+    batcher.observe(batch_size=4, latency_ms=12.0)
+    assert batcher.max_batch_size == 5
+
+    batcher.observe(batch_size=5, latency_ms=25.0)
+    assert batcher.max_batch_size == 4
+
+
+def test_batcher_respects_queue_and_current_cap():
+    batcher = AdaptiveBatcher(slo_ms=20.0, max_batch_size=8)
+    assert batcher.choose_batch_size(queue_len=3) == 3
+    assert batcher.choose_batch_size(queue_len=20) == 8
+
+
+def test_best_effort_ensemble_drops_straggler_at_deadline():
+    models = [
+        ModelContainer("fast_a", fixed_ms=2.0, per_item_ms=1.0, accuracy=0.80),
+        ModelContainer("fast_b", fixed_ms=3.0, per_item_ms=1.0, accuracy=0.82),
+        ModelContainer("slow", fixed_ms=50.0, per_item_ms=5.0, accuracy=0.95),
+    ]
+
+    result = best_effort_ensemble(models, query="x", deadline_ms=10.0)
+
+    assert result["used_models"] == ["fast_a", "fast_b"]
+    assert result["missing_models"] == ["slow"]
+    assert result["confidence"] == 2 / 3
+
+
+def test_exp3_update_increases_probability_after_reward():
+    weights = {"a": 1.0, "b": 1.0}
+    before = exp3_probabilities(weights)
+    after_weights = exp3_update(weights, chosen="a", reward=1.0, probability=before["a"])
+    after = exp3_probabilities(after_weights)
+
+    assert after["a"] > before["a"]

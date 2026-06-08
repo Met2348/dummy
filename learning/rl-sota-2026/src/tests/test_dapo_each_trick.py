@@ -53,6 +53,11 @@ def test_group_useful_mixed():
     assert is_group_useful(torch.tensor([1.0, 0, 1, 0]))
 
 
+def test_group_useful_pm_one_rewards():
+    """论文使用 +1/-1 reward，混合正确/错误也应可用."""
+    assert is_group_useful(torch.tensor([1.0, -1, 1, -1]))
+
+
 # ===== Token-level vs Response-level =====
 
 def test_token_level_long_response_more_weight():
@@ -77,30 +82,30 @@ def test_token_level_long_response_more_weight():
 # ===== Overlong Shaping =====
 
 def test_overlong_unmodified_short():
-    """response 短于 target_len → reward 不变."""
+    """response 短于 expected_len → reward 不变."""
     out = overlong_shaping(
         torch.tensor([1.0]), torch.tensor([1000.0]),
-        target_len=4096,
+        expected_len=4096,
     )
     assert abs(out.item() - 1.0) < 1e-6
 
 
 def test_overlong_penalized_long():
-    """response 远长于 target_len → reward 接近 0."""
+    """response 远长于 max_len → 正确样本被加 -1 penalty."""
     out = overlong_shaping(
         torch.tensor([1.0]), torch.tensor([10000.0]),
-        target_len=4096, alpha=200,
+        expected_len=4096, cache_len=200,
     )
-    assert out.item() < 0.01
+    assert abs(out.item() - 0.0) < 1e-6
 
 
-def test_overlong_at_target_len():
-    """response == target_len → reward * sigmoid(0) = 0.5."""
+def test_overlong_linear_cache_penalty():
+    """cache 区间内线性扣分."""
     out = overlong_shaping(
-        torch.tensor([1.0]), torch.tensor([4096.0]),
-        target_len=4096, alpha=200,
+        torch.tensor([1.0]), torch.tensor([4196.0]),
+        expected_len=4096, cache_len=200,
     )
-    assert abs(out.item() - 0.5) < 1e-3
+    assert abs(out.item() - 0.5) < 1e-6
 
 
 if __name__ == "__main__":

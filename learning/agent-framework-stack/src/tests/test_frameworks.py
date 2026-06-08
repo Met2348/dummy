@@ -13,6 +13,7 @@ MODULES = [
     "pydantic_ai_style",
     "vercel_ai_style",
     "claude_agent_sdk_style",
+    "survey_taxonomy",
     "selection_tree",
     "capstone_same_task",
 ]

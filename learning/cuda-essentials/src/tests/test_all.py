@@ -6,7 +6,8 @@ SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
 MODULES = ["common", "vector_add", "warp_primitives", "shared_memory",
-           "coalescing", "reduce_kernel", "gemm_tiled", "capstone_softmax"]
+           "coalescing", "reduce_kernel", "gemm_tiled",
+           "cuda_original_minimal", "capstone_softmax"]
 
 
 def main() -> int:

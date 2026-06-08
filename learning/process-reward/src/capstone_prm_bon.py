@@ -47,14 +47,14 @@ def evaluate_bon(n_questions: int = 100, k: int = 32, accuracy: float = 0.3):
 
 
 if __name__ == "__main__":
-    print("Capstone — GSM8K PRM + BoN (mock data)\n" + "=" * 50)
+    print("Capstone - GSM8K PRM + BoN (mock data)\n" + "=" * 50)
     for base_acc in [0.2, 0.3, 0.4]:
         print(f"\nbase greedy accuracy = {base_acc:.0%}")
         out = evaluate_bon(100, 32, accuracy=base_acc)
         for strat, acc in out.items():
-            print(f"  {strat:14s} → {acc:.1%}")
+            print(f"  {strat:14s} -> {acc:.1%}")
     print("\n观察:")
     print("  - PRM rerank (bon) 比 greedy + ~15pp")
     print("  - majority 比 greedy + ~10pp，但弱于 BoN")
     print("  - weighted_bon 几乎与 bon 持平")
-    print("  → 训 PRM 是值得的工程投入")
+    print("  -> 训 PRM 是值得的工程投入")

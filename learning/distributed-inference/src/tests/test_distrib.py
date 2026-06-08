@@ -112,7 +112,7 @@ def test_kv_payload_bytes_grows_with_seq():
 def test_router_prefix_hash_consistent():
     r1 = Router(4)
     r2 = Router(4)
-    # same prompt → same replica
+    # Same prompt maps to the same replica.
     assert r1.route([1, 2, 3, 4, 5, 6, 7, 8], "prefix_hash") == r2.route([1, 2, 3, 4, 5, 6, 7, 8], "prefix_hash")
 
 

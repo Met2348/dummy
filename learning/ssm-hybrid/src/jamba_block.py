@@ -1,4 +1,4 @@
-"""Jamba-style hybrid block — attn / mamba 按层配比."""
+"""Jamba-style hybrid block - mix attention and Mamba by layer."""
 from __future__ import annotations
 
 import math

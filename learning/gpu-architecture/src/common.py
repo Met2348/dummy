@@ -1,4 +1,4 @@
-"""Common GPU model — H100 / H200 / B200 / GB200 specs."""
+"""Common GPU model: H100 / H200 / B200 / GB200 specs."""
 from __future__ import annotations
 from dataclasses import dataclass
 

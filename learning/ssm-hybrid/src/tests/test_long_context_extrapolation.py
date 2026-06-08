@@ -20,7 +20,7 @@ def test_mini_mamba_forward():
 
 
 def test_long_context_no_explosion():
-    """训 32 长度 → 推 128 长度，ppl 不爆."""
+    """Train at length 32, infer at length 128, and keep logits finite."""
     cfg = MiniMambaConfig(vocab_size=64, n_layer=2, d_model=32, d_state=8)
     m = MiniMamba(cfg).eval()
     with torch.no_grad():

@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MODULES = [
     "common",
+    "gcg_original_minimal",
     "gcg_minimal",
     "pair_minimal",
     "autodan_minimal",

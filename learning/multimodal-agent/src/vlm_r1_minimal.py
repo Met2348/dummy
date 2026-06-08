@@ -1,4 +1,4 @@
-"""VLM-R1 (OM-AI Lab 2025.02) — GRPO 直接训 VLM.
+"""VLM-R1 reward helpers - GRPO directly trains a VLM.
 
 VLM-R1 = Qwen2-VL + GRPO + counting/grounding reward.
 本文件: 简化 reward 函数 + mock training step (真训需 GPU 配 VLM).
@@ -117,7 +117,7 @@ if __name__ == "__main__":
         ([200, 200, 250, 250], [0, 0, 100, 100]),
     ]:
         r = grounding_reward(pred, gt)
-        print(f"  pred={pred} gt={gt} → reward={r:.3f}")
+        print(f"  pred={pred} gt={gt} -> reward={r:.3f}")
 
     print("\n[Setup code (伪代码)]:")
     print(vlm_r1_setup_code())

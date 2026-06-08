@@ -71,7 +71,7 @@ VARIANTS = {
         n_param=270_000_000,
         seq_len=1024, micro_batch=16, grad_accum=8,
         max_step=4000, base_lr=6e-4,
-        data_desc="curriculum: web → code → math → long doc",
+        data_desc="curriculum: web -> code -> math -> long doc",
         target_loss=2.8,
         notes="一气训长 ctx + 课程",
     ),
@@ -115,7 +115,7 @@ def train(cfg: VariantCfg, dry: bool = True):
     print(f"  model:    {cfg.model_name} ({cfg.n_param/1e6:.0f}M)")
     print(f"  data:     {cfg.data_desc}")
     print(f"  training: seq={cfg.seq_len} batch="
-          f"{cfg.micro_batch}×{cfg.grad_accum}={cfg.micro_batch*cfg.grad_accum} "
+          f"{cfg.micro_batch}x{cfg.grad_accum}={cfg.micro_batch*cfg.grad_accum} "
           f"step={cfg.max_step} lr={cfg.base_lr}")
     print(f"  target loss: {cfg.target_loss}")
     print(f"  notes: {cfg.notes}")
@@ -162,7 +162,7 @@ def train(cfg: VariantCfg, dry: bool = True):
 
     ckpt = f"ckpt_{cfg.variant}.pt"
     torch.save({"model": model.state_dict(), "variant": cfg.variant}, ckpt)
-    print(f"\n  saved → {ckpt}")
+    print(f"\n  saved -> {ckpt}")
 
 
 def main():

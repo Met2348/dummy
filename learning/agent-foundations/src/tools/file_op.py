@@ -1,4 +1,4 @@
-"""Mock file op — in-memory virtual fs."""
+"""Mock file op - in-memory virtual fs."""
 from __future__ import annotations
 import sys
 import os

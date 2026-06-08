@@ -1,4 +1,4 @@
-"""Sandbox mock — AST whitelist + restricted exec."""
+"""Sandbox mock - AST whitelist + restricted exec."""
 from __future__ import annotations
 import ast
 

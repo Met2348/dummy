@@ -1,4 +1,4 @@
-"""Zamba — shared attention 共享 across multiple layers."""
+"""Zamba - shared attention across multiple layers."""
 from __future__ import annotations
 
 import torch

@@ -1,4 +1,4 @@
-"""Mock CUDA execution model — grid, block, warp, thread."""
+"""Mock CUDA execution model: grid, block, warp, thread."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 
@@ -55,7 +55,7 @@ def _self_test() -> None:
     b = Block(0, (256, 1, 1))
     assert b.n_threads() == 256
     assert b.n_warps() == 8
-    # 100 threads → 4 warps (last partial)
+    # 100 threads gives 4 warps, with the last warp partially used.
     b2 = Block(0, (100, 1, 1))
     assert b2.n_warps() == 4
     print("[OK] cuda_essentials.common")

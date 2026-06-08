@@ -1,4 +1,4 @@
-"""NCCL collective primitives — mock latency/BW model."""
+"""NCCL collective primitives: mock latency/BW model."""
 from __future__ import annotations
 from common import Link
 from allreduce_algos import ring_allreduce, tree_allreduce

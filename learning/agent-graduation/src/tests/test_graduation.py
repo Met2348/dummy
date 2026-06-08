@@ -15,6 +15,7 @@ MODULES = [
     "dra.orchestrator",
     "eval.tau_bench_mock",
     "eval.dra_eval",
+    "eval.agent_eval_matter",
     "portfolio_v2",
 ]
 

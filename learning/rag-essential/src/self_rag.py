@@ -14,7 +14,7 @@ def confidence_score(query: str, results: list[RetrievalResult]) -> float:
 
 
 def mock_web_search(query: str) -> list[RetrievalResult]:
-    """Mock web fallback — returns a single canned 'web' result."""
+    """Mock web fallback - returns a single canned web result."""
     snippet = f"[web] Relevant 2025 result for: {query}"
     ch = Chunk(doc_id="web", chunk_id="web1", text=snippet)
     return [RetrievalResult(chunk=ch, score=0.5)]

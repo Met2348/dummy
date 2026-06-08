@@ -1,7 +1,7 @@
-"""JailbreakBench / HarmBench standardized eval — TEACHING MOCK.
+"""JailbreakBench / HarmBench standardized eval - TEACHING MOCK.
 
-Real bench: 100-500 standardized harmful queries × N attack methods,
-report ASR (Attack Success Rate) per method × target.
+Real bench: 100-500 standardized harmful queries x N attack methods,
+report ASR (Attack Success Rate) per method x target.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def run_jailbench(target: TargetFn, queries: List[str] = None) -> Dict[str, floa
 
 
 def to_md(target_name: str, asr: Dict[str, float]) -> str:
-    lines = [f"# JailbreakBench results — `{target_name}`",
+    lines = [f"# JailbreakBench results - `{target_name}`",
              "| method | ASR |", "|---|---:|"]
     for k, v in asr.items():
         lines.append(f"| {k} | {v:.0%} |")
@@ -45,12 +45,12 @@ def to_md(target_name: str, asr: Dict[str, float]) -> str:
 
 
 def _self_test() -> int:
-    # Safe target — all methods ~0% ASR
+    # Safe target - all methods around 0% ASR
     safe = make_safe_target("safe", jb_keys=[])
     asr_safe = run_jailbench(safe, HARMFUL_QUERIES[:2])
     assert all(v == 0.0 for v in asr_safe.values()), asr_safe
-    # Vulnerable target — at least some methods succeed
-    vuln = make_safe_target("vuln", jb_keys=["{!}"])
+    # Vulnerable target - at least some methods succeed
+    vuln = make_safe_target("vuln", jb_keys=["<toy_trigger>"])
     asr_vuln = run_jailbench(vuln, HARMFUL_QUERIES[:2])
     n_succeed = sum(1 for v in asr_vuln.values() if v > 0)
     assert n_succeed >= 2, asr_vuln
