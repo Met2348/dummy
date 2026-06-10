@@ -16,6 +16,8 @@ build your taste before you drown in random accepted papers.
 - `source-pages/workshops/`: official workshop master lists.
 - `source-pages/workshops/priority-pages/`: selected NLP/LLM workshop pages.
 - `source-pages/people/`: researcher pages that should become paper-reading entry points.
+- `fallback/`: public GitHub/community indexes for cases where official pages do
+  not expose directly downloadable slides, PDFs, or reading lists.
 
 One external page was not archived because Windows Defender flagged the HTML
 snapshot. The URL is still retained in `sources.csv` and the skip note is in
@@ -163,3 +165,20 @@ Use a 5-day cycle:
 
 This is the reason to start from keynote people. You are not only collecting
 papers; you are training your taste function.
+
+## Fallback Search Rule
+
+When an official keynote/workshop page does not provide a direct PDF, slide
+deck, video, or reading list, use this order:
+
+1. Search the speaker's homepage and lab page.
+2. Search the conference/workshop official page and virtual-event page.
+3. Search GitHub/community lists, but mark them as non-official.
+4. Search OpenReview, ACL Anthology, Semantic Scholar, and Google Scholar for the speaker's recent representative papers.
+5. Only keep materials that are clearly public; do not archive private, paywalled, or login-gated content.
+
+The current public fallback set is in `fallback/README.md`. It includes GitHub
+indexes such as `qingsongedu/awesome-AI-tutorials-surveys`,
+`qingsongedu/Talks-Keynotes-slides`, `soulbliss/NLP-conference-compendium`,
+`AmberLJC/LLMSys-PaperList`, and related topic lists for causal NLP,
+social-good NLP, knowledge graphs, best papers, and LLM optimization.

@@ -7,6 +7,7 @@ researcher-entry pages collected for learning from top NLP/ML researchers.
 - Source manifest: [sources.csv](sources.csv)
 - Download audit log: [download_log.json](download_log.json)
 - Local HTML snapshots: [source-pages/](source-pages/)
+- Public fallback/community sources: [fallback/README.md](fallback/README.md)
 
 Scope of this first pass:
 
@@ -17,6 +18,8 @@ Scope of this first pass:
   likely to contain invited speakers, keynote talks, or strong problem-framing
   signals.
 - Teacher-mentioned researcher entry: Xin (Eric) Wang.
+- Public GitHub/community fallback indexes for cases where official pages do not
+  expose direct slides, PDFs, or downloadable reading lists.
 
 One external page, `Visions of Language Modeling`, is retained as a URL but not
 archived as HTML because Windows Defender flagged the downloaded snapshot. See
