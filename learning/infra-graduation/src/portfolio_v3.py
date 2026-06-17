@@ -1,14 +1,15 @@
-"""Capstone-3 — 46-topic Portfolio v3 generator."""
+"""Capstone-3 — 48-topic Portfolio v3 generator (v3.1, Module 7 extended)."""
 from __future__ import annotations
 
 
-HEADER = """# 46-Topic LLM Learning Portfolio (v3)
+HEADER = """# 48-Topic LLM Learning Portfolio (v3.1)
 
-> Generated 2026-06-06 · Module 8 收官 · 整个学习马拉松 + 硬件层完成 ⭐⭐⭐⭐⭐⭐⭐⭐
+> Generated 2026-06-06 · Module 8 收官 ⭐⭐⭐⭐⭐⭐⭐⭐
+> Extended 2026-06-17 · Module 7 +2 (agent-design-patterns / agent-harness-design) → 48 专题
 """
 
 
-TIMELINE = """## Section 1: 46-topic Timeline
+TIMELINE = """## Section 1: 48-topic Timeline
 
 ### Module 1 PEFT (3 专题)
   1. `prompt-tuning-family` — soft prompt / P-tuning / IPT
@@ -52,23 +53,25 @@ TIMELINE = """## Section 1: 46-topic Timeline
  31. `safety-defense`
  32. `eval-graduation`
 
-### Module 7 Agent 应用层 (7 专题)
+### Module 7 Agent 应用层 (9 专题)
  33. `agent-foundations`
  34. `rag-essential`
  35. `tool-use-mcp`
  36. `multi-agent-orchestration`
  37. `agent-memory-context`
  38. `agent-framework-stack`
- 39. `agent-graduation`
+ 39. `agent-design-patterns` ⭐ NEW — 5 workflow 模式 + workflow-vs-agent + context eng
+ 40. `agent-harness-design` ⭐ NEW — agentic loop + tool/context/permission/trace 引擎
+ 41. `agent-graduation`
 
-### Module 8 Infra/硬件层 (7 专题) ⭐ NEW
- 40. `gpu-architecture` — H100/B200/Tensor Core/HBM/NVLink/Roofline
- 41. `cuda-essentials` — kernel/thread/warp/SMEM/coalesce/online softmax
- 42. `kernel-engineering` — Triton/CUTLASS/FlashAttn/fused MLP
- 43. `cluster-networking` — NVLink/IB/NCCL/SHARP/fat-tree
- 44. `storage-dataops` — Lustre/dataloader/sharding/DCP-async ckpt
- 45. `training-orchestration` — Slurm/Ray/Young's formula/elastic
- 46. `infra-graduation` — Mini-cluster sim + topology selector + Portfolio v3 ⭐⭐⭐⭐⭐⭐⭐⭐
+### Module 8 Infra/硬件层 (7 专题)
+ 42. `gpu-architecture` — H100/B200/Tensor Core/HBM/NVLink/Roofline
+ 43. `cuda-essentials` — kernel/thread/warp/SMEM/coalesce/online softmax
+ 44. `kernel-engineering` — Triton/CUTLASS/FlashAttn/fused MLP
+ 45. `cluster-networking` — NVLink/IB/NCCL/SHARP/fat-tree
+ 46. `storage-dataops` — Lustre/dataloader/sharding/DCP-async ckpt
+ 47. `training-orchestration` — Slurm/Ray/Young's formula/elastic
+ 48. `infra-graduation` — Mini-cluster sim + topology selector + Portfolio v3 ⭐⭐⭐⭐⭐⭐⭐⭐
 """
 
 
@@ -100,6 +103,8 @@ CAPSTONES = """## Section 3: All Capstones (Modules 1-8)
 | DRA from scratch | M7 | planner+retriever+writer+verifier |
 | τ-bench eval | M7 | 5 task × 5 dim |
 | Portfolio v2 | M7 | 39-topic |
+| Pattern Zoo ⭐ | M7 | 1 task × 6 designs 成本对照 |
+| Mini-Harness ⭐ | M7 | agentic loop + 权限拦截 + trace |
 | Roofline zoo ⭐ | M8 | 10 op × 4 GPU |
 | Online softmax ⭐ | M8 | 1-pass FlashAttn kernel |
 | Attention HBM zoo ⭐ | M8 | 1025× HBM saved at 128k |
@@ -108,7 +113,7 @@ CAPSTONES = """## Section 3: All Capstones (Modules 1-8)
 | 24h Slurm sim ⭐ | M8 | 8 jobs × 512 GPU |
 | **Mini-cluster simulator** ⭐⭐⭐ | M8 | 18 scenario time-to-train + TCO |
 | **Topology selector** ⭐⭐⭐ | M8 | (model, budget, deadline) → blueprint |
-| **Portfolio v3** | M8 | 46-topic ⭐⭐⭐⭐⭐⭐⭐⭐ |
+| **Portfolio v3** | M8 | 48-topic (v3.1) ⭐⭐⭐⭐⭐⭐⭐⭐ |
 """
 
 
@@ -153,7 +158,8 @@ SIX_PROFILES = """## Section 5: 6 大画像 v3
 3. 用模型      — vLLM / SGLang / 量化 / 分布式 (M5)
 4. 评模型      — 25 bench / Arena / 红队 (M6)
 5. 守模型      — 4 层防御 + Constitutional Cls (M6)
-6. 造 agent   — ReAct / RAG / MCP / multi-agent / memory (M7)
+6. 造 agent   — ReAct / RAG / MCP / multi-agent / memory
+              + 设计选型(5 workflow 模式) + 手搭 harness 引擎 (M7, +2)
 7. 造 infra ⭐ — GPU / CUDA / kernel / fabric / Slurm (M8 NEW)
 
 = 2026 年 LLM 全栈工程师 ID 卡 v3
@@ -172,6 +178,8 @@ WHAT_I_CAN_DO = """## Section 6: What I Can Do (cover letter snippets v3)
 - "I can build a deep research agent with planner/retriever/writer/verifier (M7)."
 - "I can do red-team + 4-layer defense including Constitutional Classifiers (M6)."
 - "I can compare 6 agent frameworks and pick one with a decision tree (M7)."
+- "I can pick the cheapest workflow design for a task (5 patterns) instead of over-building an agent (M7)." ⭐
+- "I can build an agent harness from scratch: agentic loop, tool dispatch, context mgmt, permissions, tracing (M7)." ⭐
 - "I can roofline-analyze any LLM op against H100/B200, identifying memory vs compute bound (M8)." ⭐
 - "I can write FlashAttn-style online softmax + tiled GEMM kernels in Triton (M8)." ⭐
 - "I can size a training cluster for an N-param model under a budget + deadline (M8)." ⭐
@@ -215,7 +223,7 @@ def _self_test() -> None:
         1 for line in content.split("\n")
         if line.strip() and line.strip()[0].isdigit() and "`" in line
     )
-    assert n_topics >= 46, n_topics
+    assert n_topics >= 48, n_topics
 
     for m in ["Module 1 PEFT", "Module 3 造大模型", "Module 4 改大模型",
               "Module 5 用大模型", "Module 6 评测/安全", "Module 7 Agent 应用层",
