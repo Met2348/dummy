@@ -2,6 +2,7 @@
 
 > Generated 2026-06-06 · Module 8 收官 ⭐⭐⭐⭐⭐⭐⭐⭐
 > Extended 2026-06-17 · Module 7 +2 (agent-design-patterns / agent-harness-design) → 48 专题
+> Extended 2026-06-17 · **Module 9「科研技能」开张** ⭐ — 首专题 `critical-reading-gap` 完成 (工程 → 研究, 第二条腿); 详见文末
 
 ## Section 1: 48-topic Timeline
 
@@ -182,3 +183,39 @@
 | **HPC/Cluster Engineer** ⭐ NEW | $200k-$500k | **M8 sys** + M5 |
 
 > M8 直接打开两条新职业路径（GPU 内核 + HPC 集群）
+
+---
+
+## Module 9 科研技能 — 工程之外的第二条腿 (在建 ⭐ NEW, 2026-06-17 起)
+
+> **动因**: Module 1-8 练的是**工程**(复现/实现已有技术), 衡量标准是 "What I Can Do"。
+> PhD 衡量的是另一件事: **产出前人没有的新知识**。`I can replicate R1-Zero` ≠ `I can do research`。
+> Module 9 在工程地基之上, 补「从消费知识到生产知识」这一层。**课件式专题为主, 按研究项目生命周期编排。**
+
+### 9 专题蓝图 (生命周期)
+```
+地基    9.1 research-knowledge-mgmt   知识管理 (Zotero/笔记/idea pipeline)
+输入    9.2 literature-mapping        文献综述 + 领域地图
+       9.3 critical-reading-gap  ✅   批判式读论文 + 找问题   ← 首专题, 已完成
+执行    9.4 experiment-design         实验设计 + baseline + 消融
+       9.5 experiment-ops-repro      实验管理 + 可复现
+输出    9.6 research-figures          科研绘图 (出版级图)
+       9.7 paper-writing-submission  科研写作 + 投稿 (升级复用 how_to_write_a_paper)
+       9.8 research-presentation     会议 talk / poster / 答辩
+科研生活 9.9 research-life            审稿 + 导师沟通 + 伦理
+```
+
+### 首专题 `critical-reading-gap` 产出 (已完成)
+- 5 讲课件: 三遍读法 → 攻击式阅读(10问) → gap 分类学(6类) → idea 生成(5法+三筛) → 周流水线 SOP
+- 2 notebook (已 nbconvert 跑通): N1 解剖一篇真论文 + 拉引用邻域图; **N2 把自己的 R1-Zero 复现当待审稿论文挖 gap**
+- 3 模板 + 2 工具 (make_cards 一键起卡 / citation_graph 拉引用图)
+- 设计/计划: `docs/superpowers/specs|plans/2026-06-17-research-skills-module9*`
+
+### 第 8 大画像 (在建)
+```
+1-7 大画像 (工程): 造/改/用/评/守模型 + 造 agent + 造 infra
+8. 会做研究的人 ⭐ — 读论文找 gap → 设计实验 → 写成 paper → 投稿/presentation
+   (Module 9 完成后, portfolio 将正式升 v4)
+```
+
+> 诚实标注: Module 9 仅完成 1/9 专题, 故**暂不升 v4**; 待 9 专题收齐再正式发 portfolio v4「工程 + 研究」双 ID 卡。
