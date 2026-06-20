@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -185,6 +186,65 @@ def _run_test_command(module: str, command: list[str], timeout: int) -> list[Run
     return script_results
 
 
+RUNBOOK_NAME = "runbook.yaml"
+
+
+def _load_runbook(module: str) -> list[dict]:
+    """Read learning/<module>/runbook.yaml -> list of command entries."""
+    path = LEARNING / module / RUNBOOK_NAME
+    if not path.exists():
+        return []
+    import yaml
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("commands", []) or []
+
+
+def _format_cmd(template: str, params: dict | None) -> list[str]:
+    """Render a doc command template with smoke params and swap python -> venv exe."""
+    text = template.format(**(params or {}))
+    tokens = [t.strip('"').strip("'") for t in shlex.split(text, posix=False)]
+    if tokens and tokens[0] in {"python", "python3", "py"}:
+        tokens[0] = sys.executable
+    return tokens
+
+
+def _script_of(tokens: list[str]) -> str | None:
+    for token in tokens:
+        if token.endswith(".py"):
+            return token
+    return None
+
+
+def _run_runbook(module: str, timeout: int) -> list[RunResult]:
+    """Verify a module's documented entry-point commands.
+
+    V0: referenced script exists + `python <script> --help` exits 0.
+    V1: run the smoke form of `tier: V1` commands to completion.
+    """
+    results: list[RunResult] = []
+    for entry in _load_runbook(module):
+        cid = entry.get("id", "?")
+        tier = entry.get("tier", "V1")
+        tokens = _format_cmd(entry["cmd"], entry.get("smoke", {}))
+        script = _script_of(tokens)
+        if script is not None:
+            exists = (ROOT / script).exists() or Path(script).exists()
+            if not exists:
+                results.append(
+                    RunResult(module, f"runbook-v0:{cid}", tokens, "FAIL", None,
+                              0.0, "", f"script not found: {script}")
+                )
+            else:
+                results.append(
+                    _run(module, f"runbook-v0:{cid}",
+                         [sys.executable, script, "--help"], min(timeout, 120))
+                )
+        if tier == "V1":
+            results.append(_run(module, f"runbook-v1:{cid}", tokens, timeout))
+    return results
+
+
 def _selected_modules(args: argparse.Namespace) -> list[str]:
     if args.modules:
         return args.modules
@@ -240,16 +300,26 @@ def main() -> int:
     parser.add_argument("--modules", nargs="*", default=[])
     parser.add_argument("--env", action="store_true", help="run verify_env.py")
     parser.add_argument("--tests", action="store_true", help="run pytest")
+    parser.add_argument("--runbook", action="store_true",
+                        help="run documented runbook.yaml entry-point commands (V0+V1)")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--json-out", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--md-out", type=Path, default=DEFAULT_MD)
     args = parser.parse_args()
 
-    if not args.env and not args.tests:
+    if not args.env and not args.tests and not args.runbook:
         args.tests = True
 
     results: list[RunResult] = []
     for module in _selected_modules(args):
+        if args.runbook:
+            for result in _run_runbook(module, args.timeout):
+                print(f"  -> {result.kind} {result.status} ({result.seconds:.2f}s)", flush=True)
+                results.append(result)
+                _write_json(results, args.json_out)
+                _write_md(results, args.md_out)
+            if not args.env and not args.tests:
+                continue
         commands = _commands_for(module, args.env, args.tests)
         if not commands:
             results.append(
