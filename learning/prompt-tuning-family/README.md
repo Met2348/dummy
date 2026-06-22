@@ -101,6 +101,40 @@ python src/tests/test_p_tuning_consistency.py
 python src/tests/test_p_tuning_v2_consistency.py
 ```
 
+### 运行验证（Runbook）
+
+> 本模块的"可运行入口"即 [`runbook.yaml`](runbook.yaml) 登记的 9 个 minimal/peft 直跑 demo，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）V1 验证通过（无需改代码）。
+> 一键复验：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules prompt-tuning-family
+> ```
+
+每种方法都可直接跑（无需传参，自带 smoke 规模）：
+
+```powershell
+# Prompt Tuning（最简单，先看这个）
+python learning/prompt-tuning-family/src/prompt_tuning_minimal.py
+python learning/prompt-tuning-family/src/prompt_tuning_peft.py
+# Prefix Tuning
+python learning/prompt-tuning-family/src/prefix_tuning_minimal.py
+python learning/prompt-tuning-family/src/prefix_tuning_original_minimal.py   # 纯数值自检，秒级
+python learning/prompt-tuning-family/src/prefix_tuning_peft.py
+# P-Tuning v1 / v2
+python learning/prompt-tuning-family/src/p_tuning_minimal.py
+python learning/prompt-tuning-family/src/p_tuning_peft.py
+python learning/prompt-tuning-family/src/p_tuning_v2_minimal.py
+python learning/prompt-tuning-family/src/p_tuning_v2_peft.py
+```
+
+**测试（V2）**：4 个一致性测试校验 minimal 与 peft 数值对齐：
+
+```powershell
+python scripts/eric_3080ti_env_audit.py --modules prompt-tuning-family --tests
+# 或单独：python src/tests/test_prompt_consistency.py 等
+```
+
+> 注：本模块用 transformers 5.x 接口（`past_key_values` 为 `DynamicCache`）；4.x 需改回 tuple，详见 §8 与 `environment/README.md`。
+
 ## 7. 目录结构
 
 ```

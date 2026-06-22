@@ -35,7 +35,7 @@
 
 | # | Module | Grp | README | runbook | V0 | V1 | V2 | Notes / 修复 | Commit |
 |---|--------|-----|:--:|:--:|:--:|:--:|:--:|---|---|
-| 1 | prompt-tuning-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 1 | prompt-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 9 个 minimal/peft demo V1 全绿，**无需改码**；V0 N/A（无 argparse，v0:false）；V2 基线绿 | 41461e5.. |
 | 2 | lora-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | tests 280s（重）| |
 | 3 | adapter-tuning-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | tests 127s（重）| |
 | 4 | data-curation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
