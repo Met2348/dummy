@@ -86,6 +86,40 @@ python src/graduation_capstone.py
 python src/graduation_capstone.py --train
 ```
 
+## 运行验证（Runbook）
+
+文档入口命令清单见 [`runbook.yaml`](runbook.yaml)。一键 smoke 验证（V0 静态 `--help` + V1 最小预算真跑）：
+
+```bash
+.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --runbook --modules small-model-graduation --timeout 180 \
+  --json-out docs/local-env/ERIC-3080Ti-runbook-results.json --md-out docs/local-env/ERIC-3080Ti-runbook-matrix.md
+```
+
+可跑入口（`full` = 文档原形态；smoke 由 runbook 自动缩小预算）：
+
+| 入口 | full 形态 | smoke（验证器实跑） | GPU |
+|------|-----------|---------------------|:---:|
+| `vanilla_gpt2.py` | 直跑 | 同（建 124.4M + 前向） | — |
+| `tinystories_original_minimal.py` | 直跑 | 同（self-test 真 assert） | — |
+| `bench_matrix.py` / `generations_compare.py` / `visualize.py` / `common.py` | 直跑 | 同（真写表/模板/描述） | — |
+| `train_variant.py --variant A --max_step 3000 --train` | A 真训 3000 step | `--max_step 2 --seq_len 64 --micro_batch 2 --grad_accum 2 --train`（2 step 真训, ~12s, 不落 ckpt） | ✓ |
+| `graduation_capstone.py` | dry-run 生成 5 报告产物 | 同, 写 `/tmp/grad_smoke`（`--train` 才 5 ckpt 真训, 5090 ~24h） | — |
+
+关键坑注记：
+
+- **`train_variant.py` 的覆盖 flag**：lectures 文档化的 `--max_step` / `--seq_len` 等本是脚本未实现的（原仅 `--variant`/`--train`，文档命令会 `unrecognized arguments` 崩）；现已补齐为可选覆盖项（默认回退各 variant 配置），使文档命令真能跑，并让 smoke 用极小预算走真训路径。`--max_step < 100` 的 smoke 不写 `ckpt_*.pt`（仓库零污染）。
+- **`graduation_capstone.py` dry-run** 用 `EXPECTED` 参考 benchmark 生成报告（stdout 明示 `using EXPECTED for dry-run`），是诚实的报告骨架，非伪造训练结果；真实数字需 `--train`。
+- 训练用 `mock_loader`（random ints）教学占位，**不下载真实语料**（src 内无 `load_dataset`）；真训质量需真数据（见 lectures L03 Cosmopedia）。
+- variant C/D/E `--train` 依赖 Topic 7 `pretraining-recipe/src/phi_tiny_model.py` 且为重型（Phi-tiny 270M / 8k ctx），非本地 smoke 目标；smoke 只跑最轻的 variant A。
+
+测试（V2）：
+
+```bash
+.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --modules small-model-graduation --tests --timeout 600 \
+  --json-out /tmp/v2-small-model.json --md-out /tmp/v2-small-model.md
+# 或直接: python -m pytest src/tests/ -v   (14 passed)
+```
+
 ## 毕业 checklist
 
 - [ ] 5 ckpt 全部训完

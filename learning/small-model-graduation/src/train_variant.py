@@ -160,17 +160,40 @@ def train(cfg: VariantCfg, dry: bool = True):
         if step % 100 == 0:
             print(f"  step {step:>5d} loss {accum_loss:.4f} lr {lr:.2e}")
 
-    ckpt = f"ckpt_{cfg.variant}.pt"
-    torch.save({"model": model.state_dict(), "variant": cfg.variant}, ckpt)
-    print(f"\n  saved -> {ckpt}")
+    # Smoke / tiny runs (tens of steps) are not real checkpoints; skip the
+    # write so a quick `--train --max_step 2` does not pollute the repo root.
+    if cfg.max_step >= 100:
+        ckpt = f"ckpt_{cfg.variant}.pt"
+        torch.save({"model": model.state_dict(), "variant": cfg.variant}, ckpt)
+        print(f"\n  saved -> {ckpt}")
+    else:
+        print(f"\n  [smoke] max_step={cfg.max_step} < 100, skip ckpt write")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--variant", choices=list(VARIANTS.keys()), required=True)
     p.add_argument("--train", action="store_true")
+    # Optional overrides (lectures document --max_step / --seq_len; keeping the
+    # smoke budget tiny lets the documented commands run on a 16GB laptop GPU).
+    p.add_argument("--max_step", type=int, default=None,
+                   help="override variant max_step (default: per-variant cfg)")
+    p.add_argument("--seq_len", type=int, default=None,
+                   help="override variant seq_len")
+    p.add_argument("--micro_batch", type=int, default=None,
+                   help="override variant micro_batch")
+    p.add_argument("--grad_accum", type=int, default=None,
+                   help="override variant grad_accum")
     args = p.parse_args()
     cfg = VARIANTS[args.variant]
+    if args.max_step is not None:
+        cfg.max_step = args.max_step
+    if args.seq_len is not None:
+        cfg.seq_len = args.seq_len
+    if args.micro_batch is not None:
+        cfg.micro_batch = args.micro_batch
+    if args.grad_accum is not None:
+        cfg.grad_accum = args.grad_accum
     train(cfg, dry=not args.train)
 
 

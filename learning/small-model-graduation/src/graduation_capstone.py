@@ -13,8 +13,9 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from train_variant import VARIANTS, train
-from bench_matrix import EXPECTED, METRICS, write_csv, ablation_breakdown, make_report_md
-from visualize import loss_curve_text, spider_chart_text, make_loss_curve_data
+from bench_matrix import (EXPECTED, METRICS, write_csv, ablation_breakdown,
+                          make_report_md, make_loss_curve_data)
+from visualize import loss_curve_text, spider_chart_text
 from generations_compare import write_generations_md, MOCK_OUTPUTS, PROMPTS
 
 

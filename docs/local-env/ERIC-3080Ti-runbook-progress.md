@@ -18,7 +18,8 @@
 - 2026-06-20：建立 spec / plan / 账本三件套。
 - 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。
 - 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。
-- 2026-06-22：**M3 进度 5/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）、long-context（无改码，12/12 绿；早期修的 RoPE shape/打包溢出 bug 无回归）。**下一步：M3 剩余 scaling-infra → pretraining-recipe → small-model-graduation。**
+- 2026-06-22：**M3 进度 5/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）、long-context（无改码，12/12 绿；早期修的 RoPE shape/打包溢出 bug 无回归）。
+- 2026-06-22：**M3 造模型全部完成（8/8）**：+ scaling-infra（修不可行案例 formatter 崩溃）、pretraining-recipe（无改码，capstone 真跑从零训练 smoke）、small-model-graduation（修 2 真 bug：capstone import 漂移 + train_variant 缺文档化 flag）。**累计 11/46。下一步：M4 改模型（6 个，trl 漂移高危），从 rlhf-classic 开始。**
 
 ## 状态图例
 
@@ -47,7 +48,7 @@
 | 8 | long-context | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 11 demo V1 + 1 V0(capstone --help) 全绿(12/12)，**无需改码**。RoPE/PI/NTK/YaRN/3D 纯数学；ring-naive online-softmax max diff 2.4e-07≈vanilla；NIAH/RULER 题目生成器(设计不跑模型)；秒级 PASS 均真。ring_attention_lib [SKIP] 诚实库缺失(非假成功)；capstone 默认 dry-run 诚实骨架(--train 需 HF-gated 权重+5090)。早期修的 RoPE shape/打包溢出 bug 无回归。V2 基线绿 | |
 | 9 | scaling-infra | M3 | ✅ | ✅ | — | 🩹 | ✅ | 14 demo V1 全绿。修 capstone_train_estimator：175B/8×80GB 真不可行时 estimate() 返回 cost=None，但 report() 无条件 `${cost:.0f}` 崩溃(TypeError，硬崩非假成功)→加 feasibility 分支打印 n/a。ChinChilla 数学真实。V2 重跑绿 | 644c97b.. |
 | 10 | pretraining-recipe | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 9 demo V1 + 1 V0 全绿，**无需改码**。capstone 用 `--max_step 3` 跑**真实从零训练**(bf16,loss~9.6,15.6s)非dry-run；3步不落盘。datasets 已用命名空间 id(fineweb-edu)。data-mixture 真采样收敛。V2 复跑绿(10) | c111564.. |
-| 11 | small-model-graduation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 11 | small-model-graduation | M3 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 8 V1 + 2 V0 全绿。修 2 真 bug：① graduation_capstone 从 visualize import 实际在 bench_matrix 的函数→文档命令一上来 ImportError 崩；② train_variant 缺讲义文档化的 --max_step 等 flag→`--max_step 3000` 崩，补 flag+回退 cfg+smoke 不落 ckpt。V2 重跑绿(14) | 31c158c.. |
 | 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |
 | 13 | rlhf-classic | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: instruct-hf | |
 | 14 | dpo-family | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DPO | |
