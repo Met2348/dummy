@@ -1,0 +1,107 @@
+# pretraining-recipe 文档入口命令清单（runbook）
+# 验证：.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --runbook --modules pretraining-recipe \
+#   --json-out docs/local-env/ERIC-3080Ti-runbook-results.json --md-out docs/local-env/ERIC-3080Ti-runbook-matrix.md
+#
+# 本专题 = M3「造大模型」最大单 capstone：从零预训练一个 Phi-tiny 270M。
+#   流水线：data mixture → tokenize(依赖 data-curation) → shard(memmap) → init+LR(WSD/μP) →
+#           Phi-tiny 架构(Pre-RMSNorm+GQA+RoPE+SwiGLU+tied) → 训练 loop(grad-accum/spike 守卫) →
+#           eval(val_loss/tiny-HellaSwag) → 蒸馏 → 合成数据(Phi 风格) → Capstone 真训。
+#
+# argparse 盘点（grep -nE "add_argument|ArgumentParser|__main__" learning/pretraining-recipe/src/*.py）：
+#   仅 capstone_train.py 有 argparse(--seq_len/--micro_batch/--grad_accum/--max_step/--base_lr/--train) → v0: true。
+#   其余 8 个脚本只有 __main__ 直跑、零 add_argument → v0: false（跳过 --help 探针，直接 smoke 直跑）。
+#   harness 通过 PYTHONPATH 注入 learning/pretraining-recipe/src，故 capstone 内 `from phi_tiny_model import …`、
+#     tests 内裸 import 在 repo-root cwd 下都能解析（与 scaling-infra/long-context 同机制）。
+#
+# common.py 是纯公共工具(count_params/cosine_lr/wsd_lr/chinchilla/estimate_flops，被 tests import)
+#   → 非 lecture 入口，不列（与 scaling-infra common.py 同处理；其 __main__ self-test 打印 LR 表，仅 helper）。
+#
+# 数据/离线（catalog #2 对照）：唯一 load_dataset 出现在 lectures/05-data-loader.md 的教学代码块，
+#   且已用命名空间 id `HuggingFaceFW/fineweb-edu`（非裸别名）；src 里**无任何** load_dataset / HF 下载。
+#   capstone 真训用 mock_data_loader(random ints) 而非下载真实语料 → smoke 不依赖网络。
+#
+# 关键坑注记（catalog 对照）：
+#   - 秒级 PASS 全部合法（catalog #4 fake-pass 已逐一排除，均有真实数值/结构输出，无「捕获缺依赖 print+return」反模式）：
+#       · common(不列)/init_schedule  = 真算 cosine/WSD/inverse-sqrt/μP LR 曲线（step 0→max 真数）。
+#       · data_mixture = 真按 phi/llama3/qwen/deepseek 概率采样 10000 次，频率收敛到配比（web 49.9%≈50%）。
+#       · dataset_shards = 真写 3 个 memmap .bin(写 /tmp/test_shards)+ ShardManager 顺序遍历真 offset 推进。
+#       · distillation = 真算 KD KL(T=4) + combined CE+KD loss（随机 logits 上真数）。
+#       · eval_benchmarks = 真算 perplexity(exp) + 打印 tiny-HellaSwag 题数；__main__ 是 helper self-test
+#         (validation_loss/multiple_choice_score 是被 capstone/test import 的库函数，此处仅打印就绪)。
+#       · synth_data_prompt = 真生成 Phi 风格 seed prompt 池 + filter_quality 真过滤(拒 "Sorry, I cannot")。
+#       · training_loop = __main__ 是接口就绪标记(真训在 capstone)；train/train_step/EmaTracker 是被 import 的库。
+#   - phi_tiny_model = 真建 315.7M(excl tied embed 264.2M) torch 模型 + 真 forward 出 [2,64,50257]，~数秒。
+#   - capstone(--train) 真训：真建 PhiTiny 上 cuda bf16 + AdamW + 真前向/反向/clip/step；
+#       full=4000 step(5090 ~6h；3080Ti 16GB 装得下但更慢) → smoke=3 step(真训路径，loss~9.6，~16s)。
+#       ckpt_{step}.pt 仅在 step>0 且 step%1000==0 写出 → smoke(3 step)**不落任何 .pt**（仓库零污染）。
+#       数据用 mock_data_loader(random ints) 教学占位，非真实语料；真训质量需真数据(见 lectures/16-capstone.md)。
+#
+# 测试套件 src/tests/test_pretraining.py 归 V2（--tests，硬断言 phi 参数量/LR 曲线/shard 往返/Chinchilla/KD>0
+#   ——非空守卫，catalog #7 清白）；environment/verify_env.py 归 --env。无 official/ 子模块(.gitmodules 无本模块条目)。
+module: pretraining-recipe
+commands:
+  - id: phi-tiny-model
+    desc: "Phi-tiny 270M 架构：Pre-RMSNorm + GQA + RoPE + SwiGLU + tied embed，真建模 + 前向出 shape"
+    cmd: "python learning/pretraining-recipe/src/phi_tiny_model.py"
+    expect: "exit 0；打印 total 315.7M / excl-embed 264.2M / fwd [2,64,50257]"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: init-schedule
+    desc: "初始化 + LR schedule：GPT-2/μP 初始化 + cosine/WSD/inverse-sqrt/μP-lr 曲线"
+    cmd: "python learning/pretraining-recipe/src/init_schedule.py"
+    expect: "exit 0；打印各 step 三种 schedule + μP 随宽度缩放 lr"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: data-mixture
+    desc: "数据配比 + 课程：phi/llama3/qwen/deepseek 配比采样 + curriculum/WSD-annealing mixture"
+    cmd: "python learning/pretraining-recipe/src/data_mixture.py"
+    expect: "exit 0；10000 次采样频率收敛到配比（web≈50%/llama3 web≈70%）"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: dataset-shards
+    desc: "Memmap shard 数据集（nanoGPT 风格）：write/load_shard + ShardManager 多 shard 遍历 + resume"
+    cmd: "python learning/pretraining-recipe/src/dataset_shards.py"
+    expect: "exit 0；写 3 个 .bin + ShardManager state offset 真推进"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: eval-benchmarks
+    desc: "轻量 eval：val_loss/perplexity/tiny-HellaSwag 多选打分（库 self-test，真训评测在 capstone）"
+    cmd: "python learning/pretraining-recipe/src/eval_benchmarks.py"
+    expect: "exit 0；打印 ppl(loss=2.3)=9.97 + tiny-HellaSwag 3 题"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: distillation
+    desc: "蒸馏：soft-KL KD loss(温度 T) + CE+KD 组合 loss + 合成数据模板"
+    cmd: "python learning/pretraining-recipe/src/distillation.py"
+    expect: "exit 0；打印 KD loss / Combined loss 真数"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: synth-data-prompt
+    desc: "合成数据 prompt 生成器（Phi 风格）：seed 池 + filter_quality + dedup_by_prefix"
+    cmd: "python learning/pretraining-recipe/src/synth_data_prompt.py"
+    expect: "exit 0；生成 Phi 风格 prompt + 过滤掉 'Sorry, I cannot'"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: training-loop
+    desc: "标准 pretraining 训练 loop：param-group/AdamW/WSD/grad-accum/EMA spike 守卫（库接口就绪）"
+    cmd: "python learning/pretraining-recipe/src/training_loop.py"
+    expect: "exit 0；打印接口就绪（真训在 capstone_train.py）"
+    tier: V1
+    v0: false
+    gpu: false
+  - id: capstone-train
+    desc: "Capstone ⭐：从零预训练 Phi-tiny 270M（cuda bf16 + AdamW + WSD + grad-accum）。full 真训 4000 step≈6h；smoke 3 step 验真训路径"
+    cmd: "python learning/pretraining-recipe/src/capstone_train.py --train --max_step {step} --micro_batch {mb} --grad_accum {ga} --seq_len {sl}"
+    full:  { step: 4000, mb: 16, ga: 8, sl: 1024 }
+    smoke: { step: 3, mb: 2, ga: 2, sl: 128 }
+    expect: "exit 0；device=cuda + params 315.7M + step 0 loss~9.6；smoke 3 step 不写 ckpt"
+    tier: V1
+    v0: true
+    gpu: true

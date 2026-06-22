@@ -61,9 +61,55 @@ python environment/verify_env.py
 # 测试
 python -m pytest src/tests/ -v
 
-# Capstone (dry-run)
+# Capstone (dry-run：建模 + sanity check + WSD lr 表，不真训/不下载)
 python src/capstone_train.py
 
-# Capstone (真训, 5090 24G ~6h)
+# Capstone (真训, 5090 24G ~6h；3080 Ti 16GB 装得下但更慢)
 python src/capstone_train.py --train --max_step 4000
+```
+
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V0+V1 验证通过（10/10）。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules pretraining-recipe `
+>   --json-out docs/local-env/ERIC-3080Ti-runbook-results.json --md-out docs/local-env/ERIC-3080Ti-runbook-matrix.md
+> ```
+
+**Lecture 组件 demo**（8 个直跑脚本，均 CPU、秒级、真实数值/结构输出）：
+
+```powershell
+python learning/pretraining-recipe/src/phi_tiny_model.py    # L06 Phi-tiny 270M 建模 + 前向 (315.7M / excl-embed 264.2M)
+python learning/pretraining-recipe/src/init_schedule.py     # L04 cosine/WSD/inverse-sqrt/μP lr 曲线
+python learning/pretraining-recipe/src/data_mixture.py      # L02 phi/llama3/qwen/deepseek 配比采样
+python learning/pretraining-recipe/src/dataset_shards.py    # L05 nanoGPT memmap shard + ShardManager
+python learning/pretraining-recipe/src/eval_benchmarks.py   # L08 val_loss/ppl/tiny-HellaSwag 库 self-test
+python learning/pretraining-recipe/src/distillation.py      # L10 KD KL loss + CE+KD 组合
+python learning/pretraining-recipe/src/synth_data_prompt.py # L13 Phi 风格合成数据 prompt + 过滤
+python learning/pretraining-recipe/src/training_loop.py     # L07 训练 loop 库接口（真训在 capstone）
+```
+
+**Capstone：从零预训练 Phi-tiny 270M**（L16 ⭐）：
+
+```powershell
+# 真训（full）：4000 step、effective batch 128、WSD lr，5090 ~6h
+python learning/pretraining-recipe/src/capstone_train.py --train --max_step 4000 --micro_batch 16 --grad_accum 8 --seq_len 1024
+# 快速 smoke（验证真训路径可跑通；cuda bf16、step 0 loss~9.6、~16s）
+python learning/pretraining-recipe/src/capstone_train.py --train --max_step 3 --micro_batch 2 --grad_accum 2 --seq_len 128
+# 或仅 dry-run（建模 + sanity check，不真训）
+python learning/pretraining-recipe/src/capstone_train.py
+```
+
+> ⚠️ **数据是 mock**：capstone 用 `mock_data_loader`（random int token）作教学占位，验证的是**流水线与训练循环**而非收敛质量。真正训出可用 270M 需接真实语料（lectures/16-capstone.md：Cosmopedia + TinyStories，GPT-2 BPE，~500M token）。
+> **ckpt 落盘**：`--train` 仅在 `step%1000==0` 写 `ckpt_{step}.pt` 到当前目录；smoke（3 step）**不落任何文件**。full 训会在仓库根写 ckpt，按需清理。
+> **离线安全**：src 里**无** `load_dataset`/HF 下载（唯一 `load_dataset("HuggingFaceFW/fineweb-edu")` 只在 L05 讲义代码块、且已用命名空间 id）；smoke 不依赖网络。
+> **common.py** 是纯工具（被 tests import），不在 runbook 入口内。
+
+**测试（V2）**：
+
+```powershell
+python -m pytest learning/pretraining-recipe/src/tests/ -v
+# 或经审计 harness（注意 --json-out/--md-out 指向 /tmp，勿覆盖基线）：
+# python scripts/eric_3080ti_env_audit.py --modules pretraining-recipe --tests --json-out /tmp/v2-pretraining.json --md-out /tmp/v2-pretraining.md
 ```
