@@ -45,7 +45,7 @@
 | 6 | moe-architecture | M3 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 全绿，**无需改码**。capstone loss 60.6→12.2；秒级 summary 是真 config 计算。grouped_gemm 0.28×是诚实 CPU 结果。小漂移(README"14"实13)待清理 | 8ea09ac.. |
 | 7 | ssm-hybrid | M3 | ✅ | ✅ | — | ✅ | ✅ | 10 demo V1 全绿，**无需改码**。selective-copy 真数值演示；capstone loss 62.7→6.9。mamba_lib [SKIP] 是诚实库缺失(非假成功)，手写 mamba_block 为可跑等价。V2 复跑绿。小漂移待清理 | b9e91ca.. |
 | 8 | long-context | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 11 demo V1 + 1 V0(capstone --help) 全绿(12/12)，**无需改码**。RoPE/PI/NTK/YaRN/3D 纯数学；ring-naive online-softmax max diff 2.4e-07≈vanilla；NIAH/RULER 题目生成器(设计不跑模型)；秒级 PASS 均真。ring_attention_lib [SKIP] 诚实库缺失(非假成功)；capstone 默认 dry-run 诚实骨架(--train 需 HF-gated 权重+5090)。早期修的 RoPE shape/打包溢出 bug 无回归。V2 基线绿 | |
-| 9 | scaling-infra | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 9 | scaling-infra | M3 | ✅ | ✅ | — | 🩹 | ✅ | 14 demo V1 全绿。修 capstone_train_estimator：175B/8×80GB 真不可行时 estimate() 返回 cost=None，但 report() 无条件 `${cost:.0f}` 崩溃(TypeError，硬崩非假成功)→加 feasibility 分支打印 n/a。ChinChilla 数学真实。V2 重跑绿 | 644c97b.. |
 | 10 | pretraining-recipe | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 11 | small-model-graduation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |

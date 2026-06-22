@@ -109,7 +109,7 @@ def estimate(spec: TrainSpec, gpu_hour_usd: float = 1.5) -> TrainPlan:
 
 
 def report(spec: TrainSpec, plan: TrainPlan) -> str:
-    return f"""
+    head = f"""
 Input:
   model={spec.model_size_b}B  seq={spec.seq_len}  batch={spec.batch}
   n_token={spec.n_token:.1e}  n_gpu={spec.n_gpu}×({spec.gpu_vram_gb}GB)
@@ -117,7 +117,15 @@ Input:
   {plan.notes}
 Plan:
   strategy:       {plan.strategy}
-  mem/gpu:        {plan.mem_per_gpu_gb:.1f} GB
+  mem/gpu:        {plan.mem_per_gpu_gb:.1f} GB"""
+    if not plan.feasible:
+        # INFEASIBLE: estimate() 给的是最省策略仍超显存（cost/throughput/time 无意义）
+        return head + f"""
+  throughput:     n/a (does not fit)
+  time:           n/a
+  est. cost:      n/a — {plan.notes or 'need more GPU or PP'}
+"""
+    return head + f"""
   throughput:     {plan.tok_per_s:.0f} tok/s
   time:           {plan.hours:.1f} hours
   est. cost:      ${plan.cost_usd:.0f} (cloud)
