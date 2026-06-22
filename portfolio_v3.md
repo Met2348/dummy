@@ -3,6 +3,7 @@
 > Generated 2026-06-06 · Module 8 收官 ⭐⭐⭐⭐⭐⭐⭐⭐
 > Extended 2026-06-17 · Module 7 +2 (agent-design-patterns / agent-harness-design) → 48 专题
 > Extended 2026-06-17 · **Module 9「科研技能」开张** ⭐ — 首专题 `critical-reading-gap` 完成 (工程 → 研究, 第二条腿); 详见文末
+> Extended 2026-06-22 · **`harness-engineering`** ⭐ — 首个「工程 ⨯ 研究」双栖专题 (14 讲 + 生产级 src + 研究桥); 详见文末
 
 ## Section 1: 48-topic Timeline
 
@@ -219,3 +220,32 @@
 ```
 
 > 诚实标注: Module 9 仅完成 1/9 专题, 故**暂不升 v4**; 待 9 专题收齐再正式发 portfolio v4「工程 + 研究」双 ID 卡。
+
+---
+
+## `harness-engineering` — 首个「工程 ⨯ 研究」双栖专题 (2026-06-22) ⭐
+
+> **动因**: 2026 最火的工程方向。模型在商品化, 护城河转移到模型外那层 **harness** (88% 企业 agent 落不了地, 65% 失败源于 harness 缺陷)。是 Module 7 `agent-harness-design` (理解层) 的进阶续作。
+> **定位**: 第一个同时长在工程 (Module 7) 和研究 (Module 9) 上的专题 —— 既造生产级 harness, 又用 `critical-reading-gap` 的 gap 雷达把它变成 PhD 研究入口。
+
+### 14 讲 (4 Part)
+```
+Part I  护城河与定义    L01 模型商品化→护城河 · L02 本构定义(4要素 inclusion test)
+Part II 升级到生产级    L03 provider抽象 · L04 5阶段compaction · L05 long-horizon(loop-with-hook)
+                       · L06 subagent firewall · L07 tool/MCP控制平面 · L08 安全与控制
+Part III 成熟度三件套   L09 OTel可观测 · L10 harness eval · L11 五大架构模式(70系统) · L12 portable harness
+Part IV 研究入口        L13 6类gap雷达扫harness开放问题 · L14 Capstone
+```
+
+### 可跑的生产级 src (stdlib, MockProvider 默认无需 API key, 11 单测全绿)
+- `provider.py` 模型抽象 (流式+tool-call, 换 Anthropic/OpenAI 主体不改)
+- `compaction.py` 5 阶段渐进式压缩 (逆向 Claude Code)
+- `long_horizon.py` loop-with-hook + 文件系统 state (跨窗口长任务)
+- `otel_trace.py` OpenTelemetry 式 span 树 · `harness_eval.py` 同模型换 harness 对照
+- 4 notebook (nbconvert 跑通): compaction 实况 / long-horizon 救回 early-stop / harness eval 对照 / Capstone
+
+### 研究桥 (Part IV)
+用 6 类 gap 雷达扫出 12 个 harness 候选研究题目 (G1-G12), ⑤复现类 (G9/G10) 对博0 最友好; Capstone 产出 harness 方向 idea 卡。
+设计/计划: `docs/superpowers/{specs,plans}/2026-06-22-harness-engineering*`
+
+> 这个专题示范了一种新模式: **同一个热点, 既当工程能力练 (Module 7), 又当研究入口挖 (Module 9)**。
