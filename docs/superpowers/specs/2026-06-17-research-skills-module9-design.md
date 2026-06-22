@@ -112,9 +112,35 @@ learning/<topic>/
 
 ## 8. 成功标准
 
-- [ ] Module 9 蓝图清晰可执行, 9 个专题各有明确产出.
-- [ ] 9.3 专题完整落地, 目录结构成为可复制模板.
-- [ ] 两个 notebook 端到端跑通 (环境已配).
-- [ ] 课件达到研究生课程级: 有图、有清单、公式逐项交代.
-- [ ] 至少一个 notebook **真的拿用户自己的复现工作**当材料练「找 gap」.
-- [ ] portfolio 更新, 体现「工程 → 研究」第二条腿.
+- [x] Module 9 蓝图清晰可执行, 9 个专题各有明确产出.
+- [x] 9.3 专题完整落地, 目录结构成为可复制模板.
+- [x] 两个 notebook 端到端跑通 (环境已配).
+- [x] 课件达到研究生课程级: 有图、有清单、公式逐项交代.
+- [x] 至少一个 notebook **真的拿用户自己的复现工作**当材料练「找 gap」.
+- [x] portfolio 更新, 体现「工程 → 研究」第二条腿.
+
+## 9. 完成记录 (2026-06-22 收官) ✅ 9/9
+
+全部 9 专题完成 (9.3 首专题 commit 31ad189; 其余 8 专题 2026-06-22 一口气建完):
+
+| # | slug | 讲 | notebook | 关键 src 工具 | commit |
+|---|---|---|---|---|---|
+| 9.1 | research-knowledge-mgmt | 4 | 2 | bib_to_cards / arxiv_triage | b7e7d63 |
+| 9.2 | literature-mapping | 4 | 2 | snowball / field_map | (2026-06-22) |
+| 9.3 | critical-reading-gap | 5 | 2 | make_cards / citation_graph | 31ad189 |
+| 9.4 | experiment-design | 5 | 2 | experiment / stats | (2026-06-22) |
+| 9.5 | experiment-ops-repro | 4 | 2 | exp_tracker / repro_check | (2026-06-22) |
+| 9.6 | research-figures | 4 | 2 | plotstyle / schematic | (2026-06-22) |
+| 9.7 | paper-writing-submission | 4 | 2 | paper_assembler / rebuttal_kit | (2026-06-22) |
+| 9.8 | research-presentation | 4 | 2 | talk_planner / pitch_kit | (2026-06-22) |
+| 9.9 | research-life | 4 | 2 | review_kit / meeting_prep | (2026-06-22) |
+
+合计: **38 讲课件 + 18 notebook (全 nbconvert 0 报错) + 18 src 工具 + 多份卡模板**, 每专题 verify_env 全过。
+
+**实现中的设计亮点**:
+- **活数据流**: 9.4 确定性模拟器 (埋真实交互效应) → 9.5 留痕 jsonl → 9.6 出版级图, 同一份「Robust-DPO 噪声鲁棒性」数据 (对应用户 dpo-family 复现) 逐级加工, 走完研究结果「跑出来→印进论文」全生命周期。
+- **三身份批判视角闭环**: 9.3 攻击者 (找 gap) → 9.7 被告 (rebuttal) → 9.9 审判者 (审稿)。
+- **桥接而非重做**: 9.7 桥接已有 `how_to_write_a_paper` 技能包 (写作细则), 只补投稿/评审/rebuttal 下半场。
+- **一个真 bug 变教材**: 9.4 `experiment.py` 用 `hash(str)` 派生种子 (带 PYTHONHASHSEED 随机盐, 跨进程不可复现), 当场修掉并写进 9.4-L5 / 9.5-L1 当活案例。
+
+收尾: portfolio 升 v4 (`portfolio_v4.md`), 第 8 大画像「会做研究的人」转正, 新增 PhD/Research Scientist 职业轨道。

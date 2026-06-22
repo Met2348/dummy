@@ -68,8 +68,16 @@
 ### Task 6.4: commit.
 
 ## 成功标准
-- [ ] 9.3 专题目录完整, 可作模板复制.
-- [ ] 5 讲课件研究生级 (图 + 清单 + 公式逐项).
-- [ ] 2 notebook nbconvert 跑通.
-- [ ] N2 真的拿用户自己的复现练「找 gap」.
-- [ ] portfolio 体现「工程 → 研究」第二条腿.
+- [x] 9.3 专题目录完整, 可作模板复制.
+- [x] 5 讲课件研究生级 (图 + 清单 + 公式逐项).
+- [x] 2 notebook nbconvert 跑通.
+- [x] N2 真的拿用户自己的复现练「找 gap」.
+- [x] portfolio 体现「工程 → 研究」第二条腿.
+
+---
+
+## 后续 (2026-06-22): 9.1/9.2/9.4-9.9 全部完成 ✅ — Module 9 9/9 收官
+
+以 9.3 为模板, 一口气建完其余 8 专题 (各 4-5 讲 + 2 notebook + src 工具 + 卡模板 + environment, 全 nbconvert 0 报错、verify_env 全过)。逐专题 commit 见 git log (feat(research-knowledge-mgmt) ... feat(research-life))。
+portfolio 升 v4 (`portfolio_v4.md`): 第 8 大画像「会做研究的人」转正 + 新增 PhD/Research Scientist 轨道。
+完整完成记录见 spec 第 9 节。
