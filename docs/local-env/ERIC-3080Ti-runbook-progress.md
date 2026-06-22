@@ -50,7 +50,7 @@
 | 10 | pretraining-recipe | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 9 demo V1 + 1 V0 全绿，**无需改码**。capstone 用 `--max_step 3` 跑**真实从零训练**(bf16,loss~9.6,15.6s)非dry-run；3步不落盘。datasets 已用命名空间 id(fineweb-edu)。data-mixture 真采样收敛。V2 复跑绿(10) | c111564.. |
 | 11 | small-model-graduation | M3 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 8 V1 + 2 V0 全绿。修 2 真 bug：① graduation_capstone 从 visualize import 实际在 bench_matrix 的函数→文档命令一上来 ImportError 崩；② train_variant 缺讲义文档化的 --max_step 等 flag→`--max_step 3000` 崩，补 flag+回退 cfg+smoke 不落 ckpt。V2 重跑绿(14) | 31c158c.. |
 | 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |
-| 13 | rlhf-classic | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: instruct-hf | |
+| 13 | rlhf-classic | M4 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 6 V1 + 1 V0 全绿。修 2：① reward_hacking_demo 单元素 std→NaN→reward 全 NaN→demo 自己不演示 reward hacking(假成功变种)，改整轨迹向量化→detected:True；② capstone 缺 transformers 时 exit0 假成功→fail-fast。**trl 漂移未命中**(三段全手写无 trl)。datasets 已用 Anthropic/hh-rlhf。submodule 排除。V2 重跑绿 | ba32a98.. |
 | 14 | dpo-family | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DPO | |
 | 15 | process-reward | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 16 | reasoning-r1 | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DeepSeek-R1；env 145s | |

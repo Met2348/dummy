@@ -92,9 +92,13 @@ if __name__ == "__main__":
     print("Capstone: TL;DR RLHF 三段管线\n" + "=" * 50)
     try:
         from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    except ImportError:
-        print("缺少 transformers，跳过。pip install transformers")
-        sys.exit(0)
+    except ImportError as exc:
+        # 不静默 exit 0 假成功（systemic pitfall #4）：缺核心依赖一律 fail-fast，
+        # 否则 harness 会把"什么都没跑"记成 PASS。
+        raise SystemExit(
+            f"[capstone] 缺少 transformers，无法运行三段管线 demo: {exc}\n"
+            f"  装依赖后重试: pip install transformers"
+        )
 
     tok = GPT2Tokenizer.from_pretrained("gpt2")
     tok.pad_token = tok.eos_token

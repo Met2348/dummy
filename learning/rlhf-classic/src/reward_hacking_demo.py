@@ -43,17 +43,17 @@ if __name__ == "__main__":
     print("Reward Hacking demo\n" + "=" * 50)
     # 模拟 100 step 训练
     torch.manual_seed(0)
-    rewards, lens = [], []
-    # 模拟 actor 学到"加长 → 提分"
-    for step in range(100):
-        q = torch.randn(1) * 0.1 + 0.5  # 质量基本不变
-        # actor 不断加长（每 10 step +5）
-        L = torch.tensor([20.0 + step * 0.5])
-        r = hackable_reward(q, L, alpha=0.5)
-        rewards.append(r.item())
-        lens.append(L.item())
-        if step % 20 == 0:
-            print(f"step {step}: quality≈{q.item():.2f}, len={L.item():.0f}, r={r.item():.3f}")
+    n_steps = 100
+    # 质量基本不变（围绕 0.5 抖动）；actor 学到"把长度推向 RM 偏好的 target=50 → 提分"。
+    # 注意：质量归一化必须在整条轨迹上做（单元素 tensor 的 std 为 NaN，会让 reward 全变 NaN）。
+    quality = torch.randn(n_steps) * 0.1 + 0.5
+    lengths = 20.0 + torch.arange(n_steps).float() * 0.3   # 20 → ~50，漂向退化 RM 的 target
+    rewards_t = hackable_reward(quality, lengths, alpha=0.5)
+    rewards = rewards_t.tolist()
+    lens = lengths.tolist()
+    for step in range(0, n_steps, 20):
+        print(f"step {step}: quality≈{quality[step].item():.2f}, "
+              f"len={lens[step]:.0f}, r={rewards[step]:.3f}")
     diag = detect_hacking(rewards, lens)
     print(f"\n诊断: {diag}")
     print("\n修复建议:")
