@@ -15,7 +15,8 @@
 
 ## 📌 最近进度（每 ~3 模块更新一次）
 
-- 2026-06-20：建立 spec / plan / 账本三件套。下一步：Phase 0 在 `rl-foundations` 打磨 `--runbook` 工具 + 模板。**当前模块：rl-foundations（pilot，工具未就绪）。**
+- 2026-06-20：建立 spec / plan / 账本三件套。
+- 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。**下一步：Phase 1 fan-out，从 `prompt-tuning-family`(M1) 开始。**
 
 ## 状态图例
 
@@ -45,7 +46,7 @@
 | 9 | scaling-infra | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 10 | pretraining-recipe | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 11 | small-model-graduation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
-| 12 | rl-foundations | M4 | ⬜ | 🔧 | ⬜ | ⬜ | ✅ | **PILOT**；tests 已绿 | |
+| 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |
 | 13 | rlhf-classic | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: instruct-hf | |
 | 14 | dpo-family | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DPO | |
 | 15 | process-reward | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
@@ -92,4 +93,18 @@
 
 ## 发现的系统性问题（跨模块复用的坑，随时追加）
 
-- （暂无；pilot 后开始记录常见坑，如 Windows 路径、UTF-8、torch cu128 行为差异等）
+这些坑会在 fan-out 中**反复出现**，遇到同类直接套用同款修法：
+
+1. **trl API 漂移**（dpo/rlhf/r1/rl-sota 高危）：trl 1.5.x 移除经典 `PPOConfig`/`PPOTrainer` 情感微调 API。
+   - 症状：`cannot import name 'PPOConfig' from 'trl'`。`verify_env` 的 `trl>=0.11` 检查**会误判通过**。
+   - 修法：① 静默 `except: print; return` 一律改 **fail-fast**（`raise SystemExit(1)`），杜绝"假成功 exit 0"；
+     ② 优先回退到模块自带的手写/minimal 实现（真实可跑）；README 标注 trl 版本要求。
+2. **datasets 裸别名失效**：`datasets 4.x+` 移除裸 id，`load_dataset("imdb")` 报 `Repository id must be 'namespace/name'`。
+   - 修法：用命名空间 id（`stanfordnlp/imdb` 等）+ `try/except` 回退内置小样本（让 smoke 不依赖大下载）。
+3. **decoder-only 批量生成右填充**：HF 警告 `right-padding detected, set padding_side='left'`。
+   - 修法：批量 `generate` 前 `tokenizer.padding_side = "left"`。
+4. **"假成功"反模式**：脚本捕获缺依赖后 `print + return` → exit 0 → harness 记 PASS、学生以为跑通实则 no-op。
+   - 政策：缺依赖/缺数据一律显式失败或真实回退，**绝不静默 return 成功**。
+5. **机器休眠污染超时**：`subprocess timeout` 是墙钟；挂起期间休眠会把快任务记成超 timeout（如 51920s）。
+   - 应对：异常的超大 elapsed 不代表真慢，清醒态短超时复测即可判定。
+6. **Bash 工具吃反斜杠**：`.\.venv\Scripts\python.exe` 在 Bash 工具里要写成 `.venv/Scripts/python.exe`（正斜杠）。

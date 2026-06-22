@@ -228,7 +228,8 @@ def _run_runbook(module: str, timeout: int) -> list[RunResult]:
         tier = entry.get("tier", "V1")
         tokens = _format_cmd(entry["cmd"], entry.get("smoke", {}))
         script = _script_of(tokens)
-        if script is not None:
+        # V0 --help probe; skip for argparse-less scripts via `v0: false`.
+        if script is not None and entry.get("v0", True):
             exists = (ROOT / script).exists() or Path(script).exists()
             if not exists:
                 results.append(

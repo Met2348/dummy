@@ -26,9 +26,12 @@ def train(args):
             PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
         )
     except ImportError as e:
-        print(f"trl 未安装或版本不兼容: {e}")
-        print("pip install trl>=0.13")
-        return
+        # 不静默 return（那会"假成功"exit 0）；显式失败 + 指路手写版。
+        print(f"[ppo_gpt2_trl] 经典 trl PPOTrainer API 不可用: {e}")
+        print("[ppo_gpt2_trl] 本脚本是 trl 对照 demo，需 trl<0.12 的经典 PPOTrainer API。")
+        print("[ppo_gpt2_trl] 本机 trl 1.5.x 已重构该 API；请改跑手写等价版："
+              "python learning/rl-foundations/src/ppo_gpt2_minimal.py")
+        raise SystemExit(1)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:

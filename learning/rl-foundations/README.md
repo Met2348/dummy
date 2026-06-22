@@ -166,19 +166,41 @@ KL_approx = E[r - 1 - log r]                 ← Schulman cheap KL
 
 ---
 
-## 实用入口
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V0+V1 验证通过。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules rl-foundations
+> ```
+
+**CartPole 5 算法横向**（每个约几分钟；smoke 用 `--total-steps 1500`）：
 
 ```powershell
-# 跑 CartPole 5 算法横向（约 15 min）
 foreach ($algo in 'reinforce','a2c','trpo','ppo','sb3_ppo') {
     python learning/rl-foundations/src/cartpole_full.py --algo $algo --total-steps 30000
 }
+```
 
-# 跑 capstone smoke（~30 min）
+**Capstone：GPT-2 + IMDb + SST-2 RM + PPO**：
+
+```powershell
+# 真实跑（mean_R(pos-prob) 上升）
 python learning/rl-foundations/src/capstone_imdb_ppo.py --total-iters 30 --batch-size 4
+# 快速 smoke（验证可跑通）
+python learning/rl-foundations/src/capstone_imdb_ppo.py --total-iters 2 --batch-size 4 --n-prompts 32
+```
 
-# 跑所有测试
+> ⚠️ **trl 版本坑**：本仓库环境装的是 trl 1.5.x，已移除经典 `PPOConfig`/`PPOTrainer` 情感微调 API。
+> capstone 会**自动回退**到手写 token-level PPO（复用 `ppo_gpt2_minimal.py`）+ 真实 SST-2 RM，照样在 3080 Ti 上跑通。
+> 纯 trl 对照 demo `ppo_gpt2_trl.py` 需 trl<0.12，否则会显式报错指路手写版（不会静默假成功）。
+> IMDb 用命名空间 id `stanfordnlp/imdb`；离线时 capstone 回退内置 prompts。
+
+**测试（V2）**：
+
+```powershell
 python -m pytest learning/rl-foundations/src/tests/ -v -m "not slow"
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules rl-foundations --tests
 ```
 
 ---

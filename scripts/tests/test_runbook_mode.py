@@ -37,3 +37,19 @@ def test_load_runbook_reads_commands(tmp_path, monkeypatch):
 def test_load_runbook_missing_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(audit, "LEARNING", tmp_path / "learning")
     assert audit._load_runbook("nope") == []
+
+
+def test_run_runbook_v0_false_skips_help_probe(monkeypatch):
+    monkeypatch.setattr(audit, "_load_runbook", lambda m: [
+        {"id": "noargparse", "cmd": "python src/verify_env.py", "tier": "V1", "v0": False},
+    ])
+    monkeypatch.setattr(audit.Path, "exists", lambda self: True)
+    seen = []
+
+    def fake_run(module, kind, command, timeout):
+        seen.append(kind)
+        return audit.RunResult(module, kind, command, "PASS", 0, 0.0, "", "")
+
+    monkeypatch.setattr(audit, "_run", fake_run)
+    audit._run_runbook("demo", 60)
+    assert seen == ["runbook-v1:noargparse"]  # no runbook-v0 probe emitted
