@@ -18,7 +18,7 @@
 - 2026-06-20：建立 spec / plan / 账本三件套。
 - 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。
 - 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。
-- 2026-06-22：**M3 进度 4/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）。**下一步：M3 剩余 long-context → scaling-infra → pretraining-recipe → small-model-graduation。**
+- 2026-06-22：**M3 进度 5/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）、long-context（无改码，12/12 绿；早期修的 RoPE shape/打包溢出 bug 无回归）。**下一步：M3 剩余 scaling-infra → pretraining-recipe → small-model-graduation。**
 
 ## 状态图例
 
@@ -44,7 +44,7 @@
 | 5 | transformer-deep | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 18 demo V1 + 1 V0(capstone-train) 全绿，**无需改码**。GPU demo 真用 cuda；秒级 summary 是真 KV-cache 公式。tensor2tensor submodule 已排除。小漂移(README"7 tests"实6、papers/→paper/)待清理 | bfd46fd.. |
 | 6 | moe-architecture | M3 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 全绿，**无需改码**。capstone loss 60.6→12.2；秒级 summary 是真 config 计算。grouped_gemm 0.28×是诚实 CPU 结果。小漂移(README"14"实13)待清理 | 8ea09ac.. |
 | 7 | ssm-hybrid | M3 | ✅ | ✅ | — | ✅ | ✅ | 10 demo V1 全绿，**无需改码**。selective-copy 真数值演示；capstone loss 62.7→6.9。mamba_lib [SKIP] 是诚实库缺失(非假成功)，手写 mamba_block 为可跑等价。V2 复跑绿。小漂移待清理 | b9e91ca.. |
-| 8 | long-context | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 8 | long-context | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 11 demo V1 + 1 V0(capstone --help) 全绿(12/12)，**无需改码**。RoPE/PI/NTK/YaRN/3D 纯数学；ring-naive online-softmax max diff 2.4e-07≈vanilla；NIAH/RULER 题目生成器(设计不跑模型)；秒级 PASS 均真。ring_attention_lib [SKIP] 诚实库缺失(非假成功)；capstone 默认 dry-run 诚实骨架(--train 需 HF-gated 权重+5090)。早期修的 RoPE shape/打包溢出 bug 无回归。V2 基线绿 | |
 | 9 | scaling-infra | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 10 | pretraining-recipe | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 11 | small-model-graduation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
@@ -89,9 +89,10 @@
 | 任务 | 状态 | Notes |
 |---|:--:|---|
 | 根 `README.md` | ⬜ | Phase 2，知识组织框架 + 怎么跑/验证 |
-| `--runbook` 模式（扩展 audit harness）| ⬜ | Phase 0 pilot 产出 |
-| `runbook.yaml` 模板 | ⬜ | Phase 0 pilot 产出 |
-| README"运行验证"段模板 | ⬜ | Phase 0 pilot 产出 |
+| `--runbook` 模式（扩展 audit harness）| ✅ | 已交付（d4b5497 + v0:false 增强，6 单测） |
+| `runbook.yaml` 模板 | ✅ | rl-foundations（CLI）+ prompt-tuning（无参 demo）双模板 |
+| README"运行验证"段模板 | ✅ | 见 rl-foundations / prompt-tuning README |
+| subagent 委派 brief | ✅ | `docs/local-env/RUNBOOK-AGENT-BRIEF.md` |
 
 ## 发现的系统性问题（跨模块复用的坑，随时追加）
 

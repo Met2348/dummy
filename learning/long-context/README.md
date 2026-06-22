@@ -60,3 +60,54 @@ python -m pytest src/tests/ -v
 # Capstone 真训 (5090 24G + 5.5h)
 python src/capstone_yarn_llama32.py --train --steps 500
 ```
+
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V0+V1 验证通过（12/12，全 CPU 纯数值，秒级）。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules long-context
+> ```
+
+**RoPE 扩 ctx 家族（L02-L05，纯数学 self-test，各 < 4s）**：
+
+```powershell
+python learning/long-context/src/rope_pi.py     # Position Interpolation：压缩 position
+python learning/long-context/src/rope_ntk.py    # NTK-aware：改 base 而非 position
+python learning/long-context/src/rope_yarn.py   # YaRN ⭐：NTK-by-parts ramp + attn temperature
+python learning/long-context/src/rope_3d.py     # 3D/M-RoPE：dim 分 t/h/w 三段独立旋转
+```
+
+**长 ctx 注意力 + 评测 + 数据打包（L06-L11）**：
+
+```powershell
+python learning/long-context/src/ring_attention_naive.py  # 分块 online-softmax，max diff 2.4e-07 ≈ vanilla
+python learning/long-context/src/ring_attention_lib.py    # ring-flash-attention 探测（本机无→诚实 [SKIP]）
+python learning/long-context/src/infini_attention.py      # local attn + 压缩 memory + per-head gate
+python learning/long-context/src/niah_eval.py             # NIAH 测试集生成器（不跑模型）
+python learning/long-context/src/ruler_eval.py            # RULER 4 子任务生成器
+python learning/long-context/src/long_data_packing.py     # first-fit 打包 + block-diagonal mask + 课程
+```
+
+**Capstone（L13）：Llama-3.2-1B + YaRN scale=4 扩 32k + LoRA**：
+
+```powershell
+# 默认 dry-run：打印课程切换 (8192→16384→32768)，不加载权重，秒级（runbook smoke 形态）
+python learning/long-context/src/capstone_yarn_llama32.py
+# 真训 full 形态：需 HF-gated meta-llama/Llama-3.2-1B-Instruct + 5090/24G ~5.5h（本机不真跑）
+python learning/long-context/src/capstone_yarn_llama32.py --train --steps 500
+```
+
+> **关键坑注记**：
+> - 这 10 个 demo 均**无 argparse**（`runbook.yaml` 标 `v0: false`，跳过 `--help` 探针直接 smoke 直跑）；`common.py` 是纯 helper（无 `__main__`），非入口。
+> - **秒级 PASS 是真的**：RoPE/PI/NTK/YaRN/3D 是纯数学旋转；ring-naive 真做分块 online-softmax（数值 ≈ vanilla attention）；NIAH/RULER 是题目生成器（设计上不跑模型）。非 no-op/假成功。
+> - `ring_attention_lib` 打 `[SKIP]` 是**诚实的库缺失**报告（ring-flash-attention 仅 Linux 多 GPU），非"捕获异常假装成功"；可跑等价物即 `ring_attention_naive`。
+> - **capstone 默认 dry-run 是诚实骨架**：显式打印 `dry-run, no training` 并指路 `--train`，非静默假成功。`--train` 路径需 HF-gated 权重 + 大显存，未纳入本机 smoke。
+> - 早期 env audit 修过的 **RoPE 分段 shape**（`rope_3d`）与 **长 doc 打包溢出**（`long_data_packing` 超长先切块再 first-fit）两处真实 bug 已在代码中修好，本轮复验无回归。
+
+**测试（V2）**：
+
+```powershell
+python -m pytest learning/long-context/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules long-context --tests
+```
