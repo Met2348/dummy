@@ -20,6 +20,7 @@
 - 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。
 - 2026-06-22：**M3 进度 5/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）、long-context（无改码，12/12 绿；早期修的 RoPE shape/打包溢出 bug 无回归）。
 - 2026-06-22：**M3 造模型全部完成（8/8）**：+ scaling-infra（修不可行案例 formatter 崩溃）、pretraining-recipe（无改码，capstone 真跑从零训练 smoke）、small-model-graduation（修 2 真 bug：capstone import 漂移 + train_variant 缺文档化 flag）。**累计 11/46。下一步：M4 改模型（6 个，trl 漂移高危），从 rlhf-classic 开始。**
+- 2026-06-22：**M4 改模型进度 3/6**：rl-foundations（pilot，见上）、rlhf-classic（修 2 真 bug：reward_hacking 单元素 std→NaN 假成功变种 + capstone 缺 transformers 假成功）、dpo-family（修 1 真 bug：mock_step 对标量键 .clone() 硬崩 → 类型守卫）。**关键发现：预判的 trl API 漂移高危在 rlhf-classic/dpo-family 均未命中——两者 RLHF 三段与 8 个 PO 变体全手写、零 trl import**（grep 实证非假设）。datasets 均已用命名空间 id。**累计 14/46。下一步：process-reward（M4 #15）。**
 
 ## 状态图例
 
@@ -51,7 +52,7 @@
 | 11 | small-model-graduation | M3 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 8 V1 + 2 V0 全绿。修 2 真 bug：① graduation_capstone 从 visualize import 实际在 bench_matrix 的函数→文档命令一上来 ImportError 崩；② train_variant 缺讲义文档化的 --max_step 等 flag→`--max_step 3000` 崩，补 flag+回退 cfg+smoke 不落 ckpt。V2 重跑绿(14) | 31c158c.. |
 | 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |
 | 13 | rlhf-classic | M4 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 6 V1 + 1 V0 全绿。修 2：① reward_hacking_demo 单元素 std→NaN→reward 全 NaN→demo 自己不演示 reward hacking(假成功变种)，改整轨迹向量化→detected:True；② capstone 缺 transformers 时 exit0 假成功→fail-fast。**trl 漂移未命中**(三段全手写无 trl)。datasets 已用 Anthropic/hh-rlhf。submodule 排除。V2 重跑绿 | ba32a98.. |
-| 14 | dpo-family | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DPO | |
+| 14 | dpo-family | M4 | ✅ | ✅ | ✅ | ✅ | 🩹 | 9 demo V1 全绿(1 argparse dpo-train + 8 纯数值 PO 变体 demo) + V0(dpo-train --help)。修 1 真 bug：capstone_dpo_comparison `mock_step` 第 2 步对上一步返回里夹带的标量键(loss/margin)做 `.clone()`→`AttributeError: 'float' object has no attribute 'clone'`(硬崩 exit1，非假成功)→加 `isinstance(v, torch.Tensor)` 类型守卫只 clone tensor。**trl 漂移未命中**(8 变体全手写无 trl)。datasets 已用 `Anthropic/hh-rlhf` 命名空间(合规)。submodule `official/repos/direct-preference-optimization` 排除。V2 重跑绿(14) | |
 | 15 | process-reward | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 16 | reasoning-r1 | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DeepSeek-R1；env 145s | |
 | 17 | rl-sota-2026 | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | verl 可选栈 | |

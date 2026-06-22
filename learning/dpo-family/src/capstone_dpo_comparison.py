@@ -23,7 +23,9 @@ from rainbowpo import VARIANTS, unified_po_loss
 
 def mock_step(cfg, init_state: dict, lr: float = 0.05) -> dict:
     """模拟一步：每个变体对 chosen/rejected log_p 更新方向不同."""
-    s = {k: v.clone() for k, v in init_state.items()}
+    # 只 clone tensor 状态；上一步返回里夹带的标量键 (loss/margin) 跳过，
+    # 否则第 2 步 .clone() 会在 float 上抛 AttributeError。
+    s = {k: v.clone() for k, v in init_state.items() if isinstance(v, torch.Tensor)}
     s["log_p_c_a"].requires_grad_(True)
     s["log_p_r_a"].requires_grad_(True)
     out = unified_po_loss(
