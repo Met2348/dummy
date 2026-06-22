@@ -109,6 +109,65 @@ python learning/transformer-deep/src/capstone_train.py --steps 50
 
 ---
 
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V0+V1 验证通过（19/19 PASS）。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules transformer-deep
+> ```
+
+**18 个 from-scratch 直跑 demo**（均无参直跑，CPU 秒级；纯数值/结构 self-test，真有 assert + 打印真实张量/diff/参数量）：
+
+```powershell
+# 位置编码
+python learning/transformer-deep/src/pe_sinusoidal.py      # Sinusoidal PE
+python learning/transformer-deep/src/pe_alibi.py           # ALiBi 线性偏置
+python learning/transformer-deep/src/rope.py               # RoPE（相对位置不变性 sanity）
+# Attention 变体（MHA → MQA → GQA → MLA）
+python learning/transformer-deep/src/mha.py
+python learning/transformer-deep/src/mqa.py
+python learning/transformer-deep/src/gqa.py
+python learning/transformer-deep/src/mla.py                # 低秩 latent KV 压缩
+# Norm + Activation
+python learning/transformer-deep/src/rmsnorm.py            # vs torch.nn.RMSNorm 对照
+python learning/transformer-deep/src/swiglu.py             # SwiGLU/GeGLU/GELU 三变体
+# FlashAttention + 现代 attention
+python learning/transformer-deep/src/flash_attn_naive.py   # tiling + online softmax，数值等价 vanilla
+python learning/transformer-deep/src/flash_attn_lib.py     # PyTorch SDPA benchmark（GPU）
+python learning/transformer-deep/src/fa2_fa3_bench.py      # FA2/FA3 论文报数 + 本机 SDPA TFLOPS（GPU）
+python learning/transformer-deep/src/paged_attn_demo.py    # block table + KV pool alloc/share
+python learning/transformer-deep/src/sliding_window.py     # Mistral SWA mask
+# 架构精读（配置 + 真算 KV-cache GB）
+python learning/transformer-deep/src/deepseek_v3_summary.py
+python learning/transformer-deep/src/llama3_summary.py
+# GPT-mini
+python learning/transformer-deep/src/gpt_mini.py           # forward + KV-cache generate
+```
+
+**Capstone：GPT-mini 训练**（AdamW + cosine lr + grad clip，mock data）：
+
+```powershell
+# 真训（loss 下降）
+python learning/transformer-deep/src/capstone_train.py --steps 50
+# 快速 smoke（验证训练循环可跑通）
+python learning/transformer-deep/src/capstone_train.py --steps 8
+```
+
+> **注记**：
+> - 全部 demo 为纯数值/结构 self-test，秒级 PASS 是正常的（非 no-op：真有计算 + assert + 打印）。
+> - `flash_attn_lib` / `fa2_fa3_bench`：flash-attn 库在 Windows 装不上 → 走 **PyTorch SDPA 真实路径**，flash-attn 分支显式打印 `[SKIP]`（非假成功，主路径在 3080 Ti 真跑出 ms / TFLOPS）。
+> - 子模块 `official/repos/tensor2tensor` 是官方参考实现，**不在 runbook 范围**（不跑 / 不收录）。
+
+**测试（V2）**：
+
+```powershell
+python -m pytest learning/transformer-deep/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules transformer-deep --tests
+```
+
+---
+
 ## Git 里程碑
 
 | Tag | 内容 |
