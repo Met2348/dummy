@@ -41,7 +41,7 @@
 | 3 | adapter-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 绿(12 minimal + ia3-peft)；9 个 *_adapters.py **tier:skip**(adapters 库与 transformers5.x 冲突，已 clean fail-fast)；修 README 文档漂移(漏列 adapter_original_minimal、错误 pip adapters 指示)；V2 基线绿 | 077de22.. |
 | 4 | data-curation | M3 | ✅ | ✅ | ✅ | ✅ | 🩹 | V0 12 + V1 13 全绿。**重磅**：capstone mock 文档自相似→MinHash 坍缩→最终语料**空**却 exit 0(假成功)，V2 测试用 `if n>0` 守卫**掩盖**了空产出。修：mock 数据多样化 + spm vocab clamp(小语料崩溃) + 测试改硬断言。V2 重跑绿 | d879779.. |
 | 5 | transformer-deep | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 18 demo V1 + 1 V0(capstone-train) 全绿，**无需改码**。GPU demo 真用 cuda；秒级 summary 是真 KV-cache 公式。tensor2tensor submodule 已排除。小漂移(README"7 tests"实6、papers/→paper/)待清理 | bfd46fd.. |
-| 6 | moe-architecture | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 6 | moe-architecture | M3 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 全绿，**无需改码**。capstone loss 60.6→12.2；秒级 summary 是真 config 计算。grouped_gemm 0.28×是诚实 CPU 结果。小漂移(README"14"实13)待清理 | 8ea09ac.. |
 | 7 | ssm-hybrid | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 8 | long-context | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 9 | scaling-infra | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
