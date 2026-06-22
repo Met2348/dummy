@@ -57,6 +57,7 @@ learning/adapter-tuning-family/
 ├── lectures/                         # 10 篇 PPT-style 中文 md
 ├── src/
 │   ├── common.py
+│   ├── adapter_original_minimal.py                         # 原始 Adapter 概念（纯 Python，无 torch）
 │   ├── houlsby_minimal.py / houlsby_adapters.py
 │   ├── pfeiffer_minimal.py / pfeiffer_adapters.py
 │   ├── adapterfusion_minimal.py / adapterfusion_adapters.py
@@ -68,30 +69,31 @@ learning/adapter-tuning-family/
 │   ├── k_adapter_minimal.py / k_adapter_adapters.py
 │   ├── madx_minimal.py / madx_adapters.py
 │   ├── adamix_minimal.py                                 # 仅 minimal
-│   └── tests/                                            # 8 个测试文件
+│   └── tests/                                            # 9 个测试文件
 └── notebooks/                        # 10 个 ipynb
 ```
 
 ## 环境配置
 
-> **重要警告**：本专题的 `adapters` 库 (AdapterHub) **强制依赖 transformers 4.x**，会从 5.9 自动降级到 4.57。这只影响本专题的 venv，不影响 LoRA/Prompt 专题（它们不依赖 transformers 5.x 新特性）。
+> **重要警告**：本专题的 `adapters` 库 (AdapterHub) **强制依赖 transformers 4.x**，与本仓库统一环境（transformers 5.10.2）冲突。**本仓库 venv 故意不安装 `adapters`**——装它会把 transformers 降级到 4.x、破坏其它专题。
+>
+> - **手写 `*_minimal.py` + `peft` 的 `ia3_peft.py` 不依赖 `adapters`，在本仓库 venv 直接可跑**（即本专题的主验证路径，见下方「运行验证」）。
+> - **9 个 `*_adapters.py`（AdapterHub 调包版）本地无法运行**：脚本在 `from adapters import ...` 处 fail-fast 报 `ModuleNotFoundError`（exit 1，非静默假成功）。仅作教学对照阅读；如需真跑，请**另建** transformers 4.x 独立 venv 后 `pip install adapters`。
 
 ```powershell
-# 已有 LoRA 专题环境（cu130 nightly torch + transformers 5.9）的话:
-pip install adapters
-# 会自动降级 transformers 5.9 -> 4.57
-
-# 验证
-python learning/adapter-tuning-family/environment/verify_env.py
+# 本仓库统一 venv（transformers 5.x）—— 验证手写 + peft 路径，无需 adapters：
+.\.venv\Scripts\python.exe learning/adapter-tuning-family/environment/verify_env.py
 ```
 
-预期输出（截至 2026-06-03）：
+预期输出（本仓库 venv，transformers 5.10.2）：
 
 ```
-Part A (基础):           PASS    # torch 2.13.0.dev+cu130, transformers 4.57.6, adapters 1.3, peft 0.19
-Part B (GPU):            PASS    # RTX 5090, 25.7 GB, sm_120
-Part C (adapters lib):   PASS    # Pfeiffer smoke test
+Part A (基础):           PASS    # torch cu13x, transformers 5.10.2, peft 已装; adapters [SKIP] not installed (optional)
+Part B (GPU):            PASS    # RTX 3080 Ti Laptop 16GB, sm_86
+Part C (adapters lib):   SKIP    # adapters 未装 → 跳过（minimal/peft 测试仍全跑）
 ```
+
+> 若要复现书中「adapters 1.3 + transformers 4.57」的 Part C PASS 输出，需在独立 4.x venv 中运行；本仓库统一环境下 Part C 正常显示 SKIP。
 
 ## 横向对比表（11 方法）
 
@@ -241,3 +243,58 @@ Part C (adapters lib):   PASS    # Pfeiffer smoke test
 | 跑跑代码 | [`notebooks/`](notebooks/) 任选一个 |
 | 跑全部测试 | `python -m pytest learning/adapter-tuning-family/src/tests/` |
 | 验证环境 | `python learning/adapter-tuning-family/environment/verify_env.py` |
+
+## 运行验证（Runbook）
+
+文档入口命令清单：[`runbook.yaml`](runbook.yaml)。用 audit harness 一键验证「照文档跑」是否真能跑通：
+
+```bash
+# V0（文档静态：脚本存在）+ V1（smoke：直跑 main 到完成）
+.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --runbook \
+  --modules adapter-tuning-family --timeout 300
+```
+
+**结果（RTX 3080 Ti Laptop 16GB，transformers 5.10.2）：V1 13/13 PASS；9 个 `*_adapters.py` 标 `tier: skip`（见下）。**
+
+### 可本地直跑的入口（13 个，V1）
+
+全部脚本**无 argparse**（直跑 `main()`，固定小预算 GPT-2，纯结构/参数量演示、**无梯度训练**），故 `v0: false`、无 smoke 参数——full 形态即 smoke 形态：
+
+| 入口 | 命令 | 验证点 |
+|------|------|--------|
+| 原始 Adapter（纯 Python） | `python learning/adapter-tuning-family/src/adapter_original_minimal.py` | 手算 608,640 参数 + 近恒等输出（CPU 秒级）|
+| Houlsby minimal | `python .../src/houlsby_minimal.py` | 608,640 参数，初始 forward=base（误差 0）|
+| Pfeiffer minimal | `python .../src/pfeiffer_minimal.py` | 304,320 参数（单串联）|
+| AdapterFusion minimal | `python .../src/adapterfusion_minimal.py` | 多任务 attention 融合 |
+| AdapterDrop minimal | `python .../src/adapterdrop_minimal.py` | k=5 时 7 层 active |
+| Compacter minimal | `python .../src/compacter_minimal.py` | PHM Kronecker 数值精确 |
+| Parallel minimal | `python .../src/parallel_minimal.py` | σ=identity 等价 LoRA |
+| (IA)³ minimal | `python .../src/ia3_minimal.py` | 55,296 参数，初始 Δ=0 |
+| ⭐ (IA)³ **peft**（第三轨）| `python .../src/ia3_peft.py` | peft `IA3Config`，55,296（三轨一致）|
+| MAM minimal | `python .../src/mam_minimal.py` | Prefix(attn)+Parallel(FFN) |
+| K-Adapter minimal | `python .../src/k_adapter_minimal.py` | 多类知识 + 冻结切换 |
+| MAD-X minimal | `python .../src/madx_minimal.py` | 语言 Stack 任务，跨语言切换 |
+| AdaMix minimal | `python .../src/adamix_minimal.py` | 随机路由/平均推理/merge N→1 |
+
+> 单跑前先 `export PYTHONUTF8=1 PYTHONIOENCODING=utf-8`（避免 Windows 中文/emoji 输出乱码）。除「原始 Adapter」外均会加载 GPT-2 权重（首次联网下载、后续走缓存），单条 ~15–23s。
+
+### 本地跳过的入口（9 个 `*_adapters.py`，`tier: skip`）
+
+`houlsby_adapters` / `pfeiffer_adapters` / `adapterfusion_adapters` / `adapterdrop_adapters` / `compacter_adapters` / `parallel_adapters` / `ia3_adapters` / `k_adapter_adapters` / `madx_adapters`。
+
+**原因**：需 AdapterHub `adapters` 库，与本仓库 transformers 5.x 冲突，故本地跳过（详见上方「环境配置」）。这些脚本在 import 处 fail-fast（`ModuleNotFoundError`，exit 1），不是静默假成功；要运行须另建 transformers 4.x venv。
+
+### 关键坑注记
+
+- **`adapters` 库不可在本仓库 venv 安装**——会把 transformers 降级到 4.x、破坏其它专题。需对照阅读 `*_adapters.py` 时，请另建独立 4.x 环境。
+- **无 argparse**：脚本不接受 `--flag`，runbook 里 `v0: false`（跳过 `--help` 探针）。
+- **`adapter_original_minimal.py` 0.x 秒 PASS 属正常**：纯 Python 数值 self-test（不加载模型），非 no-op——stdout 含真实参数量与近恒等校验。
+
+### 测试（V2）
+
+一致性单测（9 个文件，~127s）走 `--tests`（不进 runbook）：
+
+```bash
+.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --modules adapter-tuning-family --tests --timeout 600
+# 或直接： python -m pytest learning/adapter-tuning-family/src/tests/
+```

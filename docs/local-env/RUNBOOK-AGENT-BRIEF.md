@@ -55,8 +55,13 @@ commands:
 - **不要 hack**：遇到需要大改架构、或你拿不准的 novel 破坏 → **停手，在报告里"ESCALATE"小节描述清楚**，留给编排者 inline 决策。
 
 ### 5. V2 复核
-- 若你**改过该模块代码** → 跑 `.venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --modules M --tests --timeout 600`，确认仍绿。
+- 若你**改过该模块代码** → 跑（**必须**带 `--json-out`/`--md-out` 指向 `/tmp`，否则会覆盖已提交的基线 `ERIC-3080Ti-test-matrix.md`！）：
+  ```bash
+  .venv/Scripts/python.exe scripts/eric_3080ti_env_audit.py --modules M --tests --timeout 600 \
+    --json-out /tmp/v2-M.json --md-out /tmp/v2-M.md
+  ```
 - 若**没改代码** → V2 记"基线绿"（基线 46/46 已 PASS），不必重跑。
+- ⚠️ **同理**：步骤 3 的 `--runbook` 也务必带 `--json-out docs/local-env/ERIC-3080Ti-runbook-results.json --md-out docs/local-env/ERIC-3080Ti-runbook-matrix.md`（这两个是 gitignored 的 runbook 专用文件）。**绝不可让任何 harness 调用使用默认 --out 路径**（默认指向已提交的基线 test 文件）。
 
 ### 6. README 运行段
 在 `learning/M/README.md` 加/改一个 `## 运行验证（Runbook）`（或 `### `）段，仿照 rl-foundations/prompt-tuning 模板：指向 runbook.yaml + `--runbook` 一键命令 + 列出可跑入口（full 形态 + smoke 提示）+ 关键坑注记 + 测试(V2)入口。

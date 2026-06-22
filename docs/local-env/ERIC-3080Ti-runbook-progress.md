@@ -16,7 +16,8 @@
 ## 📌 最近进度（每 ~3 模块更新一次）
 
 - 2026-06-20：建立 spec / plan / 账本三件套。
-- 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。**下一步：Phase 1 fan-out，从 `prompt-tuning-family`(M1) 开始。**
+- 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。
+- 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。**下一步：M3 造模型（8 个），从 `data-curation` 开始。**
 
 ## 状态图例
 
@@ -37,7 +38,7 @@
 |---|--------|-----|:--:|:--:|:--:|:--:|:--:|---|---|
 | 1 | prompt-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 9 个 minimal/peft demo V1 全绿，**无需改码**；V0 N/A（无 argparse，v0:false）；V2 基线绿 | 41461e5.. |
 | 2 | lora-family | M1 | ✅ | ✅ | — | ✅ | 🩹 | 19 demo V1 全绿；修 2 处假成功(qlora/loftq silent return→fail-fast)；**QLoRA 真能在 3080Ti 跑**(bnb 4bit NF4+TinyLlama)；V2 重跑绿(262s)。遗留：README 目录结构列了不存在文件(pissa_olora_extension 等)，待清理 | 2e67a5c.. |
-| 3 | adapter-tuning-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | tests 127s（重）| |
+| 3 | adapter-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 绿(12 minimal + ia3-peft)；9 个 *_adapters.py **tier:skip**(adapters 库与 transformers5.x 冲突，已 clean fail-fast)；修 README 文档漂移(漏列 adapter_original_minimal、错误 pip adapters 指示)；V2 基线绿 | 077de22.. |
 | 4 | data-curation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 5 | transformer-deep | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: tensor2tensor | |
 | 6 | moe-architecture | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
