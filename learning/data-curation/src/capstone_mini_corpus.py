@@ -52,25 +52,72 @@ def read_jsonl_gz(path):
 
 
 # ---------- mock 数据（smoke 模式） ----------
+# 高质量 doc 由「主题 + 多句正文」组合而成：每个 doc 用不同主题/句子，
+# 保证 (1) 彼此差异足够大、不会被 MinHash 整片去重；(2) 以句号结尾、句数足够，
+# 能通过 quality_filter 启发式。否则整条流水会在 dedup/quality 阶段被清空（空语料 no-op）。
+_QUALITY_TOPICS = [
+    ("Mitochondria", [
+        "Mitochondria are the powerhouse of the cell and generate most of its chemical energy.",
+        "They produce adenosine triphosphate through oxidative phosphorylation across the inner membrane.",
+        "Each mitochondrion carries its own circular DNA, inherited maternally in most animals.",
+        "This evidence supports the endosymbiotic theory that they descend from ancient bacteria.",
+    ]),
+    ("Photosynthesis", [
+        "Photosynthesis converts light energy into chemical energy stored in glucose molecules.",
+        "The light reactions in the thylakoid membranes split water and release oxygen.",
+        "The Calvin cycle then fixes carbon dioxide into sugars using the captured energy.",
+        "Chlorophyll absorbs mainly red and blue wavelengths while reflecting green light.",
+    ]),
+    ("Plate tectonics", [
+        "Plate tectonics describes how rigid plates move slowly over the ductile mantle below.",
+        "Convergent boundaries build mountains and trigger earthquakes as plates collide.",
+        "Divergent boundaries create new ocean floor as magma rises along mid-ocean ridges.",
+        "Transform faults release energy through sudden slips that radiate seismic waves.",
+    ]),
+    ("Neural networks", [
+        "Neural networks learn patterns by adjusting connection weights between artificial neurons.",
+        "Backpropagation computes gradients of the loss with respect to every parameter.",
+        "Deeper layers compose simple features into increasingly abstract representations.",
+        "Regularization techniques such as dropout reduce overfitting on the training data.",
+    ]),
+    ("Roman aqueducts", [
+        "Roman aqueducts carried fresh water across long distances using a gentle constant gradient.",
+        "Engineers built arched bridges to keep the channel level over valleys and rivers.",
+        "Gravity alone moved millions of litres into cities for baths, fountains, and homes.",
+        "Many segments still stand today as monuments to ancient hydraulic engineering.",
+    ]),
+    ("Ocean currents", [
+        "Ocean currents redistribute heat around the planet and shape regional climates.",
+        "The Gulf Stream carries warm tropical water northward along the Atlantic coast.",
+        "Differences in temperature and salinity drive the slow global thermohaline circulation.",
+        "Surface currents are pushed largely by prevailing winds and deflected by rotation.",
+    ]),
+]
+_QUALITY_TAILS = [
+    "Researchers continue to refine these ideas as new measurements arrive.",
+    "Understanding the mechanism helps explain many everyday observations.",
+    "The topic connects several disciplines and rewards careful study.",
+    "Textbooks often summarize it, yet the details repay a closer look.",
+    "These principles underpin much of the modern scientific worldview.",
+]
+
+
 def _mock_docs(n: int = 1000):
-    base_quality = (
-        "The mitochondria is the powerhouse of the cell. It produces "
-        "adenosine triphosphate through oxidative phosphorylation, the "
-        "primary energy currency of cellular metabolism. Mitochondria "
-        "have their own DNA, inherited maternally, supporting the "
-        "endosymbiotic theory of their origin. This double-membraned "
-        "organelle has its own ribosomes for protein synthesis as well."
-    )
     base_bad = "click here CLICK CLICK NOW NOW spam spam spam spam spam"
     base_dup = "renewable energy is clean and sustainable for future generations"
     docs = []
     for i in range(n):
         if i % 3 == 0:
-            text = base_quality + f" variant {i}"
+            # 高质量：换主题 + 轮换句子顺序 + 不同结尾句 -> 真实多样、句号结尾
+            topic, sentences = _QUALITY_TOPICS[(i // 3) % len(_QUALITY_TOPICS)]
+            rot = (i // 3) % len(sentences)
+            body = sentences[rot:] + sentences[:rot]
+            tail = _QUALITY_TAILS[(i // 3) % len(_QUALITY_TAILS)]
+            text = f"{topic}. " + " ".join(body) + " " + tail
         elif i % 3 == 1:
-            text = base_dup + f" variant {i % 10}"   # 大量重复
+            text = base_dup + f" variant {i % 10}"   # 大量重复（dedup 应清掉）
         else:
-            text = base_bad
+            text = base_bad                          # 垃圾（quality 应清掉）
         docs.append({"url": f"http://mock/{i}", "ts": "2024-12-15",
                      "lang": "en", "text": text})
     return docs

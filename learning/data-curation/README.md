@@ -203,6 +203,61 @@ python learning/data-curation/src/capstone_mini_corpus.py --smoke
 
 ---
 
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V0+V1 验证通过（25/25）。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules data-curation
+> ```
+> 命令以 repo 根为工作目录给出（README 上方「实用入口」是 `cd learning/data-curation/` 后的简写，二者等价）。
+
+**ETL 各环节 demo**（多为 CPU 秒级；带 `*` 的会下模型）：
+
+```powershell
+python learning/data-curation/src/cc_extract.py --demo            # WARC 抽取（内置 mock HTML）
+python learning/data-curation/src/minhash_dedup.py --demo         # MinHash+LSH 去重
+python learning/data-curation/src/simhash_dedup.py --demo         # 手写 64-bit SimHash
+python learning/data-curation/src/semdedup_demo.py --demo         # * SemDeDup（MiniLM ~80MB）
+python learning/data-curation/src/quality_filter.py --demo        # * C4/Gopher 启发式 + FineWeb-Edu
+python learning/data-curation/src/toxicity_pii_filter.py --demo   # Detoxify + PII（presidio 缺走 regex）
+python learning/data-curation/src/data_mix_ablation.py --demo     # 配比 ablation 玩具
+python learning/data-curation/src/magpie_synthesis.py --demo      # Magpie 合成（mock 模板）
+```
+
+**Tokenizer 三件套**：
+
+```powershell
+python learning/data-curation/src/bpe_trainer.py --demo --vocab-size 400   # 手写 BBPE
+python learning/data-curation/src/bpe_tiktoken.py --demo                   # tiktoken 对照
+python learning/data-curation/src/spm_trainer.py --demo                    # SentencePiece Unigram
+python learning/data-curation/src/vocab_compare.py                         # 5 语言压缩率（无参直跑）
+```
+
+**Capstone 端到端流水**（extract → dedup → quality → pii → tokenize）：
+
+```powershell
+# 完整 smoke（1k mock docs，产出非空 corpus + SP 模型，约 4s）
+python learning/data-curation/src/capstone_mini_corpus.py --smoke
+# 真实 WARC（需自备）/ 开 FineWeb-Edu 质量门：
+python learning/data-curation/src/capstone_mini_corpus.py --warc seg.warc.gz --use-edu
+```
+
+> ⚠️ **SentencePiece「vocab_size 两头夹」坑**：玩具级小语料下 `vocab_size` 必须 `>= required_chars`（byte_fallback 注入 256 字节 + 单字 + 元 token），又 `<=` 可切出的 piece 数。
+> `train_spm` 已**自适应抬下界**（`256 + distinct_chars + 余量`）并设 `hard_vocab_limit=False` 把上界变软上限——`spm_trainer --demo` 与 capstone stage-5 都不再因 `200 vs 286` / `too high (512)` 崩。
+> ⚠️ **空语料 no-op 坑**：capstone 的 mock 语料原先所有"优质"文档共享同一长前缀且无结尾标点 → 被 MinHash 整片去重 + quality 全砍 → 最终 corpus 为空却仍 exit 0。已改成**多样化、句号结尾**的多主题文档（现稳定产出 ~15 doc / ~5k token）；`test_capstone_smoke` 加了非空断言防回归。
+> ℹ️ **可选依赖回退**：`detoxify` / `presidio` / `ftlangdetect` 未装时分别回退到「不打毒性分」/「regex PII」/「lang=unk」，demo 仍产出真实输出（非静默假成功）。
+> ℹ️ **magpie `--real`**：走 GPU 下真 instruct 模型（Qwen2.5-0.5B），是可选路径，**不进 smoke**；runbook 用 `--demo`（纯模板 mock）。
+
+**测试（V2）**：
+
+```powershell
+python -m pytest learning/data-curation/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules data-curation --tests
+```
+
+---
+
 ## 与其他专题的关系
 
 ```

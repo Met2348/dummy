@@ -39,7 +39,7 @@
 | 1 | prompt-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 9 个 minimal/peft demo V1 全绿，**无需改码**；V0 N/A（无 argparse，v0:false）；V2 基线绿 | 41461e5.. |
 | 2 | lora-family | M1 | ✅ | ✅ | — | ✅ | 🩹 | 19 demo V1 全绿；修 2 处假成功(qlora/loftq silent return→fail-fast)；**QLoRA 真能在 3080Ti 跑**(bnb 4bit NF4+TinyLlama)；V2 重跑绿(262s)。遗留：README 目录结构列了不存在文件(pissa_olora_extension 等)，待清理 | 2e67a5c.. |
 | 3 | adapter-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 绿(12 minimal + ia3-peft)；9 个 *_adapters.py **tier:skip**(adapters 库与 transformers5.x 冲突，已 clean fail-fast)；修 README 文档漂移(漏列 adapter_original_minimal、错误 pip adapters 指示)；V2 基线绿 | 077de22.. |
-| 4 | data-curation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 4 | data-curation | M3 | ✅ | ✅ | ✅ | ✅ | 🩹 | V0 12 + V1 13 全绿。**重磅**：capstone mock 文档自相似→MinHash 坍缩→最终语料**空**却 exit 0(假成功)，V2 测试用 `if n>0` 守卫**掩盖**了空产出。修：mock 数据多样化 + spm vocab clamp(小语料崩溃) + 测试改硬断言。V2 重跑绿 | d879779.. |
 | 5 | transformer-deep | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: tensor2tensor | |
 | 6 | moe-architecture | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 7 | ssm-hybrid | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
@@ -109,3 +109,5 @@
 5. **机器休眠污染超时**：`subprocess timeout` 是墙钟；挂起期间休眠会把快任务记成超 timeout（如 51920s）。
    - 应对：异常的超大 elapsed 不代表真慢，清醒态短超时复测即可判定。
 6. **Bash 工具吃反斜杠**：`.\.venv\Scripts\python.exe` 在 Bash 工具里要写成 `.venv/Scripts/python.exe`（正斜杠）。
+7. **条件守卫掩盖空产出**（data-curation 实例）：测试写 `if last["n"]>0: assert ...` → 产出为空时**跳过断言**静默通过。capstone/流水线类要**硬断言最终产物非空**（`assert n>0` + token>0 + 文件存在），否则 #4 假成功会从测试侧漏过。
+8. **harness 默认输出会覆盖基线**：任何 `--tests`/`--runbook` 调用必须显式 `--json-out`/`--md-out`（runbook→gitignored runbook 文件；V2 tests→`/tmp`）。默认值指向已提交的 `ERIC-3080Ti-test-{matrix.md,results.json}`，会就地覆盖。

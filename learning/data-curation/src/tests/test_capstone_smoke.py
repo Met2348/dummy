@@ -25,11 +25,12 @@ def test_pipeline_smoke():
         # 各阶段必须有 n
         for r in report:
             assert "n" in r
-        # 至少最后阶段输出 > 0
-        # （PII/quality 可能砍掉很多，但 extract 应该有数百）
+        # extract 应有数百 doc
         assert report[0]["n"] > 100, "extract 应输出 ≥ 100 docs"
-        # tokenizer model 应存在
+        # 流水不能在 dedup/quality 阶段被清空（空语料 no-op 回归保护）：
+        # mock 语料须多样且句号结尾，最终 corpus 必须非空且真有 token。
         last = report[-1]
-        if last["n"] > 0:
-            assert "model" in last
-            assert Path(last["model"]).exists()
+        assert last["n"] > 0, "最终 corpus 为空——mock 数据自相似或缺结尾标点导致流水被清空"
+        assert last.get("n_tokens", 0) > 0, "tokenize 阶段 0 token"
+        assert "model" in last
+        assert Path(last["model"]).exists()
