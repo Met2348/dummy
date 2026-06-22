@@ -53,7 +53,7 @@
 | 12 | rl-foundations | M4 | ✅ | ✅ | ✅ | 🩹 | ✅ | **PILOT 完成**。修：capstone trl 漂移→手写PPO回退；IMDb 裸id→stanfordnlp/imdb+离线回退；右填充→左填充；ppo_gpt2_trl 假成功→fail-fast | d4b5497.. |
 | 13 | rlhf-classic | M4 | ✅ | ✅ | ✅ | 🩹 | 🩹 | 6 V1 + 1 V0 全绿。修 2：① reward_hacking_demo 单元素 std→NaN→reward 全 NaN→demo 自己不演示 reward hacking(假成功变种)，改整轨迹向量化→detected:True；② capstone 缺 transformers 时 exit0 假成功→fail-fast。**trl 漂移未命中**(三段全手写无 trl)。datasets 已用 Anthropic/hh-rlhf。submodule 排除。V2 重跑绿 | ba32a98.. |
 | 14 | dpo-family | M4 | ✅ | ✅ | ✅ | ✅ | 🩹 | 9 demo V1 全绿(1 argparse dpo-train + 8 纯数值 PO 变体 demo) + V0(dpo-train --help)。修 1 真 bug：capstone_dpo_comparison `mock_step` 第 2 步对上一步返回里夹带的标量键(loss/margin)做 `.clone()`→`AttributeError: 'float' object has no attribute 'clone'`(硬崩 exit1，非假成功)→加 `isinstance(v, torch.Tensor)` 类型守卫只 clone tensor。**trl 漂移未命中**(8 变体全手写无 trl)。datasets 已用 `Anthropic/hh-rlhf` 命名空间(合规)。submodule `official/repos/direct-preference-optimization` 排除。V2 重跑绿(14) | |
-| 15 | process-reward | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 15 | process-reward | M4 | ✅ | ✅ | — | ✅ | ✅ | 7 demo V1 全绿(PRM/BoN/Math-Shepherd/MCTS/PRIME/RLVR/Capstone)，**src 无需改码**；V0 N/A(全无 argparse，v0:false)。秒级 PASS 逐一核实非 no-op(math-shepherd 打 rollout 成功率→label / mcts 打 UCT 最优路径+visits / rlvr 5 类规则奖励)。Capstone 真做 100 题×32 路 BoN 重排(mock 候选→正确答案恒高分使 BoN≈oracle，已诚实标注非 bug)。**trl 漂移未命中**(零高危 import)。**改 1 处 --env**：verify_env.py 裸 `load_dataset("gsm8k")`→`openai/gsm8k`(坑#2，原只 WARN 不阻塞，仍修正避免误导)。V2 基线绿 | |
 | 16 | reasoning-r1 | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: DeepSeek-R1；env 145s | |
 | 17 | rl-sota-2026 | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | verl 可选栈 | |
 | 18 | multimodal-agent | M4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | VLM 可选栈 | |
