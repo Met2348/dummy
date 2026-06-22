@@ -51,7 +51,11 @@ def main() -> None:
             if "h.0.attn.c_attn.lora" in name:
                 print(f"  {name}: shape={tuple(p.shape)}")
     except Exception as e:
+        # fail-fast：LoftQ 初始化失败（缺 scipy / peft API 漂移）必须非零退出，
+        # 不可静默 print+return 让 harness 误记 PASS（假成功反模式）。
         print(f"[FAIL] {type(e).__name__}: {str(e)[:200]}")
+        print("LoftQ 需要 scipy；请确认已安装 (pip install scipy)。")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

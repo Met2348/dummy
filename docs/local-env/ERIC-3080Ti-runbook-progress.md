@@ -36,7 +36,7 @@
 | # | Module | Grp | README | runbook | V0 | V1 | V2 | Notes / 修复 | Commit |
 |---|--------|-----|:--:|:--:|:--:|:--:|:--:|---|---|
 | 1 | prompt-tuning-family | M1 | ✅ | ✅ | — | ✅ | ✅ | 9 个 minimal/peft demo V1 全绿，**无需改码**；V0 N/A（无 argparse，v0:false）；V2 基线绿 | 41461e5.. |
-| 2 | lora-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | tests 280s（重）| |
+| 2 | lora-family | M1 | ✅ | ✅ | — | ✅ | 🩹 | 19 demo V1 全绿；修 2 处假成功(qlora/loftq silent return→fail-fast)；**QLoRA 真能在 3080Ti 跑**(bnb 4bit NF4+TinyLlama)；V2 重跑绿(262s)。遗留：README 目录结构列了不存在文件(pissa_olora_extension 等)，待清理 | 2e67a5c.. |
 | 3 | adapter-tuning-family | M1 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | tests 127s（重）| |
 | 4 | data-curation | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 5 | transformer-deep | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | submodule: tensor2tensor | |

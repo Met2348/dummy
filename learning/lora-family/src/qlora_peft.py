@@ -80,11 +80,14 @@ def main() -> None:
             out = model(**inputs)
         print(f"\nforward logits.shape: {tuple(out.logits.shape)}")
     except Exception as e:
+        # fail-fast：真量化失败必须非零退出，绝不静默 print+return 成功（假成功反模式）
         print(f"[FAIL] {type(e).__name__}: {e}")
         print("\n常见原因：")
         print("  - bitsandbytes 与 torch CUDA 版本不兼容")
         print("  - GPU sm 不被 bitsandbytes 支持（Blackwell sm_120 需要 bnb 0.43+）")
         print("  - HF 模型下载失败（需要联网或本地缓存）")
+        print("\nCPU/无 bitsandbytes 环境请改跑 fake-quant 版: python qlora_minimal.py")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

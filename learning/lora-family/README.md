@@ -180,6 +180,63 @@ pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision
 9. **对比题**：QLoRA vs LoftQ 在 7B vs 65B 模型上的差异为什么不同
 10. **实践题**：在 LLaMA-2-7B 上估算 QLoRA + DoRA (QDoRA) 的显存占用
 
+## 运行验证（Runbook）
+
+> 本专题的"可运行入口"即 [`runbook.yaml`](runbook.yaml) 登记的 **19 个 minimal/peft 直跑 demo**（12 种方法的手写实现 + peft 调包对照 + NF4 共享模块）。均无需传参，自带 smoke 规模（GPT-2 / TinyLlama）。已在 ERIC-3080Ti（RTX 3080 Ti Laptop 16GB，torch 2.11+cu128 / peft 0.19.1 / bitsandbytes 0.49.2）**V1 全部验证通过（19/19）**。
+> 一键复验：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules lora-family --timeout 600
+> ```
+
+每种方法都可直接跑（`*_minimal.py` = 手写最小实现，`*_peft.py` = peft 调包对照）：
+
+```powershell
+# 01 LoRA（+ rsLoRA / LoRA+）
+python learning/lora-family/src/lora_minimal.py
+python learning/lora-family/src/lora_peft.py
+python learning/lora-family/src/lora_extensions.py        # rsLoRA / LoRA+ 扩展
+# 02 AdaLoRA
+python learning/lora-family/src/adalora_minimal.py
+python learning/lora-family/src/adalora_peft.py
+# 03 PiSSA（+ OLoRA）
+python learning/lora-family/src/pissa_minimal.py
+python learning/lora-family/src/pissa_peft.py
+# 04 VeRA
+python learning/lora-family/src/vera_minimal.py
+python learning/lora-family/src/vera_peft.py
+# 05 LoHa + LoKr
+python learning/lora-family/src/loha_minimal.py
+python learning/lora-family/src/lokr_minimal.py
+python learning/lora-family/src/loha_lokr_peft.py         # GPT-2 Conv1D 预期 ValueError（仅 nn.Linear 支持）
+# NF4 共享量化模块（QLoRA/LoftQ 依赖）
+python learning/lora-family/src/nf4_quant.py              # 纯数值自检，CPU 秒级
+# 06 QLoRA
+python learning/lora-family/src/qlora_minimal.py          # NF4 fake-quant，CPU/GPU 都跑
+python learning/lora-family/src/qlora_peft.py             # bitsandbytes 真 4-bit + TinyLlama，GPU only
+# 07 LoftQ
+python learning/lora-family/src/loftq_minimal.py
+python learning/lora-family/src/loftq_peft.py             # 需 scipy
+# 08 DoRA
+python learning/lora-family/src/dora_minimal.py
+python learning/lora-family/src/dora_peft.py
+```
+
+**关键坑注记**：
+
+- **QLoRA + bitsandbytes**：`qlora_peft.py` 用 `bitsandbytes` 真 4-bit NF4，**需 GPU**（4-bit 不支持 CPU）。本机 RTX 3080 Ti（Ampere sm_86）实测可跑（TinyLlama-1.1B 加载 + 前向通过）。无 GPU / 无 bitsandbytes 时它会**显式 SKIP**（提示改跑 `qlora_minimal.py` 的 fake-quant 版），真量化失败则 **fail-fast（非零退出）**——不再静默 print 成功（杜绝"假成功"反模式）。
+- **LoftQ**：`loftq_peft.py` 依赖 `scipy`；初始化失败现已 **fail-fast** 而非静默 return。
+- **LoHa / LoKr**：peft 的 `LoHaConfig`/`LoKrConfig` 不支持 GPT-2 的 `Conv1D`，`loha_lokr_peft.py` 故意捕获并打印**预期的** `ValueError`（这是 demo 的教学点，非错误）；在 LLaMA/BERT 等 `nn.Linear` 模型上可直接用。
+- 所有 `*_minimal.py` 会下载 `gpt2`（首次 ~500MB），首跑稍慢属正常。
+
+**测试（V2）**：10 个一致性测试校验 minimal 与 peft 数值对齐（本套件最重，~260s）：
+
+```powershell
+python scripts/eric_3080ti_env_audit.py --modules lora-family --tests --timeout 600
+# 或单独：python learning/lora-family/src/tests/test_lora_consistency.py 等
+```
+
+> 环境自检（CPU + GPU + bitsandbytes 三段式）：`python learning/lora-family/environment/verify_env.py`
+
 ## 与 prompt-tuning-family 的衔接（跨专题对比）
 
 LoRA 家族与上一专题（prompt-tuning-family）形成"两条主线"：
