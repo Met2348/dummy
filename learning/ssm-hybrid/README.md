@@ -59,6 +59,44 @@ python -m pytest learning/ssm-hybrid/src/tests/ -v
 python learning/ssm-hybrid/src/capstone_train_mini_mamba.py
 ```
 
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB，repo-local `.venv`）上 **V0+V1 全绿（10/10）** 验证通过。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules ssm-hybrid `
+>   --json-out docs/local-env/ERIC-3080Ti-runbook-results.json --md-out docs/local-env/ERIC-3080Ti-runbook-matrix.md
+> ```
+
+**10 个 from-scratch 直跑 demo**（全部无 argparse、纯 CPU、秒级真实 forward；无参数可调，直跑即验证）：
+
+```powershell
+# SSM 基础 → Mamba → 混合架构 → capstone，逐个直跑
+python learning/ssm-hybrid/src/s4_naive.py                 # S4 (LTI) ZOH+scan
+python learning/ssm-hybrid/src/mamba_block.py              # Mamba 选择性扫描 (S6)
+python learning/ssm-hybrid/src/mamba2_block.py             # Mamba-2 SSD form
+python learning/ssm-hybrid/src/mamba_original_minimal.py   # 论文核心机制 (selective-copy + S6 scan)
+python learning/ssm-hybrid/src/rwkv_block.py               # RWKV-7 简化 time-mix
+python learning/ssm-hybrid/src/jamba_block.py              # Jamba 混合层 (Mamba+attn+FFN)
+python learning/ssm-hybrid/src/zamba_block.py              # Zamba 共享注意力
+python learning/ssm-hybrid/src/mini_mamba.py               # capstone 模型 forward
+python learning/ssm-hybrid/src/mamba_lib.py                # mamba-ssm 库 wrapper (本机 [SKIP])
+python learning/ssm-hybrid/src/capstone_train_mini_mamba.py  # 训练 80 step，loss 64→7 真下降 (~9s)
+```
+
+> ⚠️ **可选 CUDA-kernel 库坑**：`mamba_lib.py` 依赖官方 `mamba-ssm` / `causal-conv1d`（融合 CUDA kernel，**仅 Linux/WSL2**，本 Windows box 未装）。
+> 脚本 `has_mamba_lib()` 真实探测：库不存在时打印 `[SKIP] mamba-ssm not installed`，exit 0（**诚实跳过、非假成功**——它显式报告库缺失，不伪装计算）。
+> 手写等价物即 `mamba_block.py`（数学等价于 CUDA kernel，已单列直跑），无需安装重型 CUDA 包即可学全部机制。
+> **不要** `pip install mamba-ssm causal-conv1d`（无预编译 Windows wheel，需 nvcc 现场编译，易踩坑）。
+> 裸 import（`from common import` / `from mamba_block import`）依赖 harness 注入的 `PYTHONPATH=src`；手动直跑时也用 `python learning/ssm-hybrid/src/<x>.py`（仓库根 cwd）即可，audit harness 已自动处理。
+
+**测试（V2）**：
+
+```powershell
+python -m pytest learning/ssm-hybrid/src/tests/ -q
+# 或经审计 harness（基线 6 测全绿）：python scripts/eric_3080ti_env_audit.py --modules ssm-hybrid --tests
+```
+
 ## Tags
 
 ```

@@ -17,7 +17,8 @@
 
 - 2026-06-20：建立 spec / plan / 账本三件套。
 - 2026-06-22：**Phase 0 pilot 完成**。`--runbook` 工具就绪（6 单测）；rl-foundations 全绿（V0+V1 12/12，V2 tests PASS）。修了 4 个真实 bug（见 rl-foundations 行 + 系统性问题）。
-- 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。**下一步：M3 造模型（8 个），从 `data-curation` 开始。**
+- 2026-06-22：**M1 PEFT 全部完成（3/3）**：prompt-tuning（9 demo，无需改码）、lora（19 demo，修 2 假成功，QLoRA 真跑）、adapter（13 demo + 9 skip，修文档漂移）。改用 **subagent 委派**（brief: `RUNBOOK-AGENT-BRIEF.md`），我审 diff+复验+提交。修了 brief 一个坑（V2 测试默认输出会覆盖基线，已强制 /tmp）。
+- 2026-06-22：**M3 进度 4/8**：data-curation（修空语料假成功+spm崩溃+测试硬化）、transformer-deep（无改码）、moe-architecture（无改码）、ssm-hybrid（无改码）。**下一步：M3 剩余 long-context → scaling-infra → pretraining-recipe → small-model-graduation。**
 
 ## 状态图例
 
@@ -42,7 +43,7 @@
 | 4 | data-curation | M3 | ✅ | ✅ | ✅ | ✅ | 🩹 | V0 12 + V1 13 全绿。**重磅**：capstone mock 文档自相似→MinHash 坍缩→最终语料**空**却 exit 0(假成功)，V2 测试用 `if n>0` 守卫**掩盖**了空产出。修：mock 数据多样化 + spm vocab clamp(小语料崩溃) + 测试改硬断言。V2 重跑绿 | d879779.. |
 | 5 | transformer-deep | M3 | ✅ | ✅ | ✅ | ✅ | ✅ | 18 demo V1 + 1 V0(capstone-train) 全绿，**无需改码**。GPU demo 真用 cuda；秒级 summary 是真 KV-cache 公式。tensor2tensor submodule 已排除。小漂移(README"7 tests"实6、papers/→paper/)待清理 | bfd46fd.. |
 | 6 | moe-architecture | M3 | ✅ | ✅ | — | ✅ | ✅ | 13 demo V1 全绿，**无需改码**。capstone loss 60.6→12.2；秒级 summary 是真 config 计算。grouped_gemm 0.28×是诚实 CPU 结果。小漂移(README"14"实13)待清理 | 8ea09ac.. |
-| 7 | ssm-hybrid | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
+| 7 | ssm-hybrid | M3 | ✅ | ✅ | — | ✅ | ✅ | 10 demo V1 全绿，**无需改码**。selective-copy 真数值演示；capstone loss 62.7→6.9。mamba_lib [SKIP] 是诚实库缺失(非假成功)，手写 mamba_block 为可跑等价。V2 复跑绿。小漂移待清理 | b9e91ca.. |
 | 8 | long-context | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 9 | scaling-infra | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
 | 10 | pretraining-recipe | M3 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | | |
