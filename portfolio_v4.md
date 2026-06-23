@@ -271,3 +271,25 @@ Part IV 研究入口        L13 6类gap雷达扫harness开放问题 · L14 Capst
 设计/计划: `docs/superpowers/{specs,plans}/2026-06-22-harness-engineering*`
 
 > 这个专题示范了一种新模式: **同一个热点, 既当工程能力练 (Module 7), 又当研究入口挖 (Module 9)**。
+
+---
+
+## Modules 10-13 — 前沿 4 大扩展 (规划完成 2026-06-24, 全套指导文件已落地, 建设中 🚧)
+
+> **动因**: 2026-06-24 web 核对当下招聘后, 锁定体系仅剩的 4 个主要空白, 全部命中「真空白 × 2026 高薪 × 适配用户轨迹」。用户决策: 4 个全建。
+
+| 模块 | 7 专题骨架 | 缺口 → 2026 行情 |
+|---|---|---|
+| **M10 多模态/VLM** | vision-encoders / vl-fusion / vlm-training / visual-tokenization-generation / video-audio-omni / vlm-eval / graduation | 只有应用层 → top emerging area; 用户明牌方向 |
+| **M11 具身/VLA** | embodied-foundations / vla-architectures / action-heads-diffusion-policy / robot-data-imitation / world-action-models / sim2real-isaaclab / graduation | 空白 → 2026 具身基石(ICLR 164篇); 用户已碰 IsaacLab |
+| **M12 机制可解释性** | interp-foundations / probing / causal-interventions / SAE / circuits-attention / cot-faithfulness-oversight / graduation | 空白 → MIT 2026 十大突破; frontier 安全实验室硬通货 |
+| **M13 扩散/世界模型** | diffusion-foundations / flow-matching / DiT / video-generation / world-models / **diffusion-LM** / graduation | 范式级空白(全自回归) → ICLR 主线; dLLM 直连 NLP |
+
+依赖图: M10(地基) → M11(VLM+action head) / M13(图视频世界dLLM); M12 独立横切。
+**构建顺序**: M10 → M13 → M11 → M12 (依赖驱动)。合计 28 新专题 → 体系 = 48 工程 + 9 研究 + 28 前沿 = **85 专题**。
+
+每模块同 Module 9 标准 (研究生级课件 + nbconvert 全跑通 + 小尺度 CPU 可跑 + 复用 9.3/9.4/9.5/9.6 工具)。全套指导文件:
+- specs: `docs/superpowers/specs/2026-06-24-module1{0,1,2,3}-*-design.md`
+- plans + 路线图: `docs/superpowers/plans/2026-06-24-module1{0,1,2,3}-*.md` + `...-modules10-13-roadmap.md`
+
+> 杠杆: 用户最大优势是**迁移而非从零** —— VLA 复用 transformer/RL/VLM 全套, dLLM 复用 pretraining, interp 用 EE 数学。28 个前沿专题是把 48 工程专题的存量**架到新范式上**。
