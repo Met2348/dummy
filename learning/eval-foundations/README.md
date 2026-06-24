@@ -67,3 +67,10 @@ Module 5 部署的 ckpt  ┘
 ## 一句话
 
 > 评测 = 给 LLM 出题 + 对照答案。本 topic 教你跑通主流"高考"。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N13-real-perplexity.ipynb`](notebooks/N13-real-perplexity.ipynb) — 真实 gpt2 困惑度: 区分通顺/打乱/随机文本 (最朴素的内在评估)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

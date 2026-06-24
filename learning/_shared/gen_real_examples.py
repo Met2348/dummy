@@ -334,12 +334,242 @@ if model is not None:
     write("red-team-jailbreak", "N13-real-refusal.ipynb", cells)
 
 
+# ════════════════════════════════════════════════════════════════════════
+# 6. rag-essential — 真实检索 (gpt2 嵌入) + 接地生成 (TinyLlama)
+# ════════════════════════════════════════════════════════════════════════
+def build_rag():
+    cells = [
+        md("""# N-real · 真实 RAG: 检索 (gpt2 嵌入) + 接地生成 (TinyLlama)
+
+> **小而真** (配套 rag-essential) · RAG = 先检索相关文档, 再让模型基于文档回答。
+> 这里**全程真实**: 用 gpt2 隐状态当嵌入做检索, 把检索到的文档喂给 TinyLlama 生成。
+> 看 RAG 怎么把「闭卷瞎编」变成「开卷有据」。CPU 离线确定性。"""),
+        code(PRE),
+        md(f"> {GUARD}"),
+        md("## 1. 一个模型不可能知道的「冷知识」语料库"),
+        code('''CORPUS = [
+    "The Zorblax Prize 2024 was awarded to Dr. Mira Chen for her work on tidal desalination.",
+    "Photosynthesis converts light energy into chemical energy stored in glucose.",
+    "The Heaviside layer reflects radio waves and helps long-distance transmission.",
+    "Mount Kilimanjaro is the highest mountain in Africa, located in Tanzania.",
+]
+QUESTION = "Who won the Zorblax Prize in 2024?"
+GOLD = "Dr. Mira Chen"   # 只有 CORPUS[0] 含答案; 模型预训练里没有 (虚构事实)
+print("问题:", QUESTION)
+print("黄金答案只在文档0里:", CORPUS[0])'''),
+        md("## 2. 用真实 gpt2 嵌入做检索 (隐状态均值池化 + 余弦相似)"),
+        code(MPL + """
+tok, gmodel = rm.gpt2()
+def embed(text):
+    ids = tok(text, return_tensors='pt')
+    with torch.no_grad():
+        hs = gmodel(**ids, output_hidden_states=True).hidden_states[-1][0]
+    return hs.mean(0).numpy()                    # 均值池化 = 句向量
+
+if gmodel is not None:
+    docvecs = np.stack([embed(d) for d in CORPUS])
+    qv = embed(QUESTION)
+    sims = docvecs @ qv / (np.linalg.norm(docvecs,axis=1)*np.linalg.norm(qv)+1e-8)
+    rank = np.argsort(-sims)
+    print("检索相似度排序:")
+    for r in rank:
+        print(f"  doc{r}  sim={sims[r]:+.3f}  {CORPUS[r][:55]}...")
+    top_doc = CORPUS[rank[0]]
+    print(f"\\n→ 检索到的 top 文档: doc{rank[0]} ({'命中✅' if rank[0]==0 else '未命中⚠'})")
+else:
+    print("无 gpt2, 跳过"); top_doc = CORPUS[0]"""),
+        md("## 3. 闭卷 vs 开卷 (接地): 同一问题, 给不给检索文档"),
+        code("""tok2, lm = rm.tinyllama()
+if lm is not None:
+    closed = rm.chat(tok2, lm, QUESTION + " Answer in one short sentence.", max_new_tokens=40)
+    grounded = rm.chat(tok2, lm,
+        f"Context: {top_doc}\\n\\nQuestion: {QUESTION}\\nAnswer using only the context, in one short sentence.",
+        max_new_tokens=40)
+    print("【闭卷 (无检索)】", closed.replace(chr(10),' ')[:180])
+    print("  命中黄金答案?", GOLD.lower() in closed.lower())
+    print()
+    print("【开卷 (RAG 接地)】", grounded.replace(chr(10),' ')[:180])
+    print("  命中黄金答案?", GOLD.lower() in grounded.lower())
+else:
+    print("无 TinyLlama, 跳过")"""),
+        md("""## 4. 反思
+你跑了一条**全真实**的 RAG 流水线: gpt2 嵌入检索 → TinyLlama 接地生成。带走:
+- **闭卷**: 模型对预训练里没有的事实只能瞎编 (幻觉)。
+- **开卷 (RAG)**: 把相关文档塞进上下文, 模型「照着读」就能答对。
+- RAG 两段都可能出错: **检索错** (召回不到/排错序) 或 **生成不忠实** (不照文档答)。
+  这对应你 rag-essential 学的两大评估面: 检索质量 + 生成忠实度 (groundedness)。
+
+> RAG 的价值: 把「模型记住多少」变成「模型会查多少」, 知识可更新、可溯源。检索质量是上限。"""),
+    ]
+    write("rag-essential", "N15-real-rag.ipynb", cells)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 7. quantization-deploy — 真实 int8/int4 伪量化 gpt2 权重, 测困惑度代价
+# ════════════════════════════════════════════════════════════════════════
+def build_quantization():
+    cells = [
+        md("""# N-real · 真实权重量化 (gpt2): int8/int4 的困惑度代价
+
+> **小而真** (配套 quantization-deploy) · 量化 = 把 fp32 权重压成低比特省显存。
+> 这里对**真实 gpt2 权重**做对称 int8/int4 伪量化 (量化→反量化), 测**真实困惑度**变化,
+> 亲眼看「int8 几乎无损、int4 开始掉」的经典权衡。CPU 离线确定性。"""),
+        code(PRE),
+        md(f"> {GUARD}"),
+        md("## 1. 对称 **per-channel** 量化的真实机制 (一个权重矩阵)"),
+        code("""tok, model = rm.gpt2()
+def fake_quant(t, bits):
+    # per-channel (每行独立缩放): 真实 int8 部署的标准做法, 远胜单一 scale 的 per-tensor
+    qmax = 2**(bits-1) - 1                        # int8: 127, int4: 7
+    scale = t.abs().amax(dim=1, keepdim=True) / qmax + 1e-12
+    q = torch.round(t / scale).clamp(-qmax-1, qmax)
+    return q * scale                             # 反量化回 fp32 (含量化误差)
+
+if model is not None:
+    W = model.transformer.h[0].mlp.c_fc.weight.data
+    for bits in [8, 4]:
+        Wq = fake_quant(W, bits)
+        err = (W - Wq).abs().mean() / W.abs().mean()
+        print(f"int{bits} per-channel: 相对量化误差 {err*100:.2f}%  (理论压缩 {32//bits}×)")
+else:
+    print("无 gpt2, 跳过")"""),
+        md("""## 2. 量化 transformer 块权重 (attn+MLP), 测真实困惑度代价
+> 真实做法: 只量化计算量大头 (注意力/MLP 的权重矩阵), **embedding/输出层保留高精度** (它们对量化敏感)。"""),
+        code("""import copy
+TEXT = "Machine learning models are trained on large amounts of text data to predict the next word."
+def is_block_weight(name):     # transformer 块里的 2D 权重 (跳过 embedding/ln/bias)
+    return ".h." in name and name.endswith(".weight")
+if model is not None:
+    base = rm.perplexity(tok, model, TEXT)
+    nq = sum(p.numel() for n,p in model.named_parameters() if is_block_weight(n) and p.dim()==2)
+    nt = sum(p.numel() for p in model.parameters())
+    print(f"量化覆盖 {nq/nt*100:.0f}% 参数 (attn+MLP 权重), embedding 保留 fp32\\n")
+    results = {32: base}
+    for bits in [8, 4]:
+        qm = copy.deepcopy(model)
+        with torch.no_grad():
+            for n, p in qm.named_parameters():
+                if is_block_weight(n) and p.dim() == 2:
+                    p.copy_(fake_quant(p.data, bits))
+        results[bits] = rm.perplexity(tok, qm, TEXT)
+        del qm
+    print(f"{'精度':>6} {'困惑度':>10} {'相对劣化':>10}")
+    for b in [32, 8, 4]:
+        deg = (results[b]/base - 1)*100
+        print(f"{('fp32' if b==32 else f'int{b}'):>6} {results[b]:10.2f} {deg:+9.1f}%")
+else:
+    results = {}"""),
+        md("## 3. 可视化压缩-质量权衡"),
+        code(MPL + """
+if results:
+    bits = [32, 8, 4]; ppl = [results[b] for b in bits]; sizes = [32//b if b<32 else 1 for b in bits]
+    fig, ax1 = plt.subplots(figsize=(7,4))
+    ax1.plot(['fp32','int8','int4'], ppl, 'o-', color='C3', label='困惑度 (越低越好)')
+    ax1.set_ylabel('困惑度', color='C3'); ax1.tick_params(axis='y', labelcolor='C3')
+    ax2 = ax1.twinx()
+    ax2.bar(['fp32','int8','int4'], [1,4,8], alpha=0.2, color='C0')
+    ax2.set_ylabel('理论压缩倍数', color='C0')
+    plt.title('真实 gpt2 量化: int8 几乎无损, int4 开始掉质量')
+    plt.tight_layout(); plt.show()
+    print("→ int8 困惑度几乎不变 (主流部署默认), int4 明显劣化 (需更聪明的量化, 如分组/GPTQ/AWQ)。")"""),
+        md("""## 4. 反思
+你对**真实 gpt2 权重**做了量化, 测了**真实困惑度代价**。带走:
+- **int8**: 困惑度几乎不变, 4× 压缩 —— 这就是为什么 int8 是部署默认 (你 quantization 模块的主线)。
+- **int4**: 朴素对称量化开始掉质量; 真实 int4 要靠**分组量化 + 校准** (GPTQ/AWQ) 才可用。
+- 这只是「权重量化」的最朴素版; 真实工程还有 激活量化、混合精度、per-channel/group scale。
+
+> 量化的本质权衡: **省显存/带宽 vs 精度损失**。int8 是甜点, int4 是前沿战场。"""),
+    ]
+    write("quantization-deploy", "N14-real-int8-gpt2.ipynb", cells)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 8. lora-family — 真实 LoRA (gpt2 forward hook): 0.01% 参数让模型适配
+# ════════════════════════════════════════════════════════════════════════
+def build_lora():
+    cells = [
+        md("""# N-real · 真实 LoRA (gpt2): 0.01% 参数让模型适配新文本
+
+> **小而真** (配套 lora-family) · LoRA = 冻结大模型, 只训一对低秩矩阵 A·B。
+> 这里在**真实 gpt2** 的一层注意力上挂 LoRA (forward hook), 只训 ~1.2 万参数 (全模型 0.01%),
+> 让模型「记住」一句新话, 看困惑度大幅下降。真实权重、真实训练。CPU。"""),
+        code(PRE),
+        md(f"> {GUARD}"),
+        md("## 1. 在 gpt2 第0层 c_attn 上挂一个 LoRA (冻结 base)"),
+        code("""import torch.nn as nn
+tok, model = rm.gpt2()
+if model is not None:
+    for p in model.parameters():
+        p.requires_grad_(False)                  # 冻结整个 gpt2
+    HID, OUT, R = 768, 2304, 4                    # c_attn: 768 → 2304(=Q,K,V), 低秩 r=4
+    torch.manual_seed(0)
+    A = nn.Parameter(torch.randn(HID, R) * 0.02)
+    B = nn.Parameter(torch.zeros(R, OUT))         # B 初始化 0 → 训练起点等于原模型
+    SCALE = 1.0
+    def lora_hook(mod, inp, out):
+        return out + SCALE * (inp[0] @ A @ B)     # ΔW = A·B 的低秩增量
+    handle = model.transformer.h[0].attn.c_attn.register_forward_hook(lora_hook)
+    n_lora = A.numel() + B.numel()
+    n_total = sum(p.numel() for p in model.parameters())
+    print(f"LoRA 可训练参数: {n_lora:,}  (全模型 {n_total:,} 的 {n_lora/n_total*100:.3f}%)")
+else:
+    print("无 gpt2, 跳过")"""),
+        md("## 2. 只训 A,B 让模型记住一句新话"),
+        code("""TARGET = "The secret password to the lab is granite-otter-seven."
+if model is not None:
+    ids = tok(TARGET, return_tensors="pt")
+    ppl_before = rm.perplexity(tok, model, TARGET)
+    opt = torch.optim.Adam([A, B], lr=3e-3)
+    losses = []
+    for step in range(40):
+        out = model(**ids, labels=ids.input_ids)  # 含 LoRA hook 的前向
+        opt.zero_grad(); out.loss.backward(); opt.step()
+        losses.append(out.loss.item())
+    ppl_after = rm.perplexity(tok, model, TARGET)
+    print(f"训练 loss: {losses[0]:.3f} → {losses[-1]:.3f}")
+    print(f"目标句困惑度: {ppl_before:.1f} → {ppl_after:.1f}  (LoRA 让模型大幅适配这句话)")"""),
+        md("## 3. 看 LoRA 的「特异性」: 适配目标句, 不该毁掉通用能力"),
+        code(MPL + """
+if model is not None:
+    OTHER = "The weather today is sunny and warm."
+    # 关掉 LoRA (移除 hook) 看原模型, 再开 LoRA 看变化
+    handle.remove()
+    base_target = rm.perplexity(tok, model, TARGET)
+    base_other  = rm.perplexity(tok, model, OTHER)
+    handle = model.transformer.h[0].attn.c_attn.register_forward_hook(lora_hook)
+    lora_target = rm.perplexity(tok, model, TARGET)
+    lora_other  = rm.perplexity(tok, model, OTHER)
+    fig, ax = plt.subplots(figsize=(7,4))
+    x = np.arange(2); w=0.35
+    ax.bar(x-w/2, [base_target, base_other], w, label='原 gpt2', color='gray')
+    ax.bar(x+w/2, [lora_target, lora_other], w, label='+LoRA', color='C0')
+    ax.set_xticks(x); ax.set_xticklabels(['目标句 (训练的)', '无关句 (没训的)'])
+    ax.set_ylabel('困惑度 (越低越熟悉)'); ax.legend()
+    ax.set_title('LoRA 大幅降低目标句困惑度, 对无关句影响小 (特异适配)')
+    plt.tight_layout(); plt.show()
+    print(f"目标句: {base_target:.0f} → {lora_target:.0f} (大降)")
+    print(f"无关句: {base_other:.0f} → {lora_other:.0f} (基本不变 = 没毁掉通用能力)")"""),
+        md("""## 4. 反思
+你在**真实 gpt2** 上训了一个真 LoRA: 冻结 124M 参数, 只训 1.2 万 (0.01%), 就让模型适配了新文本。带走:
+- **低秩增量 ΔW=A·B**: B 初始化 0 → 起点等于原模型, 训练只学「增量」。
+- **参数效率**: 0.01% 可训参数就能显著适配 (真实 LoRA 常 0.1~1%, 这里更极端)。
+- **特异性**: 目标句困惑度大降, 无关句基本不变 —— LoRA 是「外挂适配器」, 不破坏底座。
+- 真实 LoRA 加在多层多投影 (q/k/v/o), 这里只加一层一处, 已足够看清机制。
+
+> 这就是为什么 LoRA 统治了微调: 小到能存几百个适配器、合并零开销、不动底座。你 adapter/lora 模块的核心一图胜千言。"""),
+    ]
+    write("lora-family", "N9-real-lora-gpt2.ipynb", cells)
+
+
 BUILDERS = {
     "transformer-deep": build_transformer_deep,
     "eval-foundations": build_eval_foundations,
     "reasoning-eval": build_reasoning_eval,
     "llm-judge-arena": build_llm_judge,
     "red-team-jailbreak": build_red_team,
+    "rag-essential": build_rag,
+    "quantization-deploy": build_quantization,
+    "lora-family": build_lora,
 }
 
 

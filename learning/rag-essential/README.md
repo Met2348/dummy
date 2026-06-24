@@ -66,3 +66,10 @@ $env:PYTHONIOENCODING="utf-8"; python -c "import sys; sys.path.insert(0,'learnin
 ## 一句话
 
 > 5 RAG 策略 + RAGAS 4 维评测 — 全部 stdlib mock，理解原理而非依赖框架。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N15-real-rag.ipynb`](notebooks/N15-real-rag.ipynb) — 真实 RAG: gpt2 嵌入检索 + TinyLlama 接地生成 (闭卷瞎编 → 开卷有据)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

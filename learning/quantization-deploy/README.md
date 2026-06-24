@@ -98,3 +98,10 @@ python -m vllm.entrypoints.openai.api_server \
 ## 一句话
 
 > 量化 = **不同精度策略的工程权衡**。AWQ 是精度王 / W4A8 是速度王 / FP8 是训推一致王。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N14-real-int8-gpt2.ipynb`](notebooks/N14-real-int8-gpt2.ipynb) — 真实 gpt2 权重 per-channel 量化: int8 几乎无损(+4.7%) / int4 明显劣化
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

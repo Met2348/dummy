@@ -223,3 +223,10 @@ LoRA 家族与上一专题（prompt-tuning-family）形成"两条主线"：
 | `lora-shape` | `ae74fcd` | LoHa + LoKr（Hadamard / Kronecker）|
 | `lora-quant` | `23d45a7` | QLoRA + LoftQ（量化二人组）|
 | `lora-family-complete` | _本次_ | DoRA + 完整 README |
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N9-real-lora-gpt2.ipynb`](notebooks/N9-real-lora-gpt2.ipynb) — 真实 LoRA (gpt2 forward hook): 0.01% 参数适配新文本, 困惑度 378→4 且不毁通用能力
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

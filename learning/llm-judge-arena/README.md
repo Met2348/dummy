@@ -51,3 +51,10 @@ python -c "import sys; sys.path.insert(0,'learning/llm-judge-arena/src'); from m
 ## 一句话
 
 > Judge = 自动评开放生成；Arena = pairwise BT-Elo 排行。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N13-real-judge.ipynb`](notebooks/N13-real-judge.ipynb) — 真实 TinyLlama 当评委 + 位置偏置暴露 (自动评估有偏)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

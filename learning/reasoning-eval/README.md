@@ -50,3 +50,10 @@ python -c "import sys; sys.path.insert(0,'learning/reasoning-eval/src'); from ca
 ## 一句话
 
 > 推理 bench = 当今 LLM 的 IQ 测试 — 数学/科学/逻辑全覆盖。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N13-real-cot.ipynb`](notebooks/N13-real-cot.ipynb) — 真实 TinyLlama CoT vs 直接答 (小模型真实算错 = 评推理为何要看过程)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

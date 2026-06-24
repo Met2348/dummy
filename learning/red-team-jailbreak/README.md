@@ -60,3 +60,10 @@ Topic 6 (`safety-defense`) 用同样攻击方法 + 加防御，对比 ASR 降低
 ## 一句话
 
 > 红队 = 找洞，懂攻击才能造好防御（Topic 6）。
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N13-real-refusal.ipynb`](notebooks/N13-real-refusal.ipynb) — 真实 TinyLlama-Chat 拒答行为 (防御视角: 正常答/有害拒/边界脆弱)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。

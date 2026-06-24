@@ -134,3 +134,10 @@ data-curation (专题 1) → tokenizer + corpus
    专题 7 pretraining-recipe → 真训 270M Phi-tiny
    专题 8 graduation → 80M GPT-mini 作 baseline
 ```
+
+
+---
+## 🔬 小而真 · 真实模型例子
+> 除 toy 外, 本专题附一个**真实小模型** notebook (本地 gpt2/TinyLlama, CPU 离线):
+> - [`notebooks/N15-real-gpt2-attention-kv.ipynb`](notebooks/N15-real-gpt2-attention-kv.ipynb) — 真实 gpt2: 注意力矩阵 + 下一 token 分布 + KV cache 加速 (你 toy 学的机制, 真模型版)
+> 共享工具见 [`learning/_shared/realmodels.py`](../_shared/realmodels.py)。
