@@ -70,3 +70,18 @@ TTFT = Histogram("llm_ttft_seconds", "Time to first token")
 
 def render_all() -> str:
     return "\n\n".join((REQS.render(), TTFT.render()))
+
+
+def demo() -> None:
+    print("=== Prometheus 风格指标渲染 ===")
+    REQS.inc(("mock-7b",))
+    REQS.inc(("mock-7b",))
+    REQS.inc(("mock-13b",))
+    for ttft in (0.02, 0.04, 0.08, 0.15, 0.3):
+        TTFT.observe(ttft)
+    print(render_all())
+    print(f"\nTTFT 直方图分位: p50≈{TTFT.percentile(0.5)}s  p95≈{TTFT.percentile(0.95)}s")
+
+
+if __name__ == "__main__":
+    demo()

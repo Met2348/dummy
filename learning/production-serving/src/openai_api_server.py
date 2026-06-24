@@ -134,3 +134,21 @@ def make_app():
 
 
 app = make_app()
+
+
+def demo() -> None:
+    """演示协议层（构造/校验/mock 生成），**不起阻塞服务**。"""
+    print("=== OpenAI 兼容 API（协议层 demo，不起服务）===")
+    req = {"model": "mock-7b", "messages": [{"role": "user", "content": "hi there"}]}
+    print("validate(good):", validate_chat_request(req) or "OK")
+    print("validate(bad) :", validate_chat_request({"messages": []}))
+    text, pt, ot = mock_generate(req)
+    resp = build_completion_response(req, text, pt, ot)
+    print(f"completion content: {resp['choices'][0]['message']['content']!r}")
+    print(f"usage: {resp['usage']}")
+    print(f"\nFastAPI app 已构建: {app is not None}")
+    print("起真服务：  cd learning/production-serving/src; uvicorn openai_api_server:app --port 8000")
+
+
+if __name__ == "__main__":
+    demo()

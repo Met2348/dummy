@@ -123,3 +123,26 @@ def exp3_update(
     updated = dict(weights)
     updated[chosen] *= math.exp(learning_rate * reward / probability)
     return updated
+
+
+def demo() -> None:
+    print("=== Clipper 服务机制 ===")
+    b = AdaptiveBatcher(slo_ms=50.0, max_batch_size=4)
+    b.observe(batch_size=4, latency_ms=30.0)   # 达标 → 加性增长
+    print(f"达标(30<50ms)后 max_batch_size : {b.max_batch_size}")
+    b.observe(batch_size=8, latency_ms=70.0)   # 超 SLO → 乘性回退
+    print(f"超时(70>50ms)后 max_batch_size : {b.max_batch_size}")
+    models = [ModelContainer("fast", 5, 1, 0.80),
+              ModelContainer("mid", 20, 2, 0.88),
+              ModelContainer("slow", 60, 5, 0.93)]
+    res = best_effort_ensemble(models, "q", deadline_ms=30.0)
+    print(f"ensemble(deadline=30ms): used={res['used_models']} "
+          f"missing={res['missing_models']} conf={res['confidence']:.2f}")
+    weights = {"A": 1.0, "B": 1.0, "C": 1.0}
+    probs = exp3_probabilities(weights)
+    weights = exp3_update(weights, "B", reward=1.0, probability=probs["B"])
+    print(f"EXP3 给 B 正反馈后权重: {{'A': {weights['A']:.2f}, 'B': {weights['B']:.2f}, 'C': {weights['C']:.2f}}}")
+
+
+if __name__ == "__main__":
+    demo()

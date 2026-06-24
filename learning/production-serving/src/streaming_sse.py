@@ -30,3 +30,20 @@ def parse_sse_line(line: str) -> Dict | None:
         return json.loads(body)
     except json.JSONDecodeError:
         return None
+
+
+def demo() -> None:
+    print("=== SSE 流式编码/解析往返 ===")
+    chunks = [{"choices": [{"delta": {"content": t}}]} for t in ("Hello", " world", "!")]
+    wire = list(chunks_to_sse(chunks))
+    print("编码到线缆格式：")
+    for line in wire:
+        print("  " + repr(line))
+    print("解析回来：")
+    for line in wire:
+        parsed = parse_sse_line(line)
+        print("  ", parsed)
+
+
+if __name__ == "__main__":
+    demo()

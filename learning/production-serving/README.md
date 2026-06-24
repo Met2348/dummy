@@ -66,27 +66,51 @@ client → FastAPI (OpenAI compat) → mock/vLLM backend
 python environment/verify_env.py
 ```
 
-## 运行
+## 运行验证（Runbook）
+
+> 本模块的"可运行入口"即 [`runbook.yaml`](runbook.yaml) 登记的 6 个直跑 demo，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）V1 验证通过。全部纯 CPU 秒级、无需起服务。
+> 一键复验：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules production-serving
+> ```
+
+6 个 demo 均无需传参：
 
 ```powershell
-# 测试 (22/22 全绿)
-python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'src/tests'); import test_serving"
+python learning/production-serving/src/cost_calc.py                 # $/M-token + 缓存节省 + 成本感知路由
+python learning/production-serving/src/metrics_prometheus.py        # Counter/Histogram + p50/p95 渲染
+python learning/production-serving/src/streaming_sse.py             # SSE 编码/解析往返
+python learning/production-serving/src/clipper_original_minimal.py  # 自适应批处理(AIMD) + ensemble + EXP3
+python learning/production-serving/src/openai_api_server.py         # OpenAI 协议层 demo（不起服务）
+python learning/production-serving/src/trtllm_build.py              # TensorRT-LLM build 配置(mock)
+```
 
-# 启动 mock OpenAI server
-uvicorn src.openai_api_server:app --port 8000
+> 注：
+> - `cost_calc`/`metrics_prometheus`/`streaming_sse`/`clipper_original_minimal`/`openai_api_server` 原先缺 `__main__`（直跑无输出），本轮补了 `demo()` + `__main__` 使其可跑。
+> - `openai_api_server.py` 的协议逻辑与 FastAPI 层**解耦**：`app` 仅在 fastapi 可用时构建，纯函数(`build_completion_response`/`validate_chat_request`/`mock_generate`)不依赖起服务即可测/跑。
 
-# 用 openai-python 客户端测
-python -c "
-import openai
-c = openai.OpenAI(base_url='http://localhost:8000/v1', api_key='x')
-print(c.chat.completions.create(model='mock', messages=[{'role':'user','content':'hi'}]))
-"
+**起真 mock OpenAI server**（可选，本机已装 fastapi+uvicorn）：
+
+```powershell
+# 注意从 src 目录起，模块名才是 openai_api_server
+cd learning/production-serving/src; uvicorn openai_api_server:app --port 8000
+# 另开一个终端：
+#   curl http://localhost:8000/v1/models
+#   curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" `
+#        -d '{"model":"mock-7b","messages":[{"role":"user","content":"hi"}]}'
+```
+
+**测试（V2）**：27 个测试覆盖成本/指标/SSE/Clipper/OpenAI 协议：
+
+```powershell
+python -m pytest learning/production-serving/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules production-serving --tests
 ```
 
 ## 退出条件 checklist
 
 - [x] 12 lecture + 12 notebook
-- [x] 22 tests pass
+- [x] 27 tests pass
 - [x] OpenAI compat API (validate/build/error/stream)
 - [x] SSE encode/parse helpers
 - [x] Prometheus Counter/Histogram + render
