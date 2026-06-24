@@ -11,7 +11,12 @@ REPO_SRC = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_SRC))
 
 from vapo_minimal import adaptive_lambda, length_adaptive_gae
-from dr_grpo import mad_normalize, dr_grpo_advantage
+from dr_grpo import (
+    grpo_advantage,
+    dr_grpo_advantage,
+    grpo_length_weight,
+    dr_grpo_length_weight,
+)
 from genrm import parse_genrm_score
 
 
@@ -41,24 +46,31 @@ def test_length_adaptive_gae_runs():
     assert adv[0, -1].item() == 1.0
 
 
-# ===== Dr. GRPO =====
+# ===== Dr. GRPO（对齐 Sea AI Lab 论文：去 std 除法 + 去长度归一）=====
 
-def test_mad_outlier_robustness():
-    rewards = torch.tensor([1.0, 1, 1, 1, 1, 1, 1, 100.0])
-    A_mad = mad_normalize(rewards, k=8)
-    # std-based GRPO 会让 normal 样本 advantage 接近 0；MAD 让它们仍有意义
-    normal_part = A_mad[:7]
-    assert normal_part.abs().mean() > 0.1
+def test_dr_grpo_advantage_centered_no_std():
+    """Dr.GRPO advantage = R − group_mean，只中心化、不除 std。"""
+    rewards = torch.tensor([0.0, 1.0, 2.0, 1.0])  # mean = 1.0
+    A = dr_grpo_advantage(rewards, k=4)
+    assert torch.allclose(A, rewards - rewards.mean(), atol=1e-6)
+    # 且确与 std-normalize 的 GRPO 有别（证明真去掉了 /std）
+    assert not torch.allclose(A, grpo_advantage(rewards, k=4), atol=1e-3)
 
 
-def test_dr_grpo_length_penalty():
-    rewards = torch.tensor([1.0, 1, 0, 0])
-    lens_short = torch.tensor([10.0] * 4)
-    lens_long = torch.tensor([100.0] * 4)
-    A_s = dr_grpo_advantage(rewards, lens_short, k=4, beta_len=0.05)
-    A_l = dr_grpo_advantage(rewards, lens_long, k=4, beta_len=0.05)
-    # 长 response 被惩罚
-    assert A_l.mean() < A_s.mean()
+def test_dr_grpo_removes_difficulty_bias():
+    """① 低方差组：GRPO 把微小差异 /std 放大到 ~±1.2；Dr.GRPO 保持原始小尺度。"""
+    rewards = torch.tensor([0.45, 0.5, 0.5, 0.55])  # std 很小
+    assert grpo_advantage(rewards, k=4).abs().max() > 1.0
+    assert dr_grpo_advantage(rewards, k=4).abs().max() < 0.1
+
+
+def test_dr_grpo_removes_length_bias():
+    """② Dr.GRPO 用常数归一：不同长度 response 权重相同；GRPO 的 1/|o| 随长度变。"""
+    lens = torch.tensor([10.0, 200.0])
+    w_dr = dr_grpo_length_weight(lens, l_const=200.0)
+    assert torch.allclose(w_dr, w_dr[:1].expand_as(w_dr))  # 全相等 → 去偏
+    w_grpo = grpo_length_weight(lens)
+    assert w_grpo[0] > w_grpo[1]  # 短 response 权重更大（长度偏置）
 
 
 # ===== GenRM =====
