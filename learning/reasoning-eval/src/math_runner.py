@@ -86,6 +86,19 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer on mock models, print live accuracy + by-level."""
+    print(f"MATH micro-set: {len(_MICRO_MATH)} problems across levels 1-5")
+    base = run_math(make_dummy_model("0"))
+    gold = {r["qid"]: f"...\\boxed{{{r['gold']}}}" for r in _MICRO_MATH}
+    oracle = run_math(make_mock_model(gold))
+    print(f"  dummy('0')   accuracy = {accuracy(base):.2f}")
+    print(f"  oracle       accuracy = {accuracy(oracle):.2f}")
+    print(f"  oracle by level = {{ {', '.join(f'L{k}:{v:.2f}' for k, v in sorted(by_level(oracle).items()))} }}")
+    print("  -> accuracy is computed live: extract \\boxed{} -> numeric_equal vs gold.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"math_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

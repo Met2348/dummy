@@ -70,6 +70,23 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: show the verifier judging equivalence across forms (live)."""
+    print("math-verify (teaching version, regex+Fraction, no sympy):")
+    cases = [
+        ("1/2", "0.5"), ("0.5", r"\frac{1}{2}"), ("50%", "0.5"),
+        ("3/6", "0.5"), ("7/8", "0.875"), (r"\boxed{18}", "18"),
+        (r"\boxed{\frac{1}{2}}", "0.5"),
+        ("17", "18"), ("22/7", "3.14"), ("Paris", "Lyon"),
+    ]
+    for pred, gold in cases:
+        verdict = "EQUIV" if equiv(pred, gold) else "differ"
+        print(f"  {pred:22} vs {gold:8} -> {verdict}")
+    print("  -> each verdict parses pred/gold to a float (a/b, %, \\frac, \\boxed) "
+          "then compares within tol; non-numeric falls back to normalized string eq.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"math_verify_demo.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

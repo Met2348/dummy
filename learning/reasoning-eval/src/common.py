@@ -135,6 +135,18 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo of the shared utilities (library module)."""
+    print("common.py shared utilities:")
+    print(f"  extract_gsm8k('... #### 18')        = {extract_gsm8k('... #### 18')!r}")
+    print(f"  extract_boxed('... \\\\boxed{{42}}')    = {extract_boxed(r'... \boxed{42}')!r}")
+    print(f"  numeric_equal('1/2','0.5')          = {numeric_equal('1/2', '0.5')}")
+    print(f"  numeric_equal('50%','0.5')          = {numeric_equal('50%', '0.5')}")
+    pak = pass_at_k([[True, False], [False, False], [False, True]])
+    print(f"  pass_at_k([[T,F],[F,F],[F,T]])      = {{ {', '.join(f'{k}:{v:.2f}' for k, v in sorted(pak.items()))} }}")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"common.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

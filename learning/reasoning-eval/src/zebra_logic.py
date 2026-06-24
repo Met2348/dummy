@@ -61,6 +61,24 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer on mock models, print live accuracy.
+
+    NOTE: this is a benchmark *runner* (scores a model's answer), not a
+    constraint solver. The mock model supplies the answer; we check it.
+    """
+    print(f"ZebraLogic micro-set: {len(_PUZZLES)} constraint puzzles "
+          f"(sizes: {', '.join(p['size'] for p in _PUZZLES)})")
+    base = run_zebra(make_dummy_model("nothing"))
+    gold = {r["qid"]: r["gold"] for r in _PUZZLES}
+    oracle = run_zebra(make_mock_model(gold))
+    print(f"  dummy        accuracy = {accuracy(base):.2f}")
+    print(f"  oracle       accuracy = {accuracy(oracle):.2f}")
+    print(f"  e.g. {_PUZZLES[0]['qid']}: gold = {_PUZZLES[0]['gold']!r}")
+    print("  -> accuracy is computed live: case-folded gold-substring containment.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"zebra_logic.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

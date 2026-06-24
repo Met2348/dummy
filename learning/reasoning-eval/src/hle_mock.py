@@ -64,6 +64,19 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer on mock models, print live accuracy."""
+    print(f"HLE micro-set: {len(_MICRO_HLE)} expert short-answer (real models score 5-15%)")
+    base = run_hle(make_dummy_model("foo"))
+    gold = {r["qid"]: r["gold"] for r in _MICRO_HLE}
+    oracle = run_hle(make_mock_model(gold))
+    print(f"  dummy('foo') accuracy = {accuracy(base):.2f}")
+    print(f"  oracle       accuracy = {accuracy(oracle):.2f}  "
+          f"(domains: {', '.join(sorted({r['domain'] for r in _MICRO_HLE}))})")
+    print("  -> accuracy is computed live: case-folded gold-substring containment.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"hle_mock.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

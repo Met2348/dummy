@@ -69,6 +69,22 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer on mock models, print live accuracy."""
+    print(f"GSM8K micro-set: {len(_MICRO_GSM8K)} problems")
+    # Baseline: a dummy model that always says 0 -> should score ~0.
+    base = run_gsm8k(make_dummy_model("0"))
+    # Oracle: a mock model wired to the gold answers -> should score 1.0.
+    gold_map = {r["qid"]: f"Reason... #### {r['gold']}" for r in _MICRO_GSM8K}
+    oracle = run_gsm8k(make_mock_model(gold_map))
+    print(f"  dummy('0')   accuracy = {accuracy(base):.2f}  "
+          f"(pred for {base[0].qid}: {base[0].pred!r} vs gold {base[0].gold!r})")
+    print(f"  oracle       accuracy = {accuracy(oracle):.2f}  "
+          f"(pred for {oracle[0].qid}: {oracle[0].pred!r} vs gold {oracle[0].gold!r})")
+    print("  -> accuracy is computed live: extract '#### N' -> numeric_equal vs gold.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"gsm8k_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

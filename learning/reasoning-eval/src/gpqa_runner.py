@@ -79,6 +79,19 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer on mock models, print live accuracy."""
+    print(f"GPQA micro-set: {len(_MICRO_GPQA)} multiple-choice (chance = 25%)")
+    base = run_gpqa(make_dummy_model("E"))  # 'E' is not a valid A-D letter
+    gold = {r["qid"]: f"...Final: {r['gold']}" for r in _MICRO_GPQA}
+    oracle = run_gpqa(make_mock_model(gold))
+    print(f"  dummy('E')   accuracy = {accuracy(base):.2f}  (invalid letter -> 0)")
+    print(f"  oracle       accuracy = {accuracy(oracle):.2f}  "
+          f"(pred for {oracle[0].qid}: {oracle[0].pred!r} vs gold {oracle[0].gold!r})")
+    print("  -> accuracy is computed live: extract 'Final: X' letter -> match vs gold.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"gpqa_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

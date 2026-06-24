@@ -87,6 +87,22 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real scorer + pass@k on mock models, print live accuracy."""
+    print(f"AIME micro-set: {len(_MICRO_AIME)} problems (integer answers 0-999)")
+    base = run_aime(make_dummy_model("0"))
+    gold = {r["qid"]: f"...\\boxed{{{r['gold']}}}" for r in _MICRO_AIME}
+    oracle = make_mock_model(gold)
+    rs = run_aime(oracle)
+    print(f"  dummy('0')   accuracy = {accuracy(base):.2f}")
+    print(f"  oracle       accuracy = {accuracy(rs):.2f}")
+    pk = run_aime_passk(oracle, k=4)
+    print(f"  oracle pass@k = {{ {', '.join(f'{k}:{v:.2f}' for k, v in sorted(pk.items()))} }}  "
+          f"(deterministic mock -> all k samples agree)")
+    print("  -> accuracy is computed live: extract \\boxed{} -> exact match vs gold.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"aime_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()
