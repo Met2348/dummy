@@ -8,6 +8,17 @@
 > ⚠️ **本目录是「阅读专题」，不是代码模块**：没有 `src/` `runbook.yaml`，不进 46 模块验证账本，纯文献导读。
 > 最后更新：2026-06-25 · 维护者注：链接均为 arXiv 摘要页 / 官方页，点开即读。
 
+### 📂 目录导航
+
+| 文件 | 是什么 |
+|------|--------|
+| **本文 README.md** | 阅读指南：优先级 + 阅读路径 + 主题书单（下方） |
+| [`papers/INDEX.md`](papers/INDEX.md) | **40 篇已下载 PDF 的注释清单**（按主题 A–H，带日期/影响力/本地文件名） |
+| [`papers/download_papers.py`](papers/download_papers.py) | 一键重下全部 PDF（幂等；PDF 本体已 gitignore，~137MB） |
+| [`CURRICULUM.md`](CURRICULUM.md) | **M9 自动科研教学系列规划**（8 专题 × lectures × capstone，绑定这 40 篇 + 桥接已学模块） |
+
+> 下面 §1–§2 是**精读最短路径**（Tier-S 6 篇 + 7 主题精选）；要**完整 40 篇**带本地 PDF 看 [`papers/INDEX.md`](papers/INDEX.md)。
+
 ---
 
 ## 0. 30 秒导读：这个领域到底在争什么
