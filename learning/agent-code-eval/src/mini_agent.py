@@ -72,6 +72,32 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: print the real 5-bench scorecards for empty vs smart models.
+
+    Note: this capstone is a benchmark *aggregator* — each runner does a single
+    generate -> exec/score pass over a mock model. It is not an iterative
+    read->generate->run->revise agent loop; it shows how to assemble a 5-bench
+    scorecard, with every cell computed by the real per-bench scorer.
+    """
+    empty = make_mock_model({}, default="")
+    print(to_md(run_all(empty), "empty-model"))
+    print()
+    all_answers: Dict[str, str] = {}
+    for t in humaneval_runner._TASKS:
+        all_answers[t["qid"]] = f"```python\n{t['ref']}\n```"
+    all_answers["swe_1"] = f"```python\n{swebench_mock.REPO_FILE_FIXED}```"
+    all_answers["web_1"] = "go to item\nadd to cart\ngo to checkout\nconfirm order"
+    for t in bfcl_runner._TASKS:
+        all_answers[t["qid"]] = json.dumps(t["expect"])
+    for t in livecodebench_mock._TASKS:
+        all_answers[t["qid"]] = f"```python\n{t['ref']}\n```"
+    print(to_md(run_all(make_mock_model(all_answers)), "smart-model"))
+    print("\n-> every cell is a live pass_rate from its real per-bench scorer "
+          "(empty=all 0.00, oracle=all 1.00).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"mini_agent.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

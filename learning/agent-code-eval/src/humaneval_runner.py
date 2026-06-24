@@ -130,6 +130,23 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real exec-based scorer on empty vs oracle models."""
+    print(f"HumanEval micro-set: {len(_TASKS)} tasks (real exec() vs hidden tests)")
+    empty = run_humaneval(make_mock_model({}, default=""))
+    refs = {t["qid"]: f"```python\n{t['ref']}\n```" for t in _TASKS}
+    oracle = run_humaneval(make_mock_model(refs))
+    print(f"  empty-model  pass@1 = {pass_rate(empty):.2f}  "
+          f"({empty[0].qid}: passed={empty[0].passed}, err={empty[0].error!r})")
+    print(f"  oracle       pass@1 = {pass_rate(oracle):.2f}  "
+          f"({oracle[0].qid}: passed={oracle[0].passed})")
+    pk = run_passk(make_mock_model(refs), k=4)
+    print(f"  oracle pass@k (k=4): pass@1={pk['pass@1']:.2f}  pass@4={pk['pass@4']:.2f}")
+    print(f"  estimator check: n=10,c=3,k=1 -> {estimate_pass_at_k(10, 3, 1):.2f} "
+          "(= c/n, unbiased Chen 2021).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"humaneval_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

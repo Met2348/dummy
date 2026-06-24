@@ -56,6 +56,20 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real exec-based scorer on empty vs oracle models."""
+    print(f"LiveCodeBench micro-set: {len(_TASKS)} algo tasks "
+          f"({', '.join(t['qid'] for t in _TASKS)}) — real exec() vs hidden tests")
+    empty = run_livecodebench(make_mock_model({}, default=""))
+    refs = {t["qid"]: f"```python\n{t['ref']}\n```" for t in _TASKS}
+    oracle = run_livecodebench(make_mock_model(refs))
+    print(f"  empty-model  pass@1 = {pass_rate(empty):.2f}")
+    print(f"  oracle       pass@1 = {pass_rate(oracle):.2f}  "
+          f"(per-task: {[(r.qid, r.passed) for r in oracle]})")
+    print("  -> each candidate is really exec()'d against LeetCode-style asserts.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"livecodebench_mock.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

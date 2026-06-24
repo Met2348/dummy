@@ -93,6 +93,23 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: drive the real shop state machine to the goal state."""
+    print(f"WebArena mock: {len(_TASKS)} shopping task — actions drive a real ShopState machine")
+    empty = run_webarena_mock(make_mock_model({}, default=""))
+    good_script = "go to item\nadd to cart\ngo to checkout\nconfirm order"
+    good = run_webarena_mock(make_mock_model({"web_1": good_script}))
+    # Show the end-state reached by replaying the good script.
+    st = ShopState()
+    for a in parse_actions(good_script):
+        st = step(st, a)
+    print(f"  no-action     -> passed={empty[0]['passed']}")
+    print(f"  4-step script -> passed={good[0]['passed']}  "
+          f"end-state: page={st.page}, cart={st.cart_items}, confirmed={st.confirmed}")
+    print("  -> goal reached iff replayed actions yield the required end-state (no hardcoded score).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"webarena_mock.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

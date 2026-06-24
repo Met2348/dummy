@@ -58,6 +58,20 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: run the real exec-based scorer on empty vs oracle models."""
+    print(f"MBPP micro-set: {len(_TASKS)} tasks (real exec() vs test cases)")
+    empty = run_mbpp(make_mock_model({}, default=""))
+    refs = {t["qid"]: f"```python\n{t['ref']}\n```" for t in _TASKS}
+    oracle = run_mbpp(make_mock_model(refs))
+    print(f"  empty-model  pass@1 = {pass_rate(empty):.2f}  "
+          f"({empty[0].qid}: passed={empty[0].passed}, err={empty[0].error!r})")
+    print(f"  oracle       pass@1 = {pass_rate(oracle):.2f}  "
+          f"({oracle[0].qid}: passed={oracle[0].passed})")
+    print("  -> pass@1 computed live: exec(candidate) then exec(asserts); err is None => pass.")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"mbpp_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

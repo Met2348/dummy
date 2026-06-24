@@ -96,6 +96,24 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: grade function-calls by real JSON parse + name/args match."""
+    print(f"BFCL micro-set: {len(_TASKS)} function-calling cases (real JSON parse + arg match)")
+    empty = run_bfcl(make_mock_model({}, default=""))
+    correct = {t["qid"]: json.dumps(t["expect"]) for t in _TASKS}
+    good = run_bfcl(make_mock_model(correct))
+    # Wrong-args case: right function, wrong city -> must FAIL.
+    wrong = run_bfcl(make_mock_model(
+        {"bfcl_1": json.dumps({"name": "get_weather", "args": {"city": "Paris"}})}))
+    acc = lambda rs: sum(r["passed"] for r in rs) / len(rs)
+    print(f"  empty-model   acc = {acc(empty):.2f}")
+    print(f"  correct-JSON  acc = {acc(good):.2f}")
+    print(f"  wrong-city    bfcl_1 passed = {wrong[0]['passed']}  "
+          f"(got {wrong[0]['got'].get('args')} vs expect {wrong[0]['expect']['args']})")
+    print("  -> pass iff parsed name AND args both match expected (no hardcoded score).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"bfcl_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

@@ -118,6 +118,22 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: show the real exec-based grading mechanism live."""
+    print("safe_exec grades candidate code by REALLY exec()-ing it vs assertions:")
+    cases = [
+        ("correct", "def add(a,b): return a+b", "assert add(2,3) == 5"),
+        ("buggy",   "def add(a,b): return a-b", "assert add(2,3) == 5"),
+        ("forbidden", "import os\nos.system('ls')", "pass"),
+    ]
+    for label, code, tests in cases:
+        err = safe_exec(code, tests)
+        verdict = "PASS" if err is None else f"FAIL ({err})"
+        print(f"  [{label:9}] {code!r:42} -> {verdict}")
+    print("  -> same harness, different code => different verdict (no hardcoded score).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"common.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()

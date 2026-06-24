@@ -91,6 +91,18 @@ def _self_test() -> int:
     return 0
 
 
+def _demo() -> None:
+    """Visible demo: show the fix is graded by really running the hidden test."""
+    print(f"SWE-Bench mock: {len(_TASKS)} issue (divide-by-zero) — real exec() of patched file")
+    buggy = run_swebench_mock(make_mock_model({"swe_1": f"```python\n{REPO_FILE_BUG}```"}))
+    fixed = run_swebench_mock(make_mock_model({"swe_1": f"```python\n{REPO_FILE_FIXED}```"}))
+    print(f"  submit BUGGY file -> passed={buggy[0]['passed']}  (err={buggy[0]['error']!r})")
+    print(f"  submit FIXED file -> passed={fixed[0]['passed']}")
+    print("  -> resolved iff the patched file makes the hidden ValueError test pass "
+          "(mechanism, not a constant).")
+
+
 if __name__ == "__main__":
     f = _self_test()
     print(f"swebench_mock.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    _demo()
