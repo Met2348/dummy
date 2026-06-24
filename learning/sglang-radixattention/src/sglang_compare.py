@@ -1,8 +1,16 @@
 """Mock comparison: SGLang vs vLLM on 5 representative scenarios.
 
-No real engine called; we instrument the mock Stream's `n_forwards` field
-to count how many model forwards would happen.  RadixAttention's gain is
-modelled as: shared prefix prefill happens **once** instead of `n_forks` times.
+No real engine called.  We model only the **prefill-token cost**: how many
+prompt tokens each engine must prefill.  RadixAttention's modelled gain is that
+a shared prefix is prefilled **once** instead of `fork_k` times when a request
+forks (tree-of-thought, parallel sampling, ...).
+
+The displayed `sglang_prefill_gain` is derived **directly** from the two cost
+columns (`1 − sglang/vllm`), so it can never contradict them.  Advantages this
+cost model does NOT capture (xgrammar jump-forward on structured output, KV
+reuse across agent steps, kernel differences) are listed as a separate
+qualitative note, not as a fabricated percentage.  A real tok/s benchmark needs
+a machine with `sglang` installed (Linux + CUDA).
 """
 from __future__ import annotations
 
@@ -30,32 +38,47 @@ SCENARIOS = [
 
 
 def cost_vllm(sc: Scenario) -> int:
-    """Block-hash prefix caching: shared part is 1 prefill, suffix per request."""
+    """vLLM prefill tokens.
+
+    fork_k>1: forks are **independent** generations — each re-prefills the
+    shared prefix (no cross-fork sharing) → ``fork_k·(prefix+suffix)``.
+    fork_k==1: block-hash prefix caching dedups the identical prefix across the
+    n_prompts requests, so the shared part is prefilled once.
+    """
     if sc.fork_k > 1:
-        # vLLM fork = n_prompts independent generations
-        return sc.shared_prefix_len + sc.fork_k * sc.suffix_len
+        return sc.fork_k * (sc.shared_prefix_len + sc.suffix_len)
     return sc.shared_prefix_len + sc.n_prompts * sc.suffix_len
 
 
 def cost_sglang(sc: Scenario) -> int:
-    """RadixAttention: shared prefix 1 prefill regardless of fork_k."""
+    """SGLang/RadixAttention prefill tokens: shared prefix prefilled **once**
+    regardless of fork_k (the radix tree keeps it resident)."""
     if sc.fork_k > 1:
         return sc.shared_prefix_len + sc.fork_k * sc.suffix_len
     return sc.shared_prefix_len + sc.n_prompts * sc.suffix_len
 
 
-def gain_pct(sc: Scenario) -> float:
-    """Synthetic gain estimate (not a benchmark): when fork_k>1 SGLang wins via
-    shared prefix; when grammar-driven SGLang wins via xgrammar; else ~ tied."""
+def prefill_gain_pct(sc: Scenario) -> float:
+    """SGLang 相对 vLLM 的 prefill-token 节省，**纯由上面两列 cost 推出**。
+
+    只反映 RadixAttention 的共享前缀收益；fork_k==1 且前缀相同时两引擎都能
+    缓存共享前缀 → 0%（差异来自下面 other_advantage 列的未建模机制）。
+    """
+    v, s = cost_vllm(sc), cost_sglang(sc)
+    return 1.0 - s / v
+
+
+def other_advantage(sc: Scenario) -> str:
+    """本 prefill-token 模型**未建模**的其它 SGLang 优势（定性说明，非数字）。"""
     if sc.fork_k > 1:
-        return 1.0 - (sc.shared_prefix_len + sc.fork_k * sc.suffix_len) / (sc.fork_k * (sc.shared_prefix_len + sc.suffix_len))
+        return "(已由 prefill_gain 量化：共享前缀只 prefill 一次)"
     if "json" in sc.name:
-        return 0.50
+        return "xgrammar + jump-forward 跳过确定性 token 的解码（未建模）"
     if "react" in sc.name:
-        return 0.60
+        return "多步 agent 跨 step 复用 KV + 约束解码（未建模）"
     if "long_prompt" in sc.name:
-        return -0.05
-    return 0.05
+        return "超长前缀两引擎都缓存，差异主要在内核实现（未建模）"
+    return "前缀相同，两引擎前缀缓存基本打平"
 
 
 def run_all() -> List[Dict]:
@@ -65,9 +88,10 @@ def run_all() -> List[Dict]:
         s = cost_sglang(sc)
         out.append({
             "scenario": sc.name,
-            "vllm_cost": v,
-            "sglang_cost": s,
-            "estimated_sglang_gain": f"{gain_pct(sc) * 100:+.1f}%",
+            "vllm_prefill_tokens": v,
+            "sglang_prefill_tokens": s,
+            "sglang_prefill_gain": f"{prefill_gain_pct(sc) * 100:+.1f}%",
+            "other_advantage_not_modeled": other_advantage(sc),
         })
     return out
 

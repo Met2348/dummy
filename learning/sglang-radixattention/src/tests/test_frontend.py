@@ -73,3 +73,14 @@ def test_compare_costs_nonzero():
     for sc in SCENARIOS:
         assert cost_vllm(sc) > 0
         assert cost_sglang(sc) > 0
+
+
+def test_fork_scenario_radix_strictly_cheaper():
+    # fork_k>1 (tot_8way): RadixAttention prefills the shared prefix once while
+    # vLLM forks re-prefill it each time -> SGLang must be strictly cheaper, and
+    # the displayed gain (derived from the columns) must be positive & consistent.
+    from sglang_compare import prefill_gain_pct
+    tot = next(sc for sc in SCENARIOS if sc.fork_k > 1)
+    v, s = cost_vllm(tot), cost_sglang(tot)
+    assert v > s, "fork case must show vLLM > SGLang (else the demo is a no-op)"
+    assert abs(prefill_gain_pct(tot) - (1.0 - s / v)) < 1e-9
