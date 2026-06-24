@@ -3,7 +3,11 @@
 `python vllm_compare.py --model Qwen/Qwen2.5-0.5B`
 will spin up vllm.LLM and run the same 5 cases as mini_vllm.
 
-Skipped automatically when vllm is unavailable so CI on Windows still works.
+Requires a working `vllm` install (Linux + CUDA) and downloads the model
+(~1 GB for Qwen2.5-0.5B).  When vllm is missing this script fails fast
+(`SystemExit(2)`) instead of silently exiting 0 — a no-op "skip" that returns
+success would otherwise look like a passing benchmark.  Run `mini_vllm.py`
+for the from-scratch engine that has no heavy dependencies.
 """
 from __future__ import annotations
 
@@ -33,8 +37,11 @@ CASES = [
 def run_vllm(model_name: str) -> List[dict]:
     LLM, SamplingParams = try_import_vllm()
     if LLM is None:
-        print("vllm not installed; skipping reference benchmark")
-        return []
+        raise SystemExit(
+            "vllm not installed — cannot run the reference benchmark.\n"
+            "Install vllm (Linux + CUDA) to compare against mini_vllm, or run\n"
+            "`python mini_vllm.py --case 0` for the dependency-free engine."
+        )
     llm = LLM(model=model_name, enforce_eager=True, max_model_len=2048)
     out = []
     for case in CASES:
