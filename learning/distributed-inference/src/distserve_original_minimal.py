@@ -222,3 +222,48 @@ def colocated_placement(total_gpus: int) -> Placement:
         prefill_gpus=total_gpus,
         decode_gpus=total_gpus,
     )
+
+
+def demo() -> None:
+    """DistServe-style goodput: colocated vs disaggregated + a P/D GPU split search."""
+    requests = [
+        Request(prompt_tokens=1024, output_tokens=96),
+        Request(prompt_tokens=1536, output_tokens=96),
+        Request(prompt_tokens=2048, output_tokens=128),
+        Request(prompt_tokens=1792, output_tokens=96),
+    ]
+    slo = SLO(ttft_ms=900, tpot_ms=13)
+    rates = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
+    total_gpus = 3
+
+    print("=== DistServe-style goodput simulator ===")
+    print(f"workload: {len(requests)} request types, prompts "
+          f"{[r.prompt_tokens for r in requests]}, total_gpus={total_gpus}")
+    print(f"SLO: TTFT <= {slo.ttft_ms} ms, TPOT <= {slo.tpot_ms} ms\n")
+
+    colo = colocated_placement(total_gpus)
+    colo_best = max_goodput(requests, colo, slo, rates)
+    disagg_best = search_gpu_split(total_gpus, requests, slo, rates)
+
+    print(f"{'placement':>22}{'rate rps':>10}{'attain':>9}{'goodput':>9}{'per-GPU':>9}")
+    for tag, res in (("colocated", colo_best), (disagg_best.placement.name, disagg_best)):
+        print(f"{tag:>22}{res.request_rate_rps:>10.2f}{res.attainment:>9.0%}"
+              f"{res.goodput_rps:>9.2f}{res.per_gpu_goodput_rps:>9.3f}")
+
+    gain = (disagg_best.per_gpu_goodput_rps / max(colo_best.per_gpu_goodput_rps, 1e-9) - 1) * 100
+    print(f"\nbest split = {disagg_best.placement.prefill_gpus} prefill + "
+          f"{disagg_best.placement.decode_gpus} decode GPU(s); "
+          f"per-GPU goodput +{gain:.0f}% vs colocated.")
+
+    print("\n--- a slow cross-node link inflates TTFT ---")
+    one = [Request(prompt_tokens=2048, output_tokens=64)]
+    for bw in (900.0, 50.0, 25.0):
+        pl = Placement(f"p2-d1@{bw:g}", colocated=False, prefill_gpus=2,
+                       decode_gpus=1, bandwidth_gbps=bw)
+        ttft = estimate_latencies(one, pl, request_rate_rps=0.5)[0].ttft_ms
+        print(f"  link {bw:>5g} GB/s: TTFT = {ttft:6.1f} ms  "
+              f"({'OK' if ttft <= slo.ttft_ms else 'SLO VIOLATED'})")
+
+
+if __name__ == "__main__":
+    demo()

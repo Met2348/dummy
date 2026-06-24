@@ -63,3 +63,42 @@ class TpMlp:
     def forward_single(self, X: torch.Tensor) -> torch.Tensor:
         H = torch.relu(X @ self.W_up)
         return H @ self.W_down
+
+
+def demo() -> None:
+    """Show that column/row-split TP reproduces the unsharded matmul bit-for-bit."""
+    torch.manual_seed(0)
+    print("=== Tensor Parallel (single-process simulation) ===")
+
+    X = torch.randn(8, 256)
+    W = torch.randn(256, 512)
+    ref = X @ W
+    for n in (1, 2, 4, 8):
+        col = ColumnSplitLinear(W, n_shards=n).forward(X)
+        max_diff = (col - ref).abs().max().item()
+        print(f"column-split  TP={n}: shards concat -> max|Δ| vs single = {max_diff:.2e}")
+
+    print()
+    X_full = torch.randn(8, 256)
+    W_row = torch.randn(256, 128)
+    ref_row = X_full @ W_row
+    for n in (1, 2, 4, 8):
+        X_shards = list(torch.chunk(X_full, n, dim=-1))
+        row = RowSplitLinear(W_row, n_shards=n).forward(X_shards)
+        max_diff = (row - ref_row).abs().max().item()
+        print(f"row-split     TP={n}: partial-sum (all-reduce) -> max|Δ| = {max_diff:.2e}")
+
+    print("\n--- Megatron MLP (col-split up -> relu -> row-split down) ---")
+    d = 64
+    W_up = torch.randn(d, 4 * d)
+    W_down = torch.randn(4 * d, d)
+    Xm = torch.randn(4, d)
+    mlp = TpMlp(W_up, W_down, n_shards=4)
+    out_tp = mlp.forward_tp(Xm)
+    out_single = mlp.forward_single(Xm)
+    print(f"TP=4 MLP vs single: max|Δ| = {(out_tp - out_single).abs().max().item():.2e}")
+    print("=> TP is exact (only 1 all-reduce per row-split op); it splits memory, not math.")
+
+
+if __name__ == "__main__":
+    demo()

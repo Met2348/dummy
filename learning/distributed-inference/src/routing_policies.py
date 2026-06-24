@@ -66,3 +66,29 @@ def evaluate(policy: str, prompts: List[List[int]], n_replicas: int) -> Dict:
         "load_min": min(loads),
         "imbalance": (max(loads) - min(loads)) / max(sum(loads) / len(loads), 1e-9),
     }
+
+
+def demo() -> None:
+    """Compare routing policies on prefix cache hit-rate and load balance."""
+    import random
+
+    rng = random.Random(0)
+    # A few hot shared prefixes (e.g. system prompts) reused across many requests,
+    # plus a unique suffix per request -> prefix-aware routing should hit the cache.
+    shared_prefixes = [[1000 + p] * 16 for p in range(8)]
+    prompts: List[List[int]] = []
+    for _ in range(2000):
+        pref = rng.choice(shared_prefixes)
+        prompts.append(pref + [rng.randint(0, 9999)])
+
+    print("=== Prefix-aware routing (4 replicas, 2000 reqs, 8 hot prefixes) ===")
+    print(f"{'policy':>18}{'hit_rate':>10}{'imbalance':>11}")
+    for policy in ("round_robin", "random", "prefix_hash", "consistent", "load_aware_prefix"):
+        r = evaluate(policy, prompts, n_replicas=4)
+        print(f"{policy:>18}{r['hit_rate']:>10.2%}{r['imbalance']:>11.3f}")
+    print("\n=> prefix-aware policies route a shared prefix to the same replica,"
+          "\n   so its KV cache is reused (high hit_rate); round_robin/random scatter it.")
+
+
+if __name__ == "__main__":
+    demo()

@@ -50,20 +50,46 @@
 python environment/verify_env.py
 ```
 
-## 运行
+## 运行验证（Runbook）
+
+> 本模块的"可运行入口"即 [`runbook.yaml`](runbook.yaml) 登记的 8 个**单进程模拟** demo，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）V1 验证通过。全部无 `torch.distributed`/多卡依赖，纯 CPU 秒级直跑。
+> 一键复验：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules distributed-inference
+> ```
+
+8 个 demo 均无需传参（自带场景规模）：
 
 ```powershell
-# 测试 (16/16 全绿)
-python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'src/tests'); import test_distrib"
-
+# 并行三件套
+python learning/distributed-inference/src/tp_demo.py          # Tensor Parallel：列/行切分 + all-reduce
+python learning/distributed-inference/src/pp_demo.py          # Pipeline Parallel：微批 + bubble 占比
+python learning/distributed-inference/src/ep_demo.py          # Expert Parallel(MoE)：放置 + all-to-all
+# Disaggregated serving
+python learning/distributed-inference/src/disaggregated_mock.py        # Prefill/Decode 分离(interference 模型)
+python learning/distributed-inference/src/kv_transfer_mock.py          # KV-cache 跨节点迁移开销
+python learning/distributed-inference/src/distserve_original_minimal.py # DistServe goodput 模拟器(SLO 搜配比)
+python learning/distributed-inference/src/routing_policies.py          # 请求路由策略对比
 # Capstone
-python src/capstone_disagg.py
+python learning/distributed-inference/src/capstone_disagg.py           # 综合对比 + Markdown 报告
+```
+
+> 注（demo 性质，非 bug）：
+> - 这 8 个全是**单进程模拟**——用解析/带宽/interference 模型推算并行与 disagg 的延迟/吞吐，**不起真多卡**（3080 Ti 单卡）。要真多卡需 `torchrun` + ≥2 GPU（讲义 §并行策略给了真实命令）。
+> - `disaggregated_mock` 的 disagg 增益**由 prefill/decode interference 模型推出**（colocate 的 TPOT 被并发 prefill 拖慢，disagg 分池后无干扰）+ KV 迁移加到 TTFT——非硬编码常数；增益随 prompt 变长而增大、随链路变慢而缩小，与讲义 L08 一致。
+> - `tp_demo` 等 7 个脚本原先缺 `__main__`（直跑无输出），本轮补了 `demo()` + `__main__` 使其名副其实可跑。
+
+**测试（V2）**：20 个测试覆盖 TP 通信量 / PP bubble / EP 负载均衡 / disagg interference / DistServe goodput / routing：
+
+```powershell
+python -m pytest learning/distributed-inference/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules distributed-inference --tests
 ```
 
 ## 退出条件 checklist
 
 - [x] 12 lecture + 12 notebook
-- [x] 16 tests pass (TP/PP bubble/EP/disagg/routing 全验证)
+- [x] 20 tests pass (TP/PP bubble/EP/disagg/routing 全验证)
 - [x] Capstone 3 config 表
 - [x] git tag `distrib-infer` ✓
 
