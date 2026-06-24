@@ -30,3 +30,15 @@ def run_multi_turn(turns: int = 5, base_history: int = 200, per_turn_new: int = 
         cached += simulate_agent_turn(history, per_turn_new, cached=True)
         history += per_turn_new + 30   # tool output + assistant reply
     return TurnStats(naive_prefill_tokens=naive, cached_prefill_tokens=cached)
+
+
+def demo() -> None:
+    print("=== Agent 多轮推理：naive vs radix-cached prefill ===")
+    s = run_multi_turn(turns=5, base_history=200, per_turn_new=50)
+    saved = 1 - s.cached_prefill_tokens / s.naive_prefill_tokens
+    print(f"5 轮累计 prefill token: naive={s.naive_prefill_tokens}, cached={s.cached_prefill_tokens}")
+    print(f"radix 缓存省下 prefill: {saved * 100:.0f}%  (naive 每轮重 prefill 整段历史)")
+
+
+if __name__ == "__main__":
+    demo()

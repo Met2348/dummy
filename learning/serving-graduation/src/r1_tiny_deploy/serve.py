@@ -58,3 +58,14 @@ def run_demo() -> List[dict]:
         answer = full.split("<answer>")[1].split("</answer>")[0] if "<answer>" in full else ""
         out.append({"question": q, "thinking_present": "<think>" in thinking, "answer": answer.strip()})
     return out
+
+
+def demo() -> None:
+    print("=== Capstone-1: R1-tiny 部署 demo（mock R1 模型，<think>/<answer> 流式）===")
+    for r in run_demo():
+        print(f"  Q: {r['question'][:60]}")
+        print(f"     thinking={r['thinking_present']}  answer={r['answer']!r}")
+
+
+if __name__ == "__main__":
+    demo()

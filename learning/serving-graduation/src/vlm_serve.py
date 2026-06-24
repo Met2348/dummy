@@ -23,3 +23,16 @@ def vlm_generate(req: VlmRequest) -> str:
         for img in req.images:
             visual += encode_image_mock(img)
     return f"<vlm response to '{req.text}' with {len(visual)//8} images>"
+
+
+def demo() -> None:
+    print("=== Mock VLM 服务（图像编码 + 文本生成）===")
+    req = VlmRequest(text="describe these", images=["cat.jpg", "dog.png"])
+    print(f"请求: text={req.text!r}, {len(req.images)} 张图")
+    print(f"图像编码(每张恒 8 维): {encode_image_mock(req.images[0])}")
+    print(f"VLM 输出: {vlm_generate(req)}")
+    print(f"纯文本请求: {vlm_generate(VlmRequest(text='hello'))}")
+
+
+if __name__ == "__main__":
+    demo()

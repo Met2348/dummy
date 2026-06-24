@@ -56,23 +56,49 @@ Module 5 用大模型  -> 量化 + serve + 路由
 python environment/verify_env.py
 ```
 
-## 运行
+## 运行验证（Runbook）
+
+> 本模块的"可运行入口"即 [`runbook.yaml`](runbook.yaml) 登记的 8 个直跑入口（6 支持 demo + 2 毕业 capstone），已在 ERIC-3080Ti（RTX 3080 Ti 16GB）V1 验证通过。全部纯 CPU 秒级。
+> 一键复验：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules serving-graduation
+> ```
+
+**6 个支持 demo**（serving 全家：缓存/嵌入/路由/评分/预算/VLM）：
 
 ```powershell
-# 测试 (20/20 全绿)
-python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'src/tests'); import test_graduation"
+python learning/serving-graduation/src/agent_inference_demo.py   # 多轮 naive vs radix-cached prefill
+python learning/serving-graduation/src/embedding_serve.py        # mock 嵌入 + 余弦
+python learning/serving-graduation/src/multi_model_router.py     # 按复杂度路由 tier + 成本
+python learning/serving-graduation/src/serving_scorecard.py      # correctness+SLO+goodput 评分卡
+python learning/serving-graduation/src/thinking_budget.py        # 思考预算强制 + Wait 注入
+python learning/serving-graduation/src/vlm_serve.py              # mock VLM 服务
+```
 
-# Capstone-1: R1-tiny demo
-python -c "import sys; sys.path.insert(0,'src'); from r1_tiny_deploy.serve import run_demo; print(run_demo())"
+**2 个毕业 capstone**（子包）：
 
-# Capstone-2: 五线综合报告
-python -c "import sys; sys.path.insert(0,'src'); from graduation_e2e.run import main; import sys as s; s.argv=['x','--out','./report']; main()"
+```powershell
+# Capstone-1：R1-tiny 部署 demo
+python learning/serving-graduation/src/r1_tiny_deploy/serve.py
+
+# Capstone-2：五线综合 e2e 报告（默认写 tempdir；--out 指定目录）
+python learning/serving-graduation/src/graduation_e2e/run.py
+# 或包形式（从 src 目录）：python -m graduation_e2e.run --out report/
+```
+
+> 注：这 8 个入口原先**全都直跑无输出**（6 支持脚本 + capstone1 缺 `__main__`，capstone2 用相对 import 只能 `-m`）。本轮补齐 `demo()`/`__main__`，并让 capstone2 `run.py` 兼容"直接当脚本"和"`-m` 包"两种跑法。所有 serving demo 都是单进程模拟（mock 模型/嵌入/图像编码），无需 GPU。
+
+**测试（V2）**：23 个测试覆盖缓存/路由/评分卡/预算/两 capstone：
+
+```powershell
+python -m pytest learning/serving-graduation/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules serving-graduation --tests
 ```
 
 ## 毕业 checklist
 
 - [x] 14 lecture + 14 notebook
-- [x] 20 tests pass
+- [x] 23 tests pass
 - [x] Capstone-1 R1-tiny 部署 demo
 - [x] Capstone-2 五线综合对比 report (md + json)
 - [x] git tag `用-graduation` ⭐⭐⭐⭐⭐⭐

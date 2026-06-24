@@ -46,3 +46,21 @@ def estimate_total_cost(queries: List[str], tokens_per_query: int = 500) -> Dict
         t = route(q)
         by_tier[t.name] += tokens_per_query / 1_000_000 * t.cost_per_million
     return by_tier
+
+
+def demo() -> None:
+    print("=== 多模型路由：按 query 复杂度选 tier ===")
+    queries = [
+        "hi",
+        "what's the weather today",
+        "prove the derivative step-by-step using the optimise algorithm",
+    ]
+    for q in queries:
+        t = route(q)
+        print(f"  complexity={heuristic_complexity(q):.2f}  {q[:46]!r:48} -> {t.name} (${t.cost_per_million}/M)")
+    costs = estimate_total_cost(queries)
+    print(f"按 tier 命中成本: {{{', '.join(f'{k}: ${v:.5f}' for k, v in costs.items() if v > 0)}}}")
+
+
+if __name__ == "__main__":
+    demo()

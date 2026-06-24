@@ -63,3 +63,17 @@ def inject_wait_tokens(stream: List[str], every_n: int = 50) -> List[str]:
             if count % every_n == 0:
                 out.append("Wait")
     return out
+
+
+def demo() -> None:
+    print("=== Thinking budget forcing（s1 风格：预算耗尽强制收尾 + Wait 注入）===")
+    stream = ["<think>"] + [f"t{i}" for i in range(20)] + ["</think>", "<answer>", "42", "</answer>"]
+    r = generate_with_budget(stream, budget_tokens=8)
+    print(f"budget=8: thinking_tokens={r.thinking_tokens} forced_close={r.forced_close}")
+    print(f"  强制收尾后末段: {r.tokens[-4:]}")
+    short = ["<think>"] + [f"t{i}" for i in range(5)] + ["</think>"]
+    print(f"inject_wait(every_n=2): {inject_wait_tokens(short, every_n=2)}")
+
+
+if __name__ == "__main__":
+    demo()

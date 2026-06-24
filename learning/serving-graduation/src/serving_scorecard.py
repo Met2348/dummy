@@ -86,3 +86,28 @@ def effective_goodput(scores: Iterable[CandidateScore], request_rate_rps: float)
 def rank_candidates(scores: Iterable[CandidateScore]) -> List[CandidateScore]:
     """Passing models first, then cheaper, then lower TTFT."""
     return sorted(scores, key=lambda s: (not s.passes, s.estimated_cost, s.ttft_ms))
+
+
+def demo() -> None:
+    print("=== 毕业服务评分卡（correctness 门 + TTFT/TPOT SLO + goodput）===")
+    report = {"results": [
+        {"ckpt": "0.5B", "response": "<think>brief</think><answer>42</answer>",
+         "latency_ms": 120, "correct": True, "size_mb": 500},
+        {"ckpt": "7B", "response": "<think>some reasoning steps</think><answer>42</answer>",
+         "latency_ms": 450, "correct": True, "size_mb": 7000},
+        {"ckpt": "70B-wrong", "response": "<think>...</think><answer>41</answer>",
+         "latency_ms": 2200, "correct": False, "size_mb": 70000},
+    ]}
+    slo = GraduationSLO(max_ttft_ms=900, max_tpot_ms=80)
+    scores = score_report(report, slo)
+    for s in scores:
+        print(f"  {s.ckpt:>9}: correct={s.correct!s:5} ttft={s.ttft_ms:>6.0f}ms "
+              f"tpot={s.tpot_ms:>5.1f}ms cost={s.estimated_cost:.3f} passes={s.passes}")
+    gp = effective_goodput(scores, request_rate_rps=10.0)
+    print(f"goodput@10rps: attainment={gp['attainment']} good_rps={gp['goodput_rps']} "
+          f"cost/good={gp['cost_per_good_request']}")
+    print(f"排名(过 SLO 优先→便宜→低 TTFT): {[s.ckpt for s in rank_candidates(scores)]}")
+
+
+if __name__ == "__main__":
+    demo()
