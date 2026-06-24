@@ -1,5 +1,5 @@
 """Tests across all quant modules + capstone."""
-import sys, pathlib
+import sys, pathlib, math
 import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -15,7 +15,7 @@ from fp8_demo import fp8_round, fp8_matmul_mock, relative_error
 from bnb_int4 import quantize_nf4, dequantize_nf4
 from kv_quant import quantize_kv_per_token, dequantize_kv_per_token, attention_with_quant_kv
 from quant_eval import memory_table
-from capstone_quant_zoo import run_all, best_for, VARIANTS
+from capstone_quant_zoo import run_all, best_for, best_quantized_for
 
 
 def test_int8_per_tensor_round_trip():
@@ -125,20 +125,60 @@ def test_attention_with_quant_kv_runs():
     assert out.shape == (2, 4, 16)
 
 
-def test_capstone_returns_6_variants():
+def test_capstone_runs_all_methods():
     rows = run_all()
-    assert len(rows) == 6
     names = {r["variant"] for r in rows}
-    assert "fp16" in names and "AWQ-4bit" in names
+    # every real quantizer module must be exercised, not just named
+    for expected in {"fp16", "int8 (pc)", "GPTQ-4bit", "AWQ-4bit",
+                     "NF4 (bnb)", "FP8 (E4M3)", "SmoothQuant-int8"}:
+        assert expected in names
+
+
+def test_capstone_errors_are_computed_not_hardcoded():
+    # fp16 reference is exact; every quantized variant has real, finite error.
+    rows = {r["variant"]: r for r in run_all()}
+    assert rows["fp16"]["error"] == 0.0
+    for name in ("int8 (pc)", "GPTQ-4bit", "AWQ-4bit", "NF4 (bnb)",
+                 "FP8 (E4M3)", "SmoothQuant-int8"):
+        assert rows[name]["error"] > 0.0
+        assert math.isfinite(rows[name]["error"])
+
+
+def test_capstone_8bit_beats_4bit_on_reconstruction():
+    rows = {r["variant"]: r for r in run_all()}
+    best_8bit = min(rows["int8 (pc)"]["error"], rows["SmoothQuant-int8"]["error"])
+    worst_4bit = max(rows["GPTQ-4bit"]["error"], rows["AWQ-4bit"]["error"],
+                     rows["NF4 (bnb)"]["error"])
+    assert best_8bit < worst_4bit
+
+
+def test_capstone_gptq_compensation_beats_nf4_codebook():
+    # GPTQ's Hessian error-compensation should beat the static NF4 codebook
+    # at the same 4-bit budget on this correlated toy layer.
+    rows = {r["variant"]: r for r in run_all()}
+    assert rows["GPTQ-4bit"]["error"] <= rows["NF4 (bnb)"]["error"]
+
+
+def test_capstone_compression_and_memory_track_bitwidth():
+    for r in run_all():
+        assert r["compression"] == round(16.0 / r["bits"], 2)
+    rows = {r["variant"]: r for r in run_all()}
+    # 4-bit variants store half the bytes of the 8-bit variants
+    assert rows["GPTQ-4bit"]["mem_mib"] < rows["int8 (pc)"]["mem_mib"]
 
 
 def test_capstone_best_for_categories():
-    assert best_for("accuracy")["variant"] == "fp16"
-    assert best_for("speed")["variant"] == "W4A8"
-    assert best_for("memory")["variant"] in {"GPTQ-4bit", "AWQ-4bit", "W4A8"}
+    assert best_for("accuracy")["variant"] == "fp16"          # exact reference
+    assert best_for("compression")["bits"] == 4               # most compressed
+    assert best_quantized_for("accuracy")["error"] > 0.0      # excludes fp16
 
 
 def test_memory_table_includes_all_rows():
-    md = memory_table(VARIANTS)
-    for r in VARIANTS:
+    rows = run_all()
+    md = memory_table([
+        dict(variant=r["variant"], ppl=r["error"], acc="-",
+             mem_gb=round(r["mem_mib"] / 1024, 2), tok_s="-")
+        for r in rows
+    ])
+    for r in rows:
         assert r["variant"] in md
