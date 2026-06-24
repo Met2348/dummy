@@ -87,6 +87,10 @@ def run_mmlu_pro(model: ModelFn) -> List[EvalResult]:
     return out
 
 
+def summarize(rs: List[EvalResult]) -> Dict:
+    return {"n": len(rs), "accuracy": accuracy(rs)}
+
+
 def _self_test() -> int:
     samples = build_samples()
     assert len(samples) == 5
@@ -106,3 +110,6 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"mmlu_pro_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo run: random baseline (10-option chance ~ 10%)
+    rand = make_random_model(seed=42, choices="ABCDEFGHIJ")
+    print("random baseline (10-opt):", summarize(run_mmlu_pro(rand)))

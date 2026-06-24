@@ -78,5 +78,16 @@ def _self_test() -> int:
 
 
 if __name__ == "__main__":
+    from common import make_random_model
     f = _self_test()
     print(f"lm_eval_adapter.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo: wrap a micro task in the lm-eval-style Task API and render results
+    demo_tasks = [
+        Task(name="micro_mc",
+             samples=[
+                 {"qid": "d1", "prompt": "[qid=d1] Pick: A. cat B. dog\nA:", "gold": "A"},
+                 {"qid": "d2", "prompt": "[qid=d2] Pick: A. cat B. dog\nA:", "gold": "B"},
+                 {"qid": "d3", "prompt": "[qid=d3] Pick: A. cat B. dog\nA:", "gold": "A"},
+             ]),
+    ]
+    print(render_results(evaluate_tasks(make_random_model(seed=42), demo_tasks)))

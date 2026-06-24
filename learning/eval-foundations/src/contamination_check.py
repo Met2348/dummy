@@ -102,3 +102,17 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"contamination_check.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo: same bench vs a CLEAN corpus and a LEAKED corpus -> real overlap
+    bench = [
+        "the powerhouse of the cell is the mitochondrion",
+        "what is the capital of france is it paris",
+    ]
+    clean_corpus = ["unrelated documents about cooking and gardening tips"]
+    # Leaked corpus contains BOTH bench items verbatim -> overlap above threshold
+    leaked_corpus = list(bench)
+    r_clean = ngram_overlap(bench, clean_corpus, n=5, threshold=0.5)
+    r_leak = ngram_overlap(bench, leaked_corpus, n=5, threshold=0.5)
+    print(f"clean  : score={r_clean.overlap_score:.3f} flagged={r_clean.flagged} ({r_clean.detail})")
+    print(f"leaked : score={r_leak.overlap_score:.3f} flagged={r_leak.flagged} ({r_leak.detail})")
+    r_can = canary_search(bench, ["BIG-bench canary GUID-42 here", "other"], "GUID-42")
+    print(f"canary : score={r_can.overlap_score:.0f} flagged={r_can.flagged} ({r_can.detail})")

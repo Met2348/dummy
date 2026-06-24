@@ -123,3 +123,6 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"helm_local.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo: render the micro-HELM scenario x metric table for a random model
+    rand = make_random_model(seed=42)
+    print(render_table(run_helm_local(rand)))

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from common import EvalResult, EvalSample, ModelFn, accuracy, make_mock_model, make_random_model
+from common import EvalResult, EvalSample, ModelFn, accuracy, group_accuracy, make_mock_model, make_random_model
 
 
 _MICRO_TRUTHFUL: List[Dict] = [
@@ -74,6 +74,11 @@ def run_truthfulqa(model: ModelFn) -> List[EvalResult]:
     return out
 
 
+def summarize(rs: List[EvalResult]) -> Dict:
+    """MC1 accuracy = fraction picking the truthful (non-misconception) option."""
+    return {"truthful_acc": accuracy(rs), "by_category": group_accuracy(rs, by="category")}
+
+
 def _self_test() -> int:
     samples = build_samples()
     assert len(samples) == 6
@@ -90,3 +95,7 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"truthfulqa_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo: random baseline. truthful_acc = picks the option resisting the
+    # common misconception; higher acc != "truer", inspect error patterns.
+    rand = make_random_model(seed=42)
+    print("random baseline:", summarize(run_truthfulqa(rand)))

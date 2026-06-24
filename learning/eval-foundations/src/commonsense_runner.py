@@ -94,3 +94,6 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"commonsense_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo run: random baseline (4-option chance ~ 25%)
+    rand = make_random_model(seed=42)
+    print("random baseline:", summarize(run_commonsense(rand)))

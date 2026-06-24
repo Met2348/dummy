@@ -89,3 +89,6 @@ def _self_test() -> int:
 if __name__ == "__main__":
     f = _self_test()
     print(f"bbh_runner.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
+    # Demo run: random baseline (3-option chance ~ 33%)
+    rand = make_random_model(seed=42, choices="ABC")
+    print("random baseline:", summarize(run_bbh(rand)))
