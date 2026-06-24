@@ -63,14 +63,39 @@ Lookahead / Self-Spec           ← Jacobi / skip layer
 python environment/verify_env.py
 ```
 
-## 运行
+## 运行验证（Runbook）
+
+> 本段命令即 [`runbook.yaml`](runbook.yaml) 登记的"文档入口命令"，已在 ERIC-3080Ti（RTX 3080 Ti 16GB）上 V1 验证通过（2/2）。
+> 一键复验本模块：
+> ```powershell
+> python scripts/eric_3080ti_env_audit.py --runbook --modules speculative-decoding
+> ```
+
+**Capstone：4 method × 5 task 合成对照**（CPU 秒级；打印真实 accept / MAU / sim_speedup 表 + JSON）：
 
 ```powershell
-# 测试 (12/12 全绿)
-python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'src/tests'); import test_spec_decode"
+python learning/speculative-decoding/src/capstone_eagle3.py
+```
 
-# Capstone
-python src/capstone_eagle3.py
+**经典投机采样论文级 toy**（证明 `exact_output_distribution == target_distribution`，即零 bias；并打印 overlap α、最优 γ 与理论加速比）：
+
+```powershell
+python learning/speculative-decoding/src/speculative_original_minimal.py
+```
+
+> ⚠️ **只有这 2 个脚本可直跑**。`src/` 下其余 9 个脚本（`classic_spec_decode.py`、`eagle_minimal.py`、
+> `eagle2.py`、`medusa_heads.py`、`lookahead.py`、`self_spec.py`、`tree_attention.py`、`spec_eval.py`、`common.py`）
+> 是**库模块**（被 pytest import 调用），**没有 `__main__`**——直接 `python eagle2.py` 之类会**无输出 exit 0**（no-op，
+> 等于没跑）。要看这些算法跑起来，请走上面的 capstone（它 import 全部方法）或下面的测试。
+>
+> 注：合成数据下分布噪声小 ⇒ classic 看起来反胜（accept≈1.0）；真模型场景（Qwen-1.5B 验证 + Qwen-0.5B 草稿，
+> 经 vLLM spec-decode）见下节，需独立 vLLM 栈、不在 runbook 内。
+
+**测试（V2，12 + 7 = 19 项）**：
+
+```powershell
+python -m pytest learning/speculative-decoding/src/tests/ -v
+# 或经审计 harness：python scripts/eric_3080ti_env_audit.py --modules speculative-decoding --tests
 ```
 
 ## 退出条件 checklist
