@@ -23,8 +23,8 @@
 
 ### B. 端到端 AI Scientist（8）
 - ✅ 2408.06292 ai-scientist-v1 ⭐⭐(标杆/已做，23.8k字)
-- ⬜ 2504.08066 ai-scientist-v2-tree-search ⭐
-- ⬜ 2502.18864 google-ai-co-scientist ⭐
+- ✅ 2504.08066 ai-scientist-v2-tree-search ⭐
+- ✅ 2502.18864 google-ai-co-scientist ⭐
 - ⬜ 2501.04227 agent-laboratory
 - ⬜ 2505.18705 ai-researcher-hkuds
 - ⬜ 2505.16938 novelseek-internagent
@@ -32,14 +32,14 @@
 - ⬜ 2411.11910 aigs-automated-falsification
 
 ### C. 创意/假设生成（5）
-- ⬜ 2409.04109 can-llms-generate-novel-ideas ⭐
-- ⬜ 2506.20803 ideation-execution-gap ⭐
+- ✅ 2409.04109 can-llms-generate-novel-ideas ⭐
+- ✅ 2506.20803 ideation-execution-gap ⭐
 - ⬜ 2404.07738 researchagent-iterative-ideation
 - ⬜ 2412.14141 llm-combinatorial-creativity
 - ⬜ 2511.02238 deep-ideation-concept-network
 
 ### D. Deep Research/综述合成（4）
-- ⬜ 2402.14207 storm-wikipedia-from-scratch ⭐
+- ✅ 2402.14207 storm-wikipedia-from-scratch ⭐
 - ⬜ 2408.15232 co-storm-unknown-unknowns
 - ⬜ 2411.14199 openscholar-ai2 ⭐
 - ⬜ 2508.20033 deepscholar-bench
@@ -62,7 +62,7 @@
 
 ### G. 批判/陷阱（4）
 - ⬜ 2502.14297 critique-wishful-thinking-ari
-- ⬜ 2509.08713 critique-hidden-pitfalls ⭐
+- ✅ 2509.08713 critique-hidden-pitfalls ⭐
 - ⬜ 2506.01372 critique-fail-without-implementation
 - ⬜ 2601.03315 critique-why-not-scientists-yet ⭐
 
@@ -71,7 +71,10 @@
 
 ## 已提交批次
 （每批填：commit + 含哪几篇）
-- _(待填)_
+- f6288f4 标杆：2408.06292(v1)
+- 批次1(核心6篇)：2504.08066 v2 / 2502.18864 co-scientist / 2409.04109 novel-ideas /
+  2506.20803 ideation-gap / 2402.14207 STORM / 2509.08713 hidden-pitfalls
 
 ## 最近进度
-- 2026-06-26：建风格规范 + 账本；开做标杆 2408.06292。
+- 2026-06-26：标杆 + 批次1 共 7/40 完成。子代理+模板+标杆这套质量过关（各 42–53k 字符、
+  公式前给直觉+符号、指标有定义式、数字标出处、诚实区分宣称vs实测）。继续批次2…
