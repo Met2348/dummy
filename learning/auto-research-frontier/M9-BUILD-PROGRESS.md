@@ -25,7 +25,7 @@
 | 9.3 创意与假设生成 | `m9.3-ideation-and-tournament/` | `idea_tournament`：生成K→novelty+judge→Elo锦标赛→top-k | LLM 给自己点子打高分；novelty≠feasibility | ✅ 4/4 绿 |
 | 9.4 Deep Research 综述 | `m9.4-deep-research-storm/` | `mini_storm`：多视角提问→检索→带引用合成→**引用忠实度核查** | 引用存在≠引用忠实（植入假引用被抓） | ✅ 3/3 绿 |
 | 9.6 评测 Research Agent | `m9.6-evaluating-research-agents/` | `mini_replication_eval`：method spec+rubric 真 exec 判分（扩 safe_exec） | 弱 rubric 被刷(硬编码/print指标)，强 rubric 抓住 | ✅ 3/3 绿 |
-| 9.7 自我改进/进化 | `m9.7-self-improvement-evolution/` | `mini_self_improve`：变异自己→评估→keep-if-better→档案 | fitness 被 game（泄漏信号过拟合，held-out 戳穿） | ⬜ |
+| 9.7 自我改进/进化 | `m9.7-self-improvement-evolution/` | `mini_self_improve`：变异自己→评估→keep-if-better→档案 | fitness 被 game（泄漏信号过拟合，held-out 戳穿） | ✅ 3/3 绿 |
 | 9.8 批判·安全·诚信(capstone) | `m9.8-redteam-and-integrity/` | 红队 mini-scientist：幻觉表/换数据/硬编码指标 + 守卫 | 每种攻击对裸 pipeline 成功、被守卫抓住（防御教育） | ⬜ |
 
 ## 顺序与依赖
@@ -38,10 +38,11 @@
 - **9.2** research-agent-core → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 7 测试）。commit 152a5b6
 - **9.3** ideation-and-tournament → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 6 测试）。commit e931f82
 - **9.4** deep-research-storm → harness 3/3 绿（V0 / V1 / V2 pytest 6 测试）。commit 0b577c2
-- **9.6** evaluating-research-agents → harness 3/3 绿（V0 / V1 / V2 pytest 7 测试）。
+- **9.6** evaluating-research-agents → harness 3/3 绿（V0 / V1 / V2 pytest 7 测试）。commit 939338c
+- **9.7** self-improvement-evolution → harness 3/3 绿（V0 / V1 / V2 pytest 6 测试）。
 
 ## 最近进度
-- 2026-06-25：9.1/9.2/9.3/9.4/9.6 建成并全绿。已完成 5/7。
-  9.6 核心：真 exec 沙箱(扩 agent-code-eval) + 3候选×3rubric 判分矩阵；硬编码刷过 visible_only
-  挂 heldout，print造假刷过 trust_print，只有诚实过强 rubric(heldout)，越权候选被沙箱拦。
-  下一步建 9.7 自我改进/进化（fitness 被 game），再 9.8 红队 capstone。
+- 2026-06-25：9.1/9.2/9.3/9.4/9.6/9.7 建成并全绿。已完成 6/7。
+  9.7 核心：进化档案循环；优化代理 naive(泄漏测试集) 2代背满 holdout 死守 0.500(reward hacking)，
+  优化真目标 holdout 调 threshold 3→0.5 真涨到 1.0。全真测量、确定性。
+  下一步建最后一个 9.8 红队·诚信 capstone（红队 9.5 mini-scientist + 守卫）。
