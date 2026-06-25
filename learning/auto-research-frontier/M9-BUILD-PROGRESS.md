@@ -21,7 +21,7 @@
 | 专题 | 目录 | 可跑交付物 | 批判点(防踩坑) | 状态 |
 |------|------|-----------|---------------|------|
 | 9.1 自主性阶梯与全景 | `m9.1-autonomy-ladder-and-map/` | `taxonomy_classifier`：按**证据**(非自称)把系统归 Tool/Analyst/Scientist + 生命周期覆盖图 | claim≠evidence 的 hype gap；"自称 Scientist 的都是自评的" | ✅ 4/4 绿 |
-| 9.2 研究 Agent 内核 | `m9.2-research-agent-core/` | `mini_research_agent`：ReAct 环 问题→检索→拟idea→自我批判→结构化计划 | 无 critic 会过度自信/幻觉引用；检索 grounding | ⬜ |
+| 9.2 研究 Agent 内核 | `m9.2-research-agent-core/` | `mini_research_agent`：ReAct 环 问题→检索→拟idea→自我批判→结构化计划 | 无 critic 会过度自信/幻觉引用；检索 grounding | ✅ 4/4 绿 |
 | 9.3 创意与假设生成 | `m9.3-ideation-and-tournament/` | `idea_tournament`：生成K→novelty+judge→Elo锦标赛→top-k | LLM 给自己点子打高分；novelty≠feasibility | ⬜ |
 | 9.4 Deep Research 综述 | `m9.4-deep-research-storm/` | `mini_storm`：多视角提问→检索→带引用合成→**引用忠实度核查** | 引用存在≠引用忠实（植入假引用被抓） | ⬜ |
 | 9.6 评测 Research Agent | `m9.6-evaluating-research-agents/` | `mini_replication_eval`：method spec+rubric 真 exec 判分（扩 safe_exec） | 弱 rubric 被刷(硬编码/print指标)，强 rubric 抓住 | ⬜ |
@@ -34,8 +34,10 @@
 
 ## 已完成提交记录
 （建好一个填一行：commit hash + 模块 + V0/V1/V2 结果）
-- **9.1** autonomy-ladder-and-map → harness 4/4 绿（V0 --help / V1 ×2 / V2 pytest 8 测试）。
+- **9.1** autonomy-ladder-and-map → harness 4/4 绿（V0 --help / V1 ×2 / V2 pytest 8 测试）。commit aadc042
+- **9.2** research-agent-core → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 7 测试）。
 
 ## 最近进度
-- 2026-06-25：账本建立；9.1 建成并 4/4 绿（含修两处真 bug：Windows GBK 控制台 `⚠` 崩→换 ASCII；
-  runbook 带空格参数需在模板内给占位符包引号）。下一步建 9.2。
+- 2026-06-25：账本建立；9.1、9.2 建成并各 4/4 绿。已完成 2/7。
+  9.2 核心：ReAct 四零件 + Reviewer 角色清掉幻觉引用（无critic残留1→有critic残留0）。
+  下一步建 9.3 创意与锦标赛。
