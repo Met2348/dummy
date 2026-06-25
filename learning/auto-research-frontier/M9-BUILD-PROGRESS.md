@@ -23,7 +23,7 @@
 | 9.1 自主性阶梯与全景 | `m9.1-autonomy-ladder-and-map/` | `taxonomy_classifier`：按**证据**(非自称)把系统归 Tool/Analyst/Scientist + 生命周期覆盖图 | claim≠evidence 的 hype gap；"自称 Scientist 的都是自评的" | ✅ 4/4 绿 |
 | 9.2 研究 Agent 内核 | `m9.2-research-agent-core/` | `mini_research_agent`：ReAct 环 问题→检索→拟idea→自我批判→结构化计划 | 无 critic 会过度自信/幻觉引用；检索 grounding | ✅ 4/4 绿 |
 | 9.3 创意与假设生成 | `m9.3-ideation-and-tournament/` | `idea_tournament`：生成K→novelty+judge→Elo锦标赛→top-k | LLM 给自己点子打高分；novelty≠feasibility | ✅ 4/4 绿 |
-| 9.4 Deep Research 综述 | `m9.4-deep-research-storm/` | `mini_storm`：多视角提问→检索→带引用合成→**引用忠实度核查** | 引用存在≠引用忠实（植入假引用被抓） | ⬜ |
+| 9.4 Deep Research 综述 | `m9.4-deep-research-storm/` | `mini_storm`：多视角提问→检索→带引用合成→**引用忠实度核查** | 引用存在≠引用忠实（植入假引用被抓） | ✅ 3/3 绿 |
 | 9.6 评测 Research Agent | `m9.6-evaluating-research-agents/` | `mini_replication_eval`：method spec+rubric 真 exec 判分（扩 safe_exec） | 弱 rubric 被刷(硬编码/print指标)，强 rubric 抓住 | ⬜ |
 | 9.7 自我改进/进化 | `m9.7-self-improvement-evolution/` | `mini_self_improve`：变异自己→评估→keep-if-better→档案 | fitness 被 game（泄漏信号过拟合，held-out 戳穿） | ⬜ |
 | 9.8 批判·安全·诚信(capstone) | `m9.8-redteam-and-integrity/` | 红队 mini-scientist：幻觉表/换数据/硬编码指标 + 守卫 | 每种攻击对裸 pipeline 成功、被守卫抓住（防御教育） | ⬜ |
@@ -36,10 +36,11 @@
 （建好一个填一行：commit hash + 模块 + V0/V1/V2 结果）
 - **9.1** autonomy-ladder-and-map → harness 4/4 绿（V0 --help / V1 ×2 / V2 pytest 8 测试）。commit aadc042
 - **9.2** research-agent-core → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 7 测试）。commit 152a5b6
-- **9.3** ideation-and-tournament → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 6 测试）。
+- **9.3** ideation-and-tournament → harness 4/4 绿（V0 / V1 ×2 / V2 pytest 6 测试）。commit e931f82
+- **9.4** deep-research-storm → harness 3/3 绿（V0 / V1 / V2 pytest 6 测试）。
 
 ## 最近进度
-- 2026-06-25：9.1/9.2/9.3 建成并各 4/4 绿。已完成 3/7。
-  9.3 核心：numpy 逻辑回归真训练，评委冠军 exotic-init 真实垫底(6/6, acc=0.795)，
-  self 点子 Elo 1161 但真实 acc 0.820（novelty≠feasibility + 自偏好，真实测量）。
-  下一步建 9.4 Deep Research / 引用忠实度。
+- 2026-06-25：9.1/9.2/9.3/9.4 建成并全绿。已完成 4/7。
+  9.4 核心：mini-STORM 多视角综述 + 忠实度核查；植入 2 句"引真论文但论文不支持此论断"
+  （v2 没做湿实验/STORM 没高引用准确率），naive 存在性检查 5/5 全过、忠实度揪出 2 句。
+  下一步建 9.6 评测 Research Agent（safe_exec 真沙箱判分）。
