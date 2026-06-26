@@ -19,7 +19,7 @@
 - ✅ 2506.18096 survey-deep-research-agents-roadmap
 - ✅ 2507.01903 survey-ai4research
 - ✅ 2508.12752 survey-deep-research-autonomous
-- ⬜ 2512.02038 survey-deep-research-systematic
+- ✅ 2512.02038 survey-deep-research-systematic
 
 ### B. 端到端 AI Scientist（8）
 - ✅ 2408.06292 ai-scientist-v1 ⭐⭐(标杆/已做，23.8k字)
@@ -35,14 +35,14 @@
 - ✅ 2409.04109 can-llms-generate-novel-ideas ⭐
 - ✅ 2506.20803 ideation-execution-gap ⭐
 - ✅ 2404.07738 researchagent-iterative-ideation
-- ⬜ 2412.14141 llm-combinatorial-creativity
-- ⬜ 2511.02238 deep-ideation-concept-network
+- ✅ 2412.14141 llm-combinatorial-creativity
+- ✅ 2511.02238 deep-ideation-concept-network
 
 ### D. Deep Research/综述合成（4）
 - ✅ 2402.14207 storm-wikipedia-from-scratch ⭐
-- ⬜ 2408.15232 co-storm-unknown-unknowns
-- ⬜ 2411.14199 openscholar-ai2 ⭐
-- ⬜ 2508.20033 deepscholar-bench
+- ✅ 2408.15232 co-storm-unknown-unknowns
+- ✅ 2411.14199 openscholar-ai2 ⭐
+- ✅ 2508.20033 deepscholar-bench
 
 ### E. 评测/Benchmark（10）
 - ⬜ 2504.01848 paperbench-openai ⭐
