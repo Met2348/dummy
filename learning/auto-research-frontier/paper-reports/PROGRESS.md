@@ -25,16 +25,16 @@
 - ✅ 2408.06292 ai-scientist-v1 ⭐⭐(标杆/已做，23.8k字)
 - ✅ 2504.08066 ai-scientist-v2-tree-search ⭐
 - ✅ 2502.18864 google-ai-co-scientist ⭐
-- ⬜ 2501.04227 agent-laboratory
-- ⬜ 2505.18705 ai-researcher-hkuds
-- ⬜ 2505.16938 novelseek-internagent
-- ⬜ 2503.18102 agentrxiv-collaborative
-- ⬜ 2411.11910 aigs-automated-falsification
+- ✅ 2501.04227 agent-laboratory
+- ✅ 2505.18705 ai-researcher-hkuds
+- ✅ 2505.16938 novelseek-internagent
+- ✅ 2503.18102 agentrxiv-collaborative
+- ✅ 2411.11910 aigs-automated-falsification
 
 ### C. 创意/假设生成（5）
 - ✅ 2409.04109 can-llms-generate-novel-ideas ⭐
 - ✅ 2506.20803 ideation-execution-gap ⭐
-- ⬜ 2404.07738 researchagent-iterative-ideation
+- ✅ 2404.07738 researchagent-iterative-ideation
 - ⬜ 2412.14141 llm-combinatorial-creativity
 - ⬜ 2511.02238 deep-ideation-concept-network
 
@@ -76,5 +76,7 @@
   2506.20803 ideation-gap / 2402.14207 STORM / 2509.08713 hidden-pitfalls
 
 ## 最近进度
-- 2026-06-26：标杆 + 批次1 共 7/40 完成。子代理+模板+标杆这套质量过关（各 42–53k 字符、
-  公式前给直觉+符号、指标有定义式、数字标出处、诚实区分宣称vs实测）。继续批次2…
+- 2026-06-26：标杆 + 批次1 + 批次2 共 **13/40** 完成。批次2(B组5+ResearchAgent)：
+  agent-lab/ai-researcher/novelseek/agentrxiv/aigs/researchagent，各 37–50k 字符。
+  注：批次2 中 4 个子代理触发 API 5h 限额(429)，但文件**已全部落盘且结构完整**(429 只杀了返回消息)。
+  继续批次3(综述6篇)；若再撞 429 则等限额恢复再续。
