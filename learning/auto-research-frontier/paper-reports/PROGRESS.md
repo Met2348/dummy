@@ -87,3 +87,41 @@
   全 40 篇各 20–53k 字符、20页骨架、公式前给直觉+先定义符号、指标有定义式、数字标 §/Table/Eq 出处、
   诚实区分「宣称 vs 实测/局限」。子代理并行 + 模板 + 标杆 + 产物落盘账本，扛过一次 API 5h 限额中断。
   收尾：加 paper-reports/README.md 索引。
+
+---
+
+# 第二批扩充（2026-06-26 老师批示：量 ≥70、更新更权威、解读更详尽，**新增 why++ 与 inspires-us**）
+
+> 现有 40 篇**不动**；新增 **34 篇**（全部新、权威、不重复）→ 合计 **74 篇 ≥70**。
+> 新增遵循 [`_STYLE-GUIDE-v2-why-and-inspiration.md`](_STYLE-GUIDE-v2-why-and-inspiration.md)：v1 全部要求 + Why 三连 + 强制
+> `## ★ 对我们的启发（Inspires Us）` 一节。下载脚本已扩到 74 篇（Virtual Lab bioRxiv 反爬，未纳入）。
+> 标杆：v1=2408.06292；**v2 新标杆=2506.13131 AlphaEvolve（我亲自写，演示 why三连+inspires-us）**。
+
+## 第二批清单（34 篇，状态 ⬜未做 / 🟡进行 / ✅已写抽检）
+### A 综述(2)
+- ⬜ 2508.21148 survey-scientific-llms-data-to-agent
+- ⬜ 2501.04306 survey-llm4sr
+### B 端到端/多智能体(5)
+- ⬜ 2411.00816 cycleresearcher · ⬜ 2505.13400 robin · ⬜ 2506.22653 ursa
+- ⬜ 2509.26603 deepscientist · ⬜ 2506.15692 mle-star
+### C 创意/假设(5)
+- ⬜ 2409.05556 sciagents · ⬜ 2412.17767 researchtown · ⬜ 2404.04326 hypogenic
+- ⬜ 2410.09403 many-heads · ⬜ 2506.08140 autosdt
+### D Deep Research(4)
+- ⬜ 2409.13740 paperqa2 · ⬜ 2504.03160 deepresearcher · ⬜ 2504.21776 webthinker · ⬜ 2507.02592 websailor
+### E 评测(7)
+- ⬜ 2407.01725 discoverybench · ⬜ 2409.07440 super · ⬜ 2505.24785 exp-bench
+- ⬜ 2506.02314 researchcodebench · ⬜ 2503.00096 bixbench · ⬜ 2510.27598 innovatorbench · ⬜ 2504.11524 hypobench
+### F 自我改进/算法发现(6)
+- 🟡 2506.13131 alphaevolve（v2 标杆，我写） · ⬜ 2506.10943 seal · ⬜ 2410.04444 godel-agent
+- ⬜ 2404.18400 llm-sr · ⬜ 2505.22451 ai-mathematician · ⬜ 2510.14150 codeevolve
+### G 批判(1)
+- ⬜ 2508.16613 critique-biomedical-acceleration-limits
+### H 前沿生态(1)
+- ⬜ 2508.15126 aixiv-ai-scientist-ecosystem
+### I 域内落地发现(3，新增组)
+- ⬜ 2304.05376 chemcrow · ⬜ 2508.02956 sparksmatter · ⬜ 2509.06917 paper2agent
+
+## 第二批已提交批次
+（每批：commit + 含哪几篇）
+- （待填）
