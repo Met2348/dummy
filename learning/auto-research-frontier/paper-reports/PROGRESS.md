@@ -97,31 +97,45 @@
 > `## ★ 对我们的启发（Inspires Us）` 一节。下载脚本已扩到 74 篇（Virtual Lab bioRxiv 反爬，未纳入）。
 > 标杆：v1=2408.06292；**v2 新标杆=2506.13131 AlphaEvolve（我亲自写，演示 why三连+inspires-us）**。
 
-## 第二批清单（34 篇，状态 ⬜未做 / 🟡进行 / ✅已写抽检）
+## 第二批清单（34 篇，全部 ✅ 已写并抽检）
 ### A 综述(2)
-- ⬜ 2508.21148 survey-scientific-llms-data-to-agent
-- ⬜ 2501.04306 survey-llm4sr
+- ✅ 2508.21148 survey-scientific-llms-data-to-agent
+- ✅ 2501.04306 survey-llm4sr
 ### B 端到端/多智能体(5)
-- ⬜ 2411.00816 cycleresearcher · ⬜ 2505.13400 robin · ⬜ 2506.22653 ursa
-- ⬜ 2509.26603 deepscientist · ⬜ 2506.15692 mle-star
+- ✅ 2411.00816 cycleresearcher · ✅ 2505.13400 robin · ✅ 2506.22653 ursa
+- ✅ 2509.26603 deepscientist · ✅ 2506.15692 mle-star
 ### C 创意/假设(5)
-- ⬜ 2409.05556 sciagents · ⬜ 2412.17767 researchtown · ⬜ 2404.04326 hypogenic
-- ⬜ 2410.09403 many-heads · ⬜ 2506.08140 autosdt
+- ✅ 2409.05556 sciagents · ✅ 2412.17767 researchtown · ✅ 2404.04326 hypogenic
+- ✅ 2410.09403 many-heads · ✅ 2506.08140 autosdt
 ### D Deep Research(4)
-- ⬜ 2409.13740 paperqa2 · ⬜ 2504.03160 deepresearcher · ⬜ 2504.21776 webthinker · ⬜ 2507.02592 websailor
+- ✅ 2409.13740 paperqa2 · ✅ 2504.03160 deepresearcher · ✅ 2504.21776 webthinker · ✅ 2507.02592 websailor
 ### E 评测(7)
-- ⬜ 2407.01725 discoverybench · ⬜ 2409.07440 super · ⬜ 2505.24785 exp-bench
-- ⬜ 2506.02314 researchcodebench · ⬜ 2503.00096 bixbench · ⬜ 2510.27598 innovatorbench · ⬜ 2504.11524 hypobench
+- ✅ 2407.01725 discoverybench · ✅ 2409.07440 super · ✅ 2505.24785 exp-bench
+- ✅ 2506.02314 researchcodebench · ✅ 2503.00096 bixbench · ✅ 2510.27598 innovatorbench · ✅ 2504.11524 hypobench
 ### F 自我改进/算法发现(6)
-- 🟡 2506.13131 alphaevolve（v2 标杆，我写） · ⬜ 2506.10943 seal · ⬜ 2410.04444 godel-agent
-- ⬜ 2404.18400 llm-sr · ⬜ 2505.22451 ai-mathematician · ⬜ 2510.14150 codeevolve
+- ✅ 2506.13131 alphaevolve（v2 标杆，我亲写） · ✅ 2506.10943 seal · ✅ 2410.04444 godel-agent
+- ✅ 2404.18400 llm-sr · ✅ 2505.22451 ai-mathematician · ✅ 2510.14150 codeevolve
 ### G 批判(1)
-- ⬜ 2508.16613 critique-biomedical-acceleration-limits
+- ✅ 2508.16613 critique-biomedical-acceleration-limits
 ### H 前沿生态(1)
-- ⬜ 2508.15126 aixiv-ai-scientist-ecosystem
+- ✅ 2508.15126 aixiv-ai-scientist-ecosystem
 ### I 域内落地发现(3，新增组)
-- ⬜ 2304.05376 chemcrow · ⬜ 2508.02956 sparksmatter · ⬜ 2509.06917 paper2agent
+- ✅ 2304.05376 chemcrow · ✅ 2508.02956 sparksmatter · ✅ 2509.06917 paper2agent
 
-## 第二批已提交批次
-（每批：commit + 含哪几篇）
-- （待填）
+## 第二批已提交批次（commit + 含哪几篇）
+- 8f12cd6 基建：下载脚本扩 34 篇 + v2 风格规范(why三连+inspires-us) + 账本
+- 64e696c 标杆：2506.13131 AlphaEvolve（我亲写，演示 Why 三连 + Inspires-Us）
+- 3b7df83 批次1(6)：mle-star/paperqa2/deepresearcher/sciagents/seal/cycleresearcher
+- 073cf14 批次2(5)：super/exp-bench/researchcodebench/bixbench/hypobench
+- 4b628e8 批次3(6)：discoverybench/innovatorbench/researchtown/hypogenic/many-heads/autosdt
+- 8975dc8 批次4(6)：survey-scillms/llm4sr/robin/ursa/deepscientist/webthinker
+- 33dd31b 批次5(6)：websailor/godel-agent/llm-sr/ai-mathematician/codeevolve/biomedical-limits
+- 870e9a6 批次6(4·收官)：aixiv/chemcrow/sparksmatter/paper2agent
+
+## 第二批结论
+**34/34 全部完成。合计 40+34 = 74 篇 ≥ 老师要求的 70 篇。**
+- 全部新、权威(DeepMind/Google/MIT/Ai2/FutureHouse/顶会2025)、零重复(74 PDF↔74 报告一一对应)。
+- 现有 40 篇一字未动；新增 34 篇按 v2 规范多做两维：**Why 三连**(问题/设计/结果层) + 强制
+  **`## ★ 对我们的启发（Inspires Us）`**(a 可借用招/b 迁移到 m9.*/c 开放问题=机会/d 连接本库/e 我的下一步)。
+- 中途两次中断(socket 断连 1 次、子代理报错若干)均靠"产物落盘+账本"零损失续上；DiscoveryBench 断连后已重做补回。
+- Virtual Lab(Nature 2025)仅 bioRxiv 反爬返回 HTML，未纳入精读集(已在下载脚本注明)。

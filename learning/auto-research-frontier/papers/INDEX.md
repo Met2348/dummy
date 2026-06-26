@@ -1,9 +1,9 @@
-# 文献库索引 — auto-research（40 篇 PDF 注释清单）
+# 文献库索引 — auto-research（74 篇 PDF 注释清单）
 
 > 这 40 篇是 [`download_papers.py`](download_papers.py) 下载的全部论文（PDF 已 gitignore，跑脚本即可重下）。
 > 按主题 A–H 分组，与 [`../README.md`](../README.md)（阅读指南）和 [`../CURRICULUM.md`](../CURRICULUM.md)（教学系列）一一对应。
 > 影响力/时效标记：🏛️ 奠基·高影响 · 🧭 综述 · 🔥 2025–2026 前沿 · ⚖️ 批判/反思
-> 更新：2026-06-25
+> 更新：2026-06-27（第二批扩充至 74 篇，详见文末「第二批扩充」）
 
 ---
 
@@ -90,8 +90,28 @@
 
 ---
 
+## 第二批扩充（🆕 34 篇，2026-06；老师要求量≥70、更新更权威）
+
+> 精读报告同样新增「Why 三连 + ★对我们的启发(Inspires Us)」两维。下载脚本已含，跑脚本即重下。
+
+| 组 | arXiv · 一句话 |
+|----|----------------|
+| A 综述 | `2508.21148` 科学 LLM：数据→agent 前沿全分类法 · `2501.04306` LLM4SR：按科研生命周期综述 |
+| B 系统 | `2411.00816` CycleResearcher(ICLR'25) · `2505.13400` Robin⭐(FutureHouse,湿实验发现) · `2506.22653` URSA · `2509.26603` DeepScientist · `2506.15692` MLE-STAR⭐(Google) |
+| C 创意 | `2409.05556` SciAgents(MIT,知识图谱) · `2412.17767` ResearchTown(ICML'25) · `2404.04326` HypoGeniC · `2410.09403` Many-Heads · `2506.08140` AutoSDT |
+| D Deep Research | `2409.13740` PaperQA2⭐(FutureHouse) · `2504.03160` DeepResearcher⭐(EMNLP'25,RL) · `2504.21776` WebThinker⭐(NeurIPS'25) · `2507.02592` WebSailor(阿里) |
+| E 评测 | `2407.01725` DiscoveryBench(Ai2) · `2409.07440` SUPER(Ai2) · `2505.24785` EXP-Bench · `2506.02314` ResearchCodeBench(NeurIPS'25) · `2503.00096` BixBench · `2510.27598` InnovatorBench · `2504.11524` HypoBench |
+| F 自改进/算法发现 | `2506.13131` AlphaEvolve⭐⭐(DeepMind,破Strassen) · `2506.10943` SEAL⭐(MIT) · `2410.04444` Gödel-Agent(ACL'25) · `2404.18400` LLM-SR(ICLR'25) · `2505.22451` AI-Mathematician · `2510.14150` CodeEvolve |
+| G 批判 | `2508.16613` 生物医学加速的边界 |
+| H 生态 | `2508.15126` aiXiv：AI 科学家的投稿-评审-发布生态 |
+| I 域内落地 | `2304.05376` ChemCrow🏛️(Nature MI) · `2508.02956` SparksMatter(MIT,材料) · `2509.06917` Paper2Agent(Stanford) |
+
+---
+
 ## 统计
 
-- **共 40 篇 PDF**（~137 MB），外加 AlphaEvolve（博客/白皮书，未下载）。
-- 时间分布：2023–2024 奠基 8 篇，2025 前沿 24 篇，2026 最新 2 篇 + 多篇跨年；6 篇综述、4 篇批判。
-- **重下/更新**：`python learning/auto-research-frontier/papers/download_papers.py`（幂等，新增论文加进 `PAPERS` 列表即可）。
+- **共 74 篇 PDF**（第一批 40 + 第二批 🆕 34）。AlphaEvolve 已有 arXiv 版 `2506.13131` 并纳入。
+- 时间：2023–2024 奠基约 14 篇，2025 前沿约 56 篇，2026 最新若干；综述 8、批判/立场 5、域内落地 3。
+- 权威分布：DeepMind/Google/MIT/Ai2/FutureHouse/Stanford + ICLR/ICML/NeurIPS/ACL/EMNLP 2025 / Nature(MI)。
+- Virtual Lab（Nature 2025）仅 bioRxiv 反爬，未纳入；其余 74 篇均 arXiv 可一键重下。
+- **重下/更新**：`python learning/auto-research-frontier/papers/download_papers.py`（幂等，新增论文加进 `PAPERS` 列表即可；支持第 4 元素给完整 URL）。
