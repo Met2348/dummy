@@ -61,13 +61,13 @@
 - ✅ 2408.08435 adas-agentic-system-design ⭐
 
 ### G. 批判/陷阱（4）
-- ⬜ 2502.14297 critique-wishful-thinking-ari
+- ✅ 2502.14297 critique-wishful-thinking-ari
 - ✅ 2509.08713 critique-hidden-pitfalls ⭐
-- ⬜ 2506.01372 critique-fail-without-implementation
-- ⬜ 2601.03315 critique-why-not-scientists-yet ⭐
+- ✅ 2506.01372 critique-fail-without-implementation
+- ✅ 2601.03315 critique-why-not-scientists-yet ⭐
 
 ### H. 前沿（1）
-- ⬜ 2511.16931 omniscientist-coevolving
+- ✅ 2511.16931 omniscientist-coevolving
 
 ## 已提交批次
 （每批填：commit + 含哪几篇）
@@ -83,3 +83,7 @@
   批次5(评测6篇 paperbench/mle/re-bench/scienceagent/mlgym/mlagent)→**30/40**，
   benchmark 指标定义式齐(复现分/pass@k/归一化分/AUP/SR/CBS)。
   剩 10 篇：E×4(mlr-bench/astabench/core-bench/scicode) + F×2(DGM/ADAS) + G×3批判 + H×1。
+- 批次6(评测4+自改进2)→251d9cf(36/40)；批次7(批判3+前沿1)→**40/40 全部完成** 🎉。
+  全 40 篇各 20–53k 字符、20页骨架、公式前给直觉+先定义符号、指标有定义式、数字标 §/Table/Eq 出处、
+  诚实区分「宣称 vs 实测/局限」。子代理并行 + 模板 + 标杆 + 产物落盘账本，扛过一次 API 5h 限额中断。
+  收尾：加 paper-reports/README.md 索引。
