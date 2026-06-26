@@ -50,15 +50,15 @@
 - ✅ 2411.15114 re-bench-metr ⭐
 - ✅ 2410.05080 scienceagentbench
 - ✅ 2502.14499 mlgym-meta
-- ⬜ 2505.19955 mlr-bench
+- ✅ 2505.19955 mlr-bench
 - ✅ 2310.03302 mlagentbench
-- ⬜ 2510.21652 astabench-ai2
-- ⬜ 2409.11363 core-bench-reproducibility
-- ⬜ 2407.13168 scicode-benchmark
+- ✅ 2510.21652 astabench-ai2
+- ✅ 2409.11363 core-bench-reproducibility
+- ✅ 2407.13168 scicode-benchmark
 
 ### F. 自我改进/进化（2）
-- ⬜ 2505.22954 darwin-godel-machine ⭐
-- ⬜ 2408.08435 adas-agentic-system-design ⭐
+- ✅ 2505.22954 darwin-godel-machine ⭐
+- ✅ 2408.08435 adas-agentic-system-design ⭐
 
 ### G. 批判/陷阱（4）
 - ⬜ 2502.14297 critique-wishful-thinking-ari
