@@ -14,11 +14,11 @@
 状态：⬜ 未做 / 🟡 进行中 / ✅ 已写并抽检
 
 ### A. 综述（6）
-- ⬜ 2505.13259 survey-automation-to-autonomy ⭐(第一篇/坐标系)
-- ⬜ 2503.24047 survey-scientific-intelligence-agents
-- ⬜ 2506.18096 survey-deep-research-agents-roadmap
-- ⬜ 2507.01903 survey-ai4research
-- ⬜ 2508.12752 survey-deep-research-autonomous
+- ✅ 2505.13259 survey-automation-to-autonomy ⭐(第一篇/坐标系)
+- ✅ 2503.24047 survey-scientific-intelligence-agents
+- ✅ 2506.18096 survey-deep-research-agents-roadmap
+- ✅ 2507.01903 survey-ai4research
+- ✅ 2508.12752 survey-deep-research-autonomous
 - ⬜ 2512.02038 survey-deep-research-systematic
 
 ### B. 端到端 AI Scientist（8）
