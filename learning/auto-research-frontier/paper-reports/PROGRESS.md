@@ -45,13 +45,13 @@
 - ✅ 2508.20033 deepscholar-bench
 
 ### E. 评测/Benchmark（10）
-- ⬜ 2504.01848 paperbench-openai ⭐
-- ⬜ 2410.07095 mle-bench-openai ⭐
-- ⬜ 2411.15114 re-bench-metr ⭐
-- ⬜ 2410.05080 scienceagentbench
-- ⬜ 2502.14499 mlgym-meta
+- ✅ 2504.01848 paperbench-openai ⭐
+- ✅ 2410.07095 mle-bench-openai ⭐
+- ✅ 2411.15114 re-bench-metr ⭐
+- ✅ 2410.05080 scienceagentbench
+- ✅ 2502.14499 mlgym-meta
 - ⬜ 2505.19955 mlr-bench
-- ⬜ 2310.03302 mlagentbench
+- ✅ 2310.03302 mlagentbench
 - ⬜ 2510.21652 astabench-ai2
 - ⬜ 2409.11363 core-bench-reproducibility
 - ⬜ 2407.13168 scicode-benchmark
@@ -79,4 +79,7 @@
 - 2026-06-26：标杆 + 批次1 + 批次2 共 **13/40** 完成。批次2(B组5+ResearchAgent)：
   agent-lab/ai-researcher/novelseek/agentrxiv/aigs/researchagent，各 37–50k 字符。
   注：批次2 中 4 个子代理触发 API 5h 限额(429)，但文件**已全部落盘且结构完整**(429 只杀了返回消息)。
-  继续批次3(综述6篇)；若再撞 429 则等限额恢复再续。
+- 批次3(综述5)→eba71bc(18/40)；批次4(A末+C+D 6篇)→f0af716(24/40)；
+  批次5(评测6篇 paperbench/mle/re-bench/scienceagent/mlgym/mlagent)→**30/40**，
+  benchmark 指标定义式齐(复现分/pass@k/归一化分/AUP/SR/CBS)。
+  剩 10 篇：E×4(mlr-bench/astabench/core-bench/scicode) + F×2(DGM/ADAS) + G×3批判 + H×1。
