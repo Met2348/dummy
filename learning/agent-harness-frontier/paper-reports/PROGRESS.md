@@ -1,0 +1,127 @@
+# Agent-Harness 文献报告库 · 建设账本（source of truth，抗 compaction）
+
+> 任务：为 `papers/` 里**全部 74 篇** agent-harness 论文各写一份约 20 页、50 分钟组会级、PPT 风格中文 md。
+> 老师新方向（2026-06-27）：「Coding 被 agent 接管 → 下一个是 research；**harness 是另一个新方向，也要大规模文献调研**」。
+> 用户决定：**通用 harness 全景 · ≥70 篇 · 仅报告库 · 全复用工业化流水线**。
+> 贯穿论点：**Agent = Model + Harness**——能力/可信度有一大半压在 harness 上（对应 auto-research 的「独立验证收口」）。
+
+## 规范（三层）
+- v1 硬规范 + v2（Why 三连 + Inspires-Us）+ 本库 [`_STYLE-GUIDE-harness.md`](_STYLE-GUIDE-harness.md)（Θ1–Θ5 harness 专属：E/T/C/L/O/V 分层、回扣 Agent=Model+Harness、Inspires-Us 打到自己 harness、canon/前沿坐标、regime 诚实）。
+- 标杆：我亲写 1 篇 v2 harness 标杆（**Harness-Bench 2605.27922** 或 OpenHands SDK），其余派子代理并行对齐。
+
+## 执行方式（同 auto-research，已验证抗中断）
+- 子代理真读对应 PDF（`papers/<id>-<slug>.pdf`），严格按规范写到 `paper-reports/<id>-<slug>.md`，忠于原文、标章节/公式编号、不编造。
+- **产物落盘 + 本账本做唯一真相**；分批 commit；每次 `git add` 用**显式路径**，绝不 `git add .`。
+- 抽检：每批挑 1–2 篇核对（公式前直觉/先定义符号、Inspires-Us 落地、§/Table 出处、Why 三连齐）。
+
+## 进度（74 篇）　状态：⬜ 未做 / 🟡 进行中 / ✅ 已写并抽检
+
+### A. 综述 / 框架与定义（8）
+- ⬜ 2603.25723 natural-language-agent-harnesses
+- ⬜ 2601.11100 recreate-experience-driven-domain-agents
+- ⬜ 2604.03515 inside-the-scaffold-coding-agent-taxonomy
+- ⬜ 2601.01743 ai-agent-systems-architectures-applications-evaluation
+- ⬜ 2507.13334 survey-of-context-engineering-for-llms
+- ⬜ 2512.13564 memory-in-the-age-of-ai-agents
+- ⬜ 2308.11432 survey-on-llm-based-autonomous-agents
+- ⬜ 2604.08224 externalization-in-llm-agents-review
+
+### B. 控制循环 / 推理-行动范式（10，含 7 篇 canon 脊柱）
+- ⬜ 2210.03629 react-reasoning-and-acting ⭐canon
+- ⬜ 2303.11366 reflexion-verbal-reinforcement-learning ⭐canon
+- ⬜ 2305.10601 tree-of-thoughts ⭐canon
+- ⬜ 2310.04406 language-agent-tree-search-lats
+- ⬜ 2305.04091 plan-and-solve-prompting
+- ⬜ 2207.05608 inner-monologue-embodied-planning
+- ⬜ 2303.17651 self-refine-iterative-self-feedback
+- ⬜ 2507.11633 general-modular-harness-gaming-agents
+- ⬜ 2604.11378 from-agent-loops-to-structured-graphs
+- ⬜ 2602.01664 flowsteer-reinforced-workflow-orchestration
+
+### C. 工具接口 / Agent-Computer Interface（8）
+- ⬜ 2405.15793 swe-agent-agent-computer-interface ⭐canon(ACI 锚点)
+- ⬜ 2302.04761 toolformer-self-taught-tool-use ⭐canon
+- ⬜ 2307.16789 toolllm-toolbench-16000-apis
+- ⬜ 2305.15334 gorilla-llm-connected-massive-apis
+- ⬜ 2409.00920 toolace-winning-function-calling
+- ⬜ 2411.15399 less-is-more-function-calling-edge
+- ⬜ 2507.21428 memtool-short-term-memory-tool-calling
+- ⬜ 2509.26553 funcbenchgen-contamination-free-eval
+
+### D. 上下文工程 / 记忆（16，最大组）
+- ⬜ 2310.08560 memgpt-llms-as-operating-systems ⭐canon
+- ⬜ 2305.10250 memorybank-long-term-memory
+- ⬜ 2504.19413 mem0-production-long-term-memory
+- ⬜ 2506.15841 mem1-synergize-memory-reasoning
+- ⬜ 2509.25911 mem-alpha-rl-memory-construction
+- ⬜ 2502.12110 a-mem-agentic-memory-zettelkasten
+- ⬜ 2507.02259 memagent-multiconv-rl-memory
+- ⬜ 2511.07327 iterresearch-interaction-scaling
+- ⬜ 2510.24699 agentfold-proactive-context-folding
+- ⬜ 2510.00615 acon-context-compression-agents
+- ⬜ 2510.12635 memory-as-action-context-curation
+- ⬜ 2511.02805 memsearcher-reason-search-manage-memory
+- ⬜ 2601.04786 agentocr-optical-self-compression
+- ⬜ 2601.01885 agentic-memory-unified-ltm-stm
+- ⬜ 2602.02486 re-trac-recursive-trajectory-compression
+- ⬜ 2606.10209 less-context-better-agents（"少即是多"反方，重要对照）
+
+### E. 编码 / SWE Agent 集成系统（10）
+- ⬜ 2511.03690 openhands-software-agent-sdk ⭐
+- ⬜ 2512.10398 confucius-code-agent
+- ⬜ 2510.18779 kat-coder-technical-report
+- ⬜ 2506.19290 skywork-swe
+- ⬜ 2402.01030 codeact-executable-code-actions ⭐canon
+- ⬜ 2407.01489 agentless（无 agent 反而更强，重要对照）
+- ⬜ 2501.05040 swe-fixer
+- ⬜ 2406.11638 masai-modular-architecture-swe
+- ⬜ 2503.14269 dars-dynamic-action-resampling
+- ⬜ 2404.05427 autocoderover
+
+### F. Web / 计算机使用 / GUI Agent（7）
+- ⬜ 2307.13854 webarena ⭐canon
+- ⬜ 2401.13649 visualwebarena
+- ⬜ 2404.07972 osworld
+- ⬜ 2501.12326 ui-tars
+- ⬜ 2401.13919 webvoyager
+- ⬜ 2306.06070 mind2web
+- ⬜ 2603.27490 agentswing-parallel-context-routing
+
+### G. Harness 评测 / scaffold-aware eval（9）
+- ⬜ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点的实证锚点)
+- ⬜ 2310.06770 swe-bench-resolve-github-issues ⭐canon
+- ⬜ 2601.11868 terminal-bench-cli-agents
+- ⬜ 2308.03688 agentbench-evaluating-llms-as-agents
+- ⬜ 2406.12045 tau-bench-tool-agent-user
+- ⬜ 2311.12983 gaia-general-ai-assistants
+- ⬜ 2507.00014 swe-bench-cl-continual-learning
+- ⬜ 2512.18470 swe-evo-long-horizon-software-evolution
+- ⬜ 2601.11044 agencybench-1m-token-autonomous-agents
+
+### H. 可靠性 / 安全 / 可观测 / 沙箱（6）
+- ⬜ 2505.03574 llamafirewall-guardrail-system
+- ⬜ 2406.13352 agentdojo-prompt-injection-eval
+- ⬜ 2512.12806 fault-tolerant-sandboxing-coding-agents
+- ⬜ 2512.01295 systems-security-foundations-agentic-computing
+- ⬜ 2508.11027 hell-or-high-water-agentic-recovery
+- ⬜ 2509.03312 agentracer-failure-attribution
+
+## 已提交批次（commit + 含哪几篇）
+- ⬜ 基建：下载脚本 + harness 规范 + 账本 + spec（待提交）
+- ⬜ 标杆：（待写）
+- ⬜ 批次 1…
+
+## 备选/缓冲（已核验，下载失败可顶上）
+- D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
+
+## canon / 前沿配比
+约 **30 篇 2022–2024 基石**（harness 必备脊柱，全顶会）+ 约 **44 篇 2025–2026 前沿**（60% 为新）。
+
+## 安全护栏（不可破）
+- `learning/agent-foundations/lectures/02-react.md` 全程**不碰、不暂存、不提交**（用户自己的笔记）。
+- harness 跑子进程 `--json-out/--md-out` 必指 **temp**，绝不覆盖基线。
+- PDF 走 `.gitignore`（已加 `learning/agent-harness-frontier/papers/*.pdf`），只提交 `.md`。
+- **不 push，除非用户明说**；分支 `ERIC-3080Ti/paper-guides`。
+
+## 与 [[auto-research-reading-focus]] 的关系
+姊妹库：auto-research（74 篇，"会做科研"）+ agent-harness（74 篇，"把 LLM 变成能干活的 agent 的底座"）= 两条新方向。
