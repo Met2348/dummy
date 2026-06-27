@@ -88,7 +88,7 @@
 - ⬜ 2603.27490 agentswing-parallel-context-routing
 
 ### G. Harness 评测 / scaffold-aware eval（9）
-- ⬜ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点的实证锚点)
+- ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
 - ⬜ 2310.06770 swe-bench-resolve-github-issues ⭐canon
 - ⬜ 2601.11868 terminal-bench-cli-agents
 - ⬜ 2308.03688 agentbench-evaluating-llms-as-agents
@@ -107,9 +107,9 @@
 - ⬜ 2509.03312 agentracer-failure-attribution
 
 ## 已提交批次（commit + 含哪几篇）
-- ⬜ 基建：下载脚本 + harness 规范 + 账本 + spec（待提交）
-- ⬜ 标杆：（待写）
-- ⬜ 批次 1…
+- ✅ 基建 b2ae2a9：下载脚本(74篇)+harness规范Θ1–Θ5+账本+spec；**74/74 PDF 全部下成**（零失败、零臆造 ID）
+- ✅ 标杆 (待提交)：2605.27922 harness-bench（我亲写，25.9k 字，演示 Θ1–Θ5 + Why 三连 + Inspires-Us）
+- ⬜ 批次 1…（A 组起）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
