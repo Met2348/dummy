@@ -23,7 +23,7 @@ from rainbowpo import VARIANTS, unified_po_loss
 
 def mock_step(cfg, init_state: dict, lr: float = 0.05) -> dict:
     """模拟一步：每个变体对 chosen/rejected log_p 更新方向不同."""
-    s = {k: v.clone() for k, v in init_state.items()}
+    s = {k: (v.clone() if hasattr(v, "clone") else v) for k, v in init_state.items()}
     s["log_p_c_a"].requires_grad_(True)
     s["log_p_r_a"].requires_grad_(True)
     out = unified_po_loss(
@@ -34,8 +34,8 @@ def mock_step(cfg, init_state: dict, lr: float = 0.05) -> dict:
     with torch.no_grad():
         s["log_p_c_a"] -= lr * s["log_p_c_a"].grad
         s["log_p_r_a"] -= lr * s["log_p_r_a"].grad
-    return {k: v.detach() for k, v in s.items()} | {"loss": out["total"].item(),
-                                                      "margin": out["margin_mean"].item()}
+    return {k: (v.detach() if hasattr(v, "detach") else v) for k, v in s.items()} | {
+        "loss": out["total"].item(), "margin": out["margin_mean"].item()}
 
 
 def benchmark(steps: int = 50):
