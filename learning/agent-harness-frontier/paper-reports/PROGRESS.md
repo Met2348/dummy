@@ -38,15 +38,15 @@
 - ✅ 2604.11378 from-agent-loops-to-structured-graphs (53k)
 - ✅ 2602.01664 flowsteer-reinforced-workflow-orchestration (53k)
 
-### C. 工具接口 / Agent-Computer Interface（8）
-- ⬜ 2405.15793 swe-agent-agent-computer-interface ⭐canon(ACI 锚点)
-- ⬜ 2302.04761 toolformer-self-taught-tool-use ⭐canon
-- ⬜ 2307.16789 toolllm-toolbench-16000-apis
-- ⬜ 2305.15334 gorilla-llm-connected-massive-apis
-- ⬜ 2409.00920 toolace-winning-function-calling
-- ⬜ 2411.15399 less-is-more-function-calling-edge
-- ⬜ 2507.21428 memtool-short-term-memory-tool-calling
-- ⬜ 2509.26553 funcbenchgen-contamination-free-eval
+### C. 工具接口 / Agent-Computer Interface（8）✅ 全组完成
+- ✅ 2405.15793 swe-agent-agent-computer-interface ⭐canon(ACI 锚点) (66k)
+- ✅ 2302.04761 toolformer-self-taught-tool-use ⭐canon (67k)
+- ✅ 2307.16789 toolllm-toolbench-16000-apis (64k)
+- ✅ 2305.15334 gorilla-llm-connected-massive-apis (55k)
+- ✅ 2409.00920 toolace-winning-function-calling (51k)
+- ✅ 2411.15399 less-is-more-function-calling-edge (63k·Vercel现象学术版)
+- ✅ 2507.21428 memtool-short-term-memory-tool-calling (45k)
+- ✅ 2509.26553 funcbenchgen-contamination-free-eval (68k)
 
 ### D. 上下文工程 / 记忆（16，最大组）
 - ⬜ 2310.08560 memgpt-llms-as-operating-systems ⭐canon
@@ -111,7 +111,8 @@
 - ✅ 标杆 (待提交)：2605.27922 harness-bench（我亲写，25.9k 字，演示 Θ1–Θ5 + Why 三连 + Inspires-Us）
 - ✅ 批次 1（A 组 8 篇）：2603.25723/2601.11100/2604.03515/2601.01743/2507.13334/2512.13564/2308.11432/2604.08224（2 篇撞 429 但已落盘）
 - ✅ 批次 2（B 组 10 篇·全 L 层，含 5 canon：ReAct/Reflexion/ToT/Inner-Monologue/Self-Refine + LATS/Plan-Solve/Modular-Harness/Graph-Harness/FlowSteer）
-- ⬜ 批次 3…（C 组 8 篇·工具/ACI）
+- ✅ 批次 3（C 组 8 篇·T 层·工具/ACI：SWE-agent/Toolformer/ToolLLM/Gorilla/ToolACE/Less-is-More/MemTool/FuncBenchGen）
+- ⬜ 批次 4…（D 组·上下文/记忆 16 篇，拆两批 4a/4b）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
