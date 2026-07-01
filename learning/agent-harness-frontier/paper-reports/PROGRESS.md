@@ -16,15 +16,15 @@
 
 ## 进度（74 篇）　状态：⬜ 未做 / 🟡 进行中 / ✅ 已写并抽检
 
-### A. 综述 / 框架与定义（8）
-- ⬜ 2603.25723 natural-language-agent-harnesses
-- ⬜ 2601.11100 recreate-experience-driven-domain-agents
-- ⬜ 2604.03515 inside-the-scaffold-coding-agent-taxonomy
-- ⬜ 2601.01743 ai-agent-systems-architectures-applications-evaluation
-- ⬜ 2507.13334 survey-of-context-engineering-for-llms
-- ⬜ 2512.13564 memory-in-the-age-of-ai-agents
-- ⬜ 2308.11432 survey-on-llm-based-autonomous-agents
-- ⬜ 2604.08224 externalization-in-llm-agents-review
+### A. 综述 / 框架与定义（8）✅ 全组完成
+- ✅ 2603.25723 natural-language-agent-harnesses (51k)
+- ✅ 2601.11100 recreate-experience-driven-domain-agents (46k)
+- ✅ 2604.03515 inside-the-scaffold-coding-agent-taxonomy (84k)
+- ✅ 2601.01743 ai-agent-systems-architectures-applications-evaluation (46k)
+- ✅ 2507.13334 survey-of-context-engineering-for-llms (46k)
+- ✅ 2512.13564 memory-in-the-age-of-ai-agents (50k)
+- ✅ 2308.11432 survey-on-llm-based-autonomous-agents (50k)
+- ✅ 2604.08224 externalization-in-llm-agents-review (76k)
 
 ### B. 控制循环 / 推理-行动范式（10，含 7 篇 canon 脊柱）
 - ⬜ 2210.03629 react-reasoning-and-acting ⭐canon
@@ -109,7 +109,8 @@
 ## 已提交批次（commit + 含哪几篇）
 - ✅ 基建 b2ae2a9：下载脚本(74篇)+harness规范Θ1–Θ5+账本+spec；**74/74 PDF 全部下成**（零失败、零臆造 ID）
 - ✅ 标杆 (待提交)：2605.27922 harness-bench（我亲写，25.9k 字，演示 Θ1–Θ5 + Why 三连 + Inspires-Us）
-- ⬜ 批次 1…（A 组起）
+- ✅ 批次 1（A 组 8 篇）：2603.25723/2601.11100/2604.03515/2601.01743/2507.13334/2512.13564/2308.11432/2604.08224（2 篇撞 429 但已落盘）
+- ⬜ 批次 2…（B 组 10 篇）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
