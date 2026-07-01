@@ -26,17 +26,17 @@
 - ✅ 2308.11432 survey-on-llm-based-autonomous-agents (50k)
 - ✅ 2604.08224 externalization-in-llm-agents-review (76k)
 
-### B. 控制循环 / 推理-行动范式（10，含 7 篇 canon 脊柱）
-- ⬜ 2210.03629 react-reasoning-and-acting ⭐canon
-- ⬜ 2303.11366 reflexion-verbal-reinforcement-learning ⭐canon
-- ⬜ 2305.10601 tree-of-thoughts ⭐canon
-- ⬜ 2310.04406 language-agent-tree-search-lats
-- ⬜ 2305.04091 plan-and-solve-prompting
-- ⬜ 2207.05608 inner-monologue-embodied-planning
-- ⬜ 2303.17651 self-refine-iterative-self-feedback
-- ⬜ 2507.11633 general-modular-harness-gaming-agents
-- ⬜ 2604.11378 from-agent-loops-to-structured-graphs
-- ⬜ 2602.01664 flowsteer-reinforced-workflow-orchestration
+### B. 控制循环 / 推理-行动范式（10，含 5 篇 canon 脊柱）✅ 全组完成
+- ✅ 2210.03629 react-reasoning-and-acting ⭐canon (42k)
+- ✅ 2303.11366 reflexion-verbal-reinforcement-learning ⭐canon (40k)
+- ✅ 2305.10601 tree-of-thoughts ⭐canon (41k)
+- ✅ 2310.04406 language-agent-tree-search-lats (42k)
+- ✅ 2305.04091 plan-and-solve-prompting (35k)
+- ✅ 2207.05608 inner-monologue-embodied-planning ⭐canon (38k)
+- ✅ 2303.17651 self-refine-iterative-self-feedback ⭐canon (42k)
+- ✅ 2507.11633 general-modular-harness-gaming-agents (49k)
+- ✅ 2604.11378 from-agent-loops-to-structured-graphs (53k)
+- ✅ 2602.01664 flowsteer-reinforced-workflow-orchestration (53k)
 
 ### C. 工具接口 / Agent-Computer Interface（8）
 - ⬜ 2405.15793 swe-agent-agent-computer-interface ⭐canon(ACI 锚点)
@@ -110,7 +110,8 @@
 - ✅ 基建 b2ae2a9：下载脚本(74篇)+harness规范Θ1–Θ5+账本+spec；**74/74 PDF 全部下成**（零失败、零臆造 ID）
 - ✅ 标杆 (待提交)：2605.27922 harness-bench（我亲写，25.9k 字，演示 Θ1–Θ5 + Why 三连 + Inspires-Us）
 - ✅ 批次 1（A 组 8 篇）：2603.25723/2601.11100/2604.03515/2601.01743/2507.13334/2512.13564/2308.11432/2604.08224（2 篇撞 429 但已落盘）
-- ⬜ 批次 2…（B 组 10 篇）
+- ✅ 批次 2（B 组 10 篇·全 L 层，含 5 canon：ReAct/Reflexion/ToT/Inner-Monologue/Self-Refine + LATS/Plan-Solve/Modular-Harness/Graph-Harness/FlowSteer）
+- ⬜ 批次 3…（C 组 8 篇·工具/ACI）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
