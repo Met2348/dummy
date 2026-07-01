@@ -57,14 +57,14 @@
 - ✅ 2502.12110 a-mem-agentic-memory-zettelkasten (48k·我们MEMORY.md的[[link]]同源)
 - ✅ 2507.02259 memagent-multiconv-rl-memory (49k)
 - ✅ 2511.07327 iterresearch-interaction-scaling (49k)
-- ⬜ 2510.24699 agentfold-proactive-context-folding
-- ⬜ 2510.00615 acon-context-compression-agents
-- ⬜ 2510.12635 memory-as-action-context-curation
-- ⬜ 2511.02805 memsearcher-reason-search-manage-memory
-- ⬜ 2601.04786 agentocr-optical-self-compression
-- ⬜ 2601.01885 agentic-memory-unified-ltm-stm
-- ⬜ 2602.02486 re-trac-recursive-trajectory-compression
-- ⬜ 2606.10209 less-context-better-agents（"少即是多"反方，重要对照）
+- ✅ 2510.24699 agentfold-proactive-context-folding (56k)
+- ✅ 2510.00615 acon-context-compression-agents (63k)
+- ✅ 2510.12635 memory-as-action-context-curation (65k)
+- ✅ 2511.02805 memsearcher-reason-search-manage-memory (64k)
+- ✅ 2601.04786 agentocr-optical-self-compression (64k)
+- ✅ 2601.01885 agentic-memory-unified-ltm-stm (59k)
+- ✅ 2602.02486 re-trac-recursive-trajectory-compression (63k)
+- ✅ 2606.10209 less-context-better-agents (69k·"少即是多"反方压舱石) ✅ D组16篇全完成
 
 ### E. 编码 / SWE Agent 集成系统（10）
 - ⬜ 2511.03690 openhands-software-agent-sdk ⭐
@@ -113,7 +113,7 @@
 - ✅ 批次 2（B 组 10 篇·全 L 层，含 5 canon：ReAct/Reflexion/ToT/Inner-Monologue/Self-Refine + LATS/Plan-Solve/Modular-Harness/Graph-Harness/FlowSteer）
 - ✅ 批次 3（C 组 8 篇·T 层·工具/ACI：SWE-agent/Toolformer/ToolLLM/Gorilla/ToolACE/Less-is-More/MemTool/FuncBenchGen）
 - ✅ 批次 4a（D 组前 8·C 层：MemGPT canon/MemoryBank/Mem0/MEM1/Mem-α/A-MEM/MemAgent/IterResearch）※ 8 篇均撞 5h 限额但已落盘
-- ⬜ 批次 4b…（D 组后 8：AgentFold/ACON/Memory-as-Action/MemSearcher/AgentOCR/Agentic-Memory/RE-TRAC/Less-Context）
+- ✅ 批次 4b（D 组后 8·C 层：AgentFold/ACON/Memory-as-Action/MemSearcher/AgentOCR/Agentic-Memory/RE-TRAC/Less-Context）→ **D 组 16 篇全完成**
 - ⬜ 批次 5…（E 组编码 10）／批次 6（F 组 Web 7）／批次 7（G 组余 8）／批次 8（H 组 6）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
