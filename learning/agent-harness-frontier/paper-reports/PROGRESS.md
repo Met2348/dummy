@@ -48,15 +48,15 @@
 - ✅ 2507.21428 memtool-short-term-memory-tool-calling (45k)
 - ✅ 2509.26553 funcbenchgen-contamination-free-eval (68k)
 
-### D. 上下文工程 / 记忆（16，最大组）
-- ⬜ 2310.08560 memgpt-llms-as-operating-systems ⭐canon
-- ⬜ 2305.10250 memorybank-long-term-memory
-- ⬜ 2504.19413 mem0-production-long-term-memory
-- ⬜ 2506.15841 mem1-synergize-memory-reasoning
-- ⬜ 2509.25911 mem-alpha-rl-memory-construction
-- ⬜ 2502.12110 a-mem-agentic-memory-zettelkasten
-- ⬜ 2507.02259 memagent-multiconv-rl-memory
-- ⬜ 2511.07327 iterresearch-interaction-scaling
+### D. 上下文工程 / 记忆（16，最大组）　4a✅ / 4b⬜
+- ✅ 2310.08560 memgpt-llms-as-operating-systems ⭐canon (51k)
+- ✅ 2305.10250 memorybank-long-term-memory (47k)
+- ✅ 2504.19413 mem0-production-long-term-memory (49k)
+- ✅ 2506.15841 mem1-synergize-memory-reasoning (57k)
+- ✅ 2509.25911 mem-alpha-rl-memory-construction (54k)
+- ✅ 2502.12110 a-mem-agentic-memory-zettelkasten (48k·我们MEMORY.md的[[link]]同源)
+- ✅ 2507.02259 memagent-multiconv-rl-memory (49k)
+- ✅ 2511.07327 iterresearch-interaction-scaling (49k)
 - ⬜ 2510.24699 agentfold-proactive-context-folding
 - ⬜ 2510.00615 acon-context-compression-agents
 - ⬜ 2510.12635 memory-as-action-context-curation
@@ -112,7 +112,9 @@
 - ✅ 批次 1（A 组 8 篇）：2603.25723/2601.11100/2604.03515/2601.01743/2507.13334/2512.13564/2308.11432/2604.08224（2 篇撞 429 但已落盘）
 - ✅ 批次 2（B 组 10 篇·全 L 层，含 5 canon：ReAct/Reflexion/ToT/Inner-Monologue/Self-Refine + LATS/Plan-Solve/Modular-Harness/Graph-Harness/FlowSteer）
 - ✅ 批次 3（C 组 8 篇·T 层·工具/ACI：SWE-agent/Toolformer/ToolLLM/Gorilla/ToolACE/Less-is-More/MemTool/FuncBenchGen）
-- ⬜ 批次 4…（D 组·上下文/记忆 16 篇，拆两批 4a/4b）
+- ✅ 批次 4a（D 组前 8·C 层：MemGPT canon/MemoryBank/Mem0/MEM1/Mem-α/A-MEM/MemAgent/IterResearch）※ 8 篇均撞 5h 限额但已落盘
+- ⬜ 批次 4b…（D 组后 8：AgentFold/ACON/Memory-as-Action/MemSearcher/AgentOCR/Agentic-Memory/RE-TRAC/Less-Context）
+- ⬜ 批次 5…（E 组编码 10）／批次 6（F 组 Web 7）／批次 7（G 组余 8）／批次 8（H 组 6）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
