@@ -15,7 +15,7 @@
 
 | 知识点 | 为什么重要 | C 类比 |
 |--------|------------|--------|
-| 列表推导 `[x*2 for x in lst]` | 仓库代码大量使用 | 类似 for 循环但更紧凑 |
+| 列表推导 `[x*2 for x in lst]`(已展开成完整系列,见 [python-idioms/01](python-idioms/01-comprehensions-and-functional.md)) | 仓库代码大量使用 | 类似 for 循环但更紧凑 |
 | 类和对象 `class Foo:` | PyTorch 模型都是类 | 类似 C struct + 函数指针 |
 | 装饰器 `@something` | 框架代码里到处是 | 没有直接 C 类比，要专门学 |
 | numpy 数组操作 | ML 的数据容器 | 类似 C 的多维数组但自动管理内存 |
