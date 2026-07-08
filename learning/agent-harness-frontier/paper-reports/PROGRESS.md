@@ -66,17 +66,17 @@
 - ✅ 2602.02486 re-trac-recursive-trajectory-compression (63k)
 - ✅ 2606.10209 less-context-better-agents (69k·"少即是多"反方压舱石) ✅ D组16篇全完成
 
-### E. 编码 / SWE Agent 集成系统（10）
-- ⬜ 2511.03690 openhands-software-agent-sdk ⭐
-- ⬜ 2512.10398 confucius-code-agent
-- ⬜ 2510.18779 kat-coder-technical-report
-- ⬜ 2506.19290 skywork-swe
-- ⬜ 2402.01030 codeact-executable-code-actions ⭐canon
-- ⬜ 2407.01489 agentless（无 agent 反而更强，重要对照）
-- ⬜ 2501.05040 swe-fixer
-- ⬜ 2406.11638 masai-modular-architecture-swe
-- ⬜ 2503.14269 dars-dynamic-action-resampling
-- ⬜ 2404.05427 autocoderover
+### E. 编码 / SWE Agent 集成系统（10）✅ 全组完成
+- ✅ 2511.03690 openhands-software-agent-sdk ⭐ (67k)
+- ✅ 2512.10398 confucius-code-agent (67k)
+- ✅ 2510.18779 kat-coder-technical-report (68k)
+- ✅ 2506.19290 skywork-swe (60k)
+- ✅ 2402.01030 codeact-executable-code-actions ⭐canon (53k)
+- ✅ 2407.01489 agentless（无 agent 反而更强，重要对照·68k）
+- ✅ 2501.05040 swe-fixer (64k)
+- ✅ 2406.11638 masai-modular-architecture-swe (65k)
+- ✅ 2503.14269 dars-dynamic-action-resampling (62k)
+- ✅ 2404.05427 autocoderover (51k)
 
 ### F. Web / 计算机使用 / GUI Agent（7）
 - ⬜ 2307.13854 webarena ⭐canon
@@ -114,7 +114,8 @@
 - ✅ 批次 3（C 组 8 篇·T 层·工具/ACI：SWE-agent/Toolformer/ToolLLM/Gorilla/ToolACE/Less-is-More/MemTool/FuncBenchGen）
 - ✅ 批次 4a（D 组前 8·C 层：MemGPT canon/MemoryBank/Mem0/MEM1/Mem-α/A-MEM/MemAgent/IterResearch）※ 8 篇均撞 5h 限额但已落盘
 - ✅ 批次 4b（D 组后 8·C 层：AgentFold/ACON/Memory-as-Action/MemSearcher/AgentOCR/Agentic-Memory/RE-TRAC/Less-Context）→ **D 组 16 篇全完成**
-- ⬜ 批次 5…（E 组编码 10）／批次 6（F 组 Web 7）／批次 7（G 组余 8）／批次 8（H 组 6）
+- ✅ 批次 5（E 组编码 10：OpenHands SDK 旗舰 + CodeAct canon + Agentless反方 + MASAI/Confucius/KAT/Skywork/SWE-Fixer/DARS/AutoCodeRover）
+- ⬜ 批次 6（F 组 Web 7）／批次 7（G 组 9）／批次 8（H 组 6）
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
