@@ -78,14 +78,14 @@
 - ✅ 2503.14269 dars-dynamic-action-resampling (62k)
 - ✅ 2404.05427 autocoderover (51k)
 
-### F. Web / 计算机使用 / GUI Agent（7）
-- ⬜ 2307.13854 webarena ⭐canon
-- ⬜ 2401.13649 visualwebarena
-- ⬜ 2404.07972 osworld
-- ⬜ 2501.12326 ui-tars
-- ⬜ 2401.13919 webvoyager
-- ⬜ 2306.06070 mind2web
-- ⬜ 2603.27490 agentswing-parallel-context-routing
+### F. Web / 计算机使用 / GUI Agent（7）　3/7 done，4 篇撞 5h 硬限额待补
+- ✅ 2307.13854 webarena ⭐canon (76k)
+- ⬜ 2401.13649 visualwebarena （撞 5h 限额，待重派）
+- ✅ 2404.07972 osworld ⭐canon (70k)
+- ⬜ 2501.12326 ui-tars （撞 5h 限额，待重派）
+- ✅ 2401.13919 webvoyager (64k)
+- ⬜ 2306.06070 mind2web ⭐canon （撞 5h 限额，待重派）
+- ⬜ 2603.27490 agentswing-parallel-context-routing （撞 5h 限额，待重派）
 
 ### G. Harness 评测 / scaffold-aware eval（9）
 - ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
