@@ -101,7 +101,7 @@
 ### H. 可靠性 / 安全 / 可观测 / 沙箱（6）
 - ⬜ 2505.03574 llamafirewall-guardrail-system
 - ⬜ 2406.13352 agentdojo-prompt-injection-eval
-- ⬜ 2512.12806 fault-tolerant-sandboxing-coding-agents
+- ✅ 2512.12806 fault-tolerant-sandboxing-coding-agents (75.5k · 13篇并行批次中唯一在进程中断前完整落盘的一篇，结构自检通过)
 - ⬜ 2512.01295 systems-security-foundations-agentic-computing
 - ⬜ 2508.11027 hell-or-high-water-agentic-recovery
 - ⬜ 2509.03312 agentracer-failure-attribution
