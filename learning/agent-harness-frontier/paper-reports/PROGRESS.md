@@ -89,7 +89,7 @@
 
 ### G. Harness 评测 / scaffold-aware eval（9）
 - ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
-- ⬜ 2310.06770 swe-bench-resolve-github-issues ⭐canon
+- ✅ 2310.06770 swe-bench-resolve-github-issues ⭐canon (84.4k · 子代理配额已恢复，验证完整流程正常)
 - ⬜ 2601.11868 terminal-bench-cli-agents
 - ⬜ 2308.03688 agentbench-evaluating-llms-as-agents
 - ⬜ 2406.12045 tau-bench-tool-agent-user
