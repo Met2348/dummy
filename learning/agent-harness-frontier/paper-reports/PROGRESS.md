@@ -82,7 +82,7 @@
 - ✅ 2307.13854 webarena ⭐canon (76k)
 - ✅ 2401.13649 visualwebarena (36.2k · 主线程直接撰写，结构自检通过)
 - ✅ 2404.07972 osworld ⭐canon (70k)
-- ⬜ 2501.12326 ui-tars （子代理撞日限额，改主线程直接撰写）
+- ✅ 2501.12326 ui-tars (38.0k · 主线程直接撰写，结构自检通过)
 - ✅ 2401.13919 webvoyager (64k)
 - ✅ 2306.06070 mind2web ⭐canon (69.7k · 主线程亲自续写完成：子代理写到§13撞"日限额已用完"截断，主线程用pdftotext提取PDF文本续写§14–20+Inspires-Us，结构自检通过)
 - ⬜ 2603.27490 agentswing-parallel-context-routing （子代理撞日限额，改主线程直接撰写）
