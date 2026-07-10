@@ -87,14 +87,14 @@
 - ✅ 2306.06070 mind2web ⭐canon (69.7k · 主线程续写：子代理撞限额于§13截断，续写§14–20+Inspires-Us)
 - ✅ 2603.27490 agentswing-parallel-context-routing (36.5k · 主线程直接撰写，2026-03-31前沿，D组姊妹篇)
 
-### G. Harness 评测 / scaffold-aware eval（9）
+### G. Harness 评测 / scaffold-aware eval（9）✅ 全组完成
 - ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
 - ✅ 2310.06770 swe-bench-resolve-github-issues ⭐canon (84.4k · 子代理配额已恢复，验证完整流程正常)
 - ✅ 2601.11868 terminal-bench-cli-agents (88.9k · 子代理，13篇批次中撞5h限额但已落盘)
 - ✅ 2308.03688 agentbench-evaluating-llms-as-agents (91.8k · 子代理自报failed但磁盘已落盘，协议再次验证)
 - ✅ 2406.12045 tau-bench-tool-agent-user (34.9k · 主线程直接撰写)
 - ✅ 2311.12983 gaia-general-ai-assistants (88.5k · 子代理自报failed但磁盘已落盘)
-- ⬜ 2507.00014 swe-bench-cl-continual-learning （撞5h限额未落盘，待主线程撰写）
+- ✅ 2507.00014 swe-bench-cl-continual-learning (34.5k · 主线程直接撰写，诚实标注论文为预印本/审稿中性质，核心实证部分"进行中"未编造)
 - ✅ 2512.18470 swe-evo-long-horizon-software-evolution (79.9k)
 - ✅ 2601.11044 agencybench-1m-token-autonomous-agents (64.8k)
 
