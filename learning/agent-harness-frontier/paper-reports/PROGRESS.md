@@ -80,7 +80,7 @@
 
 ### F. Web / 计算机使用 / GUI Agent（7）　4/7 done（含主线程亲自续写1篇），3 篇待补
 - ✅ 2307.13854 webarena ⭐canon (76k)
-- ⬜ 2401.13649 visualwebarena （子代理撞日限额，改主线程直接撰写）
+- ✅ 2401.13649 visualwebarena (36.2k · 主线程直接撰写，结构自检通过)
 - ✅ 2404.07972 osworld ⭐canon (70k)
 - ⬜ 2501.12326 ui-tars （子代理撞日限额，改主线程直接撰写）
 - ✅ 2401.13919 webvoyager (64k)
