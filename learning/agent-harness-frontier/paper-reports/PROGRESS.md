@@ -98,14 +98,13 @@
 - ✅ 2512.18470 swe-evo-long-horizon-software-evolution (79.9k)
 - ✅ 2601.11044 agencybench-1m-token-autonomous-agents (64.8k)
 
-### H. 可靠性 / 安全 / 可观测 / 沙箱（6）
+### H. 可靠性 / 安全 / 可观测 / 沙箱（6）✅ 全组完成
 - ✅ 2505.03574 llamafirewall-guardrail-system (33.0k · 主线程直接撰写，Meta生产环境护栏系统)
 - ✅ 2406.13352 agentdojo-prompt-injection-eval (32.2k · 主线程直接撰写，与LlamaFirewall构成本库内部方法论引用关系)
 - ✅ 2512.12806 fault-tolerant-sandboxing-coding-agents (75.5k · 13篇并行批次中唯一在进程中断前完整落盘的一篇，结构自检通过)
 - ✅ 2512.01295 systems-security-foundations-agentic-computing (43.4k · 主线程直接撰写，SoK论文，H组元层框架)
-- ⬜ 2508.11027 hell-or-high-water-agentic-recovery （撞5h限额未落盘，待主线程撰写）
+- ✅ 2508.11027 hell-or-high-water-agentic-recovery (35.2k · 主线程直接撰写，H组收官，全库74篇最后一篇)
 - ✅ 2509.03312 agentracer-failure-attribution (72.1k · 子代理自报failed但磁盘已落盘)
-- ⬜ 2509.03312 agentracer-failure-attribution
 
 ## 已提交批次（commit + 含哪几篇）
 - ✅ 基建 b2ae2a9：下载脚本(74篇)+harness规范Θ1–Θ5+账本+spec；**74/74 PDF 全部下成**（零失败、零臆造 ID）
