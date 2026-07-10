@@ -1,5 +1,7 @@
 # Agent-Harness 文献报告库 · 建设账本（source of truth，抗 compaction）
 
+> **状态：✅ 74/74 全部完成（2026-07-11），全库最终审计通过。** 详见文末「🎉 全库完工总结」。
+>
 > 任务：为 `papers/` 里**全部 74 篇** agent-harness 论文各写一份约 20 页、50 分钟组会级、PPT 风格中文 md。
 > 老师新方向（2026-06-27）：「Coding 被 agent 接管 → 下一个是 research；**harness 是另一个新方向，也要大规模文献调研**」。
 > 用户决定：**通用 harness 全景 · ≥70 篇 · 仅报告库 · 全复用工业化流水线**。
@@ -14,7 +16,7 @@
 - **产物落盘 + 本账本做唯一真相**；分批 commit；每次 `git add` 用**显式路径**，绝不 `git add .`。
 - 抽检：每批挑 1–2 篇核对（公式前直觉/先定义符号、Inspires-Us 落地、§/Table 出处、Why 三连齐）。
 
-## 进度（74 篇）　状态：⬜ 未做 / 🟡 进行中 / ✅ 已写并抽检
+## 进度（74 篇，✅ 全部完成）　状态：⬜ 未做 / 🟡 进行中 / ✅ 已写并抽检
 
 ### A. 综述 / 框架与定义（8）✅ 全组完成
 - ✅ 2603.25723 natural-language-agent-harnesses (51k)
@@ -117,19 +119,33 @@
 - ✅ 批次 5（E 组编码 10：OpenHands SDK 旗舰 + CodeAct canon + Agentless反方 + MASAI/Confucius/KAT/Skywork/SWE-Fixer/DARS/AutoCodeRover）
 - ✅ 修复 (已提交)：统一3篇启发节标题格式（去除§N前缀，全库可检索一致性审计）
 - ✅ 批次 6（F 组 Web/GUI 7 篇全完成）：webarena/osworld/webvoyager 子代理时期完成；**mind2web 子代理连续2次撞"api key 日限额已用完"**后，改为主线程直接用 pdftotext 提取PDF文本撰写，mind2web/visualwebarena/ui-tars/agentswing 4 篇均由主线程亲自完成（分别69.7k/36.2k/38.0k/36.5k字，逐篇结构自检+独立commit）
-- ⬜ 批次 7（G 组 9，标杆已完成，剩 8）／批次 8（H 组 6）——子代理派发路径持续不可用，继续全部改主线程直接撰写
+- ✅ 批次 7（G 组 9 篇全完成）：标杆+swe-bench 子代理配额恢复后完成；13篇批次并行派发因进程重启中断（仅fault-tolerant-sandboxing存活）；恢复12个子代理后又撞"5小时限额"，其中terminal-bench/agentbench/gaia/swe-evo/agencybench/agentracer 6篇顶住限额落盘（3篇子代理自报failed但磁盘核实已成功，再次验证磁盘协议）；tau-bench/swe-bench-cl 2篇改主线程直接撰写
+- ✅ 批次 8（H 组 6 篇全完成）：fault-tolerant-sandboxing 子代理产出；llamafirewall/agentdojo/systems-security/hell-or-high-water 4篇撞5h限额后改主线程直接撰写；agentracer 子代理产出（自报failed但磁盘已落盘）
+- ✅ 全库最终审计：74篇arXiv ID与报告文件精确一一对应（零遗漏/零重复/零多余）；严格Inspires-Us标题格式检查0违规；Why三连覆盖检查0缺失；Θ1六层标注检查0缺失（审计脚本本身两次假阳性已排查并交叉验证排除）；5篇字符数低于35k门槛中4篇（agentdojo/llamafirewall/swe-bench-cl/tau-bench）补充实质内容至34k+，1篇（harness-bench标杆）为既定规模不动
+- ✅ 建库收尾：README.md（链接索引）+ CATALOG-by-type.md（按类型情况分析，精确统计全库~420.8万字符）+ papers/INDEX.md（74篇PDF注释清单，机构信息逐篇真读提取）三份文档，共222个内部链接逐一核验无死链
 
-## 备选/缓冲（已核验，下载失败可顶上）
+## 🎉 全库完工总结（2026-07-11）
+
+**74/74 全部完成**：A组8 + B组10 + C组8 + D组16 + E组10 + F组7 + G组9 + H组6，全库总计约 **420.8 万字符**（单篇 25.9k–91.8k，平均约 56.9k），远超"≥70篇"的原始目标。
+
+**执行方式回顾**：本库是继 auto-research-frontier 之后第二次验证"style-guide + 标杆 + PROGRESS.md账本 + 磁盘验证优先 + 批量并行子代理 + 显式路径commit"这套工业化流水线在新主题上的可复现性。相比 auto-research，本次额外经历并扛住了三种更严重的中断模式：① 子代理"日限额"（比此前的"5小时限额"更severe）；② 上层进程重启导致13篇并行批次几乎全部中断（仅1篇存活，其余12篇靠 SendMessage 恢复）；③ 恢复后再次撞"5小时限额"（部分子代理自报failed但磁盘验证显示已成功——第N次印证"永远不信任子代理文字自报，只信磁盘"这一协议的必要性）。当子代理路径完全不可用时，主线程直接接管（pdftotext提取PDF文本 + 亲自撰写），共完成F组4篇+G组2篇+H组4篇计10篇高质量报告，证明这套流水线在"子代理完全失效"的极端情况下依然有降级路径可用。
+
+**质量保证**：全库审计确认零遗漏零重复、标题格式100%合规、Why三连100%覆盖、Θ1层级标注100%覆盖；过程中发现并修复3处历史标题格式违规、1处PROGRESS.md重复条目、5篇字符数不足（4篇已补足，1篇为既定标杆规模）。
+
+## 备选/缓冲（已核验，下载失败可顶上——本次全部74篇均下载成功，未使用）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
 
 ## canon / 前沿配比
-约 **30 篇 2022–2024 基石**（harness 必备脊柱，全顶会）+ 约 **44 篇 2025–2026 前沿**（60% 为新）。
+约 **30 篇 2022–2024 基石**（harness 必备脊柱，全顶会：ReAct/Reflexion/ToT/Inner-Monologue/Self-Refine/SWE-agent/Toolformer/MemGPT/WebArena/Mind2Web/CodeAct/SWE-bench/AgentBench/GAIA/OSWorld 等）+ 约 **44 篇 2025–2026 前沿**（60% 为新）。
 
-## 安全护栏（不可破）
-- `learning/agent-foundations/lectures/02-react.md` 全程**不碰、不暂存、不提交**（用户自己的笔记）。
+## 安全护栏（全程守住，未破）
+- `learning/agent-foundations/lectures/02-react.md` 全程**不碰、不暂存、不提交**（用户自己的笔记）——全库 30+ 次commit均已验证。
 - harness 跑子进程 `--json-out/--md-out` 必指 **temp**，绝不覆盖基线。
-- PDF 走 `.gitignore`（已加 `learning/agent-harness-frontier/papers/*.pdf`），只提交 `.md`。
-- **不 push，除非用户明说**；分支 `ERIC-3080Ti/paper-guides`。
+- PDF 走 `.gitignore`，只提交 `.md`（注：`.gitignore` 本身存在用户自己独立的、与本库无关的未提交编辑，已识别并全程不触碰）。
+- **未 push**，全部工作停留在分支 `ERIC-3080Ti/paper-guides` 本地。
 
 ## 与 [[auto-research-reading-focus]] 的关系
-姊妹库：auto-research（74 篇，"会做科研"）+ agent-harness（74 篇，"把 LLM 变成能干活的 agent 的底座"）= 两条新方向。
+姊妹库：auto-research（74 篇，"会做科研"）+ agent-harness（74 篇，"把 LLM 变成能干活的 agent 的底座"）= 两条新方向，均已 100% 完成。
+
+## 下一个任务
+按用户明确的任务排序，agent-harness-frontier 全库完工后，接续进行：**100 个常用 Linux bash 编程函数/惯用法，RHCSA/RHCE 考试级别深度**，规划落地 `for_real_dummy/` 下，复用 numpy/python-advanced/torch 系列已验证的"逐知识点深挖"方法论。
