@@ -90,20 +90,21 @@
 ### G. Harness 评测 / scaffold-aware eval（9）
 - ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
 - ✅ 2310.06770 swe-bench-resolve-github-issues ⭐canon (84.4k · 子代理配额已恢复，验证完整流程正常)
-- ⬜ 2601.11868 terminal-bench-cli-agents
-- ⬜ 2308.03688 agentbench-evaluating-llms-as-agents
-- ⬜ 2406.12045 tau-bench-tool-agent-user
-- ⬜ 2311.12983 gaia-general-ai-assistants
-- ⬜ 2507.00014 swe-bench-cl-continual-learning
-- ⬜ 2512.18470 swe-evo-long-horizon-software-evolution
-- ⬜ 2601.11044 agencybench-1m-token-autonomous-agents
+- ✅ 2601.11868 terminal-bench-cli-agents (88.9k · 子代理，13篇批次中撞5h限额但已落盘)
+- ✅ 2308.03688 agentbench-evaluating-llms-as-agents (91.8k · 子代理自报failed但磁盘已落盘，协议再次验证)
+- ⬜ 2406.12045 tau-bench-tool-agent-user （撞5h限额未落盘，待主线程撰写）
+- ✅ 2311.12983 gaia-general-ai-assistants (88.5k · 子代理自报failed但磁盘已落盘)
+- ⬜ 2507.00014 swe-bench-cl-continual-learning （撞5h限额未落盘，待主线程撰写）
+- ✅ 2512.18470 swe-evo-long-horizon-software-evolution (79.9k)
+- ✅ 2601.11044 agencybench-1m-token-autonomous-agents (64.8k)
 
 ### H. 可靠性 / 安全 / 可观测 / 沙箱（6）
-- ⬜ 2505.03574 llamafirewall-guardrail-system
-- ⬜ 2406.13352 agentdojo-prompt-injection-eval
+- ⬜ 2505.03574 llamafirewall-guardrail-system （撞5h限额未落盘，待主线程撰写）
+- ⬜ 2406.13352 agentdojo-prompt-injection-eval （唯一真正未产出内容的一篇，撞5h限额，待主线程撰写）
 - ✅ 2512.12806 fault-tolerant-sandboxing-coding-agents (75.5k · 13篇并行批次中唯一在进程中断前完整落盘的一篇，结构自检通过)
-- ⬜ 2512.01295 systems-security-foundations-agentic-computing
-- ⬜ 2508.11027 hell-or-high-water-agentic-recovery
+- ⬜ 2512.01295 systems-security-foundations-agentic-computing （撞5h限额未落盘，待主线程撰写）
+- ⬜ 2508.11027 hell-or-high-water-agentic-recovery （撞5h限额未落盘，待主线程撰写）
+- ✅ 2509.03312 agentracer-failure-attribution (72.1k · 子代理自报failed但磁盘已落盘)
 - ⬜ 2509.03312 agentracer-failure-attribution
 
 ## 已提交批次（commit + 含哪几篇）
