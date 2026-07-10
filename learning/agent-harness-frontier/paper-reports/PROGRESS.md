@@ -78,14 +78,14 @@
 - ✅ 2503.14269 dars-dynamic-action-resampling (62k)
 - ✅ 2404.05427 autocoderover (51k)
 
-### F. Web / 计算机使用 / GUI Agent（7）　4/7 done（含主线程亲自续写1篇），3 篇待补
+### F. Web / 计算机使用 / GUI Agent（7）✅ 全组完成（4篇主线程直接撰写，应对子代理日限额中断）
 - ✅ 2307.13854 webarena ⭐canon (76k)
-- ✅ 2401.13649 visualwebarena (36.2k · 主线程直接撰写，结构自检通过)
+- ✅ 2401.13649 visualwebarena (36.2k · 主线程直接撰写)
 - ✅ 2404.07972 osworld ⭐canon (70k)
-- ✅ 2501.12326 ui-tars (38.0k · 主线程直接撰写，结构自检通过)
+- ✅ 2501.12326 ui-tars (38.0k · 主线程直接撰写)
 - ✅ 2401.13919 webvoyager (64k)
-- ✅ 2306.06070 mind2web ⭐canon (69.7k · 主线程亲自续写完成：子代理写到§13撞"日限额已用完"截断，主线程用pdftotext提取PDF文本续写§14–20+Inspires-Us，结构自检通过)
-- ⬜ 2603.27490 agentswing-parallel-context-routing （子代理撞日限额，改主线程直接撰写）
+- ✅ 2306.06070 mind2web ⭐canon (69.7k · 主线程续写：子代理撞限额于§13截断，续写§14–20+Inspires-Us)
+- ✅ 2603.27490 agentswing-parallel-context-routing (36.5k · 主线程直接撰写，2026-03-31前沿，D组姊妹篇)
 
 ### G. Harness 评测 / scaffold-aware eval（9）
 - ✅ 2605.27922 harness-bench-measuring-harness-effects ⭐⭐(库论点实证锚点 · **我亲写 v2 标杆**)
@@ -116,8 +116,8 @@
 - ✅ 批次 4b（D 组后 8·C 层：AgentFold/ACON/Memory-as-Action/MemSearcher/AgentOCR/Agentic-Memory/RE-TRAC/Less-Context）→ **D 组 16 篇全完成**
 - ✅ 批次 5（E 组编码 10：OpenHands SDK 旗舰 + CodeAct canon + Agentless反方 + MASAI/Confucius/KAT/Skywork/SWE-Fixer/DARS/AutoCodeRover）
 - ✅ 修复 (已提交)：统一3篇启发节标题格式（去除§N前缀，全库可检索一致性审计）
-- 🟡 批次6进行中（F 组 Web 7）：webarena/osworld/webvoyager 此前已完成；**mind2web 子代理连续2次撞"api key 日限额已用完"（比此前5小时限额更严重）**，改为主线程直接用 pdftotext 提取PDF文本、亲自续写完成（69.7k字，结构自检通过，待提交）；剩余 visualwebarena/ui-tars/agentswing 3 篇同样改主线程直接撰写
-- ⬜ 批次 7（G 组 9）／批次 8（H 组 6）——子代理派发路径暂时不可用，全部改主线程直接撰写
+- ✅ 批次 6（F 组 Web/GUI 7 篇全完成）：webarena/osworld/webvoyager 子代理时期完成；**mind2web 子代理连续2次撞"api key 日限额已用完"**后，改为主线程直接用 pdftotext 提取PDF文本撰写，mind2web/visualwebarena/ui-tars/agentswing 4 篇均由主线程亲自完成（分别69.7k/36.2k/38.0k/36.5k字，逐篇结构自检+独立commit）
+- ⬜ 批次 7（G 组 9，标杆已完成，剩 8）／批次 8（H 组 6）——子代理派发路径持续不可用，继续全部改主线程直接撰写
 
 ## 备选/缓冲（已核验，下载失败可顶上）
 - D 2601.02553 simplemem · D 2509.24704 memgen · F 2604.01664 contextbudget · G 2602.22769 ama-bench
