@@ -99,7 +99,7 @@
 - ✅ 2601.11044 agencybench-1m-token-autonomous-agents (64.8k)
 
 ### H. 可靠性 / 安全 / 可观测 / 沙箱（6）
-- ⬜ 2505.03574 llamafirewall-guardrail-system （撞5h限额未落盘，待主线程撰写）
+- ✅ 2505.03574 llamafirewall-guardrail-system (33.0k · 主线程直接撰写，Meta生产环境护栏系统)
 - ⬜ 2406.13352 agentdojo-prompt-injection-eval （唯一真正未产出内容的一篇，撞5h限额，待主线程撰写）
 - ✅ 2512.12806 fault-tolerant-sandboxing-coding-agents (75.5k · 13篇并行批次中唯一在进程中断前完整落盘的一篇，结构自检通过)
 - ⬜ 2512.01295 systems-security-foundations-agentic-computing （撞5h限额未落盘，待主线程撰写）
