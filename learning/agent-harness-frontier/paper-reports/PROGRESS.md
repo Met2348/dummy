@@ -92,7 +92,7 @@
 - ✅ 2310.06770 swe-bench-resolve-github-issues ⭐canon (84.4k · 子代理配额已恢复，验证完整流程正常)
 - ✅ 2601.11868 terminal-bench-cli-agents (88.9k · 子代理，13篇批次中撞5h限额但已落盘)
 - ✅ 2308.03688 agentbench-evaluating-llms-as-agents (91.8k · 子代理自报failed但磁盘已落盘，协议再次验证)
-- ⬜ 2406.12045 tau-bench-tool-agent-user （撞5h限额未落盘，待主线程撰写）
+- ✅ 2406.12045 tau-bench-tool-agent-user (34.9k · 主线程直接撰写)
 - ✅ 2311.12983 gaia-general-ai-assistants (88.5k · 子代理自报failed但磁盘已落盘)
 - ⬜ 2507.00014 swe-bench-cl-continual-learning （撞5h限额未落盘，待主线程撰写）
 - ✅ 2512.18470 swe-evo-long-horizon-software-evolution (79.9k)
