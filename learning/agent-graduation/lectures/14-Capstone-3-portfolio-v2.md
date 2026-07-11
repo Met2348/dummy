@@ -6,9 +6,22 @@
 
 ## 跑
 
+```powershell
+$env:PYTHONIOENCODING="utf-8"; python learning/agent-graduation/src/portfolio_v2.py
+```
+
+`__main__` 会先跑 `_self_test()`（写一个相对临时文件、断言内容后立即删除，不落 repo），再真实生成一份完整 Portfolio v2 并写到系统临时目录（`%TEMP%/agent_graduation_portfolio_v2.md`，同样不写入 repo），打印前 1500 字符预览 + 完整落盘路径。
+
+若要在自己的脚本 / notebook 里生成到指定路径（例如真的要产出简历附件）：
+
 ```python
+import sys
+sys.path.insert(0, "learning/agent-graduation/src")
 from portfolio_v2 import write_portfolio_v2
-path = write_portfolio_v2("portfolio_v2.md")
+
+# 显式传一个你想要的路径；bare 相对路径（如 "portfolio_v2.md"）从 repo 根运行会直接
+# 落在 repo 根，请勿在仓库工作区里裸调用——写到 repo 外部或系统临时目录更安全。
+path = write_portfolio_v2("portfolio_v2.md")  # 或换成你自己的绝对路径
 print(f"Portfolio v2 written to {path}")
 ```
 

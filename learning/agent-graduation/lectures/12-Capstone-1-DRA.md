@@ -30,40 +30,56 @@
 ## 跑
 
 ```powershell
-$env:PYTHONIOENCODING="utf-8"
-python -c "import sys; sys.path.insert(0,'learning/agent-graduation/src'); from dra.orchestrator import run_capstone_1, to_md; print(to_md(run_capstone_1()))"
+$env:PYTHONIOENCODING="utf-8"; python learning/agent-graduation/src/dra/orchestrator.py
 ```
 
-## 预期输出
+（等价于讲义旧版 `python -c "sys.path.insert(...); from dra.orchestrator import run_capstone_1, to_md; print(to_md(run_capstone_1()))"` 一行流，但不依赖 CWD——脚本 `__main__` 自带 `_self_test()` + `print(to_md(run_capstone_1()))`。经审计 harness 用 `PYTHONPATH=learning/agent-graduation/src` 隔离运行验证：`python scripts/eric_3080ti_env_audit.py --runbook --modules agent-graduation`。）
 
-```markdown
-# Deep Research Agent Capstone-1
+## 预期输出（实测，2026-07-12 ERIC-3080Ti）
 
-## Plan (5 sub-questions)
-1. What are major 2026 LLM inference frameworks?
-2. ...
-5. ...
+````
+[OK] dra.orchestrator._self_test passed (5 cites, 10 supported)
 
-## Notes (5 sub-q × 3 docs)
-[table]
+# Deep Research Agent - Capstone-1
 
-## Draft (markdown report)
-[5-paragraph report with [1]-[N]]
+**Query:** Write a brief report on modern LLM inference optimization techniques.
+
+## Plan
+- 5 sub-questions
+- Rationale: Decomposed into 5 sub-questions on 'llm inference'.
+
+### Sub-questions
+1. What are major LLM inference engines used in modern serving stacks?
+2. How do PagedAttention and RadixAttention compare?
+3. What is speculative decoding and how much speedup does it give?
+4. What quantization methods are most popular?
+5. How does FlashAttention v3 affect inference?
+
+## Retrieval: 10 doc snippets across 5 sub-q
+
+## Draft preview (first 400 chars)
+```
+# Report: Write a brief report on modern LLM inference optimization techniques.
+...
+```
+- Citations: 5
+- Claims: 10
 
 ## Verification
-- 12 claims, 12 supported, 0 unsupported
-- 5 citations valid
-
-## Final report
-[final md]
+- Supported: 10
+- Unsupported: 0
 
 ## Cost
-- LLM calls: 7
-- Tool calls: 15
-- ~cost_usd: 0.012
+- LLM calls: 3
+- Tool calls: 16
+- Tokens in: 334
+- Tokens out: 959
+- ~cost_usd: 0.095387
 
 ## Verdict: [PASS]
-```
+````
+
+> 注：本讲义早期版本的"预期输出"是撰写时的设计草图（`## Notes`/`## Final report` 等小节名），与 `to_md()` 实际输出的小节名（`## Retrieval`/`## Draft preview`/`## Verification`/`## Cost`）不完全一致；上面已替换为脚本真实 stdout。退出条件里的"5 步 plan / 至少 3 citation / 100% claims 都有 source"三条在实测里都成立（5 sub-questions、5 citations、10/10 supported）。
 
 ## 一句话
 

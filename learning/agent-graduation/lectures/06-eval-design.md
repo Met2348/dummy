@@ -60,21 +60,23 @@ for task in tasks:
 
 → DRA 在 research-report task 上目标完成度。
 
-## 我们 capstone-2 输出
+## 我们 capstone-2 输出（实测，2026-07-12 ERIC-3080Ti；跑法见 L13）
 
 ```markdown
-# τ-bench Mock Eval
+# Tau-bench Mock Eval - Capstone-2
 
 | Task | Goal | Tool | Safety | Eff | Cost | Mean |
 |------|-----:|-----:|-------:|----:|-----:|-----:|
-| airline-search | 0.8 | 0.7 | 1.0 | 0.6 | 0.5 | 0.72 |
-| retail-return  | 0.7 | 0.8 | 1.0 | 0.7 | 0.7 | 0.78 |
-| banking        | 0.9 | 0.9 | 1.0 | 0.8 | 0.8 | 0.88 |
-| support-trouble| 0.6 | 0.6 | 1.0 | 0.5 | 0.6 | 0.66 |
-| research-report| 0.9 | 0.8 | 1.0 | 0.7 | 0.6 | 0.80 |
+| airline-search  | 1.00 | 0.90 | 1.00 | 1.00 | 1.00 | 0.980 |
+| retail-return   | 1.00 | 0.90 | 1.00 | 1.00 | 1.00 | 0.980 |
+| banking         | 1.00 | 0.90 | 1.00 | 1.00 | 1.00 | 0.980 |
+| support-trouble | 1.00 | 0.90 | 1.00 | 1.00 | 1.00 | 0.980 |
+| research-report | 1.00 | 1.00 | 1.00 | 1.00 | 0.09 | 0.818 |
 
-Mean: 0.768
+Overall mean: 0.948
 ```
+
+> `simulate_mock_agent()` 对前 4 个任务总是完成全部 required actions（Goal=1.0），是确定性 mock baseline；`research-report` 走真实 Capstone-1 DRA，goal/tool/safety/efficiency 全满分，只有 cost 维因真实 token 成本超过 $0.05 目标被拉到 0.09（详见 L13）。
 
 ## 退出条件
 
@@ -84,4 +86,4 @@ Mean: 0.768
 
 ## 一句话
 
-> τ-bench mock = 5 task × 5 dim — DRA 在 research-report 上 80% goal 完成度。
+> τ-bench mock = 5 task × 5 dim — DRA 在 research-report 上 goal/tool/safety/efficiency 全满分，overall mean 0.948。

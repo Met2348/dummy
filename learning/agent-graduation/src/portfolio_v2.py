@@ -1,6 +1,8 @@
 """Capstone-3 — 39-topic Portfolio v2 generator."""
 from __future__ import annotations
 
+import os
+
 
 HEADER = """# 39-Topic LLM Learning Portfolio (v2)
 
@@ -184,7 +186,6 @@ def write_portfolio_v2(path: str) -> str:
 
 
 def _self_test() -> None:
-    import os
     out_path = "tmp_portfolio_v2.md"
     actual_path = write_portfolio_v2(out_path)
     assert actual_path == out_path
@@ -216,3 +217,13 @@ def _self_test() -> None:
 
 if __name__ == "__main__":
     _self_test()
+    # Demonstrate the real Capstone-3 deliverable (a pushable portfolio_v2.md) without
+    # littering the repo: write to the OS temp dir, not the current working directory.
+    import tempfile
+
+    tmp_out = os.path.join(tempfile.gettempdir(), "agent_graduation_portfolio_v2.md")
+    write_portfolio_v2(tmp_out)
+    with open(tmp_out, encoding="utf-8") as f:
+        preview = f.read()[:1500]
+    print(preview)
+    print(f"\n[full portfolio_v2.md written to {tmp_out}]")

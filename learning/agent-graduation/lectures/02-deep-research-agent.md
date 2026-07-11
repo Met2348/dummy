@@ -75,7 +75,7 @@ verified = verifier(report, notes)
 
 期望：
 - 5 步 plan
-- 5 mock tool calls (search / cite / verify / file_write)
+- 5 类 mock tool 可用 (search / fetch / cite / file_write / python，见 L04)
 - markdown 报告 with [1]-[N] cite
 - 3+ 个 citation
 
