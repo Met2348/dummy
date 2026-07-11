@@ -35,10 +35,12 @@
 
 ## 环境前置说明
 
-- 验证环境:WSL2 → Rocky Linux 发行版(`wsl.exe -d RockyLinux`)。
-- 连通性检查:`wsl.exe -d RockyLinux -- whoami`——**截至 2026-07-11,该发行版仍报 `getpwuid(0) failed` 错误,处于半初始化状态,尚未可用**,需要用户在 Windows 侧修复(默认用户配置问题)后才能开始需要真实环境验证的知识点。
-- root/sudo:待环境修复后确认该发行版默认是 root 会话还是需要 sudo 提权,不预设。
-- LVM/存储类实验一律用 `dd if=/dev/zero of=/tmp/xxx.img bs=1M count=N` + `losetup` 构造 loop device,不动真实磁盘,验证完在同一代码块内清理干净。
+**✅ 2026-07-11 环境已修复,验证环境正式就绪。** 修复过程记录(供将来环境损坏时参考):
+- **根因**:最初 `getpwuid(0) failed` 报错的真正原因不是"半初始化",而是导入 WSL 用的 `D:\WSL\rocky-10-base.tar.xz` 根本不是扁平的 rootfs tar 包,而是一个 **OCI 容器镜像归档**(`blobs/sha256/...` + `index.json` + `oci-layout` 结构,应为当初用 `skopeo`/`docker save` 从容器仓库导出)——`wsl --import` 只会把它当成普通 tar 解压,解压结果里没有 `/etc/passwd`,自然找不到 root 用户。
+- **修复步骤**:① 解析 OCI 镜像的 `index.json`→manifest,定位到唯一的文件系统层 blob(`sha256:530d6b37...`,本身就是 gzip 压缩的真实 rootfs);② 把这一层单独提取为 `D:\WSL\rocky-10-rootfs.tar.gz`(已验证含合法 `etc/passwd`,`root:x:0:0:...`);③ `wsl --unregister RockyLinux` 卸载损坏实例;④ `wsl --import RockyLinux "D:\WSL\RockyLinux" "D:\WSL\rocky-10-rootfs.tar.gz" --version 2` 用正确的 rootfs 重新导入;⑤ 中途遇到过一次 WSL 自身已知 bug(`Wsl/Service/CreateInstance/E_UNEXPECTED`,微软 WSL 仓库多个开放 issue),`wsl --update` 把 WSL 从 2.1.5.0 升级到 2.7.10.0 后解决;⑥ 装齐 RHCSA 全类目需要的工具包(`systemd`/`firewalld`/`lvm2`/`policycoreutils`+`selinux-policy-targeted`/`NetworkManager`/`chrony`/`podman`/`openssh-server`/`vim-enhanced`/`man-db`/`rsync`/`parted`/`quota`/`cryptsetup`/`nfs-utils`+`autofs`/`sudo`/`acl`/`cronie`,`gdisk` 默认仓库没有,用 `parted` 替代 GPT 分区演示,不影响覆盖范围);⑦ `/etc/wsl.conf` 写入 `[boot]\nsystemd=true` + `wsl --terminate RockyLinux` 重启,确认 `systemctl is-system-running` 返回 `running`,chronyd/firewalld/sshd/NetworkManager 等服务真实运行中。
+- **当前系统信息**:`Rocky Linux 10.2 (Red Quartz)`,`platform:el10`,与 RHCSA 新基准(RHEL 10)一致;默认 root 会话(`uid=0(root)`),无需额外 sudo 提权;`getenforce` 当前是 `Disabled`(SELinux 默认关闭——这本身会成为第 08 类"如何启用 SELinux"知识点的真实素材,不是要回避的缺陷);LVM 版本 `2.03.36(2)-RHEL10`。
+- **调用方式提醒(避免走弯路)**:从 Git Bash 调 `wsl.exe` 时必须先 `export MSYS_NO_PATHCONV=1`,否则 Git Bash 会把要传给 WSL 内部 Linux 程序的 `/mnt/d/...` 这类路径错误翻译成 Windows 路径;但 `wsl.exe --import`/`--unregister` 这些**Windows 端**命令本身的路径参数,要用原生 Windows 反斜杠路径(`D:\WSL\...`),不能反过来用 `/mnt/d/...`。`/tmp` 在 WSL2 VM 空闲重启后会清空(疑似 tmpfs),多步骤操作要在同一次 `wsl.exe` 调用里用脚本文件一次做完,不要依赖跨调用的 `/tmp` 状态。
+- **LVM/存储类实验**仍一律用 `dd if=/dev/zero of=/tmp/xxx.img bs=1M count=N` + `losetup` 构造 loop device,不动真实磁盘,验证完在同一代码块内清理干净——这条纪律不因为环境已是真实 Rocky Linux 而放松,依然是良好实践。
 
 ---
 
@@ -47,16 +49,16 @@
 | # | 分类 | 文件 | 知识点数 | 状态 |
 |---|------|------|---------|------|
 | 01 | 必备工具与文本处理 | [01-essential-tools.md](01-essential-tools.md) | 14 | ✅ 已完成(14个代码块 Git Bash 下实际执行全部通过;第1-7/14、14项为shell/GNU工具语法本身,和真实RHEL行为一致,完整验证;第8-13项依赖Windows内核/文件系统语义,已如实记录与RHEL的真实差异——其中硬链接、chmod语法、vim、ssh-keygen本地部分、软链接的"实际降级行为"均完整验证,但chmod的完整ugo/rwx强制效果、man/info交互、ssh-copy-id、scp/rsync远程传输能力受限于本机环境(无man/info/rsync/无可达远程主机)未能验证,需 Rocky Linux 环境修复后补充,详见文内各条"常见坑") |
-| 02 | 进程与系统运行 | [02-process-and-boot.md](02-process-and-boot.md) | 12 | ⏳ 待开始 |
-| 03 | 本地存储与 LVM | [03-storage-and-lvm.md](03-storage-and-lvm.md) | 12 | ⏳ 待开始 |
-| 04 | 文件系统与权限 | [04-filesystem-and-permissions.md](04-filesystem-and-permissions.md) | 13 | ⏳ 待开始 |
-| 05 | 软件与系统部署 | [05-package-and-deployment.md](05-package-and-deployment.md) | 10 | ⏳ 待开始 |
-| 06 | 用户组管理 | [06-users-and-groups.md](06-users-and-groups.md) | 10 | ⏳ 待开始 |
+| 02 | 进程与系统运行 | [02-process-and-boot.md](02-process-and-boot.md) | 12 | ✅ 已完成(已验证,Rocky Linux 10.2真实systemd环境,24个代码块全部通过;现场发现并记录3处真实差异:默认target是graphical非multi-user、rsyslog/logrotate默认不装、systemd属性多值字段顺序不稳定+timer调度延迟需轮询) |
+| 03 | 本地存储与 LVM | [03-storage-and-lvm.md](03-storage-and-lvm.md) | 12 | ✅ 已完成(已验证,23个代码块全部独立通过;撰写过程中发现并修正2处真实问题:知识点5-9最初写成跨代码块变量依赖,已改为逐点自包含;losetup -d后立即查询存在偶发竞态,已改为轮询重试) |
+| 04 | 文件系统与权限 | [04-filesystem-and-permissions.md](04-filesystem-and-permissions.md) | 13 | ✅ 已完成(已验证,26个代码块全部通过;现场发现3处真实差异:xfs最小300MB门槛、cryptsetup密码错误退出码是2非1、VDO受WSL2内核缺dm-vdo模块限制无法创建真实卷) |
+| 05 | 软件与系统部署 | [05-package-and-deployment.md](05-package-and-deployment.md) | 10 | ✅ 已完成(已验证,20个代码块全部通过;现场发现:grubby需单独安装不在grub2-tools里、docker.io本机网络超时改用quay.io验证podman) |
+| 06 | 用户组管理 | [06-users-and-groups.md](06-users-and-groups.md) | 10 | ✅ 已完成(已验证,19个代码块全部通过;现场纠正多处凭记忆写错的细节:passwd -S状态码是单字母P/L非PS/LK、锁定是原哈希前加!非清空成!!、tr -d会破坏带空格字段值改用xargs) |
 | 07 | 网络配置 | [07-networking.md](07-networking.md) | 10 | ⏳ 待开始 |
 | 08 | 安全:SELinux 与防火墙 | [08-security-selinux-firewall.md](08-security-selinux-firewall.md) | 10 | ⏳ 待开始 |
 | 09 | bash 脚本编程本身 | [09-bash-scripting.md](09-bash-scripting.md) | 9 | ✅ 已完成(已验证,27个代码块 Git Bash 下语法检查+实际执行全部通过) |
 
-**合计:100 个知识点,9 篇,23/100 完成(2/9 篇)。**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
+**合计:100 个知识点,9 篇,80/100 完成(7/9 篇)。**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
 
 **撰写顺序(按 root 依赖/风险递增,不是文件编号顺序;2026-07-11 实测修正)**:
 1. 09 bash 脚本本身——**已完成**,不需要 root,纯语言特性,Git Bash 验证足够真实。
