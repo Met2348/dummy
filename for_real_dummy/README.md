@@ -47,6 +47,14 @@ Python 基本语法        →  中级 Python(类、装饰器、numpy)
 
 每个函数/知识点都固定同一套结构(torch/tensorflow 两个框架系列额外多两块:底层机制/为什么这样设计、面试怎么问+追问链):签名(人话翻译)→ 一句话是什么 → AI 研究场景(具体用在哪) → 可运行例子(带 assert,真的在仓库 `.venv` 里跑过) → 常见坑。五条系列合计约 366 个知识点,均已验证完成。
 
+## 独立技能系列(不是 Python/ML,完全独立的新领域)
+
+| 系列 | 内容 | 规模 | 状态 |
+|------|------|------|------|
+| [rhcsa-bash-deep-dive/](rhcsa-bash-deep-dive/00-roadmap.md) | Linux 系统管理 + bash 脚本编程,对标 Red Hat 官方 RHCSA(EX200,RHEL 10 基准)认证范围,9 个分类:必备工具与文本处理→进程与系统运行→本地存储与LVM→文件系统与权限→软件与系统部署→用户组管理→网络配置→安全(SELinux/防火墙)→bash脚本编程本身。验证环境为 WSL2 Rocky Linux 10.2(真实 systemd + root),涉及改网络/权限的知识点全部在隔离沙箱(dummy网卡/loop device)里操作,不影响宿主环境 | 100 个知识点 | ✅ 全部完成并验证 |
+
+每个知识点固定七步结构(命令/配置 → 一句话是什么 → 为什么RHCSA真考/生产会用到 → 从最容易犯错的做法讲起 → 真实场景例子 → 可运行例子 → 常见坑),不采用 torch/tensorflow 系列"面试怎么问"环节(RHCSA 是纯上机操作考试)。和前五条系列的关键差异:本仓库没有 Linux 系统管理场景可挖,"真实场景例子"如实标注为典型运维/RHCSA 考试场景,不冒充仓库代码里挖出来的;部分知识点受 WSL2 内核结构性限制(GRUB引导链路不存在、dm-vdo模块缺失、selinuxfs接口残缺)无法完整验证真实效果,均已在对应小节诚实标注验证颗粒度,不冒充"已完整验证"。
+
 ## 自维护工具
 
 - [my-cheatsheet.md](my-cheatsheet.md) —— 你自己的速查表。规则:同一个函数查了 3 次文档,就记一条进去。自己写的记得最牢。
@@ -77,6 +85,9 @@ for_real_dummy/
 ├── python-idioms/                     ← Pythonic写法惯用法系列(26个知识点,4批,python-advanced姊妹篇)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表
 │   └── 01~04-*.md                     ← 每批一个文件
+├── rhcsa-bash-deep-dive/              ← Linux系统管理+bash脚本系列(100个知识点,对标RHCSA/EX200,9批,WSL2 Rocky Linux环境)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 环境声明
+│   └── 01~09-*.md                     ← 每批一个文件
 ├── my-cheatsheet.md                   ← 你自己维护的速查表(持续增长)
 ├── practice/                          ← 你自己动手写代码验证的 notebook
 │   └── 00-getting-started.ipynb       ← 现成的起步文件,含环境自检 + 练习模板
