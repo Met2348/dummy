@@ -1,7 +1,7 @@
 """Capstone-3: Portfolio README generator.
 
 Builds a comprehensive markdown report compiling:
-- 25-topic timeline
+- 32-topic timeline (25 prior + 7 Module 6)
 - 5-ckpt comparison
 - mini-HELM table
 - mini-Arena ranking
@@ -11,6 +11,7 @@ Builds a comprehensive markdown report compiling:
 """
 from __future__ import annotations
 
+import os
 from typing import Dict, List
 
 from ckpt_zoo import CKPT_METADATA, load_all
@@ -74,7 +75,7 @@ def gen_portfolio() -> str:
     rt = run_red_team()
     defense = compare_defense()
 
-    parts: List[str] = ["# 25-topic LLM Learning Portfolio",
+    parts: List[str] = ["# 32-topic LLM Learning Portfolio",
                         "",
                         "> 2026-06-05 - Module 6 收官，全系列完结",
                         "",
@@ -115,7 +116,7 @@ def write_portfolio(out_path: str = "portfolio.md") -> str:
 
 def _self_test() -> int:
     md = gen_portfolio()
-    assert "25-topic" in md
+    assert "32-topic" in md
     assert "Module 1 PEFT" in md
     assert "Capstone-1" in md
     assert "Capstone-2A" in md
@@ -136,3 +137,9 @@ if __name__ == "__main__":
     f = _self_test()
     print(f"portfolio.py self-test: {'OK' if f == 0 else f'FAILED ({f})'}")
     print(gen_portfolio()[:1500])
+    # Demonstrate the real capstone deliverable (a pushable portfolio.md) without
+    # littering the repo: write to the OS temp dir, not the current working directory.
+    import tempfile
+    tmp_out = os.path.join(tempfile.gettempdir(), "eval_graduation_portfolio.md")
+    write_portfolio(tmp_out)
+    print(f"\n[full portfolio.md written to {tmp_out}]")
