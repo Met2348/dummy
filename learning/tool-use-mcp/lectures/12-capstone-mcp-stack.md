@@ -34,13 +34,19 @@
 
 ```powershell
 $env:PYTHONIOENCODING="utf-8"
-python -c "import sys; sys.path.insert(0,'learning/tool-use-mcp/src'); from capstone_mcp_stack import run_capstone, to_md; print(to_md(run_capstone()))"
+python learning/tool-use-mcp/src/capstone_mcp_stack.py
 ```
 
 ## 预期输出
 
+先跑内置 `_self_test`（真断言），再打印 markdown 报告：
+
+```text
+[OK] capstone_mcp_stack._self_test passed (3 success + 1 expected error)
+```
+
 ```markdown
-# MCP Capstone
+# MCP Capstone - Topic 3 tool-use-mcp
 
 ## Handshake
 - protocolVersion: 2024-11-05
@@ -52,15 +58,15 @@ python -c "import sys; sys.path.insert(0,'learning/tool-use-mcp/src'); from caps
 - search_kb
 - get_time
 
-## Calls (4)
-| # | tool | args | result |
-|---|------|------|--------|
-| 1 | calculator | {"expression":"6*3"} | 18 |
-| 2 | search_kb | {"query":"MCP"} | top: ... |
-| 3 | get_time | {"tz":"UTC"} | 2026-... |
-| 4 | bogus | {} | ERROR -32602 Unknown tool |
+## Calls
+| # | Tool | Args | OK | Result |
+|---|------|------|----|--------|
+| 1 | calculator | {'expression': '6 * 3'} | [OK] | 18 |
+| 2 | search_kb | {'query': 'MCP'} | [OK] | MCP: Model Context Protocol - JSON-RPC-style tool interface  |
+| 3 | get_time | {'tz': 'UTC'} | [OK] | 2026-06-05T12:00:00 UTC (mock fixed time) |
+| 4 | bogus_tool | {} | [FAIL] | -32602 Unknown tool: bogus_tool |
 
-## Verdict: [PASS] (4 successful round-trips)
+## Verdict: [PASS] (3 valid + 1 expected error caught)
 ```
 
 ## 一句话
