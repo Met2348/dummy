@@ -974,8 +974,11 @@ python learning\agent-memory-context\src\memgpt_virtual_context.py
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'
-python -c "import sys; sys.path.insert(0,'learning/agent-memory-context/src'); from capstone_memory_chat import run_capstone, to_md; print(to_md(run_capstone()))"
+python learning/agent-memory-context/src/capstone_memory_chat.py
 ```
+
+（脚本无 argparse，Python 会把脚本自身所在目录插入 `sys.path[0]`，`from common import ...` 等裸导入照样能解析，
+不再需要手动 `sys.path.insert` 的 CWD 依赖一行流。）
 
 读代码顺序:
 
