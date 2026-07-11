@@ -54,11 +54,11 @@
 | 04 | 文件系统与权限 | [04-filesystem-and-permissions.md](04-filesystem-and-permissions.md) | 13 | ✅ 已完成(已验证,26个代码块全部通过;现场发现3处真实差异:xfs最小300MB门槛、cryptsetup密码错误退出码是2非1、VDO受WSL2内核缺dm-vdo模块限制无法创建真实卷) |
 | 05 | 软件与系统部署 | [05-package-and-deployment.md](05-package-and-deployment.md) | 10 | ✅ 已完成(已验证,20个代码块全部通过;现场发现:grubby需单独安装不在grub2-tools里、docker.io本机网络超时改用quay.io验证podman) |
 | 06 | 用户组管理 | [06-users-and-groups.md](06-users-and-groups.md) | 10 | ✅ 已完成(已验证,19个代码块全部通过;现场纠正多处凭记忆写错的细节:passwd -S状态码是单字母P/L非PS/LK、锁定是原哈希前加!非清空成!!、tr -d会破坏带空格字段值改用xargs) |
-| 07 | 网络配置 | [07-networking.md](07-networking.md) | 10 | ⏳ 待开始 |
-| 08 | 安全:SELinux 与防火墙 | [08-security-selinux-firewall.md](08-security-selinux-firewall.md) | 10 | ⏳ 待开始 |
+| 07 | 网络配置 | [07-networking.md](07-networking.md) | 10 | ✅ 已完成(已验证,20个代码块全部通过;涉及改IP/路由的知识点全部在独立dummy虚拟网卡上操作,全程确认真实eth0连接零影响;现场发现NetworkManager默认不接管"外部创建"设备、connection type需匹配设备类型、network.service在RHEL10已不存在) |
+| 08 | 安全:SELinux 与防火墙 | [08-security-selinux-firewall.md](08-security-selinux-firewall.md) | 10 | ✅ 已完成(已验证,19个代码块全部通过;防火墙部分功能完整验证,SELinux部分经三层排查确认WSL2内核限制——内核参数不生效/selinuxfs残缺/auditd被拒,semanage和工具语法已扎实验证,如实标注enforcing强制效果需真实RHEL环境) |
 | 09 | bash 脚本编程本身 | [09-bash-scripting.md](09-bash-scripting.md) | 9 | ✅ 已完成(已验证,27个代码块 Git Bash 下语法检查+实际执行全部通过) |
 
-**合计:100 个知识点,9 篇,80/100 完成(7/9 篇)。**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
+**合计:100 个知识点,9 篇,100/100 完成(9/9 篇)。🎉 全部完成。**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
 
 **撰写顺序(按 root 依赖/风险递增,不是文件编号顺序;2026-07-11 实测修正)**:
 1. 09 bash 脚本本身——**已完成**,不需要 root,纯语言特性,Git Bash 验证足够真实。
