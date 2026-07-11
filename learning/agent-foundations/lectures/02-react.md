@@ -53,6 +53,20 @@ def react_loop(question, llm, tools, max_steps=10):
         history += f"{thought_action}\nObservation {step+1}: {obs}\n"
     return None  # 超时
 ```
+我自己的详细注释版本
+```python
+def react_loop(question, llm, tools, max_steps):
+    history = f"Question: {question}\n"   # 初始的历史就是最初用户输入的question
+    for step in range(max_steps):          # 允许尝试多次
+        thought_action = llm(history + f"Thought {step+1}:")    # 调用LLM，输入截止目前的完整历史 和 提示LLM 进行新一轮React Loop中第一步： thought 的提示文本。 获取LLM的输出
+        if "Final Answer:" in thought_action:    # 获取输出后，首先看LLM是否判定自己获得了最终答案。 若检测到最终答案的出现， 则直接返回最终答案
+            return parse_final(thought_action)   # 需要专门的parser来提取最终答案
+        action_name, action_args = parse_action(thought_action)  # 若执行到这一步， 说明最终答案还没有出现，则LLM返还的是React第二步 Action相关的信息。包含工具的名称和工具的调用相关参数
+        obs = tools[action_name](action_args)    # 在工具列表找到这个工具，传入参数，等待工具输出返回结果 作为 React 第三步 observation的 素材
+        history += f"{thought_action}\nObservation {step+1}: {obs}\n"  # 获取新的observation， 改变了LLM对任务状态的认识，更新到表征这个状态的history当中。这里是简单的concat，其实还可以summarize
+    return None  # 若执行到这一步返回，则说明用尽了尝试次数，仍没有答案
+```
+
 
 ## ReAct vs Tool-Use（OpenAI function calling）
 
