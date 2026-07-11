@@ -29,6 +29,33 @@ MODULES = [
     "p17_union_find",
     "p18_prefix_sum",
     "p19_bit_math",
+    # Phase 2：进阶补充（_ii）
+    "p01_arrays_two_pointers_ii",
+    "p02_sliding_window_ii",
+    "p03_hashing_ii",
+    "p04_strings_ii",
+    "p05_linked_list_ii",
+    "p06_stack_queue_ii",
+    "p07_binary_search_ii",
+    "p08_binary_tree_ii",
+    "p09_bst_ii",
+    "p10_backtracking_ii",
+    "p11_graph_bfs_dfs_ii",
+    "p12_dp_basics_ii",
+    "p13_dp_advanced_ii",
+    "p14_greedy_ii",
+    "p15_heap_topk_ii",
+    "p16_monotonic_stack_ii",
+    "p17_union_find_ii",
+    "p18_prefix_sum_ii",
+    "p19_bit_math_ii",
+    # Phase 2：全新分类
+    "p20_trie",
+    "p21_design",
+    "p22_advanced_graph",
+    "p23_matrix_simulation",
+    "p24_advanced_strings",
+    "p25_concurrency",
 ]
 
 
