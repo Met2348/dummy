@@ -1,4 +1,5 @@
-"""跑全部 19 个 problems 模块的 _self_test() + catalog/tracker 一致性检查。"""
+"""跑全部 77 个 problems 模块（Phase1核心19 + Phase2进阶19+新6 + Phase3竞赛级25+新8）
+的 _self_test() + catalog/tracker 一致性检查。"""
 from __future__ import annotations
 
 import importlib
@@ -56,6 +57,41 @@ MODULES = [
     "p23_matrix_simulation",
     "p24_advanced_strings",
     "p25_concurrency",
+    # Phase 3：竞赛级补充（_iii）
+    "p01_arrays_two_pointers_iii",
+    "p02_sliding_window_iii",
+    "p03_hashing_iii",
+    "p04_strings_iii",
+    "p05_linked_list_iii",
+    "p06_stack_queue_iii",
+    "p07_binary_search_iii",
+    "p08_binary_tree_iii",
+    "p09_bst_iii",
+    "p10_backtracking_iii",
+    "p11_graph_bfs_dfs_iii",
+    "p12_dp_basics_iii",
+    "p13_dp_advanced_iii",
+    "p14_greedy_iii",
+    "p15_heap_topk_iii",
+    "p16_monotonic_stack_iii",
+    "p17_union_find_iii",
+    "p18_prefix_sum_iii",
+    "p19_bit_math_iii",
+    "p20_trie_iii",
+    "p21_design_iii",
+    "p22_advanced_graph_iii",
+    "p23_matrix_simulation_iii",
+    "p24_advanced_strings_iii",
+    "p25_concurrency_iii",
+    # Phase 3：全新竞赛级分类
+    "p26_number_theory",
+    "p27_segment_tree_bit",
+    "p28_string_matching_advanced",
+    "p29_computational_geometry",
+    "p30_advanced_graph_ii",
+    "p31_bitmask_dp",
+    "p32_game_theory_combinatorics",
+    "p33_advanced_data_structures",
 ]
 
 

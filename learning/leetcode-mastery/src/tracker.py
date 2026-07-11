@@ -78,8 +78,8 @@ def _self_test() -> None:
 
     t = ReviewTracker()
     seed_from_catalog(t, PROBLEMS)
-    assert len(t.cards) == 298
-    assert len(t.due(0)) == 298          # 全部初始 due 于第 0 天
+    assert len(t.cards) == 544
+    assert len(t.due(0)) == 544          # 全部初始 due 于第 0 天
 
     # 答得好：间隔拉长，第 0 天不再 due，未来才 due
     t.review("lc1", quality=5, today=0)
@@ -100,8 +100,8 @@ def _self_test() -> None:
     # 序列化往返
     t2 = ReviewTracker.from_json(t.to_json())
     assert t2.cards["lc1"].reps == t.cards["lc1"].reps
-    assert len(t2.cards) == 298
-    print("[PASS] tracker: 298题种子 + 成功拉长 + 失败打回 + 序列化往返")
+    assert len(t2.cards) == 544
+    print("[PASS] tracker: 544题种子 + 成功拉长 + 失败打回 + 序列化往返")
 
 
 if __name__ == "__main__":
