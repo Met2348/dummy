@@ -43,10 +43,23 @@ MODULES = [
     "frontier_deep.dp_data_scaling_2026",
     "frontier_deep.dp_rag_tooling_2026",
     "frontier_deep.sc_engineering_judgment",
+    # Staff Gauntlet:按面试关卡阶段组织的资深通关训练营(11关)
+    "staff_gauntlet.gate1_screen_motivation",
+    "staff_gauntlet.gate2_research_coding_paper2code",
+    "staff_gauntlet.gate3_paper_critique_fluency",
+    "staff_gauntlet.gate4_ml_infra_system_design",
+    "staff_gauntlet.gate5_agentic_system_design",
+    "staff_gauntlet.gate6_values_safety_stance",
+    "staff_gauntlet.gate7_staff_ownership_narrative",
+    "staff_gauntlet.gate8_cross_functional_ambiguity",
+    "staff_gauntlet.gate9_domestic_senior_socialhire",
+    "staff_gauntlet.gate10_leveling_negotiation",
+    "staff_gauntlet.gate11_hpc_cluster_infra",
     # 聚合汇总校验
     "ai_deep",
     "backend_deep",
     "frontier_deep",
+    "staff_gauntlet",
 ]
 
 

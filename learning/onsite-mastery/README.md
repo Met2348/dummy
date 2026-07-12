@@ -63,6 +63,37 @@
 
 用法：`from frontier_deep import ALL_DP as FR_DP, ALL_SP as FR_SP`，`ALL_DP` 复用 `deep_common.drill()`/`grade_chain()`；`ALL_SP` 配合新增的 `deep_common.grade_scenario(sp, your_answer)` 做要点覆盖率自查（不是对错判断）。
 
+## 层层通关:Staff Gauntlet 资深关卡训练(`src/staff_gauntlet/`)
+
+老手拿前两版(初版208点+2026前沿补强207点,合计415点)三审后的反馈:"Frontier Lab招人那叫一个难",要求专门查清楚2026年这些实验室到底考什么,做一份"那种层次的面试层层通关教程"。用12轮WebSearch核实后发现,这次的差异化不是"更多同主题知识点",而是一个**全新的组织轴**:
+
+1. **面试loop本身就是分阶段关卡制**:OpenAI/Anthropic/DeepMind的真实面试确实按顺序过关——screen(动机匹配)→research coding(论文转代码)→paper critique(论文批判)→系统设计判断→values round(价值观关)→跨团队协作。前两版都按**知识主题**分类,这次改为按**面试关卡阶段**组织,练法也不同:要按顺序过关,不是随机抽题。
+2. **Staff/Senior的核心分水岭是"定方向"而非"知识深度"**:资深叙事关(gate7)专门训练"我主导了方向"而非"我执行了任务"这种更高阶的叙事框架。
+3. **values round是完全空白的内容维度**:Anthropic式的价值观关,45分钟非技术、奖励"真实怀疑"而非"表演式认同"、奖励"讲自己出错的经历"而非"永远正确的故事"。
+4. **"面试官临场改约束"是系统设计判断的新范式**:约束变了是打补丁还是推倒重来,是资深与否的行为分水岭。
+5. **HPC/大规模集群基础设施是老手中途追加的专项要求**:大集群训模型的网络拓扑/故障容错/checkpoint工程是真正稀缺、此前"点到为止"的领域,单独成一整关(gate11),锚定Meta Llama 3 405B真实故障数据(419次中断/54天/16384块H100)等具体数字。
+6. **定级/谈判判断是另一个完全空白的维度**:面试官质疑你的level时怎么用证据argue、多offer怎么比较含金量而不是只看title。
+
+同时,考虑到候选人项目里大量代码可能是AI coding agent代写而非自己深度理解("研究玩具级别代码"风险),多个关卡(尤其gate2/gate7/gate9)专门设计了"AI代写代码穿帮测试"——面试官让你现场修改/调试/解释一段"你说是你写的"代码,如果答不上来暴露的正是没有真正吃透的部分。
+
+**合计219点(6个DeepPoint关120点 + 5个ScenarioPoint关99点)**,与前两版415点全局id/trigger均无冲突(四个子包合计634点,程序化验证过)。
+
+| 关 | 类别(`src/staff_gauntlet/`) | 点数 | 类型 | 对应真实面试阶段 |
+|---|---|:--:|:--:|---|
+| 01 | 动机筛选与方向匹配 | 19 | DeepPoint | recruiter/HM screen |
+| 02 | 论文转代码研究手写 | 20 | DeepPoint | research coding / take-home |
+| 03 | 论文批判与研究流利度 | 19 | DeepPoint | paper discussion round |
+| 04 | ML基础设施系统设计判断 | 20 | ScenarioPoint | 分布式训练/评测基建设计+临场改约束 |
+| 05 | Agent生产系统设计判断 | 20 | ScenarioPoint | orchestrator-vs-LLM边界判断 |
+| 06 | 价值观与安全立场关(Values Round) | 21 | ScenarioPoint | Anthropic式45分钟非技术关 |
+| 07 | 资深叙事与研究方向主导权 | 20 | DeepPoint | Staff vs Senior差异化叙事 |
+| 08 | 跨团队协作与模糊决策判断 | 20 | ScenarioPoint | 组织张力/资源冲突判断 |
+| 09 | 国内大厂资深社招视角 | 20 | DeepPoint | P8级决策权/风险取舍/带教 |
+| 10 | 定级与谈判判断 | 18 | ScenarioPoint | leveling/offer谈判 |
+| 11 | 大规模集群HPC基础设施深水 | 22 | DeepPoint | 网络拓扑/故障容错/checkpoint工程 |
+
+用法:`from staff_gauntlet import ALL_DP as SG_DP, ALL_SP as SG_SP, GATES`,`GATES`是按真实面试loop顺序排列的关卡元数据(每项含`n`/`name`/`cat`/`kind`/`bank`),配合 `deep_common.drill()`/`grade_chain()`/`grade_scenario()` 使用。**练法和前三个子包不同**:应该按`GATES`里`n`从1到11的顺序过关,而不是随机抽题——详见 [`00-how-to-defend.md`](lectures/00-how-to-defend.md) 新增的第7节。
+
 ## 项目深挖文档
 
 | # | 文档 | 素材来源 |
