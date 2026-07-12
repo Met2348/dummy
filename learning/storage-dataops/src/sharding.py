@@ -43,9 +43,7 @@ def shard_balance(strategy, samples: list[Sample], n_shards: int) -> dict:
 
 
 def _self_test() -> None:
-    import random
-    random.seed(0)
-    # 10000 samples with skewed sizes
+    # 10000 samples with skewed sizes: period-50 pattern, 100B..5000B repeating.
     samples = [Sample(i, 100 + (i % 50) * 100) for i in range(10000)]
 
     h = shard_balance("hash", samples, 8)
@@ -54,7 +52,14 @@ def _self_test() -> None:
 
     # round_robin tied with hash for skewed data
     assert rr["imbalance_pct"] < 10.0, rr
-    # Range gets unlucky if data is sorted by size pattern (49,49,49,... cluster)
+    # NOTE: range lands at exactly 0.0% here -- not because range partitioning is
+    # generally skew-resistant, but because this toy skew period (50) evenly divides
+    # the per-shard sample count (10000/8=1250 -> exactly 25 full periods per shard),
+    # so every contiguous range sees an identical size mix. Range only gets "unlucky"
+    # (large imbalance) when the skew is *clustered by index* instead of periodic --
+    # e.g. first 8000 samples at 100B + last 2000 at 5000B drives range imbalance to
+    # ~363% while hash/round_robin both stay under 10% (verified empirically, not
+    # exercised by this self-test's periodic data).
     print(f"[OK] sharding (hash imbalance {h['imbalance_pct']}%, "
           f"range {r['imbalance_pct']}%, rr {rr['imbalance_pct']}%)")
 

@@ -19,7 +19,7 @@ def pipelined(stages: list[Stage], n_samples: int, n_workers: int = 4) -> float:
     """N workers in parallel + double-buffering.
 
     Throughput = min over stages of (n_workers / per_sample_us).
-    Total time = max(stages) * N (assuming compute is hidden by overlap).
+    Total time = (max(stages) / n_workers) * N (assuming compute is hidden by overlap).
     """
     parallel_per_sample = max(s.per_sample_us for s in stages) / n_workers
     return parallel_per_sample * n_samples
