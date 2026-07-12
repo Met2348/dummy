@@ -32,9 +32,21 @@ MODULES = [
     "backend_deep.dp_database_internals",
     "backend_deep.dp_distributed_systems",
     "backend_deep.dp_cache_concurrency",
+    # 2026 前沿补强（9 类 DeepPoint + 1 类 ScenarioPoint）
+    "frontier_deep.dp_reasoning_testtime",
+    "frontier_deep.dp_agentic_production",
+    "frontier_deep.dp_alignment_oversight",
+    "frontier_deep.dp_interpretability_2026",
+    "frontier_deep.dp_multimodal_vla",
+    "frontier_deep.dp_frontier_oss_models",
+    "frontier_deep.dp_llm_infra_2026",
+    "frontier_deep.dp_data_scaling_2026",
+    "frontier_deep.dp_rag_tooling_2026",
+    "frontier_deep.sc_engineering_judgment",
     # 聚合汇总校验
     "ai_deep",
     "backend_deep",
+    "frontier_deep",
 ]
 
 

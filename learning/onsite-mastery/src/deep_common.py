@@ -48,6 +48,28 @@ def drill(bank: list[DeepPoint], cat: str | None = None, n: int | None = None) -
     return pool if n is None else pool[:n]
 
 
+@dataclass(frozen=True)
+class ScenarioPoint:
+    """无标准答案的场景判断题（区别于 DeepPoint）：'如果上线后效果变差你怎么定位' 这类问题
+    考的是覆盖面和思路完整度，不存在唯一参考答案，所以不能用 grade_chain 的"对/错"逻辑。
+    """
+    id: str
+    cat: str
+    trigger: str
+    rubric: tuple[str, ...]
+    trap: str
+    real_world_link: str = ""
+
+
+def grade_scenario(sp: ScenarioPoint, answer: str) -> float:
+    """rubric 要点命中率（不区分大小写子串匹配）。不判断"对不对"，只判断"覆盖面够不够"。"""
+    if not sp.rubric:
+        return 0.0
+    ans = answer.lower()
+    hit = sum(1 for k in sp.rubric if k.lower() in ans)
+    return hit / len(sp.rubric)
+
+
 def _self_test() -> None:
     sample = [
         DeepPoint(
@@ -70,7 +92,22 @@ def _self_test() -> None:
     assert scores[1] == 1.0, scores
     assert scores[2] == 0.0, scores
     assert drill(sample, cat="test", n=1) == sample
-    print("[PASS] deep_common: DeepPoint/grade_chain/drill 自检通过")
+
+    sp_sample = [
+        ScenarioPoint(
+            id="sc-test-01",
+            cat="test",
+            trigger="如果上线后效果变差，你怎么定位？",
+            rubric=("对比线上线下分布差异", "灰度回滚止损", "分层排查数据/模型/服务"),
+            trap="只会说'看日志'，说不清具体先看哪一层、怎么止损",
+            real_world_link="",
+        )
+    ]
+    assert categories(sp_sample) == ["test"]
+    sp_score = grade_scenario(sp_sample[0], "先对比线上线下分布差异，同时灰度回滚止损")
+    assert sp_score == 2 / 3, sp_score
+    assert grade_scenario(sp_sample[0], "") == 0.0
+    print("[PASS] deep_common: DeepPoint/grade_chain/drill/ScenarioPoint/grade_scenario 自检通过")
 
 
 if __name__ == "__main__":

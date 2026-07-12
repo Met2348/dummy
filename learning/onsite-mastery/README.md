@@ -16,7 +16,7 @@
 
 ## 深水知识点总览
 
-**合计 208 个 DeepPoint / 17 类**，全部通过 `_self_test()`（链长 >= 3 层、id 全局唯一、trigger 不重复，见 `src/deep_common.py` 的 `grade_chain()`）。
+**合计 208 个 DeepPoint / 17 类**（2026 前沿补强前的初版），全部通过 `_self_test()`（链长 >= 3 层、id 全局唯一、trigger 不重复，见 `src/deep_common.py` 的 `grade_chain()`）。
 
 | # | AI 深水类别（`src/ai_deep/`） | 点数 | # | 后端深水类别（`src/backend_deep/`） | 点数 |
 |---|---|:--:|---|---|:--:|
@@ -37,6 +37,31 @@
 用法：`from ai_deep import ALL_DP as AI_DP; from backend_deep import ALL_DP as BE_DP`，配合 `deep_common.drill(bank, cat=None, n=None)` 抽题、`deep_common.grade_chain(dp, your_answers)` 逐层自评。
 
 优先级沿用 `baguwen-mastery` 的既有说明：`ai_deep/` 是你的主战场（研究岗终面几乎全靠它+项目深挖），`backend_deep/` 仅在你也准备国内大厂后端/算法岗终面时才需要投入同等精力。
+
+## 2026 前沿补强（`src/frontier_deep/`）
+
+老手拿初版 208 点二次审阅后的反馈：**深度够了，但不够"新"**——不足以应付 2026 年 top 级别公司的深度面试。这一批不是重复内容，而是三个方向的差异化补强：
+
+1. **内容新鲜度**：每一类都锚定 2025-2026 年真实的论文/技术报告/面经细节（如 circuit tracing/cross-layer transcoder、reward hacking 2026 形式化论文、Shumailov 2024 Nature 的 model collapse 数学结果、DeepSeek 的 MLA-RoPE 适配、Mooncake 的 KVCache 分离式架构），而不是重复初版已覆盖的经典知识。
+2. **一个全新的内容维度**：`dp_multimodal_vla.py`——初版 12 个 AI 类目完全没有多模态/VLA 相关内容，这次补上 VLM vs VLA 建模目标差异、MoT 架构、深度/几何信息注入等前沿细节。
+3. **一个全新的数据结构**：`ScenarioPoint`（`sc_engineering_judgment.py`）——"线上效果变差怎么定位""如何证明新 Prompt 更好"这类问题**没有唯一正确答案**，考的是工程判断力而非知识记忆，不适合用 `DeepPoint` 的"每层带参考答案"格式，`grade_scenario()` 按 rubric 要点覆盖率自查而非对错匹配。
+
+**合计新增 207 点（185 个 DeepPoint / 9 类 + 22 个 ScenarioPoint / 1 类）**，与初版 208 点全局 id/trigger 均无冲突（`ai_deep`+`backend_deep`+`frontier_deep` 三者合计 415 点，程序化验证过）。
+
+| # | 类别（`src/frontier_deep/`） | 点数 | 类型 |
+|---|---|:--:|:--:|
+| 01 | 推理模型与Test-Time-Compute深水 | 21 | DeepPoint |
+| 02 | Agent生产工程2026深水 | 20 | DeepPoint |
+| 03 | 对齐与可扩展监督2026深水 | 21 | DeepPoint |
+| 04 | 可解释性2026前沿深水 | 19 | DeepPoint |
+| 05 | 多模态与VLA深水（全新类目） | 22 | DeepPoint |
+| 06 | 开源前沿模型技术细节深水（DeepSeek/MiniMax） | 22 | DeepPoint |
+| 07 | LLM推理系统2026深水 | 20 | DeepPoint |
+| 08 | 数据与Scaling2026深水 | 19 | DeepPoint |
+| 09 | RAG与工具调用工程2026深水 | 21 | DeepPoint |
+| 10 | 工程判断力场景题(无标准答案) | 22 | **ScenarioPoint** |
+
+用法：`from frontier_deep import ALL_DP as FR_DP, ALL_SP as FR_SP`，`ALL_DP` 复用 `deep_common.drill()`/`grade_chain()`；`ALL_SP` 配合新增的 `deep_common.grade_scenario(sp, your_answer)` 做要点覆盖率自查（不是对错判断）。
 
 ## 项目深挖文档
 
