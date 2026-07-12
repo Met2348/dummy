@@ -14,7 +14,7 @@
 |----|------|------|
 | **保险·真框架** | `src/mlcoding/` — 真 torch 从零 9 件(attention/norm/rope/block/sampling/kv_cache/lora/training_loop/bpe) | ✅ 真跑真反传 |
 | **保险·算法** | `src/leetcode/` — 15 高频 pattern 范例解 + 间隔复习 tracker | ✅ |
-| **薄底·基础** | `src/mlqa/` — 45 题/8 类 rapid-fire + 关键词自评 | ✅ |
+| **薄底·基础** | `src/mlqa/` — 45 题/8 类 rapid-fire + 关键词自评（完整扩展版 306 题/23 类见 `learning/baguwen-mastery/`，含后端通用八股） | ✅ |
 | **主线·研究** | `docs/.../interview-research-hero-project.md` — 对接你 PhD 仓的真复现 spec | 📋 spec(不硬建) |
 
 ## mlcoding —— 面试保险 × 研究肌肉双用
