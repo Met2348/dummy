@@ -56,6 +56,16 @@ Python 基本语法        →  中级 Python(类、装饰器、numpy)
 
 每个知识点固定七步结构(命令/配置 → 一句话是什么 → 为什么RHCSA真考/生产会用到 → 从最容易犯错的做法讲起 → 真实场景例子 → 可运行例子 → 常见坑),不采用 torch/tensorflow/huggingface 系列"面试怎么问"环节(RHCSA 是纯上机操作考试)。和"深挖系列"表格里六条系列的关键差异:本仓库没有 Linux 系统管理场景可挖,"真实场景例子"如实标注为典型运维/RHCSA 考试场景,不冒充仓库代码里挖出来的;部分知识点受 WSL2 内核结构性限制(GRUB引导链路不存在、dm-vdo模块缺失、selinuxfs接口残缺)无法完整验证真实效果,均已在对应小节诚实标注验证颗粒度,不冒充"已完整验证"。
 
+## 专题精读系列(直接对应 `learning/` 下具体专题模块的精读伴读笔记)
+
+和上面"深挖系列"的关键差异:上面六条补的是"读懂 `learning/` 代码需要的通用框架/语言技能"(numpy/torch/HF 库机制本身,不绑定具体研究专题);这里每一条都**直接对应 `learning/` 下一个具体专题模块**,讲的是**同一份代码**,只是换成更适合初学者/面试备考的讲解深度(7 步结构,从最笨的想法讲起,面试怎么问+追问链),不是重复造轮子——定位类似"这份 PhD 级代码,配一份大二学生看得懂、还能扛住面试的精读笔记"。
+
+| 系列 | 对应 `learning/` 专题 | 内容 | 规模 | 状态 |
+|------|---------------------|------|------|------|
+| [long-context-deep-dive/](long-context-deep-dive/00-roadmap.md) | [`learning/long-context/`](../learning/long-context/) | RoPE 外推家族(vanilla→PI→NTK→YaRN→3D-RoPE)→ 长上下文 Attention 架构(Ring/Striped/Infini-Attention)→ 长上下文评测方法论(NIAH/RULER/Lost-in-the-Middle)→ 数据工程与 Capstone(文档打包/课程学习/YaRN+LoRA capstone/KV-cache 显存核算),4 个分类。全系列纯 CPU、零 GPU 依赖 | 17 个知识点 | ✅ 全部完成并验证 |
+
+每个知识点固定七步结构(与 torch/tensorflow/huggingface 系列完全一致:签名/是什么→一句话→**底层机制/为什么这样设计**→AI研究场景→可运行例子(assert验证)→**面试怎么问+追问链**→常见坑)。这套模板比"深挖系列"的轻量六步(numpy/python-advanced/python-idioms)多两块,因为这里讲的是算法/框架机制而非通用语言技能。
+
 ## 自维护工具
 
 - [my-cheatsheet.md](my-cheatsheet.md) —— 你自己的速查表。规则:同一个函数查了 3 次文档,就记一条进去。自己写的记得最牢。
@@ -94,6 +104,9 @@ for_real_dummy/
 ├── rhcsa-bash-deep-dive/              ← Linux系统管理+bash脚本系列(100个知识点,对标RHCSA/EX200,9批,WSL2 Rocky Linux环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 环境声明
 │   └── 01~09-*.md                     ← 每批一个文件
+├── long-context-deep-dive/            ← 长上下文技术精读系列(17个知识点,面试深度,4批,对应learning/long-context/,纯CPU环境)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
+│   └── 01~04-*.md                     ← 每批一个文件
 ├── my-cheatsheet.md                   ← 你自己维护的速查表(持续增长)
 ├── practice/                          ← 你自己动手写代码验证的 notebook
 │   └── 00-getting-started.ipynb       ← 现成的起步文件,含环境自检 + 练习模板
