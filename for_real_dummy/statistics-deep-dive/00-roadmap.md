@@ -45,7 +45,7 @@
 | 01 | I 经典推断统计基础 | 概率论回顾与描述统计 | [01-probability-recap-and-descriptive.md](01-probability-recap-and-descriptive.md) | 6 | ✅ 已完成 |
 | 02 | I | 点估计理论 | [02-point-estimation.md](02-point-estimation.md) | 7 | ✅ 已完成 |
 | 03 | I | 区间估计与假设检验框架 | [03-interval-estimation-and-testing-framework.md](03-interval-estimation-and-testing-framework.md) | 7 | ✅ 已完成 |
-| 04 | I | 经典检验方法 | [04-classical-tests.md](04-classical-tests.md) | 8 | ⬜ 待撰写 |
+| 04 | I | 经典检验方法 | [04-classical-tests.md](04-classical-tests.md) | 8 | ✅ 已完成 |
 | 05 | I | 多重检验与回归推断 | [05-multiple-testing-and-regression-inference.md](05-multiple-testing-and-regression-inference.md) | 7 | ⬜ 待撰写 |
 | 06 | II 实验设计与因果推断 | A/B测试设计与功效分析 | [06-ab-test-design-and-power.md](06-ab-test-design-and-power.md) | 6 | ⬜ 待撰写 |
 | 07 | II | 现代实验方法 | [07-modern-experimentation.md](07-modern-experimentation.md) | 5 | ⬜ 待撰写 |
