@@ -1,4 +1,4 @@
-"""CUTLASS-style layout — row/col major + swizzle."""
+"""CUTLASS-style layout — row/col major + swizzle (swizzle_32b is a documented stub, see its docstring)."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -35,6 +35,18 @@ def swizzle_32b(rows: int, cols: int) -> Layout:
     """XOR-based swizzle to break bank conflicts on stride-32 access.
 
     Effective offset = row * cols + (col XOR (row * cols % 32))
+
+    STUB — not yet implemented. `Layout.offset()` only supports a linear
+    (shape, stride) dot-product (see the dataclass above), and the XOR term
+    above is non-affine, so it cannot be expressed as a stride with the
+    current `Layout` representation. This currently returns the same
+    `Layout` as `row_major()` — i.e. no swizzling is actually applied.
+    `_self_test()` below asserts this present (identity) behavior explicitly
+    so the gap stays visible/tested instead of silently unexercised. A real
+    implementation needs a non-affine offset function (e.g. `Layout` gaining
+    a swizzle hook) — see lecture `03-cutlass.md` and CUTLASS's
+    `Swizzle<B,M,S>` for the real algorithm; left as follow-up, out of scope
+    for this teaching module.
     """
     return Layout((rows, cols), (cols, 1))
 
@@ -55,8 +67,16 @@ def _self_test() -> None:
     assert is_coalesced(cm, axis=0)
     assert not is_coalesced(cm, axis=1)
 
+    # swizzle_32b is a documented STUB (see its docstring): it currently
+    # returns the same Layout as row_major, i.e. identity/no real XOR
+    # transform. Assert that explicitly so the stub stays honestly tested
+    # instead of silently unexercised by this self-test.
+    sw = swizzle_32b(4, 8)
+    assert sw.shape == rm.shape and sw.stride == rm.stride, sw
+    assert is_coalesced(sw, axis=1)  # true only because it's still row_major underneath
+
     # GEMM intuition: A row-major + B col-major = both sides walk K contiguously
-    print("[OK] cutlass_layout")
+    print("[OK] cutlass_layout (swizzle_32b is a stub — see docstring)")
 
 
 if __name__ == "__main__":
