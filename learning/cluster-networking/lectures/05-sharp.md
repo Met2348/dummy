@@ -12,9 +12,10 @@
 T_SHARP = 2 * (link_lat + (size/N) / BW)
 ```
 
-64 GPU 100 MB 在 IB NDR：
-- ring: ~30 ms
-- SHARP: ~0.5 ms → **60× 加速**
+64 GPU 100 MB 在 IB NDR（`python learning/cluster-networking/src/sharp_inline.py` 实测，`_self_test()` 内置的同一场景）：
+- ring: ~4.13 ms
+- SHARP: ~0.066 ms → **63× 加速**（512-GPU 同法算出 511×；两者都约等于 `n_gpus-1`，因为 ring 步数
+  `2(N-1)` 随 N 线性增长而 SHARP 恒为 2 步，大消息下带宽项主导，时间比收敛到步数比）
 
 ## 实战门槛
 
