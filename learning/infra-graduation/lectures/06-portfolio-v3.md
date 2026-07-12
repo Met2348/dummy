@@ -20,14 +20,22 @@
 ## 出门作品集
 
 ```powershell
-python -c "import sys; sys.path.insert(0,'learning/infra-graduation/src'); from portfolio_v3 import write_portfolio_v3; print(write_portfolio_v3('portfolio_v3.md'))"
+# Capstone-3：Portfolio v3（直接跑；self-test 后真落盘到系统临时目录 %TEMP%，不写入仓库）
+python learning/infra-graduation/src/portfolio_v3.py
 
-# Capstone-1
-python learning/infra-graduation/src/sim/capstone_1.py
-
-# Capstone-2
-python learning/infra-graduation/src/eval/mlperf_mock.py
+# Capstone-1 + Capstone-2：sim/*.py（除 common.py 外）和 eval/mlperf_mock.py 用包内绝对导入
+# `from sim.common import ...`，不能像上面 portfolio_v3.py 那样直接裸跑（会报
+# `ModuleNotFoundError: No module named 'sim'`）。手动跑需要先把 src/ 加进 PYTHONPATH：
+$env:PYTHONPATH = "learning/infra-graduation/src"
+python learning/infra-graduation/src/sim/capstone_1.py      # Capstone-1：18 场景 time-to-train + TCO
+python learning/infra-graduation/src/eval/mlperf_mock.py    # Capstone-2：5 task H100 vs B200
+Remove-Item Env:\PYTHONPATH
 ```
+
+> 为什么不能像其它 M8 模块一样"复制粘贴 `python xxx.py` 就行"、也不能再用旧版 `python -c
+> "sys.path.insert(...)"` 一行流：后者从仓库根目录跑会把 `portfolio_v3.md` 直接写进仓库根目录污染仓库
+> （`write_portfolio_v3()` 对相对路径没有防护）。完整原因和三种可选跑法（`$env:PYTHONPATH` / `cd src`
+> 后 `python -m` / 走 `--runbook` harness）见 [`README.md`](../README.md) 的「环境配置」段。
 
 ## 与 Portfolio v2 的差异
 
@@ -41,7 +49,9 @@ python learning/infra-graduation/src/eval/mlperf_mock.py
 
 ## 退出条件 ⭐⭐⭐⭐⭐⭐⭐⭐
 
-- [x] 7 lectures + sim/ + eval/ + portfolio_v3 全 PASS
+- [x] 6 lectures + sim/ + eval/ + portfolio_v3 全 PASS（`01-grad-overview.md`"收官 7 件事"里的
+  "7"是 M8 全系列 7 个 Topic 计数，Topic 7 = 本模块自己，本模块内 `lectures/` 目录实际是 6 篇
+  01-06；早期版本把两个"7"搞混，已订正为本模块真实文件数）
 - [x] 7 tags (gpu-architecture / cuda-essentials / kernel-engineering /
   cluster-networking / storage-dataops / training-orchestration / infra-graduation)
 - [x] 3 个总收尾 tag (`基础-graduation` + `module8-complete` + `series-v3-complete`)
