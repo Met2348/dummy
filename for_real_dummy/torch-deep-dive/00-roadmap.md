@@ -34,8 +34,9 @@
 | 09 | 分布式训练基础机制 | [09-distributed-training-basics.md](09-distributed-training-basics.md) | 6 | ✅ 已完成(已验证,含1处自查修正) |
 | 10 | 序列化与部署基础 | [10-serialization-and-deployment.md](10-serialization-and-deployment.md) | 6 | ✅ 已完成(已验证) |
 | 11 | 调试与常见报错精解 | [11-debugging-and-common-errors.md](11-debugging-and-common-errors.md) | 9 | ✅ 已完成(已验证,系列收尾) |
+| 12 | 进阶深度追加:5 个多级追问链案例 | [12-advanced-interview-depth.md](12-advanced-interview-depth.md) | 5案例(不计入100) | ✅ 已完成(已验证,9/9代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——autograd内存泄漏诊断链(现场证明"未backward"和"backward(retain_graph=True)"两种不同根因的显存轨迹逐点差异仅3.96MB,肉眼/纯数字分不清,必须回代码核实)、CUDA OOM多级诊断链(现场触发真实OOM报错文本+独立复现两次"Windows驱动在显存告急时静默回落到系统共享内存、不可靠触发OOM"这一调研阶段未预料到的真实现象)、DataParallel被DDP取代的决策依据追问(GIL瓶颈量化验证+2进程gloo DDP参数广播/梯度all-reduce真实验证)、inplace报错方案批判迭代(用autograd版本计数器报错文本里的版本号精确定位两次错误修复分别错在哪,40层残差网络量化验证保留inplace=True的40.6%显存差异)、训练循环规模递增(峰值显存线性拆解外推+梯度标准差1/√n统计规律现场验证+BatchNorm在梯度累加下不等价于大batch的真实数值证据);独立复验阶段还额外确认了 agent 自己收尾时修复的一处真实 Windows 多进程坑——案例3源码检查代码原本写在 `__main__` 保护之外,导致 `ProcessPoolExecutor` spawn 出的4个子进程重复执行了5次,现已修复为只执行1次) |
 
-**合计:100 个知识点,11 篇全部完成并独立验证。**
+**合计:100 个知识点,11 篇 + 1 篇进阶深度追加(5 个案例,不计入 100),全部完成并独立验证。**
 
 ---
 

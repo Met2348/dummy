@@ -97,8 +97,9 @@ train 9,846 条 / test 518 条,单一 `text` 字段已是 `### Human: ... ### As
 | 11 | Hub 与模型分享机制 | [11-hub-and-sharing.md](11-hub-and-sharing.md) | 6 | ✅ 已完成(已验证,6/6代码块独立通过;现场发现gated仓库"元数据可查、文件下载受限"两层访问控制的真实边界,license字段与00环境声明交叉验证一致;push_to_hub/gated下载受限于本机无写权限token,如实标注) |
 | 12 | 推理优化基础 | [12-inference-optimization.md](12-inference-optimization.md) | 7 | ✅ 已完成(已验证,7/7代码块独立通过;现场发现`TextIteratorStreamer`默认`skip_prompt=False`会回显prompt、`skip_prompt=True`后新内容开头丢失边界空格(与03类pipeline同源的SentencePiece边界问题)、torch.compile对generate()动态shape场景无明显加速) |
 | 13 | 调试与常见报错精解 | [13-debugging-and-common-errors.md](13-debugging-and-common-errors.md) | 9 | ✅ 已完成(已验证,9/9代码块独立通过;全系列最重要发现——越界token id触发CUDA设备端断言后,整个进程CUDA上下文被永久污染,后续任何无关操作都会失败,唯一恢复方式是重启进程,与可安全catch的标准OOM形成鲜明对比) |
+| 14 | 进阶深度追加:5 个多级追问链案例 | [14-advanced-interview-depth.md](14-advanced-interview-depth.md) | 5案例(不计入101) | ✅ 已完成(已验证,7/7代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——全参→LoRA→QLoRA显存/耗时方案批判迭代(真实复算Adam优化器状态开销977倍差距+4bit压缩精确4倍,交叉验证09类真实训练数字QLoRA耗时是全参2.9倍)、Windows WDDM显存静默failure日志诊断(全新题型,建立在13类+00环境声明记录的真实事故,现场发现00-roadmap.md正文23.76GB与表格24.67GB数字不一致,统一采用与13类代码一致的24.67)、混合精度/梯度累加规模递增(真实测得accum=256时有效batch放大256倍但显存仅多6.9%,直接堆batch则暴涨3.46倍;bf16/fp32显存比例在5个数量级规模跨度里精确稳定等于2.0)、单卡模拟分布式的决策依据追问(3进程gloo all_reduce确定性验证,如实标注未测nccl的边界)、参数高效微调效率真实性验证追问(用09类真实JSON数据证明"效率"一词在LoRA/QLoRA上指向相反结论)) |
 
-**合计:101 个知识点,13 篇,101/101 完成(13/13 篇)。🎉 全部完成。**(自查发现实际完成101个,比计划的100个多1个——各分类页面标题数逐个用`grep`核对过,101这个数字是真实文件内容,不是笔误;不因为101不是整数就将错就错标成100,如实更正)
+**合计:101 个知识点,13 篇 + 1 篇进阶深度追加(5 个案例,不计入 101),101/101 完成(13/13 篇)。🎉 全部完成。**(自查发现实际完成101个,比计划的100个多1个——各分类页面标题数逐个用`grep`核对过,101这个数字是真实文件内容,不是笔误;不因为101不是整数就将错就错标成100,如实更正)
 
 **撰写顺序(按 root/GPU 依赖与耗时递增,不是文件编号顺序):**
 1. 01(tokenizer)→ 02(model加载)→ 03(pipeline)→ 04(datasets)——纯 CPU/轻量 GPU,机制类,先跑顺流程。
