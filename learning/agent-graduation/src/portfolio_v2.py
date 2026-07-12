@@ -219,7 +219,11 @@ if __name__ == "__main__":
     _self_test()
     # Demonstrate the real Capstone-3 deliverable (a pushable portfolio_v2.md) without
     # littering the repo: write to the OS temp dir, not the current working directory.
+    import sys
     import tempfile
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     tmp_out = os.path.join(tempfile.gettempdir(), "agent_graduation_portfolio_v2.md")
     write_portfolio_v2(tmp_out)
