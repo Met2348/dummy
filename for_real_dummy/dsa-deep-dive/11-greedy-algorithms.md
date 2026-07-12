@@ -1,0 +1,446 @@
+# 11 · 贪心算法(Greedy Algorithms)
+
+> 总览见 [00-roadmap.md](00-roadmap.md)。贪心是"每一步都做当下看起来最优的选择,不回头"——比 DP 简单直接得多,但也更容易用错:多数人知道"贪心不一定对",却说不清楚"什么时候对、怎么证明对"。本类的重点正是这个判断力,而不是罗列贪心题目。
+
+---
+
+## 1. 贪心算法总纲与适用条件
+
+**签名/是什么:**
+```
+贪心选择性质(greedy choice property): 通过局部最优选择,能够推导出全局最优解
+最优子结构: 问题的最优解包含子问题的最优解(贪心和DP都需要这个性质)
+```
+
+**一句话:** 贪心算法在每一步都不假思索地选择"当下看起来最好"的选项,并且**永不回头、不重新考虑**之前的选择——这种"一条路走到黑"的策略能得到全局最优解,依赖一个必须被验证、而不是想当然认为成立的前提:贪心选择性质。
+
+**底层机制/为什么这样设计:** 贪心和 DP 都要求问题具有最优子结构,区别在于:DP 会枚举/记录多种可能的子问题解(因为不确定哪种局部选择最终会导向全局最优),贪心则大胆断定"局部最优选择,必然是某个全局最优解的一部分",从而**不需要**枚举其他可能性,直接向前推进。这个断定不是免费的——它要求问题满足贪心选择性质,这个性质**不是所有具有最优子结构的问题都满足**([知识点4](11-greedy-algorithms.md#4-贪心与-dp-的边界)会给出一个具体反例:满足最优子结构、但贪心选择性质不成立,必须用 DP)。这也是为什么贪心算法"看起来简单",证明它正确却常常不简单——简单的是实现,不简单的是"为什么这样实现是对的"这个论证过程。
+
+**AI 研究/工程场景:** [huggingface-deep-dive 06 类](../huggingface-deep-dive/06-accelerate-and-devices.md)讲过的梯度累加策略,如果要在有限显存下决定"每一步该不该立即执行反向传播、还是继续累积更多样本",某些简化的启发式策略本质上是贪心思路(不做全局最优的显存排布规划,只看当前这一步是否超限);这类工程场景里贪心之所以被接受,通常是因为完全最优化的代价过高,贪心提供了一个"足够好、算得快"的实用折中,不追求理论上的绝对最优。
+
+**可运行例子:**
+```python
+def max_non_overlapping(intervals):
+    """经典贪心:活动选择问题(呼应知识点2),这里先作为贪心总纲的具体示例"""
+    if not intervals:
+        return 0
+    intervals = sorted(intervals, key=lambda x: x[1])   # 按结束时间排序 —— 这是贪心策略的核心
+    count = 1
+    last_end = intervals[0][1]
+    for s, e in intervals[1:]:
+        if s >= last_end:
+            count += 1
+            last_end = e
+    return count
+
+assert max_non_overlapping([[1, 2], [2, 3], [3, 4], [1, 3]]) == 3   # 选[1,2],[2,3],[3,4]
+assert max_non_overlapping([]) == 0
+assert max_non_overlapping([[1, 2], [1, 2], [1, 2]]) == 1   # 完全重叠,只能选一个
+
+# 交叉验证:用暴力穷举所有合法(不重叠)子集,找最大规模,验证贪心确实达到最优
+from itertools import combinations
+
+def max_non_overlapping_brute(intervals):
+    n = len(intervals)
+    best = 0
+    for size in range(n, 0, -1):
+        for combo in combinations(range(n), size):
+            selected = sorted(intervals[i] for i in combo)
+            if all(selected[i][1] <= selected[i + 1][0] for i in range(len(selected) - 1)):
+                best = max(best, size)
+        if best > 0:
+            break
+    return best
+
+import random
+random.seed(40)
+for _ in range(15):
+    n = random.randint(0, 8)
+    test_intervals = [[s, s + random.randint(1, 5)] for s in random.sample(range(15), n)]
+    assert max_non_overlapping(test_intervals) == max_non_overlapping_brute(test_intervals)
+
+print("OK: 贪心解法(按结束时间排序)在边界情况下正确, 15组随机测试与暴力穷举找到的真实最优解完全一致")
+```
+本机实测:贪心解法在边界情况(空输入、完全重叠)下均正确;15 组随机测试中,贪心解法和暴力穷举所有合法子集找到的真实最优解完全一致——这个交叉验证本身就是对"贪心选择性质在这个具体问题上成立"的一次实证支持(不是数学证明,[知识点5](11-greedy-algorithms.md#5-如何证明贪心算法正确性交换论证法)会给出真正的证明方法)。
+
+**面试怎么问 + 追问链:** "贪心算法和动态规划都依赖最优子结构,那贪心为什么能比 DP 更简单?" → 追问"能不能举一个例子,满足最优子结构,但贪心选择性质不成立?"(能——[知识点4](11-greedy-algorithms.md#4-贪心与-dp-的边界)的硬币找零反例正是这样一个问题;这个追问检验的是能否理解"最优子结构"和"贪心选择性质"是两个独立的条件,前者是贪心和DP共同的前提,后者才是贪心独有的、必须额外验证的更强条件)。
+
+**常见坑:**
+1. 看到"局部最优"这个词就假设贪心一定适用——贪心选择性质需要针对具体问题验证,不是所有"看起来该贪心"的问题都真的可以贪心解决。
+2. 贪心算法"不回头"这个特性被误解成"实现简单等于容易写对"——实现的代码行数可能很少,但确保这几行代码背后的贪心策略选对了(比如按什么排序、选择依据是什么),往往需要比代码量本身多得多的思考。
+
+---
+
+## 2. 区间调度问题:活动选择与无重叠区间
+
+**签名/是什么:**
+```
+活动选择: 给定多个区间[start, end], 选出最多数量的两两不重叠区间
+关键贪心策略: 按结束时间(不是开始时间!)从小到大排序，依次贪心选择
+```
+
+**一句话:** 活动选择问题的贪心策略是"总是优先选结束最早的活动"——这个选择"最保守地"占用最少的未来时间,给后续能容纳的活动留出最大的空间,是贪心策略里最经典、也最容易被误以为"该按开始时间排序"的一道题。
+
+**底层机制/为什么这样设计:** 直觉上容易想到"按开始时间排序,尽早开始"——但这个策略是错的:一个开始很早、但持续时间极长的活动,会占用大量后续时间,挤掉本可以安排的更多短活动。正确策略是按**结束时间**排序:结束最早的活动,无论它什么时候开始,占用的"未来时间"一定是当前所有候选里最少的,选它之后剩下的可用时间窗口一定不小于选择任何其他活动后剩下的窗口——这个"选结束最早的,不会让未来可选空间变小"的论证,正是[知识点5](11-greedy-algorithms.md#5-如何证明贪心算法正确性交换论证法)要展开的交换论证法思路的直觉版本。
+
+**AI 研究/工程场景:** [07类知识点6](07-heaps-and-priority-queues.md#6-堆与贪心的组合会议室调度问题)已经讲过的会议室调度问题,是活动选择问题的"资源可复用"版本(这里假设只有一个资源位,那边扩展成多个资源);两者共享同一个核心贪心直觉:结束时间越早的任务,越应该被优先处理或者优先释放资源。
+
+**可运行例子:**
+```python
+def max_non_overlapping(intervals):
+    if not intervals:
+        return 0
+    intervals = sorted(intervals, key=lambda x: x[1])
+    count = 1
+    last_end = intervals[0][1]
+    for s, e in intervals[1:]:
+        if s >= last_end:
+            count += 1
+            last_end = e
+    return count
+
+def erase_overlap_intervals(intervals):
+    """求最少需要删除多少个区间,才能让剩下的两两不重叠 —— 是活动选择问题的镜像"""
+    return len(intervals) - max_non_overlapping(intervals)
+
+assert max_non_overlapping([[1, 2], [2, 3], [3, 4], [1, 3]]) == 3
+assert erase_overlap_intervals([[1, 2], [2, 3], [3, 4], [1, 3]]) == 1   # 只需删除[1,3]
+
+# 关键对照:验证"按开始时间排序"这个直觉策略是错的
+def max_non_overlapping_wrong_by_start(intervals):
+    if not intervals:
+        return 0
+    intervals = sorted(intervals, key=lambda x: x[0])   # 错误:按开始时间排序
+    count = 1
+    last_end = intervals[0][1]
+    for s, e in intervals[1:]:
+        if s >= last_end:
+            count += 1
+            last_end = e
+    return count
+
+# 构造一个"最早开始的活动持续时间极长"的场景,真实暴露按开始时间排序的问题
+tricky_case = [[1, 100], [2, 3], [4, 5], [6, 7]]
+correct = max_non_overlapping(tricky_case)
+wrong = max_non_overlapping_wrong_by_start(tricky_case)
+assert correct == 3    # 应该选[2,3],[4,5],[6,7]三个短活动
+assert wrong == 1        # 按开始时间贪心会先选[1,100],之后所有活动都被它挡住
+assert wrong < correct   # 真实复现:错误策略给出的答案明显更差
+
+print(f"OK: 按结束时间排序的正确贪心策略得到最优解{correct}; "
+      f"现场复现按开始时间排序这个错误直觉, 在'最早开始但持续极长'的场景下只能得到{wrong}"
+      f"(明显劣于正确策略, 直接证伪'按开始时间贪心也可以'这个常见误解)")
+```
+本机实测:标准情况下贪心解法(按结束时间排序)得到最优解 3;人为构造一个"最早开始的活动持续时间极长"的场景,验证了"按开始时间排序"这个常见错误直觉只能得到 1(远劣于正确答案 3)——这个对比直接、具体地证伪了"按开始时间贪心也说得通"这个容易产生的误解。
+
+**面试怎么问 + 追问链:** "活动选择问题为什么按结束时间排序,而不是按开始时间或者持续时长排序?" → 追问"按'持续时长从短到长'排序贪心,能不能得到正确答案?"(不能——可以构造反例:一个短活动恰好卡在两个本可以顺畅衔接的长活动中间,优先选这个短活动反而破坏了更优的整体安排;这个追问检验的是能否理解"贪心策略的选择依据"本身需要针对问题精确设计和验证,不是任何看起来合理的排序依据都行得通,唯有"结束时间"这个依据经得起交换论证法的检验)。
+
+**常见坑:**
+1. 直觉性地选择"按开始时间排序"而不是"按结束时间排序"——本知识点已经用具体数字复现了这个错误策略的真实后果。
+2. 边界条件 `s >= last_end` 里等号的处理(区间恰好首尾相接算不算冲突)——这个细节取决于题目对区间开闭的具体约定,呼应[02类知识点9](02-arrays-and-strings.md#9-区间合并类问题的通用处理框架)常见坑提到的同一个问题,必须先明确题目约定。
+
+---
+
+## 3. 哈夫曼编码类问题:带权合并代价最小化
+
+**签名/是什么:**
+```
+给定一组带权重的元素(如字符出现频率),每次合并权重最小的两个,
+合并代价是两者权重之和，求完成全部合并的最小总代价
+用堆维护当前候选,每次取出最小的两个(呼应07类堆的应用)
+```
+
+**一句话:** 哈夫曼编码是"贪心 + 堆"的经典组合应用——每一步都合并当前权重最小的两个节点,这个局部最优选择经过反复迭代,最终能保证总的加权路径长度(对应编码后的总比特数)最小。
+
+**底层机制/为什么这样设计:** 哈夫曼编码为高频字符分配更短的编码、低频字符分配更长的编码,以此压缩整体编码长度——具体做法是每次从候选集合里取出权重最小的两个节点合并成一个新节点(权重是两者之和),重复直到只剩一个节点(即哈夫曼树的根)。堆结构在这里的作用和[07类知识点6](07-heaps-and-priority-queues.md#6-堆与贪心的组合会议室调度问题)一致:快速定位"当前候选里最小的那个/两个"。**为什么优先合并最小的两个是最优策略**:权重越小的元素,合并得越早,它在最终生成的哈夫曼树里离根节点越远(路径越长,对应编码越长)——每次都合并当前最小的两个,恰好保证了"权重小的元素倾向于承担更长的路径",这正是我们希望达到的效果(低频字符编码长、高频字符编码短)。
+
+**AI 研究/工程场景:** [huggingface-deep-dive 02 类](../huggingface-deep-dive/02-model-loading-and-autoclass.md)讲过的 safetensors 格式,以及模型权重的压缩存储场景,哈夫曼编码这类基于符号频率的最优前缀编码思想,是通用无损压缩算法(如 DEFLATE,被 gzip/zip 等广泛使用)的重要组成部分之一。
+
+**可运行例子:**
+```python
+import heapq
+import math
+
+class HuffNode:
+    def __init__(self, freq, char=None, left=None, right=None):
+        self.freq = freq
+        self.char = char
+        self.left = left
+        self.right = right
+    def __lt__(self, other):
+        return self.freq < other.freq   # 让堆能够直接比较HuffNode对象(呼应07类知识点2常见坑)
+
+def build_huffman(freqs):
+    heap = [HuffNode(f, c) for c, f in freqs.items()]
+    heapq.heapify(heap)
+    if len(heap) == 1:
+        return heap[0]
+    while len(heap) > 1:
+        a = heapq.heappop(heap)
+        b = heapq.heappop(heap)
+        merged = HuffNode(a.freq + b.freq, left=a, right=b)
+        heapq.heappush(heap, merged)
+    return heap[0]
+
+def get_codes(node, prefix='', codes=None):
+    if codes is None:
+        codes = {}
+    if node.char is not None:
+        codes[node.char] = prefix or '0'   # 只有一个字符时,编码退化成单个'0'
+        return codes
+    get_codes(node.left, prefix + '0', codes)
+    get_codes(node.right, prefix + '1', codes)
+    return codes
+
+# 经典教材案例(Cormen等《算法导论》哈夫曼编码章节的标准示例数据)
+freqs = {'a': 45, 'b': 13, 'c': 12, 'd': 16, 'e': 9, 'f': 5}
+root = build_huffman(freqs)
+codes = get_codes(root)
+total_bits = sum(freqs[c] * len(codes[c]) for c in freqs)
+assert total_bits == 224   # 教材给出的标准答案
+
+fixed_length_bits = sum(freqs.values()) * math.ceil(math.log2(len(freqs)))
+assert fixed_length_bits == 300   # 6个符号需要3位定长编码,总频次224*3=300... 实际是sum(freqs)*3
+assert total_bits < fixed_length_bits   # 哈夫曼编码确实比定长编码更省空间
+
+# 验证:高频字符('a', freq=45)编码长度应该短于低频字符('f', freq=5)
+assert len(codes['a']) < len(codes['f'])
+
+# 边界情况
+single = build_huffman({'x': 10})
+single_codes = get_codes(single)
+assert single_codes == {'x': '0'}   # 只有一个字符,编码退化
+
+print(f"OK: 哈夫曼编码在经典教材数据上得到总比特数{total_bits}(与教材标准答案一致), "
+      f"明显优于定长编码的{fixed_length_bits}比特; 高频字符编码长度({len(codes['a'])})"
+      f"确认短于低频字符({len(codes['f'])}); 单字符边界情况正确")
+```
+本机实测:使用《算法导论》教材的经典示例数据(6 个字符及其频率),哈夫曼编码得到的总比特数精确等于教材给出的标准答案 224 比特,明显优于定长编码所需的 300 比特;验证了高频字符('a', 频率45)的编码长度确实短于低频字符('f', 频率5);单字符边界情况正确处理。
+
+**面试怎么问 + 追问链:** "哈夫曼编码为什么每次要合并'最小的两个',不能是'最小的三个'或其他数量吗?" → 追问"如果构建的是一棵三叉树(每次合并三个节点)而不是二叉树,哈夫曼算法的思路还成立吗?"(成立,但需要调整——每次合并"最小的三个"节点,前提是符号数量恰好能保证最后合并干净利落(否则需要补充虚拟符号凑数);这个追问检验的是能否理解"两个"只是二叉编码这个具体场景下的参数,算法的核心贪心思路(每次合并当前最小的若干个)可以推广到 k 叉编码,只是需要对参数做相应调整)。
+
+**常见坑:**
+1. 堆里存的自定义节点对象没有实现 `__lt__` 方法——这是[07类知识点2](07-heaps-and-priority-queues.md#2-python-heapq-模块使用与内部实现)常见坑提到的问题在这里的具体重现:堆需要能比较节点大小(按 freq),不重写比较方法会在权重相等时尝试比较节点对象本身而报错。
+2. 只有一个符号时的边界处理遗漏——单个符号不需要合并,但依然需要能获得一个有效编码(通常约定为 `'0'`),如果直接复用"合并直到只剩一个节点"的主循环逻辑而不做特判,可能因为堆里从头到尾只有一个元素、循环条件不成立而漏掉编码生成这一步。
+
+---
+
+## 4. 贪心与 DP 的边界:贪心失效的具体反例
+
+**签名/是什么:**
+```
+硬币找零(非标准币值系统): coins=[1,3,4], amount=6
+贪心(每次选面值最大的能用的硬币): 4+1+1 = 3枚
+真实最优(DP): 3+3 = 2枚
+```
+
+**一句话:** "贪心每次选面值最大的硬币"在人民币/美元这类"标准"币值系统下恰好总是最优,但换成非标准的币值组合(比如硬币面值是 1、3、4),贪心策略会给出比真实最优解更差的答案——这是一个**真实验证过**、不是编造的反例,直接说明"贪心选择性质"必须针对具体问题验证,不能凭直觉假设。
+
+**底层机制/为什么这样设计:** 用 `coins=[1,3,4]` 凑出金额 6:贪心策略每一步都选面值最大的能用硬币——先选 4(剩余 2),剩余 2 又选不了 3 或 4,只能用 1+1,总共 4+1+1=3 枚硬币;但真实最优解是 3+3=2 枚硬币,贪心策略完全没有考虑到"选 3 而不是 4"这个当下看起来"不够贪心"的选择,反而能为后续留下更好的组合空间。这个反例之所以重要,是因为"硬币找零该贪心还是该 DP"是一个极容易被想当然的问题——很多人凭直觉认为"硬币找零显然可以贪心",这在生活中最常见的币值系统(1/5/10/20/50/100 这类"标准"系统)下确实成立,但**这个成立性依赖币值系统本身的特殊结构**(标准术语是"canonical coin system"),不是所有硬币面值组合都具有这个性质。[10类知识点6](10-dynamic-programming-basics.md#6-完全背包与背包问题变体总结)的 `coin_change` DP 解法之所以稳妥,正是因为它不依赖这类特殊结构假设,对任意硬币面值组合都能给出真正最优解。
+
+**AI 研究/工程场景:** 这个反例背后的教训——"某个启发式策略在常见/典型场景下工作得很好,不代表它在所有输入下都最优"——在[huggingface-deep-dive 系列](../huggingface-deep-dive/00-roadmap.md)反复出现:比如 08 类"4bit 量化推理反而比 bf16 慢"这类反直觉的真实发现,提醒工程决策不能只依赖"常见场景下有效"的经验规则,遇到不熟悉的输入分布/参数组合,直觉性的启发式规则值得重新验证。
+
+**可运行例子:**
+```python
+def greedy_coin_change(coins, amount):
+    coins = sorted(coins, reverse=True)
+    count = 0
+    remaining = amount
+    for c in coins:
+        while remaining >= c:
+            remaining -= c
+            count += 1
+    return count if remaining == 0 else -1
+
+def dp_coin_change(coins, amount):
+    dp = [float('inf')] * (amount + 1)
+    dp[0] = 0
+    for c in coins:
+        for j in range(c, amount + 1):
+            dp[j] = min(dp[j], dp[j - c] + 1)
+    return dp[amount] if dp[amount] != float('inf') else -1
+
+# 非标准币值系统:贪心失效的真实反例
+coins = [1, 3, 4]
+amount = 6
+greedy_result = greedy_coin_change(coins, amount)
+optimal_result = dp_coin_change(coins, amount)
+assert greedy_result == 3    # 贪心: 4+1+1
+assert optimal_result == 2    # 真实最优: 3+3
+assert greedy_result > optimal_result   # 真实复现:贪心比最优解差
+
+# 标准币值系统:贪心恰好等于最优(这也是为什么很多人凭生活经验误以为"硬币找零可以贪心")
+standard_coins = [1, 5, 10, 25]   # 美分体系(1/5/10/25美分)
+for amt in [6, 30, 41, 99]:
+    assert greedy_coin_change(standard_coins, amt) == dp_coin_change(standard_coins, amt)
+
+print(f"OK: 非标准币值系统[1,3,4]凑6, 贪心给出{greedy_result}枚(4+1+1), "
+      f"真实最优是{optimal_result}枚(3+3) —— 贪心明显更差, 真实复现贪心策略失效; "
+      f"标准币值系统[1,5,10,25]下, 贪心与DP最优解在多组金额上恰好完全一致"
+      f"(这正是'贪心找零'这个生活直觉的真实来源,但这个直觉不能推广到任意币值系统)")
+```
+本机实测:非标准币值系统 `[1,3,4]` 凑出金额 6,贪心策略给出 3 枚硬币(4+1+1),真实最优(DP)是 2 枚(3+3)——贪心策略确实给出了更差的答案,这不是理论假设,是真实运行验证过的结果;标准美分币值系统 `[1,5,10,25]` 下,贪心和 DP 在多组金额测试中结果完全一致,这正是"硬币找零可以贪心"这个生活直觉的真实来源,但这个直觉的成立性依赖币值系统本身的特殊结构,不能不加验证地推广。
+
+**面试怎么问 + 追问链:** "硬币找零问题,什么时候可以用贪心,什么时候必须用 DP?" → 追问"能不能描述一下,什么样的硬币面值系统能保证贪心总是最优?"(这是一个有一定理论深度的问题:标准/canonical 币值系统有一些已知的充分条件,比如面值之间满足特定的倍数关系;严谨的做法是,除非能证明当前面值系统满足这类性质,否则应该默认使用 DP 这个总是正确、不依赖额外假设的方案;这个追问检验的是能否在"能不能用贪心"这个问题上保持谨慎,而不是凭直觉断定)。
+
+**常见坑:**
+1. 把"生活中找零经验里贪心好用"直接当成"硬币找零问题在算法层面总是能贪心解决"——本知识点的反例是对这个误解最直接的纠正。
+2. 遇到一个新的贪心策略候选,没有先尝试构造反例验证,就直接采用——比[知识点5](11-greedy-algorithms.md#5-如何证明贪心算法正确性交换论证法)更进一步的纪律是:在设计贪心算法时,应该主动尝试"这个策略会不会在某个刁钻输入下失效"这种反向思考,而不是等到线上真实数据触发错误才发现问题。
+
+---
+
+## 5. 如何证明贪心算法正确性:交换论证法
+
+**签名/是什么:**
+```
+交换论证法(exchange argument): 假设存在一个最优解OPT，如果OPT和贪心策略在某一步的选择不同,
+证明"把OPT的这一步选择替换成贪心的选择"不会让结果变差 —— 这样就能把OPT逐步"掰成"贪心解,
+证明贪心解至少和OPT一样好
+```
+
+**一句话:** 交换论证法是证明贪心算法正确性最常用的技术——不是直接证明"贪心解是最优的",而是证明"假设有一个最优解,总能把它一步步改造成贪心解,且改造过程中解的质量不会变差",从而间接证明贪心解本身就是最优的。
+
+**底层机制/为什么这样设计:** 以活动选择问题为例:假设存在一个最优解 OPT,它的第一个活动不是"结束最早"的那个(不是贪心会选的活动)——可以证明,把 OPT 里的第一个活动**替换**成结束最早的那个活动,不会导致任何冲突(因为结束更早的活动,占用的时间窗口是原活动的子集,不会和 OPT 里的其他活动产生新的冲突),且活动总数不变——这样就构造出一个"至少和 OPT 一样好、且第一步选择符合贪心策略"的新最优解;对这个新解的"第二个活动"重复同样的论证,可以逐步把整个 OPT 改造成贪心解,过程中最优性从未被破坏,因此贪心解本身也是最优的。这个论证方法的核心步骤是:①假设一个最优解;②找到它和贪心解的第一处分歧;③证明"替换成贪心的选择"不会变差;④重复直到两者完全一致。
+
+**AI 研究/工程场景:** 交换论证法本身是一种通用的数学证明技巧,不限于算法领域——[huggingface-deep-dive 09 类](../huggingface-deep-dive/09-finetuning-comparison-lab.md)反复强调的"不满足于结果看起来对,要能讲清楚为什么对"这个纪律,在贪心算法这个具体领域,交换论证法正是回答"为什么"的标准工具,而不是仅仅停留在"我测试了很多例子,好像都对"这种不完全的实证支持。
+
+**可运行例子:**
+```python
+def max_non_overlapping_greedy(intervals):
+    if not intervals:
+        return 0
+    intervals = sorted(intervals, key=lambda x: x[1])
+    count = 1
+    last_end = intervals[0][1]
+    for s, e in intervals[1:]:
+        if s >= last_end:
+            count += 1
+            last_end = e
+    return count
+
+# 交换论证法的直觉可以用代码具体演示:验证"把任意一个合法解的第一个活动,
+# 替换成结束时间最早的活动"之后,依然是合法解(不产生新冲突),且规模不变
+def can_swap_to_earliest_end(intervals):
+    """演示交换论证的核心步骤:找到一个非贪心的合法解,替换第一个活动为贪心选择后,
+    验证依然合法且规模相同"""
+    sorted_by_end = sorted(intervals, key=lambda x: x[1])
+    earliest_end_interval = sorted_by_end[0]
+
+    # 构造一个"非贪心"的合法解:选一个不是最早结束、但依然彼此不重叠的组合
+    # (这里用暴力方式找一个具体的非贪心合法解作为演示)
+    from itertools import combinations
+    n = len(intervals)
+    greedy_size = max_non_overlapping_greedy(intervals)
+    for combo in combinations(range(n), greedy_size):
+        selected = sorted((intervals[i] for i in combo), key=lambda x: x[0])
+        if all(selected[i][1] <= selected[i + 1][0] for i in range(len(selected) - 1)):
+            if selected[0] != earliest_end_interval:   # 找一个第一个活动不是"结束最早"的合法解
+                # 替换第一个活动为结束最早的那个,验证依然合法
+                new_solution = [earliest_end_interval] + selected[1:]
+                new_solution_sorted = sorted(new_solution, key=lambda x: x[0])
+                still_valid = all(new_solution_sorted[i][1] <= new_solution_sorted[i + 1][0]
+                                   for i in range(len(new_solution_sorted) - 1))
+                return still_valid, len(new_solution) == len(selected)
+    return None, None   # 没找到"非贪心"的最优解可供演示(比如贪心解本身就是唯一最优解)
+
+test_intervals = [[1, 4], [2, 3], [4, 6], [5, 7], [6, 9]]
+valid_after_swap, same_size = can_swap_to_earliest_end(test_intervals)
+if valid_after_swap is not None:
+    assert valid_after_swap    # 替换后依然是合法(不重叠)的解
+    assert same_size            # 替换后解的规模没有变化(没有变差)
+
+print(f"OK: 交换论证法的核心步骤(把最优解的第一个活动替换成贪心选择)现场验证: "
+      f"替换后依然合法={valid_after_swap}, 规模保持不变={same_size} —— "
+      f"这正是交换论证能够成立的两个关键条件, 支撑了'贪心解至少和任意最优解一样好'这个结论")
+```
+本机实测:构造一个"第一个活动不是结束最早"的合法解,把它的第一个活动替换成贪心策略会选择的"结束最早"的活动后,验证了替换后依然是合法的不重叠方案,且解的规模没有变化——这正是交换论证法证明贪心正确性所依赖的两个关键性质在一个具体案例上的真实展示。
+
+**面试怎么问 + 追问链:** "你怎么证明一个贪心算法是正确的,而不只是'测试了很多例子看起来都对'?" → 追问"交换论证法和数学归纳法有什么相似之处?"(两者都是"从一个基础情形出发,通过可重复的归纳步骤,把结论推广到一般情形"这个思路的应用——交换论证法的"归纳步骤"是"每次消除一处和贪心解的分歧、且不让解变差",数学归纳法的归纳步骤是"假设第 k 步成立,推出第 k+1 步也成立";这个追问检验的是能否看出交换论证法本质上是数学归纳思想在贪心算法证明这个具体场景下的应用形式,而不是一个孤立的、只适用于算法题的特殊技巧)。
+
+**常见坑:**
+1. 只用"测试了几个例子,结果都对"作为贪心算法正确性的证据——这是[02类知识点7](02-arrays-and-strings.md#7-循环不变量方法论)已经反复强调过的不严谨验证方式,在贪心算法场景下尤其危险,因为贪心策略"看起来合理"但实际错误的情况(呼应[知识点4](11-greedy-algorithms.md#4-贪心与-dp-的边界)的硬币找零反例)并不罕见。
+2. 交换论证法证明时,只验证了"替换后不会变差",却没有验证"替换后依然是合法解"——这两个条件缺一不可,只满足其中一个不能构成完整的证明。
+
+---
+
+## 6. 贪心常见坑
+
+**签名/是什么:**
+```
+局部最优 != 全局最优 -> 在没有验证贪心选择性质的情况下,想当然地使用贪心策略
+```
+
+**一句话:** 贪心算法最根本的坑,就是把"这个局部选择看起来最合理"当成"这样做全局结果一定最优"的充分理由——本篇[知识点4](11-greedy-algorithms.md#4-贪心与-dp-的边界)已经用真实反例证明这个跳跃在没有验证的情况下是不成立的,这里补充一个专门针对"局部最优陷阱"的具体案例。
+
+**底层机制/为什么这样设计:** "局部最优不等于全局最优"这句话本身很多人都听过,但真正的坑在于:**贪心策略往往在大多数测试用例下都恰好给出正确答案**,只有在特定构造的输入下才会暴露问题——这意味着"随手测试几个例子,都对"这种验证方式,对贪心算法的错误检出能力是特别弱的,错误的贪心策略经常能通过一批"温和"的测试用例,只在精心构造(或者线上流量里偶然出现)的刁钻输入下才会暴露差距。这也是为什么本篇反复强调交换论证法(或至少是"暴力穷举对照验证",如本篇[知识点1](11-greedy-algorithms.md#1-贪心算法总纲与适用条件)、[知识点2](11-greedy-algorithms.md#2-区间调度问题活动选择与无重叠区间)的可运行例子所做的)这类更严格的验证手段,而不是依赖"跑几个例子看着对"的弱验证。
+
+**AI 研究/工程场景:** 这类"大多数情况下表现良好,只在特定输入下失效"的问题,和[huggingface-deep-dive 13 类](../huggingface-deep-dive/13-debugging-and-common-errors.md)讲过的"哪些警告可以放心忽略"形成有趣的对照——两者都在讨论"什么时候可以信任一个看似可靠的信号/策略",区别是警告问题关心的是"识别可以忽略的噪音",贪心算法正确性关心的是"识别看似正确、实则脆弱的策略",本质上都是"不能仅凭表面证据下结论"这条纪律的不同应用场景。
+
+**可运行例子:**
+```python
+def can_partition_greedy_wrong(nums):
+    """错误的贪心尝试:分割等和子集问题(呼应10类知识点5),
+    贪心地把数字从大到小依次分配给'当前和更小'的那一组"""
+    total = sum(nums)
+    if total % 2 != 0:
+        return False
+    nums_sorted = sorted(nums, reverse=True)
+    group_a, group_b = 0, 0
+    for num in nums_sorted:
+        if group_a <= group_b:
+            group_a += num
+        else:
+            group_b += num
+    return group_a == group_b
+
+def can_partition_dp_correct(nums):
+    """10类知识点5已经验证过的正确DP解法"""
+    total = sum(nums)
+    if total % 2 != 0:
+        return False
+    target = total // 2
+    dp = [False] * (target + 1)
+    dp[0] = True
+    for num in nums:
+        for j in range(target, num - 1, -1):
+            dp[j] = dp[j] or dp[j - num]
+    return dp[target]
+
+# 一个真实反例的具体来源说明:最初手工构造了[1,2,3,4,5,9]想当作反例,
+# 但现场验证发现贪心策略在这个具体案例上恰好也给出了正确答案(True)——手工直觉挑选反例并不可靠,
+# 改用随机搜索的方式,真正找到了一个贪心和DP判断不一致的具体案例
+tricky_nums = [11, 4, 8, 13, 4, 15, 20, 7]   # 总和82,目标41: {8,13,20}=41 和 {11,4,4,15,7}=41,存在合法分割
+greedy_result = can_partition_greedy_wrong(tricky_nums)
+correct_result = can_partition_dp_correct(tricky_nums)
+assert correct_result is True     # DP正确找到了合法分割
+assert greedy_result is False      # 贪心策略在这个案例上误判为"不存在"合法分割
+assert greedy_result != correct_result   # 真实复现:贪心策略给出了错误答案
+
+# 用随机测试统计贪心策略的真实错误率(不是理论声称,是真实统计出的数字)
+import random
+random.seed(41)
+total_tests = 200
+mismatch_count = 0
+for _ in range(total_tests):
+    test_nums = [random.randint(1, 20) for _ in range(random.randint(1, 8))]
+    if can_partition_greedy_wrong(test_nums) != can_partition_dp_correct(test_nums):
+        mismatch_count += 1
+
+assert mismatch_count > 0   # 真实存在贪心判断错误的案例,不是理论上的担忧
+
+print(f"OK: 构造的具体案例{tricky_nums}上, 贪心策略给出{greedy_result}, 正确答案(DP)是{correct_result}; "
+      f"200组随机测试中, 贪心策略与正确DP解法的判断不一致的案例有{mismatch_count}个"
+      f"(真实统计出的错误率约{mismatch_count/total_tests*100:.1f}%, 不是理论上的担忧, "
+      f"且错误率不算低, 足以说明这个贪心策略不可信赖)")
+```
+本机实测(含一次真实的自我修正):最初手工构造 `[1,2,3,4,5,9]` 想作为反例,现场验证却发现贪心策略在这个具体案例上碰巧也给出了正确答案——**手工直觉挑选反例本身并不可靠**,改用随机搜索后,真正找到了 `[11,4,8,13,4,15,20,7]` 这个贪心与 DP 判断不一致的具体案例:真实存在的合法分割是 `{8,13,20}` 和 `{11,4,4,15,7}`(两边都是 41),但贪心策略(从大到小分配给当前和更小的一组)最终得到 42 比 40,误判为"不存在"合法分割。200 组随机测试的统计进一步显示,这类判断不一致的案例比例不算低——直接说明"局部最优不等于全局最优"在这个具体贪心策略上是一个会真实发生、而不只是理论上存在的问题。
+
+**面试怎么问 + 追问链:** "如果你设计的一个贪心策略在你测试的所有例子上都通过了,你会直接采用它吗?" → 追问"在什么情况下,'测试很多例子都通过'依然不足以说服你这个贪心策略是对的?"(当问题的解空间很大、测试用例的构造方式没有刻意覆盖边界/极端情况时,即使通过了几十上百个随机测试,依然可能存在错误率不高但真实存在的失效场景——本知识点的具体案例就是如此;唯一真正可靠的验证方式是交换论证法这类数学证明,或者至少是针对该问题特点、有意识构造出的边界/刁钻测试用例,而不是纯随机的大量测试;这个追问检验的是对"验证的强度"有没有清醒的认知,而不是把"测试数量多"简单等同于"验证充分")。
+
+**常见坑:**
+1. 只用少量、未经刻意设计的测试用例验证贪心策略,就直接在生产代码里采用——本知识点的随机测试统计已经证明,这类验证方式对某些错误贪心策略的检出能力是不足的。
+2. 看到一个贪心策略在"看起来有代表性"的例子上表现正确,就停止进一步验证——真正有代表性的测试用例设计,应该有意识地去构造"贪心策略的假设最可能被打破"的边界场景,而不是随手挑几个例子。
+
+---
+
+*本篇 6 个知识点全部在仓库根目录 `.venv` 真实测试验证(含与暴力穷举/DP最优解的交叉验证、真实反例的现场复现、以及贪心策略错误率的随机统计)。*
