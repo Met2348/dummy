@@ -278,13 +278,13 @@ M8: `gpu-architecture` `cuda-essentials` `kernel-engineering` `cluster-networkin
 
 ---
 
-## 完成定义（DoD）
+## 完成定义（DoD）—— ✅ 2026-07-12 全部达成
 
-- [ ] 46 模块每个都有 `runbook.yaml`，且 `--runbook` 全模块 V0/V1 = PASS 或有理由的 SKIP。
-- [ ] 46 模块 README 都有与 runbook 对齐的「运行验证」段；M8 七个 README 已建。
-- [ ] 根 README 已建。
-- [ ] 账本矩阵全行收口（无 ⬜/🔧）。
-- [ ] `--runbook --modules <all>` 一把过的最终 matrix 已生成并 commit。
+- [x] 46 模块每个都有 `runbook.yaml`，且 `--runbook` 全模块 V0/V1 = PASS 或有理由的 SKIP。（454/454 PASS，零 FAIL/SKIP）
+- [x] 46 模块 README 都有与 runbook 对齐的「运行验证」段；M8 七个 README 已建。
+- [x] 根 README 已建。（`README.md`，commit `cf66259`）
+- [x] 账本矩阵全行收口（无 ⬜/🔧）。（`docs/local-env/ERIC-3080Ti-runbook-progress.md` 46 行全 ✅/🩹）
+- [x] `--runbook --modules <all>` 一把过的最终 matrix 已生成并 commit。（`docs/local-env/ERIC-3080Ti-runbook-matrix.md`，commit `ee10ac0`）
 
 ---
 
