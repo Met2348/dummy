@@ -53,7 +53,7 @@ Python 基本语法        →  中级 Python(类、装饰器、numpy)
 | 系列 | 内容 | 规模 | 状态 |
 |------|------|------|------|
 | [rhcsa-bash-deep-dive/](rhcsa-bash-deep-dive/00-roadmap.md) | Linux 系统管理 + bash 脚本编程,对标 Red Hat 官方 RHCSA(EX200,RHEL 10 基准)认证范围,9 个分类:必备工具与文本处理→进程与系统运行→本地存储与LVM→文件系统与权限→软件与系统部署→用户组管理→网络配置→安全(SELinux/防火墙)→bash脚本编程本身。验证环境为 WSL2 Rocky Linux 10.2(真实 systemd + root),涉及改网络/权限的知识点全部在隔离沙箱(dummy网卡/loop device)里操作,不影响宿主环境 | 100 个知识点 | ✅ 全部完成并验证 |
-| [dsa-deep-dive/](dsa-deep-dive/00-roadmap.md) | 数据结构与算法,对标技术终面 1 小时持续深挖难度,18 个分类:复杂度分析与Python内置容器内核→数组字符串技巧→链表→二分查找→栈队列(含LRU/LFU设计)→排序从零实现→堆/优先队列→树→回溯→DP基础→贪心算法→Trie与字符串匹配→位运算与数学→图论基础→图论进阶(最短路/MST/强连通分量/网络流/二分图匹配)→DP进阶(区间/状压/数位/树形/概率期望/博弈)→线段树与树状数组→面试方法论与代码规范,收尾 1 篇 [1小时模拟终面capstone](dsa-deep-dive/19-mock-interview-capstone.md)(不是知识点列表,是完整还原终面节奏的场景叙事)。验证环境为仓库根目录 `.venv`,纯 Python 标准库,不需要任何第三方包 | 140 个知识点 + 1 篇 capstone | ✅ 全部完成并验证 |
+| [dsa-deep-dive/](dsa-deep-dive/00-roadmap.md) | 数据结构与算法,对标技术终面 1 小时持续深挖难度,18 个分类:复杂度分析与Python内置容器内核→数组字符串技巧→链表→二分查找→栈队列(含LRU/LFU设计)→排序从零实现→堆/优先队列→树→回溯→DP基础→贪心算法→Trie与字符串匹配→位运算与数学→图论基础→图论进阶(最短路/MST/强连通分量/网络流/二分图匹配)→DP进阶(区间/状压/数位/树形/概率期望/博弈)→线段树与树状数组→面试方法论与代码规范,收尾 1 篇 [1小时模拟终面capstone](dsa-deep-dive/19-mock-interview-capstone.md)(不是知识点列表,是完整还原终面节奏的场景叙事),再收尾 1 篇 [进阶深度追加](dsa-deep-dive/20-advanced-interview-depth.md)(基于真实调研2026大厂二面追问模式撰写的5个多级追问链案例:LRU并发/分布式、TopK海量数据、限流方案批判迭代、日志诊断真实系统行为、项目真实性验证追问)。验证环境为仓库根目录 `.venv`,纯 Python 标准库,不需要任何第三方包 | 140 个知识点 + 1 篇 capstone + 1 篇进阶深度追加 | ✅ 全部完成并验证 |
 
 rhcsa-bash-deep-dive 每个知识点固定七步结构(命令/配置 → 一句话是什么 → 为什么RHCSA真考/生产会用到 → 从最容易犯错的做法讲起 → 真实场景例子 → 可运行例子 → 常见坑),不采用 torch/tensorflow/huggingface 系列"面试怎么问"环节(RHCSA 是纯上机操作考试)。和"深挖系列"表格里六条系列的关键差异:本仓库没有 Linux 系统管理场景可挖,"真实场景例子"如实标注为典型运维/RHCSA 考试场景,不冒充仓库代码里挖出来的;部分知识点受 WSL2 内核结构性限制(GRUB引导链路不存在、dm-vdo模块缺失、selinuxfs接口残缺)无法完整验证真实效果,均已在对应小节诚实标注验证颗粒度,不冒充"已完整验证"。
 
@@ -109,10 +109,11 @@ for_real_dummy/
 ├── rhcsa-bash-deep-dive/              ← Linux系统管理+bash脚本系列(100个知识点,对标RHCSA/EX200,9批,WSL2 Rocky Linux环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 环境声明
 │   └── 01~09-*.md                     ← 每批一个文件
-├── dsa-deep-dive/                     ← 数据结构与算法系列(140个知识点+1篇capstone,面试深度,18批,纯Python标准库环境)
+├── dsa-deep-dive/                     ← 数据结构与算法系列(140个知识点+1篇capstone+1篇进阶深度追加,面试深度,18批,纯Python标准库环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 复杂度验证方法论 + 经典题单映射表附录
 │   ├── 01~18-*.md                     ← 每批一个文件
 │   ├── 19-mock-interview-capstone.md  ← 1小时模拟终面capstone(场景叙事,非知识点列表)
+│   ├── 20-advanced-interview-depth.md ← 进阶深度追加(基于真实调研的5个多级追问链案例,非知识点列表)
 │   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
 ├── long-context-deep-dive/            ← 长上下文技术精读系列(17个知识点,面试深度,4批,对应learning/long-context/,纯CPU环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
