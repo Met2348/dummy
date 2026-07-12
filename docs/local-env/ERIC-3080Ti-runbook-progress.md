@@ -4,6 +4,17 @@
 
 ## 🧭 RESUME PROTOCOL（compact 后从这里开始）
 
+**⭐ 46/46 模块验证已全部完成（2026-07-12，见下方模块矩阵全部 ✅）。** 如果你是接续会话看到这里：
+模块级验证不再是下一步，直接跳到下方「Phase 2 剩余任务」。以下 1-5 步是模块验证阶段的协议，仅在
+模块矩阵出现新的非 ✅/⏭ 行时才需要重新启用（例如发现遗漏模块，或某模块因仓库变更需要重验）。
+
+**Phase 2 剩余任务（46/46 完成后）**：
+1. 创建根 `README.md`（46 模块知识地图，spec §7 / plan Phase 2 Task 2.2）。
+2. 全模块一把过 `--runbook --modules <all 46>` 最终验证 + 提交最终 matrix（plan 的 Definition of Done）。
+3. 完成后转回 `for_real_dummy` 新系列（long-context / PEFT / kernel-GPU / alignment-algorithms），用户已明确指示"先完成全部挂起模块验证，再做新系列"，本任务完成即满足该前提。
+
+---
+
 1. 读这三个文件：
    - 标准/方法：[`docs/superpowers/specs/2026-06-20-runbook-verification-design.md`](../superpowers/specs/2026-06-20-runbook-verification-design.md)
    - 计划/循环：[`docs/superpowers/plans/2026-06-20-runbook-verification.md`](../superpowers/plans/2026-06-20-runbook-verification.md)
@@ -28,6 +39,7 @@
 - 2026-07-12：**M7(agent技术栈) 7/7 全部完成**：agent-foundations（12 demo 全绿，无需改码，capstone_react 实测 Final Answer=18 与断言一致；⚠️lectures/02-react.md 用户手写笔记全程未触碰）、rag-essential（15 demo 全绿，修讲义"5→6策略"漏HippoRAG+文档/query数量漂移，新增hash_embed非固定种子坑记录）、tool-use-mcp（13 demo 全绿，无需改码，MCP/A2A均in-process mock无挂起风险）、multi-agent-orchestration（14 demo 全绿，无需改码，cost_analyzer实测16.7x token比）、agent-memory-context（13 demo 全绿，无需改码，确认hash_embed用blake2b稳定哈希、从设计上规避rag-essential踩过的坑）、agent-framework-stack（10 demo 全绿，无需改码，纯stdlib零真实框架依赖）、agent-graduation（**M7毕业模块**，修1真bug：portfolio_v2从不落盘按eval-graduation先例补写临时目录；修5处讲义漂移，含撰写时凭空写的打分表换成实测真实值）。**累计 39/46。下一步：M8 系统与Infra（7个，均缺README，从 gpu-architecture 起）。**
 - 2026-07-12：**M8 进度 3/7**：gpu-architecture（新建README，8 demo全绿，修1处死代码，独立发现ridge point非单调反直觉洞察）、cuda-essentials（新建README，9 demo全绿，无需改码，页首澄清"cuda"模块名下是纯Python机制模拟非真kernel）、kernel-engineering（新建README，6 demo全绿；**首次遇到子代理429限额中断**——检查working tree发现子代理已完成绝大部分工作仅未提交，inline复核全部6脚本+test_all.py+runbook harness+submodule pin+论文导读行数后直接提交，未重派；修1处诚实标注(`swizzle_32b()`是documented stub非bug)+1处文档数字漂移)。**累计 42/46。下一步：cluster-networking(M8 #43)。**
 - 2026-07-12：**M8 进度 6/7**：cluster-networking（新建README，7 demo全绿，修2处文档漂移，独立发现SHARP加速比精确收敛n_gpus-1的推导）、storage-dataops（新建README，7 demo全绿，修1处文档漂移+2处纯注释问题，独立核实hashlib.sha1跨进程确定性+checkpoint零真实文件I/O两个风险点）、training-orchestration（新建README，8 demo全绿，**零代码改动零文档漂移**——本系列罕见的"文档从一开始就同步"模块；确认"ray可选栈"疑虑不成立，两个ray_*.py零import ray、纯dataclass模拟Ray论文机制）。**累计 45/46。下一步：infra-graduation(M8 #46，M8毕业模块，最后一个模块)。**
+- 2026-07-12：**infra-graduation（M8 #46）完成 → runbook-verification-task 全部 46/46 模块收官**。M8 毕业模块，src/ 首次采用包结构（sim/+eval/子包），新建README详解"包导入陷阱"（5脚本裸跑ModuleNotFoundError，harness自动PYTHONPATH不受影响，人工跑法需PYTHONPATH/-m/harness三选一）。修1真bug：portfolio_v3.py从不落盘真实交付物（同eval-graduation/agent-graduation先例修复）。**独立复核环节额外抓到2个子代理报告未覆盖的问题**：①该修复在Windows中文locale控制台GBK编码下UnicodeEncodeError（真实PowerShell复现，子代理"已验证"的说法与实际不符）→修复+顺手修了同款bug的agent-graduation/portfolio_v2.py（独立commit）；②删除仓库根目录一个已提交的历史遗留文件portfolio_v3.md（与本模块同一首次提交，CRLF归一化后与当前代码输出逐字节相同，实锤为旧版CWD依赖一行流误跑产生）。修2处文档漂移（7→6 lectures计数混淆；18场景表格手估值→实测替换）。**M8(系统与Infra) 7/7 全部收官。18个挂起模块（M6尾4+M7全部7+M8全部7）全部完成，全仓46/46模块验证任务完成。下一步：Phase 2 Task 2.2 创建根README.md(46模块知识地图) + 全模块一把过最终验证 + 完成后转回for_real_dummy新系列。**
 
 ## 状态图例
 
@@ -91,7 +103,7 @@
 | 43 | cluster-networking | M8 | ✅ | ✅ | — | ✅ | ✅ | **新建 README**(仿前3站M8模板)。7 demo V1 全绿(common/fabric_topology/allreduce_algos/nccl_collectives/sharp_inline/nccl_original_minimal+capstone_cluster_sim)，全 stdlib-only/CPU-only。5 脚本互相 `from common import ...` 跨文件 import(同 gpu-architecture/cuda-essentials 模式)，已实测直接跑无需 PYTHONPATH。**src 无需改码**(0 bug，7/7 首跑全过)。修 2 处文档漂移：`05-sharp.md`/`06-capstone.md` 的 ring/SHARP 示例时延数字与当前 `sharp_inline.py`/`capstone_cluster_sim.py` 实测不符(公式/LINKS 早期迭代过未同步)→实测 stdout 逐字替换，补充"加速比精确收敛到 n_gpus-1"推导。**独立发现**：`nccl_original_minimal.py`(212行，唯一无对应lecture，仅论文导读§16提及)的 `ProtocolProfile.bandwidth_fraction`×`payload_fraction` 复合有效带宽易被误读(LL表面35%实际复合仅17.5%)。`capstone_cluster_sim.py` 核实真调用 ring/halving_doubling/sharp 三个算法实现(非硬编码)。V2 test_all.py 7/7 passed | 401173c |
 | 44 | storage-dataops | M8 | ✅ | ✅ | — | ✅ | ✅ | **新建 README**(仿前4站M8模板)。7 demo V1 全绿(common/dataloader/sharding/checkpoint/webdataset_style/data_loading_original_minimal+capstone_ckpt_recovery)，全 stdlib-only/CPU-only。修 3 处纯注释/文档问题(零行为改动，改后重跑逐字节输出不变)：①`dataloader.py` docstring 公式笔误(漏`/n_workers`，函数体从未错)；②`sharding.py` 清理死代码(`import random`从未被调用)+ 订正误导性注释(声称range会"unlucky"但实测最均衡0.0%，根因是周期50恰好整除1250样本/shard，补充实测过的真实失衡场景聚簇倾斜363%)；③`06-capstone.md`表格async blocking(min)"0.03"→实测精确"0.00"(`blocking=False`短路，非"很小")。**独立核实两个我点名的风险点**：`sharding.py`用`hashlib.sha1`(非内置`hash()`)，3进程+`PYTHONHASHSEED=42`验证跨进程确定性，非rag-essential踩过的坑；`checkpoint.py`/`capstone_ckpt_recovery.py`grep确认零`open(`/`write(`/`os.`调用，纯数值代价模型不写真实文件。V2 test_all.py 7/7 passed | 491de3c |
 | 45 | training-orchestration | M8 | ✅ | ✅ | — | ✅ | ✅ | **新建 README**(仿前5站M8模板)。8 demo V1 全绿(common/slurm_scheduler/gang_scheduling/fault_tolerance/ray_actors/ray_original_minimal/elastic_training+capstone_cluster_run)，全 stdlib-only/CPU-only。**零代码改动、零文档漂移**(6篇lecture+论文导读逐一核对，与实测输出完全一致，本系列罕见)。**确认"ray 可选栈"疑虑不成立**：`.venv`未装ray(`ModuleNotFoundError`)，但`ray_actors.py`/`ray_original_minimal.py`零`import ray`，纯dataclass手写模拟Ray论文(Moritz et al. 2018 OSDI)机制——前者模拟actor编程模型(有状态方法调用)，后者模拟系统架构(GCS/bottom-up调度器/对象存储/lineage容错)，均不实现Placement Group(grep核实零命中)。确认`fifo_with_backfill`是真backfill(队头大job不阻塞后面能塞进空隙的小job)非伪装FIFO。独立指出`capstone_cluster_run.py`的"24h"是叙事标签非真时间步进仿真(代码自身注释"Single scheduling pass at t=0"已诚实披露)。V2 test_all.py 8/8 passed | eaa3000 |
-| 46 | infra-graduation | M8 | ❌→写 | ⬜ | ⬜ | ⬜ | ⬜ | **缺 README**；test_all.py | |
+| 46 | infra-graduation | M8 | ✅ | ✅ | — | ✅ | ✅ | **M8 毕业模块，全仓 46/46 最后一个**。新建 README（详解 src/ 包结构与前 6 个 M8 模块平铺脚本的差异）。8 demo V1 全绿(sim/{common,cost_model,time_to_train,topology_selector,capstone_1}+eval/{mlperf_mock,mlperf_original_minimal}+portfolio_v3)。**包导入陷阱**：5 个脚本用 `from sim.common import ...` 包内绝对导入，裸跑报 `ModuleNotFoundError`；harness `_env_for()` 自动注入 `PYTHONPATH=<module>/src` 故 runbook 本身不受影响，README/讲义已补 3 种人工正确跑法。**修 1 真 bug**：`portfolio_v3.py` `__main__` 原只调 `_self_test()`（写相对路径临时文件后立即删除），从不落盘真实交付物，与讲义 exit checklist"portfolio_v3.md 生成"矛盾→仿 eval-graduation/agent-graduation 先例补写 `tempfile.gettempdir()`。**独立复核额外发现并修复**：该修复在 Windows 中文 locale 控制台（GBK）会 `UnicodeEncodeError`（真实 PowerShell 复现，非 Bash 转译问题；子代理声称"已在真实PowerShell测过"但未捕捉到）→ 加 `sys.stdout.reconfigure(utf-8)`；同款 bug 也存在于更早已提交的 `agent-graduation/src/portfolio_v2.py`，已一并修复（独立 commit `af5d866`）。**删除仓库根目录已提交的 `portfolio_v3.md`**：`git log` 定位到与本模块同一首次提交(`3d8f12b`)，CRLF 归一化后与当前 `write_portfolio_v3()` 输出逐字节相同——实锤为旧版一行流命令从仓库根误跑产生的历史遗留文件，非应跟踪文件。修 2 处文档漂移：`06-portfolio-v3.md` "7 lectures"→"6 lectures"(混淆了M8全系列7个Topic计数与本模块lecture文件数)；`02-mini-cluster-sim.md` 18场景表格手估草稿值→实测替换(70B-5T/4096x H100 一行差6倍以上)，独立验证B200/H100 speedup精确收敛于GPU峰值算力比2250/989=2.275。V2 test_all.py 8/8 passed | 7e773bc |
 
 ## 全局任务（非单模块）
 
