@@ -68,6 +68,7 @@ dsa-deep-dive 的知识点结构和"深挖系列"六条完全一致的七步(签
 | [long-context-deep-dive/](long-context-deep-dive/00-roadmap.md) | [`learning/long-context/`](../learning/long-context/) | RoPE 外推家族(vanilla→PI→NTK→YaRN→3D-RoPE)→ 长上下文 Attention 架构(Ring/Striped/Infini-Attention)→ 长上下文评测方法论(NIAH/RULER/Lost-in-the-Middle)→ 数据工程与 Capstone(文档打包/课程学习/YaRN+LoRA capstone/KV-cache 显存核算),4 个分类。全系列纯 CPU、零 GPU 依赖 | 17 个知识点 | ✅ 全部完成并验证 |
 | [kernel-gpu-deep-dive/](kernel-gpu-deep-dive/00-roadmap.md) | [`learning/gpu-architecture/`](../learning/gpu-architecture/) + [`learning/kernel-engineering/`](../learning/kernel-engineering/) | GPU 硬件与存储层次(规格表/tier推荐/Tensor Core/SM Occupancy/NVLink)→ Roofline 性能建模(arithmetic intensity/ridge point/反直觉发现)→ Kernel 设计语言(Triton autotune/CUTLASS layout代数/swizzle stub方法论)→ FlashAttention与Kernel Fusion(online softmax/HBM流量核算/128k capstone),4 个分类。全系列纯 CPU、零第三方依赖 | 19 个知识点 | ✅ 全部完成并验证 |
 | [alignment-algorithms-deep-dive/](alignment-algorithms-deep-dive/00-roadmap.md) | [`learning/dpo-family/`](../learning/dpo-family/) | DPO 基础与推导(RLHF闭式解→Bradley-Terry代换→loss逐项对照→真训练脚本→零margin=log2边界测试)→ PO 变体家族(IPO/KTO/ORPO/SimPO/CPO/DPOP六变体+8算法横向对比表)→ RainbowPO 统一视角与 Capstone(4轴统一框架的真实验证成色→6变体50步benchmark→zero trl import架构选择),3 个分类。全系列纯 CPU(`dpo_minimal.py` 真训练部分标注为可选进阶验证)。**亮点**:独立复验发现 `rainbowpo.py::unified_po_loss` 只精确复现 `dpo` 一个配置——`dpop`/`kto` 配置字段和 `dpo` 逐字段相同、静默退化成纯 DPO,其余变体均与各自独立实现存在结构性数值偏差 | 15 个知识点 | ✅ 全部完成并验证 |
+| [peft-deep-dive/](peft-deep-dive/00-roadmap.md) | [`learning/lora-family/`](../learning/lora-family/) + [`learning/adapter-tuning-family/`](../learning/adapter-tuning-family/) | LoRA 核心与初始化变体(LoRA数学→rsLoRA/LoRA+→merge_and_unload→PiSSA/OLoRA→VeRA→LoHa/LoKr→AdaLoRA)→ 量化+LoRA(NF4→QLoRA fake-quant训练循环→QLoRA真4bit路径→LoftQ→DoRA→真4bit训练与真bitsandbytes从未同时出现的精确边界)→ Adapter家族核心(原始bottleneck adapter→Houlsby vs Pfeiffer→AdapterFusion→Compacter→Parallel Adapter→IA3)→ Adapter进阶与统一视角(AdapterDrop→MAM→K-Adapter/MAD-X→AdaMix→Prompt+LoRA+Adapter三线统一公式),4 个分类,四条新系列里规模最大的一条,唯一真实用到本机 GPU(RTX 3080 Ti)验证。**亮点**:独立复验发现 IA3 手写与 peft 两条实现路径参数总量相等(55,296)系 GPT-2 具体维度巧合,直接读 peft 源码确认两者缩放的是完全不同的张量;MAD-X 的 `InvertibleAdapter` 被创建、计入参数量,但用 forward hook 确认从未接入前向计算图;`merge_weights()` docstring 与实现不符导致误用会双重计数 | 24 个知识点 | ✅ 全部完成并验证 |
 
 每个知识点固定七步结构(与 torch/tensorflow/huggingface 系列完全一致:签名/是什么→一句话→**底层机制/为什么这样设计**→AI研究场景→可运行例子(assert验证)→**面试怎么问+追问链**→常见坑)。这套模板比"深挖系列"的轻量六步(numpy/python-advanced/python-idioms)多两块,因为这里讲的是算法/框架机制而非通用语言技能。
 
@@ -124,6 +125,9 @@ for_real_dummy/
 ├── alignment-algorithms-deep-dive/    ← 偏好优化算法精读系列(15个知识点,面试深度,3批,对应learning/dpo-family,纯CPU环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
 │   └── 01~03-*.md                     ← 每批一个文件
+├── peft-deep-dive/                    ← PEFT技术精读系列(24个知识点,面试深度,4批,对应learning/lora-family+adapter-tuning-family,唯一用到本机GPU验证)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
+│   └── 01~04-*.md                     ← 每批一个文件
 ├── my-cheatsheet.md                   ← 你自己维护的速查表(持续增长)
 ├── practice/                          ← 你自己动手写代码验证的 notebook
 │   └── 00-getting-started.ipynb       ← 现成的起步文件,含环境自检 + 练习模板
