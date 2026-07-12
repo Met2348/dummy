@@ -63,6 +63,7 @@ Python 基本语法        →  中级 Python(类、装饰器、numpy)
 | 系列 | 对应 `learning/` 专题 | 内容 | 规模 | 状态 |
 |------|---------------------|------|------|------|
 | [long-context-deep-dive/](long-context-deep-dive/00-roadmap.md) | [`learning/long-context/`](../learning/long-context/) | RoPE 外推家族(vanilla→PI→NTK→YaRN→3D-RoPE)→ 长上下文 Attention 架构(Ring/Striped/Infini-Attention)→ 长上下文评测方法论(NIAH/RULER/Lost-in-the-Middle)→ 数据工程与 Capstone(文档打包/课程学习/YaRN+LoRA capstone/KV-cache 显存核算),4 个分类。全系列纯 CPU、零 GPU 依赖 | 17 个知识点 | ✅ 全部完成并验证 |
+| [kernel-gpu-deep-dive/](kernel-gpu-deep-dive/00-roadmap.md) | [`learning/gpu-architecture/`](../learning/gpu-architecture/) + [`learning/kernel-engineering/`](../learning/kernel-engineering/) | GPU 硬件与存储层次(规格表/tier推荐/Tensor Core/SM Occupancy/NVLink)→ Roofline 性能建模(arithmetic intensity/ridge point/反直觉发现)→ Kernel 设计语言(Triton autotune/CUTLASS layout代数/swizzle stub方法论)→ FlashAttention与Kernel Fusion(online softmax/HBM流量核算/128k capstone),4 个分类。全系列纯 CPU、零第三方依赖 | 19 个知识点 | ✅ 全部完成并验证 |
 
 每个知识点固定七步结构(与 torch/tensorflow/huggingface 系列完全一致:签名/是什么→一句话→**底层机制/为什么这样设计**→AI研究场景→可运行例子(assert验证)→**面试怎么问+追问链**→常见坑)。这套模板比"深挖系列"的轻量六步(numpy/python-advanced/python-idioms)多两块,因为这里讲的是算法/框架机制而非通用语言技能。
 
@@ -105,6 +106,9 @@ for_real_dummy/
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 环境声明
 │   └── 01~09-*.md                     ← 每批一个文件
 ├── long-context-deep-dive/            ← 长上下文技术精读系列(17个知识点,面试深度,4批,对应learning/long-context/,纯CPU环境)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
+│   └── 01~04-*.md                     ← 每批一个文件
+├── kernel-gpu-deep-dive/              ← GPU架构+Kernel工程精读系列(19个知识点,面试深度,4批,对应learning/gpu-architecture+kernel-engineering,纯CPU环境)
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 差异化声明 + 环境声明
 │   └── 01~04-*.md                     ← 每批一个文件
 ├── my-cheatsheet.md                   ← 你自己维护的速查表(持续增长)
