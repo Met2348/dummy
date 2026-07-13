@@ -57,7 +57,7 @@
 | 13 | III | 贝叶斯应用 | [13-bayesian-applications.md](13-bayesian-applications.md) | 5 | ✅ 已完成 |
 | 14 | IV AI/ML场景专属统计 | 模型评测统计 | [14-model-evaluation-statistics.md](14-model-evaluation-statistics.md) | 6 | ✅ 已完成 |
 | 15 | IV | 排位系统 | [15-ranking-systems.md](15-ranking-systems.md) | 5 | ✅ 已完成 |
-| 16 | IV | Scaling law与外推 | [16-scaling-laws-and-extrapolation.md](16-scaling-laws-and-extrapolation.md) | 5 | ⬜ 待撰写 |
+| 16 | IV | Scaling law与外推 | [16-scaling-laws-and-extrapolation.md](16-scaling-laws-and-extrapolation.md) | 5 | ✅ 已完成 |
 | 17 | IV | 分布漂移与监控 | [17-distribution-shift-and-monitoring.md](17-distribution-shift-and-monitoring.md) | 5 | ⬜ 待撰写 |
 | 18 | IV | 标注一致性与分析方法论 | [18-annotator-agreement-and-methodology.md](18-annotator-agreement-and-methodology.md) | 5 | ⬜ 待撰写 |
 | 19 | V 时间序列基础 | 时间序列基础 | [19-time-series-foundations.md](19-time-series-foundations.md) | 6 | ⬜ 待撰写 |
