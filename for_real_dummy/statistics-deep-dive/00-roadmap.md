@@ -51,7 +51,7 @@
 | 07 | II | 现代实验方法 | [07-modern-experimentation.md](07-modern-experimentation.md) | 5 | ✅ 已完成 |
 | 08 | II | 因果推断基础 | [08-causal-inference-foundations.md](08-causal-inference-foundations.md) | 6 | ✅ 已完成 |
 | 09 | II | 观察性因果推断方法 | [09-observational-causal-methods.md](09-observational-causal-methods.md) | 6 | ✅ 已完成 |
-| 10 | II | 真实陷阱案例集 | [10-real-world-traps.md](10-real-world-traps.md) | 5 | ⬜ 待撰写 |
+| 10 | II | 真实陷阱案例集 | [10-real-world-traps.md](10-real-world-traps.md) | 5 | ✅ 已完成 |
 | 11 | III 贝叶斯方法 | 贝叶斯推断基础 | [11-bayesian-inference-foundations.md](11-bayesian-inference-foundations.md) | 6 | ⬜ 待撰写 |
 | 12 | III | MCMC基础 | [12-mcmc-foundations.md](12-mcmc-foundations.md) | 5 | ⬜ 待撰写 |
 | 13 | III | 贝叶斯应用 | [13-bayesian-applications.md](13-bayesian-applications.md) | 5 | ⬜ 待撰写 |
