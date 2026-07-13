@@ -53,7 +53,7 @@
 | # | 板块 | 分类 | 文件 | 知识点数(约) | 环境 | 状态 |
 |---|------|------|------|------------|------|------|
 | 01 | I 关系模型与SQL基础 | 关系模型与基础SQL | [01-relational-model-and-sql-basics.md](01-relational-model-and-sql-basics.md) | 7 | .venv | ✅ 已完成(7个`.venv`代码块全部通过) |
-| 02 | I | 范式与进阶SQL | [02-normalization-and-advanced-sql.md](02-normalization-and-advanced-sql.md) | 7 | .venv | ⏳ 未开始 |
+| 02 | I | 范式与进阶SQL | [02-normalization-and-advanced-sql.md](02-normalization-and-advanced-sql.md) | 7 | .venv | ✅ 已完成(7个`.venv`代码块全部通过,板块I完成) |
 | 03 | II 索引与查询优化 | 索引结构与查询优化器 | [03-indexing-and-query-optimization.md](03-indexing-and-query-optimization.md) | 10 | .venv+WSL2双引擎 | ⏳ 未开始 |
 | 04 | III 事务与并发控制 | 事务与隔离级别 | [04-transactions-and-isolation-levels.md](04-transactions-and-isolation-levels.md) | 8 | WSL2双引擎 | ⏳ 未开始 |
 | 05 | III | MVCC与锁机制 | [05-mvcc-and-locking.md](05-mvcc-and-locking.md) | 8 | WSL2双引擎 | ⏳ 未开始 |
