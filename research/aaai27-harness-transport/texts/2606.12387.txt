@@ -1,0 +1,1277 @@
+                                         TAHOE: Text-to-SQL with Automated Hint Optimization
+                                                          from Experience
+
+                                                                          Zhiyi Chen1,2,∗ , Jie Song1 , Peng Li1
+                                                                  1
+                                                                      ByteDance Inc., 2 Georgia Institute of Technology
+                                                         ∗
+                                                             Work done during an internship at the ByteBrain team, ByteDance
+
+
+
+
+arXiv:2606.12387v1 [cs.DB] 10 Jun 2026
+                                                                                        Abstract
+                                           Large Language Models (LLMs) have democratized access to databases via Text-to-SQL, yet
+                                           bridging the gap between prototypes and production remains challenging. Real-world deployments
+                                           face strict dialect constraints (e.g., Snowflake), massive schemas, and evolving user preferences
+                                           that vanilla LLMs struggle to handle. Existing solutions like Supervised Fine-Tuning (SFT) are
+                                           costly and rigid, while manual prompt engineering and agentic test-time scaling are unscalable in
+                                           latency and computation.
+                                           We present Tahoe, a system that transforms prompt optimization into a dynamic data management
+                                           problem. Tahoe runs an error-driven hint learning pipeline over a two-phase lifecycle (Development
+                                           and Deployment) to consolidate debugging traces into a structured Hint Bank. Compiler feedback
+                                           is distilled into reusable Syntax Hints that enforce dialect-specific rules, while execution and
+                                           user feedback are converted into Semantic Hints that capture schema- and user-specific logic.
+                                           A novel Strategy Layer models conflicting user intents as competing strategies under shared
+                                           natural-language triggers; each strategy is annotated with a learning-time recency signal and,
+                                           after learning, with post-learning attribution statistics that summarize its empirical success, harm,
+                                           inertness, and support on actual generations. At inference time, Tahoe performs context-aware
+                                           retrieval and guides the LLM through a two-stage process: Logic Planning to select and combine
+                                           strategies, followed by SQL Synthesis to generate dialect-correct queries. We implement and
+                                           evaluate the development-phase workflow, while leaving deployment-time human-feedback updates
+                                           for future work.
+                                           Evaluations on the Spider 2.0–Snow benchmark show that Tahoe substantially improves hint-
+                                           guided Text-to-SQL without updating model parameters. In the development-phase evaluation on
+                                           the 113 supervised Spider 2.0–Snow-0212 examples, with our primary backbone (GPT-5.5), Tahoe
+                                           lifts pass rate from 61.95% to 79.42% and pass@4 from 72.57% to 87.61%, drives the Snowflake
+                                           syntax pass rate to 100%, and reduces average compiler-feedback critic rounds from 2.79 to 0.12
+                                           per sampled candidate. The same Hint Bank, plugged into weaker backbones without retraining,
+                                           also yields large gains (e.g., +19.7 pp pass rate on Doubao-2.0-lite), demonstrating cross-model
+                                           transferability. On held-out examples, syntax transfer remains strong, while semantic gains are
+                                           more modest, suggesting that semantic benefits depend on how well the development set covers
+                                           the target workload. By converting transient feedback into a persistent and interpretable Hint
+                                           Bank, Tahoe provides a practical framework for robust and adaptable database interfaces.
+
+                                           Date: June 11, 2026
+                                           Correspondence: Zhiyi Chen, zchen798@gatech.edu
+1   Introduction
+Translating natural language (NL) questions into executable SQL queries, or Text-to-SQL, is a long-standing
+goal of database research. Recent advances in large language models (LLMs) have brought remarkable
+progress. However, a significant gap persists between prototype demos and realistic deployments. In real-world
+scenarios—characterized by strict dialects (e.g., Snowflake), massive schemas, and evolving user preferences—
+generic LLMs frequently fail. As illustrated in Figure 1, models often violate dialect constraints (e.g., failing
+to quote mixed-case identifiers like "name" in Snowflake) or misinterpret subtle user intents (e.g., using
+LIMIT 1 for “top product” instead of handling ties). These failures are not merely corner cases; on the recent
+Spider 2.0–Snow benchmark, even top-tier coding models (e.g., Qwen-Coder) achieve only ≈30% execution
+accuracy, with general-purpose models like GPT-4o often performing worse due to a lack of domain-specific
+discipline [1].
+To bridge this gap, recent research has diverged into several paradigms. As summarized in Table 1, while
+each offers partial solutions, they face distinct limitations in production environments:
+The ‘‘Compute Trap’’ (Test-Time Scaling): A growing trend involves Test-Time Scaling or agentic workflows,
+where models engage in multi-turn iterative refinement, generate massive numbers of candidates, or rely on
+“fixer” agents to correct errors [17]. While this can improve accuracy, it incurs substantial latency and financial
+costs—often requiring dozens of LLM calls for a single query. As highlighted in recent studies on long-term
+interaction, these systems suffer from total amnesia: they effectively “reset” between sessions, repeating the
+same errors on every new query and learning nothing from previous failures [3]. Consequently, an error fixed in
+one session is committed again in the next, necessitating redundant correction loops that waste computation
+and frustrate users.
+The ‘‘Rigidity Trap’’ (Supervised Fine-Tuning): Another approach applies Supervised Fine-Tuning (SFT)
+to internalize domain knowledge [14]. Although effective for static tasks, SFT presents significant data
+management challenges in dynamic database environments. Adapting to a schema change, a new SQL dialect,
+or evolving user preferences introduced by newly onboarded users requires expensive retraining. Furthermore,
+the learned weights are opaque and non-transferable; switching the base model renders the SFT investment
+obsolete.
+The ‘‘Context Noise’’ (Documentation RAG): Finally, simple Retrieval-Augmented Generation (RAG) over
+database documentation or schemas often fails due to the “Context Window Fallacy.” As recent memory
+research indicates, simply extending context windows does not ensure effective utilization of information due
+to attention degradation over distant tokens [3, 6]. Retrieving excessive raw schema descriptions introduces
+significant noise, leading to hallucinations when critical information is buried under voluminous metadata.
+These methods lack the precision to distill documentation into the actionable, concise logic required for
+complex reasoning.
+In this paper, we propose Tahoe, a system that addresses these challenges by transforming prompt optimization
+from a transient computational process into a persistent data management problem. Our core insight is that
+neither raw documentation retrieval (too noisy) nor iterative agentic reasoning (too slow and repetitive) is the
+right trade-off for production. Instead, we identify that retrieving concise, error-driven hints—summarized by
+LLM agents from past successful debugging—offers a balance of precision and efficiency. Unlike raw RAG
+that floods the context, Tahoe retrieves only the distilled logic needed to solve the current problem. For
+instance, rather than retrieving pages of SQL dialect docs, the system might provide a specific syntax hint:
+Quote every database, schema, table, column, CTE, and alias exactly as it is stored; quote each element of a
+fully-qualified path separately. Similarly, for ambiguous business logic, it retrieves precise semantic guidance:
+in a Google Analytics 4 (GA4) e-commerce schema, use user_pseudo_id instead of user_id to uniquely
+identify customers (see Section 5.6 for a concrete walkthrough).
+Crucially, Tahoe addresses a major limitation of existing RAG and memory systems: the inability to handle
+dynamic and conflicting interpretations. Real-world queries often contain ambiguities where different users or
+contexts demand different valid solutions. Standard RAG treats these variations as noise or retrieves them
+randomly (the “static retrieval” problem). In contrast, we design a structured Semantic Hint model that maps
+a single NL Trigger to multiple competing Strategies. Each strategy explicitly encapsulates a distinct solution
+
+
+                                                        2
+                      Table 1 Comparison of Tahoe with existing Text-to-SQL adaptation paradigms.
+
+ Paradigm                       Representative Works      Latency       Continuous Evolution    Model Agnosticism      Generalizability        Accuracy
+                                                         (Efficiency)   (Learns from Errors?)   (Switchable Base?)   (Avoids Overfitting?)   (Performance)
+ Vanilla LLMs                      Qwen-Coder [18]          Low                  Low                  N/A                    High                Low
+ Supervised Fine-Tuning (SFT)       PICARD [14]             Low                  Low                   Low                   Low                 High
+ Test-Time Scaling (Agents)     Agentar-Scale-SQL [17]      High                 Low                  High                   High                High
+ Retrieval-Augmented (RAG)          SQLGenie [5]            Low               Medium                  High                 Medium              Medium
+ Tahoe (Ours)                             –                 Low                  High                 High                   High                High
+
+
+
+
+path with a rationale and contrastive examples. This allows Tahoe to store conflicts explicitly and resolve
+them at runtime by ranking strategies based on flexible metrics, including a learning-time recency signal and
+post-learning attribution statistics that summarize each strategy’s empirical success, harm, inertness, and
+support, ultimately offering the model a more reliable or user-preferred solution.
+Beyond resolving ambiguity, constructing this structured Hint Bank gives Tahoe three advantages that are
+especially valuable for enterprise deployment: Continuous Evolution, Model Agnosticism, and Generalizability.
+First, because hints are external and human-readable, users can audit, revise, and extend them directly,
+allowing the system to continuously evolve as new errors, schemas, and user preferences emerge. Second,
+the Hint Bank is model-agnostic: unlike black-box SFT weights, it remains reusable even when the base
+LLM changes. Third, Tahoe improves generalizability by decoupling Syntax Hints from Semantic Hints
+and organizing semantic logic by scope (General, Database-specific, and User-specific), preventing localized
+conventions from contaminating unrelated settings. As a result, the system can adapt by updating or
+re-configuring the relevant hint subset rather than retraining model parameters.
+To operationalize this idea, Tahoe uses an error-driven hint learning pipeline to extract reusable syntax and
+semantic hints from failures and consolidate them into the Hint Bank. Hint learning is performed outside the
+critical inference path: the Hint Bank is initialized before deployment (i.e., development phase) and further
+refreshed during deployment through periodic batch updates over accumulated user feedback. This design
+separates background hint construction and maintenance from online query serving. At query time, Tahoe
+combines lightweight hint retrieval with two-stage hint-guided generation, reducing latency and monetary
+cost while mitigating repeated user-facing failures. Tahoe is orthogonal to schema linking and can be
+seamlessly integrated with existing schema pruning techniques to support large databases. This paper focuses
+on validating the development-phase hint learning and reuse pipeline; deployment-time human-feedback
+refresh is part of the architecture but is not empirically evaluated in this benchmark setting.
+Our contributions are summarized as follows:
+    • Hint-Based Long-Term Memory Paradigm: We introduce a hint-based long-term memory paradigm for
+      Text-to-SQL that reframes prompt optimization as managing a persistent Hint Bank. Tahoe employs
+      an error-driven hint learning pipeline that consolidates debugging traces and accumulated feedback into
+      reusable Syntax and Semantic Hints, while keeping hint learning and maintenance outside the critical
+      inference path. This design shifts most reasoning and correction overhead to background construction
+      and periodic batch refresh, thereby mitigating context noise and alleviating the latency bottlenecks of
+      agentic workflows while preserving compatibility with different base LLMs.
+    • Structured and Transferable Hint Architecture: We design a modular Hint Bank that decouples syntax
+      from semantics and organizes semantic logic into hierarchical scopes (General, Database-specific, User-
+      specific). A trigger–strategy abstraction captures multiple competing solution paths under the same
+      natural-language trigger and ranks them using flexible signals (e.g., recency and success rate). This
+      structure makes the Hint Bank both interpretable and model-agnostic, and adaptable to diverse industry
+      contexts without expensive retraining.
+    • Empirical Effectiveness: On the 113 supervised development examples of Spider 2.0–Snow-0212, Tahoe
+      substantially outperforms strong vanilla baselines for our primary backbone GPT-5.5 (pass rate 61.95% →
+      79.42%, pass@4 72.57% → 87.61%, syntax pass rate 96.24% → 100%, avg. critic rounds 2.79 → 0.12 per
+
+
+
+                                                                             3
+                                             NL Question: ‘‘Show me
+                                            the top-selling product.’’
+                                        (Context: Snowflake SQL Dialect)
+
+
+                               Case A: Syntax Error
+
+                                WITH top_product AS (
+                                  SELECT name, "sales" FROM "PRODUCTS" ... – Unquoted
+                                ’name’ vs quoted "name"
+                                ) SELECT name, sales FROM top_product;
+
+
+                                 × Compiler Error: Invalid identifier ’NAME’.
+                                 Reason: Unquoted identifiers are upcased in Snowflake.
+
+
+
+
+                               Case B: Semantic Error
+                                SELECT "name", "sales" FROM "PRODUCTS"
+                                ORDER BY "sales" DESC LIMIT 1;
+                                – Returns only one row, ignoring ties
+
+                                 × User Feedback: ‘‘Incomplete result.’’
+                                 Intent: I want all products with the top value (ties in-
+                                 cluded).
+
+
+
+Figure 1 Motivating Example. Case A: A syntax error where the model fails Snowflake’s case-sensitivity rules. Case
+B: A semantic error where the model uses LIMIT 1 instead of handling ties, mismatching user intent.
+
+
+      sampled candidate), and the same Hint Bank also lifts weaker backbones (Doubao-2.0-lite, GPT-5) by
+      double-digit pp without any model-specific adaptation, evidencing cross-model transferability.
+
+2     Related Work
+2.1   Automatic Prompt Optimization
+Recent work in automatic prompt optimization aims to reduce the reliance on manual prompt design by
+using automated search or reflective mechanisms. AutoHint [15] automatically generates and refines textual
+“hints” for a target task by prompting an LLM to propose, evaluate, and update task-specific guidance. Other
+methods optimize prompts via gradient-inspired updates and search over discrete prompt candidates, such as
+the “Automatic Prompt Optimization with Gradient Descent and Beam Search” framework [12]. More recently,
+reflective prompt evolution approaches such as GEPA [2] use natural-language reflection over rollouts and
+genetic-style mutation of prompts, and show that prompt-space optimization can outperform reinforcement
+learning in weight space on several benchmarks.
+These methods demonstrate the promise of automated prompt design, but typically operate at the level
+of a single (or small set of) global prompts tuned for a fixed task. They inherently struggle with the
+context-dependent conflicts common in enterprise data (e.g., different users needing different logic for the same
+query). In contrast, Tahoe reframes prompt optimization from a transient search process into a persistent
+data management problem. Rather than converging to one “golden prompt,” Tahoe manages a structured
+Hint Bank. By keying hints by triggers, scopes, and strategies, Tahoe enables query-specific retrieval and
+explicit conflict management, allowing the system to adapt dynamically to distinct user needs.
+
+2.2    Prompting and Retrieval for Text-to-SQL
+Prompt-based improvements for Text-to-SQL have been explored in both research and practical systems.
+DIN-SQL [10] decomposes Text-to-SQL into modular sub-tasks (e.g., schema linking, SQL sketching, self-
+correction) and uses in-context prompting of LLMs for each step. DAIL-SQL [4] systematically evaluates
+prompt design and proposes an integrated strategy with an emphasis on token efficiency.
+
+
+                                                             4
+A parallel line of work augments prompting with retrieval. ReFSQL [20] introduces a structure-enhanced
+retrieval framework that retrieves samples with comparable specific knowledge to aid generation. Beyond
+research prototypes, industrial systems such as SQLGenie [5] adopt an example-based RAG design, retrieving
+verified query–SQL pairs from an Example Bank.
+These retrieval-augmented approaches primarily provide implicit guidance through raw examples. This design
+faces the “Context Noise” challenge: retrieving large or weakly matched examples can introduce irrelevant
+tokens, ambiguous patterns, and conflicting logic [6]. Tahoe takes an orthogonal approach by retrieving
+explicit, abstracted hints derived from error analysis rather than raw (question, SQL) pairs. First, instead of
+implicitly encoding dialect quirks through examples, Tahoe factors dialect-specific syntax knowledge into
+minimal reusable rules (Syntax Hints). Second, rather than collapsing all behaviors into a flat retrieval space,
+Tahoe organizes semantic hints by explicit Scope (General, Database-specific, and User-specific). Third, when
+multiple valid behaviors exist, Tahoe uses a Strategy Layer to model mutually exclusive alternatives and
+rank them using explicit signals—namely a learning-time recency timestamp augmented by post-learning
+attribution statistics (success/harm/inert/support summaries that capture empirical evidence of when a
+strategy helped, hurt, or was merely retrieved)—instead of relying solely on similarity scores.
+
+2.3   Test-Time Scaling and Agentic Workflows
+A growing trend in Text-to-SQL focuses on Test-Time Scaling, which enhances performance by increasing
+computational spend during inference. Agentar-Scale-SQL [17] represents the state-of-the-art, proposing an
+orchestrated framework that combines RL-enhanced reasoning, iterative refinement, and parallel tournament
+selection. While achieving high accuracy on benchmarks like BIRD, these methods fundamentally trade
+latency for performance. As noted by the authors of Agentar-Scale-SQL, the reliance on multiple LLM calls
+results in “substantial computational overhead,” making them “less suitable for real-time applications”. In
+typical benchmark-oriented test-time scaling workflows, corrections are not persisted across sessions, so the
+system may repeat similar errors on new queries, learning little from previous failures.
+Tahoe addresses this by “shifting left” the computational burden. Instead of relying on heavy online
+computation to correct errors at runtime, we perform reasoning during the Development Phase or batch
+updates. By consolidating error corrections into a persistent Hint Bank, Tahoe substitutes expensive iterative
+re-reasoning with efficient memory retrieval. This enables the system to avoid recurring errors without the
+latency penalties of agentic loops.
+
+2.4   LLM Memory and Knowledge Management
+There is a growing body of work on equipping LLM-based systems with explicit long-term or external memory.
+The Generative Agents architecture [9] extends an LLM with a memory stream that stores natural-language
+records of an agent’s experiences. MemGPT [8] introduces an OS-inspired hierarchical memory system to
+support long-running conversations. ChatDB [7] augments LLMs with databases as symbolic memory for
+complex multi-hop reasoning. More recently, Mem0 [3] proposes a scalable memory layer that dynamically
+extracts and consolidates user preferences into a structured store, explicitly addressing the “reset problem” by
+detecting and resolving conflicts in long-term interactions.
+These works share the goal of separating parametric knowledge from an explicit, inspectable memory store.
+Tahoe applies a similar philosophy to Text-to-SQL but introduces a specialized structure tailored for
+ambiguity management: the Strategy Layer. Many generic memory systems are optimized toward maintaining
+a single consistent user profile, whereas Tahoe organizes hints hierarchically to explicitly preserve competing
+interpretations. This structure allows the system to manage the lifecycle of knowledge effectively—preserving
+mutually exclusive behaviors (e.g., varying metric definitions) as parallel strategies rather than treating them
+as noise. By tracking lightweight per-strategy signals—a learning-time recency timestamp and post-learning
+attribution statistics (success/harm/inert/support summaries that capture empirical evidence of when a
+strategy helped, hurt, or was merely retrieved)—Tahoe dynamically resolves these semantic conflicts at
+inference time based on the specific user context.
+
+
+
+
+                                                       5
+2.5     Other Approaches to Robust Text-to-SQL
+A large body of work tackles Text-to-SQL via supervised learning (SFT). Classical parsers like SyntaxSQL-
+Net [19] and RAT-SQL [16] train on labeled pairs to achieve strong performance. Recent approaches like
+PICARD [14] fine-tune models with constrained decoding. While effective for static tasks, SFT presents the
+“Rigidity Trap”: adapting to a schema change or new dialect necessitates expensive retraining. Furthermore,
+the learned weights are opaque and non-transferable.
+By contrast, Tahoe keeps the underlying LLM fixed and updates only the external Hint Bank. This yields a
+lightweight adaptation strategy that is inherently model-agnostic. Unlike SFT parameters, which are discarded
+when upgrading the base LLM, our Hint Bank persists as a reusable, transferable asset. By decoupling syntax
+from semantics, Tahoe ensures that semantic hints remain valid even if the SQL dialect changes, providing a
+level of modularity that parameter-based methods cannot match.
+
+3     Background and Problem Formulation
+3.1     Text-to-SQL and Real-World Challenges
+The Text-to-SQL task aims to translate a natural language (NL) question q and a database schema S into an
+executable SQL query y. While vanilla LLMs perform well on academic benchmarks with standard SQL dialects
+and simplified schemas, their effectiveness degrades significantly in real-world deployments. As captured
+by the recent Spider 2.0–Snow benchmark [1], realistic scenarios expose the intrinsic limitations of generic
+models—specifically their lack of domain-specific parametric knowledge and tendency to hallucinate—through
+three distinct challenges:
+      • Strict Dialect Adherence: Industrial environments strictly enforce dialect rules that diverge from standard
+        SQL. For instance, in Snowflake SQL, unquoted identifiers are automatically uppercased. A generic LLM,
+        biased by its pre-training on standard SQL, lacks this specific dialect knowledge and often hallucinates
+        valid ANSI-SQL syntax (e.g., unquoted names) that triggers immediate compilation errors in strict
+        environments.
+      • Massive Schema Reasoning: Real-world databases contain hundreds of inter-related tables with obscure
+        column names. The massive context required to describe such schemas often exceeds the model’s effective
+        attention span, leading to schema hallucinations where the model invents non-existent join paths or
+        misinterprets column definitions.
+      • Ambiguous and Evolving User Intent: Unlike academic datasets where questions are precise, real users
+        often use domain jargon or imply constraints (e.g., “top products” might imply distinct counting).
+        Furthermore, these preferences are dynamic—definitions of metrics often evolve over time, creating a
+        “moving target” that static model weights struggle to track without expensive retraining.
+
+3.2     Error Taxonomy
+To address these challenges systematically, we categorize Text-to-SQL failures into two orthogonal types
+based on their feedback source. This taxonomy underpins the error-driven hint learning pipeline developed in
+Section 5.2.
+      • Syntax Errors (Compiler-Level): The generated SQL is invalid and rejected by the database engine.
+        These errors stem from dialect mismatches (e.g., keywords, quoting, function names) rather than logic.
+        They are objectively verifiable via compiler feedback.
+      • Semantic Errors (Execution-Level): The SQL executes successfully but yields incorrect data. These
+        errors arise from misaligned business logic or user intent (e.g., incorrect filters, wrong aggregation scope).
+        Detecting them requires execution feedback against ground truth or human verification.
+Figure 1 grounds this taxonomy: the top panel is a syntax error (an unquoted Snowflake identifier rejected by
+the compiler), and the bottom panel is a semantic error (the SQL compiles but uses LIMIT 1, mismatching
+the user’s intent to include ties).
+
+
+                                                           6
+3.3     Problem Formulation
+Traditional approaches treat Text-to-SQL as learning a direct mapping fθ (q, S) → y, where θ represents the
+model parameters. In Tahoe, we freeze the LLM parameters θ and instead optimize an external knowledge
+structure: the Hint Bank H.
+We formally define the inference process and the optimization objective as follows:
+Execution Equivalence (Exec): Let Exec(y, D) denote the result set obtained by executing SQL query y on a
+database instance D conforming to schema S. A generated query ŷ is semantically correct with respect to the
+ground truth y ∗ if and only if Exec(ŷ, D) = Exec(y ∗ , D).
+Interaction Cost (C ): We define the interaction cost C(ŷ, y ∗ ) as the number of feedback rounds required to
+transform an initial prediction ŷ into a correct query. In a vanilla setting, if ŷ fails compilation, C ≥ 1 (syntax
+correction rounds). If ŷ executes but returns incorrect results, C ≥ 1 (user feedback rounds). The ideal case
+is C = 0 (correct on the first attempt).
+Optimization Objective: The Hint Bank decomposes into two disjoint registries, H = Hsyn ∪ Hsem , that are
+accessed by different mechanisms at inference time. We therefore decompose the retrieval function as
+                                                  (dialect)
+                                    h(q, S, H) = Hsyn       ∪ Rsem (q, S, Hsem ),
+
+           (dialect)
+where Hsyn       is the complete syntax-hint registry for the target dialect (always injected, not retrieved), and
+Rsem performs scope filtering followed by trigger-based semantic retrieval over Hsem . Rsem implies a conflict
+resolution mechanism: it does not merely fetch similar examples but ranks competing strategies based on
+flexible signals—a learning-time recency timestamp and post-learning attribution summaries (success/har-
+m/inert/support produced by a post-learning attribution pass)—to maximize alignment with current user
+needs (as detailed in Sections 5.3 and 5.4). The LLM generation is modeled as a conditional probability
+distribution Pθ (y | q, S, h).
+Our ultimate goal is to minimize the expected interaction cost E[C] during deployment. Since the interaction
+cost is minimized (i.e., C = 0) if and only if the initial generation is correct, minimizing the expected cost is
+equivalent to maximizing the expected accuracy of the hint-guided inference. Therefore, we aim to maintain a
+Hint Bank H∗ that maximizes:
+
+
+                           H∗ = arg max E(q,S,D,y∗ )∼P [I [Exec(ŷ0 , D) = Exec(y ∗ , D)]]                        (1)
+                                      H
+
+where ŷ0 ∼ Pθ (· | q, S, h(q, S, H)) denotes a single sampled generation conditioned on the retrieved hints (before
+any compiler-feedback or execution-feedback loop). At evaluation time we separately report the candidate-level
+pass rate (averaged over multiple sampled ŷ0 ) and the example-level pass@4 (any-of-k correctness over k = 4
+samples). By maximizing the probability that ŷ0 is correct, we effectively obviate the need for expensive
+feedback loops (minimizing E[C] towards 0).
+Crucially, the cost of optimizing H (e.g., error analysis, strategy merging) is incurred asynchronously—during
+the Development Phase or via batch updates in deployment—so that it is decoupled from the synchronous
+user interaction.
+
+4     System Architecture
+Figure 2 illustrates the high-level architecture of Tahoe. Unlike traditional pipelines that treat prompts
+as transient strings, Tahoe centers around a persistent, evolving knowledge base: the Hint Bank (H). This
+centralized asset stores all learned Syntax Hints (Hsyn ) and Semantic Hints (Hsem ).
+The system operates in two distinct phases, designed to “shift left” the computational burden of error correction.
+The key distinction lies in the availability of ground truth:
+      • Phase I: Development Phase. The system bootstraps an initial H using a small offline dataset where
+        explicit Ground Truth SQL (y ∗ ) and verified execution results are available. By iteratively exposing the
+
+
+                                                         7
+                                                                                                                    Deployment Phase
+ Development Phase
+
+                                                                                                 Online
+       Offline                                                                               Unlabeled Data
+    Labeled Data                                                                                 (q, S)
+      (q, S, y ∗ )
+
+                                                      Hint Bank (H)
+                                                 1. Syntax Hints (Hsyn )                    Hint-Guided
+   Hint Learning      Hint Management             (Dialect-specific)         Retrieval                                  Output
+                                                 2. Semantic Hints (Hsem )               Inference Module
+      Module               Module                                                                                        SQL
+                                                  - General / DB / User                  (Logic Plan + Synthesis)
+                                                  - Strategy Layer
+                                                    (Conflict Resolution)
+      Compiler
+                                                                                                Compiler
+
+                                                  Hint Learning Module
+                                                                                                                    User Feedback
+                                                   (Asynchronous Update)
+
+
+
+
+Figure 2 The Tahoe system architecture. The Hint Bank (H) centrally manages both dialect-specific syntax hints
+and strategy-aware semantic hints across the Development and Deployment phases. Note: This figure depicts the
+high-level data lifecycle (how hints are generated, curated, and consumed); the detailed hint learning execution flow for
+a single example—including multi-sampling, sequential syntax/semantic feedback, and multi-iteration refinement—is
+presented in Figure 3.
+
+
+      LLM to failures against y ∗ , the system extracts generalized Hsyn and Hsem to populate the Hint Bank.
+      This phase incurs high computational cost upfront to ensure efficiency later, and corresponds to the
+      fully supervised learning regime detailed in Section 5.2.
+    • Phase II: Deployment Phase. Deployed in production, the system serves unseen queries and adapts via
+      asynchronous updates. Syntax updates are automated via compiler feedback: failed online queries
+      are batch-processed by the Syntax Learning Agent without blocking users. For semantic adaptation,
+      the system relies on Human-in-the-Loop interaction: each user-accepted SQL candidate is treated as
+      a pseudo-ground-truth (ỹ ∗ ), while a rejected candidate becomes a semantic error trace only when its
+      execution result differs from that of an accepted candidate; if all candidates are rejected, the query is
+      logged for manual review rather than learned from. This two-stream update process ensures robustness
+      to both dialect updates and shifting user intents. We detail this deployment lifecycle in Section 5.5.
+Tahoe comprises three core modules that manage the lifecycle of hints:
+1. Hint Learning Module (Section 5.2). The “Writer.”
+Input: A query context (q, S), the frozen global Hint Bank H(t) for the current batch, and available feedback
+sources (the compiler, execution against y ∗ , or user feedback).
+Output: Temporary-bank deltas (atomic diffs clustered into suggestions and applied to a per-example H̃),
+and, when the stop criteria retain them, the eligible temporary-bank deltas to be later consolidated by the
+Hint Management Module.
+Given this input, the module invokes hint-guided inference to sample candidates and then converts observed
+failures into temporary-bank deltas. As detailed in Figure 3 and Section 5.2, it implements a three-stage
+learning pipeline: (1) diversity via multi-sampling, (2) sequential syntax–then–semantic feedback with error
+clustering and reflection, and (3) multi-iteration hint refinement that re-injects updated hints to verify their
+effectiveness. Concretely, it first interacts with a compiler to fix dialect-specific syntax errors (generating
+Hsyn ), and subsequently compares execution results against the ground truth or user feedback to identify
+semantic mismatches (generating Hsem ).
+2. Hint Bank Management Module (Section 5.3). The “Curator.”
+Input: The eligible per-example temporary-bank deltas (from each H̃) accumulated over a batch, together
+with the frozen global Hint Bank H(t) .
+Output: The merged next-version global Hint Bank H(t+1) (structured, deduplicated, and conflict-resolved).
+After all examples in a batch finish, it consolidates their eligible deltas into H(t) by merging newly learned hints
+with existing ones, deduplicating redundant triggers, and resolving conflicts. A key innovation is the Strategy
+
+
+                                                               8
+                                                      Input: (q, S, y ∗ )
+
+
+                              H(t)        Step 1: Multi-Sampling Inference
+                           Hint Bank                  (using H̃)
+                       Initialize
+
+                        Temp. Bank H̃            Pred SQLs: ŷ1 , ŷ2 , . . . , ŷN
+
+
+
+                                                   Pass                     No             Critic Agent
+                                                 Compiler?              Ksyn traces       (Runtime Fix)
+
+
+                                                                                           Syntax diffs
+                                          Yes (Svalid )                                    (Multi-step)
+                                                          Step 2A: Syntax Feedback
+
+
+
+                                                 Execution                   No            Semantic diffs
+                                                Match (y ∗ )?            Ksem traces         (One-step)
+
+                                                          Step 2B: Semantic Debugging
+                                                   Yes
+
+
+                                                                                       Step 3: Sugges-
+                                     No          Success or                           tion & Clustering
+                                Update & Loop    Max Retry?                   (M diffs → M suggestions
+                                                                                    → C changes)
+
+                                                   Yes
+
+                                             Hint Management Module
+                                    (Batch merge eligible deltas into H(t) → H(t+1) )
+
+
+                                                              Stop
+
+Figure 3 The per-example hint learning loop. A temporary bank H̃ is initialized from the frozen global bank H(t) ;
+multi-sampled candidates undergo sequential Syntax and Semantic filtering, and the resulting atomic diffs drive
+multi-iteration refinement of H̃ until success or max retry. After all examples in the batch finish, the Hint Management
+Module consolidates the eligible temporary-bank deltas into H(t) to produce H(t+1) .
+
+
+Layer, which models mutually exclusive behaviors (e.g., conflicting rounding conventions) as competing
+strategies under a single trigger. For each strategy, the module maintains lightweight signals—a learning-time
+recency signal and post-learning attribution statistics—that the retrieval and planning stages later use to
+rank strategies during inference and to balance “correction” behaviors against common “vanilla” behaviors
+learned from success cases. We defer the precise definition of these signals and the attribution procedure to
+Section 5.3.
+3. Hint-Guided Inference Module (Section 5.4). The “Reader.”
+Input: A new user question q, schema S, and the Hint Bank H.
+Output: A ranked list of executable SQL candidates.
+At inference time, it retrieves relevant Hsem via trigger matching and combines them with the complete
+                        (dialect)
+syntax-hint registry Hsyn         for the target dialect. It then guides the base LLM through a two-stage
+generation process that mirrors Section 5.4: Logic Planning followed by SQL Synthesis. Crucially, the Logic
+Planning stage is designed to determine the optimal combination of strategies (especially when multiple
+retrieved hints offer competing paths) and to resolve conflicts using the statistics maintained by the Hint
+
+
+                                                                  9
+Bank Management Module, forming a coherent solution plan before the final SQL is synthesized.
+
+5     Methodology
+5.1     Data Model: Structure of Hints
+To effectively serve as the system’s long-term memory, the Hint Bank H employs an asymmetric design
+tailored to the distinct nature of the errors identified in Section 3.2. We observe that syntax constraints are
+objectively verifiable and static (determined by the compiler), whereas semantic logic is often ambiguous
+and context-dependent (determined by users). Consequently, we use a lightweight, rule-based structure for
+syntax hints, while employing a structured, conflict-aware schema for semantic hints to manage competing
+interpretations (see Section 5.6 for concrete structured hints paired with each walkthrough example).
+
+Syntax Hints (Hsyn ). These hints address dialect-specific compilation errors. Since syntax rules within a
+target dialect are deterministic and conflict-free (e.g., a keyword is either reserved or it is not), we do not
+require complex scoping or strategy selection. We structure each syntax hint simply as a tuple (R, E):
+      • Rule (R): A concise natural language description of the constraint (e.g., “Quote every database element
+        exactly as stored”).
+      • Example (E ): A few-shot demonstration that grounds the rule, consisting of a specific schema context
+        and the corresponding correct SQL snippet.
+
+Semantic Hints (Hsem ). These capture logic adjustments required by specific schemas or user preferences.
+Unlike syntax, semantic intents often carry ambiguity—for instance, a “log transformation” might imply
+different mathematical handling of zeros depending on the context. To ensure precise retrieval and explicit
+conflict resolution, we structure each semantic hint as a tuple (T, S, Σ):
+      • Trigger (T ): A concise natural language pattern (e.g., “log10 transformation”) used as the index key for
+        retrieval. This decouples the hint from exact lexical matching, allowing the system to activate logic
+        based on semantic similarity.
+      • Scope (S ): A classification tag indicating applicability: General, Database-specific, or User-specific.
+        This design promotes knowledge transferability: general logic can be reused across projects, while
+        database-specific conventions and user-specific preferences (e.g., tie-handling rules) remain isolated to
+        their respective environments. We emphasize that General here is purely a context label: it states
+        only that the hint is not tied to a specific database id or user id, in contrast to Database-specific and
+        User-specific hints. It does not claim that the hint is universally frequent, highly reliable, or broadly
+        useful across all workloads. Reliability and usefulness are tracked separately, after learning, by the
+        Strategy Attribution pass through σ.eval_stats (Section 5.3); two General hints with very different
+        empirical support can therefore coexist and be ranked accordingly at inference time.
+      • Strategies (Σ): A set of competing strategies {σ1 , . . . , σk } associated with the trigger. This layer is
+        critical for handling conflicts. For example, the trigger “log10 transformation” may map to two valid
+        but mutually exclusive strategies: Strategy A (add 1 to avoid infinity) and Strategy B (nullify zeros).
+        Crucially, each strategy σi contains: (1) a rationale, (2) a pair of contrastive few-shot examples (Positive
+        vs. Negative) to distinguish the logic, and (3) two pieces of statistical metadata: the learning-time field
+        recency, written by the Hint Learning Module to record when the strategy was last distilled, and the
+        evaluation-time field eval_stats, written exclusively by the post-learning Strategy Attribution pass
+        (Section 5.3) and used to quantify the strategy’s empirical effect on actual generations. The two fields
+        are updated by disjoint mechanisms and never overwrite each other.
+
+5.2     Hint Learning Module
+Instead of treating prompt optimization as a one-off search, Tahoe adopts an iterative, debugging-based
+approach. The core philosophy follows a standard engineering cycle: Execution → Feedback → Reflection
+→ Re-evaluation. For each example, Tahoe does not directly modify the global Hint Bank. Instead, it
+
+
+                                                         10
+initializes a temporary Hint Bank H̃ as a working copy of the current frozen global bank H(t) , and all
+multi-iteration revisions are applied exclusively to H̃. This design keeps the global bank stable during iterative
+refinement. Importantly, the per-example output is not a new global bank: each example produces only a
+set of temporary-bank deltas—the additions, revisions, and suspensions recorded in its own H̃ relative to
+H(t) . After all examples in the current batch finish their per-example loops, the Hint Management Module
+(Section 5.3) merges the eligible temporary-bank deltas into the frozen H(t) to produce the next version
+H(t+1) , following the batch-sequential protocol detailed in Section 5.5.
+The remainder of this subsection zooms in on the per-example learning loop: the three integrated stages
+below all operate on a single example and its temporary Hint Bank H̃, and they repeat until a stop criterion
+is met.
+
+5.2.1   Step 1: Multi-Sampling Inference with the Temporary Hint Bank
+
+Single-pass generation is inherently noisy due to LLM stochasticity. To ensure that revisions to H̃ cover the
+full spectrum of potential errors and do not introduce regressions, we employ Multi-Sampling at the start of
+each iteration. For a given input (q, S), we perform N inference runs via the Hint-Guided Inference Module
+(Section 5.4), each conditioned on the temporary Hint Bank H̃ (initialized from H(t) , with H(0) = ∅ for the
+first batch). The temporary-bank deltas accumulated in H̃ are not committed to the global bank one example
+at a time; they are pooled across the current batch and consolidated into H(t+1) collectively (see §5.5).
+
+5.2.2   Step 2: Sequential Feedback & Atomic diff Generation
+We process the N generated candidates (i.e., samples) through a two-stage sequential filter, using the ground-
+truth execution result as the reference. In the first stage, candidates that fail to compile form the set of syntax
+error traces, denoted by Ksyn . We then apply runtime syntax fixes (Phase A) to obtain syntactically valid
+SQL queries, including both originally valid and repaired candidates. All syntactically valid candidates are
+subsequently executed, and those whose execution results still fail to match the ground truth form the set of
+semantic error traces, denoted by Ksem .
+
+Phase A: Syntax Correction & diff Generation (Compiler Feedback). The first barrier is the SQL compiler.
+For each candidate in Ksyn , we enter a rapid Critic Loop that asks an agent to repair syntax without altering
+semantics. Because this loop involves iterative interaction with compiler feedback, syntax correction is
+inherently a multi-step process. From the resulting sequence of compiler errors and repairs, we extract atomic
+syntax diffs that capture specific violations and their corresponding fixes. We extract atomic syntax diffs
+only from candidates whose Critic Loop ultimately produces a syntactically valid query: a successful repair
+trace gives an unambiguous (error → fix) pair from which a hint can be distilled. Candidates that exhaust
+the Critic Loop’s iteration budget without compiling are discarded for the purpose of syntax hint learning,
+since their final state offers no verified fix to generalize from.
+
+Phase B: Semantic Debugging & diff Generation (Execution Feedback). Semantic debugging proceeds in
+two steps. First, the execution-result mismatch (against the ground-truth result) identifies which candidates
+are semantically wrong, yielding Ksem . Then, since offline learning has access to the ground-truth SQL y ∗ , a
+semantic diff agent performs a one-step comparison between the logical steps of y ∗ and the predicted SQL
+(optionally aided by their result summaries) to localize the specific logic gaps responsible for the mismatch
+(e.g., an incorrect join condition or aggregation scope).
+To make the feedback produced by these two phases comparable and reusable, Tahoe represents both syntax
+and semantic deviations as atomic diffs. An atomic diff isolates a single, specific deviation between the
+preferred solution and an error trace, avoiding the complexity of comparing full SQL queries or verbose
+execution logs directly. The unified schema for atomic diffs is detailed in Appendix A.
+
+
+
+
+                                                        11
+5.2.3   Step 3: Hint Suggestion & Clustering (Updating the Temporary Hint Bank)
+After processing the Ksyn syntax error traces and Ksem semantic error traces, we obtain a set of M atomic
+diffs (from both compiler and execution feedback). We then prompt another LLM to produce a hint
+suggestion for each diff. Specifically, the agent must decide to: (1) Add a new hint, if no hint in the current
+H̃ would have prevented the error described by the diff; or (2) Revise an existing hint, if a hint already
+in H̃ should have prevented the error but failed (e.g., due to ambiguity), and thus needs refinement; or (3)
+Suspend a previously proposed change, i.e., roll back an addition or revision introduced earlier in the current
+temporary-bank refinement loop if the latest diff indicates that the change is now misleading or no longer
+applies—this lets the loop undo its own recent updates rather than only growing H̃ monotonically.
+This yields M hint suggestions. Because different traces may trigger overlapping or duplicate suggestions,
+we prompt an LLM to cluster these M suggestions into C final changes. These C changes are then applied
+to update H̃. Each suggested semantic hint is also assigned a scope tag S at generation time based on the
+current example’s DB/User context, following the scope rules in Section 5.1. The loop then restarts at Step 1,
+leveraging the refined H̃. The core intuition is that complex traces are difficult to analyze holistically; the
+pipeline of atomic diffs → suggestions → clustering distills actionable, empirically effective hints.
+
+Stop Criteria and Conditional Merge.     The hint refinement loop terminates under one of two conditions, each
+triggering a different merge policy:
+   1. All samples correct (Success). All N candidates generated with the current H̃ pass both the compiler
+      and execution checks against y ∗ . This confirms that the refined hints are strictly beneficial, so the
+      temporary-bank deltas are unconditionally marked eligible for batch merge by the Hint Management
+      Module (Section 5.3).
+   2. Maximum iterations reached. The loop exhausts its revision budget Tmax without achieving full
+      correctness. To guard against regressions introduced by over-revision, we apply a conservative merge
+      policy: the temporary-bank deltas are retained for batch merge only if the number of correct samples
+      produced under H̃ strictly exceeds that of the original frozen bank, i.e., |correct(H̃)| > |correct(H(t) )|.
+      Both counts are measured under the same sampling budget (N samples) and decoding setting, so the
+      comparison reflects the effect of the revised hints rather than sampling noise. If not, the deltas are
+      discarded and do not enter the batch-level merge, preventing the global Hint Bank from being polluted
+      by ineffective revisions.
+
+5.3     Hint Management Module
+A key challenge in automated hint learning is handling conflicts and maintaining distribution balance. If
+the system learns solely from errors, the Hint Bank risks becoming a collection of edge cases, losing track of
+general correct behaviors. We propose a management pipeline to ensure both consistency and coverage:
+   1. LLM-Augmented Merging & Deduplication (Scope-Aware): After all examples in a batch finish, the
+      Hint Management Module consolidates their eligible temporary-bank deltas into the global Hint Bank
+      H. For each new or revised hint, we first determine its scope tag S (Section 5.1) and only compare
+      it against existing global hints with the same scope. Within that scope, we check whether a similar
+      Trigger already exists using a Hint-Merge Agent. If the temporary hint matches an existing strategy,
+      we merge them (e.g., consolidating examples and updating statistics). If it proposes conflicting logic
+      (e.g., Round-Up vs. Round-Down), the agent appends it as a new, mutually exclusive Strategy under
+      the same trigger, enabling the system to model localized variations without polluting other scopes.
+   2. Coverage Assurance (Preventing Error-Bias): To prevent the Hint Bank from biasing towards failures
+      (“overfitting to mistakes”), we additionally process examples that are solved on the first iteration—i.e.,
+      where all N candidates produced from the very first Multi-Sampling pass already pass both compiler
+      and execution checks, so no error trace is generated. For such examples we still inspect the retrieved
+      hints used during that first pass: an LLM judge compares the successful predicted SQL against the
+      retrieved hints (via the same logical-diff analysis used for semantic debugging) to infer the strategy
+      actually used. If the model succeeded via parametric knowledge but the retrieved hints did not explicitly
+
+
+                                                       12
+      cover that strategy, we distill this Vanilla Strategy and add it to the Hint Bank. This ensures that
+      “normal” or “correct” behaviors are competing fairly with “correction” strategies during ranking, instead
+      of being silently absent from the bank simply because they never produced an error.
+  3. Strategy Attribution and Statistic Tracking: Each strategy σ carries two complementary signals. The
+     first is a learning-time signal, recency: the timestamp of the most recent successful application during
+     learning, used by the retriever to prioritize evolving user preferences. We deliberately do not rely on
+     raw learning-time success counts, because they conflate “how often a strategy was learned ” with “how
+     often it was useful ”, which inflates recall but hurts retrieval precision once the bank grows.
+      The second signal is an evaluation-time attribution measured on a frozen Hint Bank. Periodically—e.g.,
+      after every K learned examples or at the end of a learning round—we pause learning, freeze the current
+      global Hint Bank H, and run a dedicated multi-sample evaluation pass on previously processed examples
+      using H as the only knowledge source. This evaluation produces, for each example, the predicted SQL,
+      the ground-truth SQL, the execution score, and the set of retrieved hint IDs; the resulting artifacts
+      are then consumed by the Strategy Attribution step, which writes its results into a dedicated field
+      σ.eval_stats that is never modified by the learning loop. Because retrieval is recorded at the hint level
+      but a retrieved hint exposes all of its strategies, the exposed strategy set for a sample is the union of
+      strategies under its retrieved hints. For every (example, exposed strategy) pair, an LLM judge inspects
+      the predicted SQL against the ground-truth SQL and assigns one of three SQL-evidence-driven verdicts:
+         • positive: the predicted SQL visibly applied σ’s preferred action and that choice was relevant to a
+           correct execution result;
+         • negative: the predicted SQL followed σ’s preferred action and that exact choice is where it diverged
+           from the ground-truth SQL;
+         • inert: σ was retrieved but not reflected in the SQL, or its application was irrelevant to correctness.
+      Verdicts are aggregated to the example level across the N samples: an example is added to a strategy’s
+      positive list if any correct sample applied σ, and to its negative list if any incorrect sample was misled by
+      σ; inert exposures in incorrect samples are not counted as negative. Because attribution is aggregated
+      across multiple samples, the positive and negative lists are not necessarily mutually exclusive: the same
+      example may show that a strategy can help one sample while misleading another. We therefore do
+      not force a single label per (example, strategy) pair; instead, the inference-time formatter (Section 5.4)
+      reports success rate and harm rate as separate quantities over the retrieved support, so the planner
+      can see partial-help cases for what they are. Concretely, eval_stats keeps three deduplicated lists per
+      strategy—the examples on which it was retrieved, those it helped, and those it hurt—over the previously
+      evaluated examples; storing the actual example references (rather than only counts) keeps the data
+      deduplicated, auditable, and recomputable across attribution runs.
+
+5.4   Hint-Guided Inference Module
+During inference, Tahoe utilizes the Hint Bank to guide the LLM. The process proceeds in two sequential
+stages:
+  1. Step 1: Hint Retrieval and Logic Planning. Before generating the SQL query, we retrieve relevant semantic
+     hints from the Hint Bank in two stages. We first apply a scope-aware filter (Section 5.1) over the
+     global bank: General hints are always kept, while Database-specific and User-specific hints are kept
+     only when their attached database id (resp. user id) matches the current query’s context. Scope filtering
+     is performed before retrieval, so the candidate pool exposed to retrieval is already context-isolated. The
+     remaining candidates’ Triggers (and aliases) are then serialized into a compact textual list and passed to
+     a retrieval LLM (run with low temperature), which is instructed to use semantic judgment rather than
+     keyword matching to return the subset of hint ids it considers relevant to q. The associated strategies
+     are scored using the flexible signals defined in Section 5.3: the learning-time recency (used to prioritize
+     recent user contexts) and the evaluation-time attribution stored in σ.eval_stats. Crucially, before any
+     of this is exposed to the planning LLM we apply a lightweight formatting layer that turns the raw
+
+
+
+                                                        13
+        eval_stats lists into compact, anonymized statistics: it computes a per-strategy success rate (positive
+        over retrieved), the corresponding harm rate (negative over retrieved), the inert share, and the support
+        size, and drops the underlying example references. This serves two purposes simultaneously: it prevents
+        leakage of any specific evaluation example into the prompt, and it presents the planning LLM with a
+        single trustworthiness summary per strategy rather than raw bookkeeping. The LLM is then asked
+        to use these summaries as a credibility signal: a strategy with a high success rate over many distinct
+        examples is treated as well-supported and preferred; one that is frequently retrieved but rarely actually
+        applied (high inert share) is surfaced as optional and may be safely ignored; one with a non-trivial harm
+        rate or only a handful of supporting examples is flagged as low-confidence and can be down-weighted
+        or skipped. The LLM then produces a Logic Plan that integrates the strategies it chooses to trust,
+        resolving any remaining conflicts before code generation.
+   2. Step 2: SQL Synthesis. Following logic planning, the system injects the complete set of dialect-specific
+      Syntax Hints alongside the generated Logic Plan into the prompt for the final SQL synthesis. We
+      consciously inject all available syntax hints for the target dialect rather than retrieving a subset. Because
+      modern base LLMs already possess a strong foundational understanding of SQL, the number of persistent,
+      dialect-specific compilation errors tends to be small. Consequently, the syntax registry for any single
+      dialect remains highly compact. Injecting the complete set provides exhaustive dialect guidance and
+      substantially improves adherence to compiler constraints without risking prompt context overflow,
+      allowing the LLM to reliably synthesize the final executable SQL.
+
+5.5     Deployment Lifecycle
+Tahoe is designed for continuous adaptation, bridging the gap between static training and dynamic production
+through a two-phase lifecycle.
+
+Phase I: Development (Cold Start). We bootstrap the initial Hint Bank H using a small, manually curated
+offline dataset. Crucially, each example in this phase includes not just the ground truth SQL (y ∗ ), but also the
+verified Execution Result, allowing both the Syntax and Semantic Learning Agents to operate in full capacity:
+validating syntax against the compiler and verifying logic by comparing execution outcomes against y ∗ .
+Batch-Sequential Update Protocol. The offline dataset is processed in sequential batches B1 , B2 , . . . , BT .
+We denote the Hint Bank available at the start of batch Bt as H(t) , with H(0) = ∅ (empty bank). For each
+example in Bt , the Hint Learning Module executes the full per-example pipeline (Figure 3): a temporary Hint
+Bank H̃ is initialized as a copy of the frozen H(t) , and all multi-iteration hint revisions operate exclusively on
+H̃. Because all examples within Bt share the same frozen H(t) , their per-example H̃ copies are independent
+and can be processed in parallel. Once all examples in Bt are processed, the Hint Management Module merges
+all eligible temporary-bank deltas into H(t) to produce the updated bank H(t+1) . This batch merge is the
+only point at which the global bank is updated. This sequential batch structure ensures every batch builds
+cumulatively on all knowledge distilled by prior batches. After T batches, the resulting H(T ) serves as the
+warm-started Hint Bank handed off to the Deployment Phase.
+
+Phase II: Deployment. The fundamental challenge distinguishing deployment from the development phase is
+the absence of ground truth SQL. In development, we have access to a verified y ∗ for every example, which
+enables both the Syntax and Semantic Learning Agents to operate at full capacity. In production, no such
+ground truth is predefined, so the two types of hint learning require different adaptation strategies.
+      • Continuous Syntax Updates (Automated): Syntax learning is unaffected by the absence of ground truth
+        SQL, because the SQL compiler itself is the sole source of truth for syntax validity. Failed queries
+        from live traffic are batch-processed asynchronously by the Syntax Learning Agent exactly as in the
+        development phase, allowing the system to adapt to dialect version updates or newly encountered errors
+        without any human intervention.
+      • Human-in-the-Loop Semantic Updates: Semantic learning requires knowing which SQL output is correct,
+        which is precisely what ground truth provides in development. In deployment we approximate this via
+        a user preference interaction. For each incoming question q, the system runs N inference calls with
+
+
+                                                        14
+       the current Hint Bank, generating N candidate SQL queries {ŷ1 , . . . , ŷN } ranked by strategy statistics
+       (Section 5.3). These candidates are presented to the user, who accepts any that produce a correct result
+       and rejects the rest.
+       This labeling induces a preference dataset analogous to the signal used in Direct Preference Optimization
+       (DPO) [13]:
+          1. Positive signal (accepted): Each accepted candidate is treated as a pseudo-ground-truth ỹ ∗ .
+          2. Negative signal (rejected): Each rejected candidate ŷrej whose execution result differs from an
+             accepted one is treated as a semantic error.
+          3. Hint learning: The pair (ỹ ∗ , ŷrej ) is fed directly into the Semantic Learning Agent, which generates
+             atomic diffs, produces hint suggestions, and updates Hsem via the Hint Management Module—
+             exactly as in the development phase.
+        If the user rejects all candidates, the system logs the query for manual review, as this signals a knowledge
+        gap that cannot be safely resolved by automated reflection alone.
+
+5.6     Case Study: End-to-End Hint Learning
+We trace three concrete examples through the learning pipeline; the corresponding structured hints appear
+immediately after each example below. Recall the three steps in each iteration: Multi-Sampling Inference
+(generating N candidates from the current H̃), Sequential Feedback (compiler and execution checks that
+produce atomic diffs), and Hint Suggestion & Clustering (converting diffs into hint updates for H̃).
+Examples 1–2 walk through both feedback channels in full; Example 3 illustrates a Database-specific semantic
+hint. (No User-specific examples appear here, since this benchmark exposes no per-user identity; see
+Section 6.1.)
+
+Example 1 (Syntax): Snowflake Identifier Quoting. Consider the question “Count all orders placed” against an
+orders table. In the Multi-Sampling Inference step with an empty H̃, all sampled candidates use bare, unquoted
+identifiers (e.g., FROM SALES.ORDERS). During Sequential Feedback, the compiler rejects every candidate,
+reporting that the table object does not exist—Snowflake requires every identifier to be double-quoted in
+the exact stored casing. This compiler trace is converted into a SYNTAX-category atomic diff whose gold
+strategy is “quote each path element separately in double-quotes”. In the Hint Suggestion & Clustering step,
+this diff is translated into a syntax hint—a rule stating that every identifier must be quoted exactly as
+stored, accompanied by a corrected SQL snippet—and added to H̃syn . In the next iteration’s Multi-Sampling
+Inference step, the hint is injected into the prompt and all candidates now compile successfully. The success
+stop criterion is met, and the resulting temporary-bank delta is marked eligible for the batch-level merge.
+
+      Structured hint (Example 1)
+
+      Rule: Quote every database, schema, table, column, CTE, and alias exactly as it is stored; quote each
+      element of a fully-qualified path separately. System-generated columns from table-functions are already
+      UPPER-CASE—leave them unquoted or quote them in UPPER-CASE only.
+      Example: Schema: sales.orders(orderId, order_date) Question: Count all orders.
+      SELECT COUNT(*) AS "total"
+      FROM "SALES"."ORDERS";
+
+
+
+Example 2 (Semantic, General): log10 Transformation. For the question “Compute the log10 -transformed
+view count per event type”, the Multi-Sampling Inference step produces candidates that use NULLIF(col, 0)
+to suppress zeros before taking the log. The queries compile, but during Sequential Feedback (execution
+phase) the result set mismatches the ground truth: rows with a zero view count return NULL instead of the
+expected 0 (i.e., log10 (0 + 1)). The LLM analyzes the ground-truth SQL versus the predicted output and
+extracts a FORMULA-category diff: the gold strategy adds 1 before the log to handle zero-valued rows, while
+
+
+                                                          15
+the wrong strategy silently nullifies them. Hint Suggestion & Clustering converts this into a general-scope
+semantic hint with trigger “log10 transformation of counts”, containing a strategy that prescribes adding one
+before applying log10, i.e., log10 (column + 1), and flags nullifying zeros (e.g., NULLIF) as incorrect. Because
+the scope is General, this hint is eligible for retrieval across databases and users; whether it should be trusted
+for a specific query is still determined by attribution statistics during inference. In the next iteration the
+retrieved hint guides the Logic Plan, and the corrected formula is used, matching the ground truth.
+
+      Structured hint (Example 2)
+
+      Trigger: log10 transformation of counts
+      Strategy 1
+      Rationale: When the question asks for a log10 transformation of count-type data that can contain
+      zeros, keep zero-valued rows and avoid −∞ by adding 1 before the log.
+      Preferred Action (logical): Apply log10 after adding one to the column: log10 (column + 1).
+      Implementation example (Snowflake):
+      LOG(10, "{COLUMN}" + 1)
+
+      Wrong Action (logical): Replace zeros with NULL before taking the log, which silently drops the
+      zero-valued rows.
+      Implementation example of the wrong action (Snowflake):
+      LOG(10, NULLIF("{COLUMN}", 0))
+
+
+
+Example 3 (Semantic, DB-specific): GA4 Visitor ID. For the question “List unique visitors from last month”
+on the GA4 database, sampled candidates filter on the USER_ID column, which is almost always NULL in the
+GA4 sample schema, producing an empty result. The execution feedback identifies the correct column as
+USER_PSEUDO_ID (which stores the actual visitor identifier). The learned hint is scoped to DB-specific (GA4),
+so it is only retrieved for queries against the GA4 database and does not affect other schemas.
+
+      Structured hint (Example 3)
+
+      Database: GA4   Trigger: reference to column USER_ID in GA4 events tables
+      Strategy 1
+      Rationale: GA4 sample ecommerce tables store visitor IDs in USER_PSEUDO_ID, while USER_ID is
+      almost always NULL.
+      Preferred Action: Use the pseudo-ID column:
+      ... WHERE USER_PSEUDO_ID LIKE ’{INT}.%’ ...
+
+      Wrong Action: Avoid filtering directly on USER_ID:
+      ... WHERE USER_ID = ’{INT}’ ...
+
+
+
+6     Evaluation
+6.1     Experimental Setup
+We evaluate Tahoe on the Spider 2.0--Snow-0212 benchmark [1], which is designed to mimic realistic
+enterprise challenges, featuring the strict Snowflake SQL dialect, complex multi-table schemas, and logic-heavy
+questions that frequently confuse standard models.
+
+Dataset Split. This paper focuses on the Development Phase (Phase I) of Tahoe: hint learning and evaluation
+on examples that ship with usable supervision. The Spider 2.0–Snow-0212 release contains 547 examples in
+total, of which only a subset ships with both ground-truth SQL and ground-truth execution results. After
+
+
+                                                       16
+filtering, we obtain 113 examples with usable supervision1, on which the Hint Bank is bootstrapped sequentially.
+Following the development-phase protocol described in Section 5.5, we then re-evaluate on the same 113
+examples using the final learned Hint Bank and compare against a vanilla baseline that uses no hints. We
+additionally evaluate, in Section 6.4, on the remaining Spider 2.0–Snow-0212 examples that the development
+phase did not learn from, in order to test how the development-phase Hint Bank generalizes outside its
+learning set. The full Deployment Phase workflow—in which the same architecture continues to learn hints
+from these examples through accumulated execution and user feedback rather than ground-truth SQL—is left
+for future work (Section 7).
+
+Models. We deliberately span three backbones of different capability tiers to test both end-to-end performance
+and cross-model transferability of the learned Hint Bank:
+    • Doubao-2.0-lite (weak): a lightweight open-style backbone used to test whether a Hint Bank distilled
+      by a stronger model can lift a weaker generator.
+    • GPT-5 (medium): a mid-tier OpenAI model used as a medium-capability transfer target.
+    • GPT-5.5 (strong, primary): our core model. All learning agents (Syntax/Semantic Learning, Hint-Merge,
+      Strategy Attribution) and the primary Hint Bank reported in Tables 2 and 4 use GPT-5.5.
+Unless otherwise stated, the Hint Bank evaluated in every table is the one learned by GPT-5.5 on the 113
+development examples; Doubao and GPT-5 inherit exactly this bank without any model-specific adaptation.
+The final bank contains 11 syntax hints and 37 semantic hints (19 General + 18 Database-specific; no
+User-specific hints arise in this single-tenant benchmark).
+
+Baselines. For every backbone, our primary baseline is the Vanilla configuration of the same model: same
+backbone, decoding parameters, and syntax critic budget, but without hint retrieval or hint-conditioned
+planning. This isolates the contribution of the Hint Bank from raw model capability.
+In addition, on the held-out split (Section 6.4) we compare against a reproduced SQLGenie-style Example-
+Bank RAG baseline based on SQLGenie [5], the closest published RAG-style system from our related work
+(Section 2). Since SQLGenie’s official inference code is not available, we implement a best-effort reproduction of
+only its Example Bank RAG route, omitting non-RAG components such as table onboarding, self-refinement,
+and feedback-driven bank augmentation. The bank stores the same 113 supervised development question–SQL
+pairs used by Tahoe for hint learning; retrieval uses masked-question similarity and, for each query, returns the
+top-3 most similar (question, SQL) pairs, which are injected verbatim into the generator prompt. Evaluation
+is restricted to held-out examples whose gold SQL is not in the bank to avoid target leakage. This baseline
+(referred to as SQLGenie-style RAG) is run with GPT-5.5 as the generator, with the same decoding parameters
+as the Vanilla and Tahoe configurations.
+
+Metrics. We report four metrics that jointly capture end-to-end correctness and the efficiency of iterative
+refinement:
+    • Pass Rate: the fraction of sampled candidates (across all examples) whose execution result matches
+      the ground truth. We deliberately report this as a per-candidate rate because it is computed over all k
+      samples per example, not just a single top-ranked candidate.
+    • pass@4 (pass@k): an example counts as solved if at least one of the k=4 parallel candidates matches
+      the ground truth.
+    • Syntax Pass Rate: the fraction of sampled candidates that become syntactically valid Snowflake queries
+      after the syntax critic loop terminates (i.e., either parsed successfully on initial generation or repaired
+   1 Of the 547 examples, 120 are released with both a ground-truth SQL and a ground-truth execution result. We discard 7 of
+
+these whose official ground-truth SQL produces a result set that does not match the official ground-truth result when executed
+under the Snowflake engine, and treat them as having no usable ground truth. This leaves 113 examples with usable supervision
+(used for both hint learning and evaluation); the remaining 547 − 113 = 434 examples do not have usable gold SQL for hint
+learning, but they do provide official execution-result targets, which we use only for evaluation. These 434 examples form the
+held-out split used in Section 6.4.
+
+
+                                                             17
+Table 2 Main results on Spider 2.0–Snow-0212 (113 development examples): Vanilla baseline vs. Tahoe using the
+GPT-5.5-learned Hint Bank (11 syntax + 37 semantic hints).
+
+         Backbone              Configuration    Pass Rate ↑     pass@4 ↑    Syntax Pass ↑     Avg. Critics ↓
+                               Vanilla             29.42%        46.02%         62.17%            2.854
+         Doubao-2.0-lite
+                               Tahoe               49.12%        64.60%         96.46%            0.575
+                               Vanilla             42.70%        61.06%         74.56%            2.148
+         GPT-5
+                               Tahoe               58.85%        78.76%         99.12%            0.602
+                               Vanilla             61.95%        72.57%         96.24%            2.790
+         GPT-5.5 (primary)
+                               Tahoe               79.42%        87.61%        100.00%            0.124
+
+
+
+        into valid SQL within the per-sample critic budget). We report this at the candidate level for consistency
+        with Avg. Critics, which is also aggregated over candidates.
+      • Avg. Critics: the average number of compiler-feedback critic rounds taken across all sampled candidates,
+        where each candidate’s count is measured until it either becomes syntactically valid or exhausts the
+        per-sample critic budget. This is an aggregate over candidates, not an example-level “first valid candidate”
+        metric. Lower is better.
+
+Implementation Details. All experiments are executed under the Snowflake dialect of Spider 2.0–Snow-0212.
+For Tahoe’s Syntax Loop, we use the Snowflake SQL compiler for real-time validation; for the Semantic Loop,
+correctness is measured by comparing execution result sets against the ground truth. We set the maximum
+number of hint-learning iterations per example to 3, draw k=4 candidate samples in parallel at inference time,
+and use a sampling temperature of 0.3. Both the Vanilla baseline and Tahoe runs share the same backbone,
+decoding parameters, and syntax critic budget, so the comparison isolates the effect of Tahoe’s hint-guided
+inference pipeline from raw model capability.
+
+6.2     Main Results
+Table 2 reports the four metrics on the 113 development examples for the three backbones, each in its Vanilla
+and Tahoe-equipped configuration. Across every model and every metric, Tahoe delivers consistent and
+substantial gains.
+For our primary model GPT-5.5, Tahoe lifts pass rate from 61.95% to 79.42% (+17.47 pp) and pass@4 from
+72.57% to 87.61% (+15.04 pp), while driving the Snowflake syntax pass rate to 100% and reducing average
+critic rounds from 2.790 to 0.124 (≈ 22× reduction). The pass-rate gain is especially noteworthy: it shows
+that the Hint Bank not only widens the candidate pool (pass@4) but also raises the density of correct queries
+among all sampled candidates. The near-zero average critic rounds further indicate that essentially all queries
+are emitted in the correct dialect on the first attempt, so the compiler-feedback loop almost never has to fire
+during hint-guided inference.
+A category-level breakdown of these aggregate gains over the three sub-categories of the development set
+(sf_other, sf_local, sf_bq) shows that the improvement is concentrated on the harder local-Snowflake
+and BigQuery-converted subsets while the small sf_other subset is already near-saturated; full numbers are
+deferred to Appendix B.
+
+6.3     Cross-Model Transferability of the Hint Bank
+A central claim of Tahoe (Section 5) is that, unlike SFT-style adaptation, a Hint Bank is an external, model-
+agnostic asset: it is learned once with one backbone and can be plugged into other backbones without retraining.
+We test this directly by reusing the Hint Bank learned by GPT-5.5 on weaker backbones (Doubao-2.0-lite,
+GPT-5) without any model-specific adaptation. The corresponding rows in Table 2 show that:
+
+
+
+
+                                                         18
+Table 3 Held-out evaluation (434 examples not used in development-phase hint learning); all configurations use
+GPT-5.5 with identical decoding settings. SQLGenie-style RAG is our reproduced SQLGenie-style Example-Bank
+RAG baseline [5], injecting top-3 retrieved (question, SQL) pairs.
+
+              Configuration            Pass Rate ↑    pass@4 ↑    Syntax Pass ↑    Avg. Critics ↓
+              Vanilla                    56.16%        65.90%         90.21%            1.184
+              SQLGenie-style RAG         55.30%        65.44%         85.77%            0.446
+              Tahoe                      58.06%        67.28%         99.14%            0.203
+
+
+
+    • On Doubao-2.0-lite, the same bank lifts pass rate from 29.42% to 49.12% (+19.70 pp), pass@4 from
+      46.02% to 64.60% (+18.58 pp), and the syntax pass rate from 62.17% to 96.46%, while reducing average
+      critic rounds from 2.854 to 0.575 (≈ 5×).
+    • On GPT-5, pass rate improves from 42.70% to 58.85% (+16.15 pp), pass@4 from 61.06% to 78.76%
+      (+17.70 pp), and the syntax pass rate from 74.56% to 99.12%, with average critic rounds dropping from
+      2.148 to 0.602 (≈ 3.6×).
+
+The fact that a weaker backbone (Doubao) realizes the largest absolute pass-rate jump indicates that much of
+the dialect and logic knowledge required by Spider 2.0–Snow can be externalized into hints; once externalized,
+that knowledge transfers across backbones at zero retraining cost—a property that parameter-update-based
+approaches such as SFT [14] and DPO [13] cannot match.
+
+6.4   Generalization to Held-Out Examples
+The 113 examples used above also served as the learning set, so the previous results characterize the Hint
+Bank’s effect on its source distribution. To probe out-of-source generalization we additionally evaluate on the
+remaining 434 Spider 2.0--Snow-0212 examples that the development phase did not learn from; execution
+correctness is determined by comparing the predicted result set against the official ground-truth result set. To
+put Tahoe’s held-out behavior in context, we also report the SQLGenie-style RAG baseline introduced in
+Section 6.1.
+Three observations follow. First, the syntax-level benefits of Tahoe transfer almost completely to the held-out
+split: syntax pass rate climbs from 90.21% to 99.14% and average compiler-feedback critic rounds drop from 1.184
+to 0.203 (≈ 5.8×) once the Hint Bank is enabled. This is intuitive—Snowflake dialect rules captured by Syntax
+Hints are largely query-independent, so they generalize regardless of whether the example was seen during
+development-phase learning. Second, the semantic gains are noticeably smaller (pass rate +1.90 pp, pass@4
++1.38 pp) than on the development split. We interpret this as evidence that the held-out and development
+splits of Spider 2.0–Snow-0212 cover only loosely overlapping semantic distributions: the Semantic Hints
+distilled in the development phase encode triggers and strategies frequent in those 113 examples that do not
+all activate on the held-out queries. This suggests that semantic-side benefits scale with how representative
+the development set is of the target workload—which is exactly the regime in which the Deployment Phase is
+meant to operate.
+Third, the SQLGenie-style RAG baseline is not able to convert the same 113-example supervision into held-out
+gains. It actually trails the Vanilla GPT-5.5 baseline on both execution accuracy and syntax validity (−0.86 pp
+pass rate, −0.46 pp pass@4, −4.44 pp syntax pass). Although it reduces average critic rounds (from 1.184 to
+0.446), this efficiency gain does not translate into higher syntax validity or execution accuracy. One possible
+explanation is that exemplar injection only helps when retrieved examples are sufficiently aligned; otherwise,
+loosely matched SQL pairs can distract the generator. This is consistent with the fundamental difference
+between exemplar-injection RAG and structured hint distillation: such a baseline can only paste in retrieved
+(question, SQL) pairs, so when no nearly-isomorphic example exists in the bank—a common situation under
+the loose semantic overlap noted above—the retrieved exemplars become a distraction rather than a signal,
+dragging accuracy below the no-context baseline. Tahoe, in contrast, distills the same 113 examples into
+trigger-conditioned, attribution-validated strategies, which generalize beyond verbatim question similarity and
+mitigate this failure mode.
+
+
+                                                       19
+Table 4 Effect of Strategy Attribution (GPT-5.5, 113 development examples). Both configurations share the same
+learned Hint Bank and reach 100% syntax pass rate (column omitted).
+
+                       Configuration                Pass Rate ↑    pass@4 ↑    Avg. Critics ↓
+                       Tahoe w/o Attribution          69.03%        79.65%          0.334
+                       Tahoe with Attribution          79.42%        87.61%         0.124
+
+
+
+6.5     Ablation: Effect of Strategy Attribution
+The Hint Management Module’s Strategy Attribution pass (Section 5.3) is meant to address a specific failure
+mode: the Hint Bank can be expanded with strategies that are retrieved often but rarely actually useful,
+conflating “learned” with “useful” and dragging down inference quality. To isolate its effect, we compare two
+Hint Banks that differ only in whether attribution has been run:
+      • w/o Attribution. The bank produced directly by the Hint Learning Module on the 113 development
+        examples; strategies carry only the learning-time recency signal and no eval_stats.
+      • with Attribution. The same bank after a single Strategy Attribution pass populates each strategy’s
+        eval_stats with example-level retrieved/helped/hurt evidence; the inference-time formatting layer then
+        derives success, harm, and inert summaries.
+Both runs use GPT-5.5 with identical decoding settings; results on the 113 development examples are shown
+in Table 4. Both configurations already reach a 100% syntax pass rate, so we omit that column from the table.
+Adding the attribution-derived credibility summaries lifts pass rate by +10.39 pp and pass@4 by +7.96 pp,
+while further reducing average critic rounds by roughly 2.7×. Crucially, no new hints are learned between
+these two configurations—only the planner’s view of the bank changes. This confirms our hypothesis from
+Section 5.3: separating “learned” from “useful” and giving the planner an explicit per-strategy credibility
+signal lets it down-weight noisy or rarely-applied strategies and prefer those with empirically strong support,
+translating directly into higher end-to-end accuracy.
+
+7     Discussion and Future Work
+7.1     When to Use Tahoe
+Tahoe is designed to bridge the gap between static benchmarks and dynamic production environments. It
+delivers the highest ROI (Return on Investment) in settings where:
+      • Environments with Heterogeneous Dialects. Unlike SFT models that are often overfitted to standard
+        SQL [14], Tahoe’s syntax hints generalize across queries and databases within the same target dialect,
+        while separate dialect-specific syntax registries can be maintained for heterogeneous dialect environments,
+        effectively preventing recurrent compiler failures in strict dialects (e.g., Snowflake) without the need for
+        parameter retraining.
+      • Personalized or Domain-Specific Querying. When user preferences vary significantly or domain-specific
+        knowledge is essential in crafting SQL queries, semantic hints capture these local conventions dynamically.
+        This granular adaptation is often overlooked or too costly to implement via global fine-tuning.
+      • Dynamic, Evolving Workloads. In scenarios requiring continuous adaptation, the Hint Bank evolves
+        naturally as new examples arrive. This avoids the high operational cost of labeling new datasets and
+        retraining models for every schema change.
+In contrast, for static tasks with limited schema coverage where adaptation is unnecessary, traditional SFT
+may remain a competitive solution.
+
+7.2     System Limitations
+We acknowledge several boundaries in our current design:
+
+
+                                                         20
+      • Deployment Phase Not Evaluated. Our experiments cover only the Development Phase (Phase I).
+        Because the Deployment Phase (Phase II) relies on a human-in-the-loop preference signal that public
+        benchmarks such as Spider 2.0–Snow do not provide, we do not run deployment-phase experiments in
+        this paper and leave them as future work.
+      • Trigger Sensitivity. The retrieval of semantic hints relies on the precision of natural-language triggers.
+        Poorly formulated triggers may lead to lower recall or precision in hint selection, impacting the Logic
+        Planning stage.
+      • Strategy Sparsity. While the Strategy Layer prevents conflict loss, in the early stages of deployment
+        (cold start), the system may lack sufficient statistical data to reliably rank competing strategies for rare
+        edge cases.
+
+7.3     Future Directions
+We identify several promising directions to extend this framework:
+      • Graph-Based Hint Representation. Currently, hints are stored as independent entries indexed by natural-
+        language triggers and retrieved at inference time by an LLM-based scope-aware retriever (Section 5.4).
+        We envision upgrading the Hint Bank to a Graph Structure, where nodes represent business entities (e.g.,
+        tables, metrics) and edges represent strategy dependencies. This would enable the system to handle
+        complex, multi-hop reasoning—for instance, realizing that a specific “Revenue” calculation strategy
+        depends on a “Currency Conversion” rule defined in a separate hint.
+      • Multi-Hint Reasoning. Although the current system uses an LLM-based Logic Planning step to combine
+        retrieved strategies, future work can make multi-hint interaction more explicit and verifiable, for example
+        through graph- or constraint-based reasoning over hint dependencies.
+      • Benchmarking against Adaptation Paradigms. A natural future direction is to conduct systematic
+        comparisons with alternative adaptation methods, including Supervised Fine-Tuning (SFT) [14], Direct
+        Preference Optimization (DPO) [13], and Reinforcement Learning (RL) [11], to quantify trade-offs in
+        computational cost, adaptability, and interpretability.
+      • Deployment and Hint Bank Monitoring. Deploying Tahoe in real industry settings and monitoring
+        the Hint Bank’s scale is an important next step. Although the Hint Management Module handles
+        merging, deduplication, and conflict resolution, in production the bank can grow with continuous
+        learning; operational monitoring of bank size, retrieval latency, and storage is needed to keep the system
+        sustainable.
+      • Knowledge Lifecycle Management. Real-world deployment requires robust management of the Hint
+        Bank’s lifecycle, including mechanisms for pruning outdated hints (Eviction Policies), prioritizing new
+        strategies, and managing storage constraints in long-running systems.
+
+8     Conclusion
+Large language models have made Text-to-SQL increasingly practical, but robust deployment in real database
+environments remains challenging due to dialect-specific syntax failures, ambiguous business logic, and evolving
+user preferences. Existing adaptation paradigms each expose a key weakness in this setting: supervised
+fine-tuning is rigid and costly to refresh, test-time scaling incurs substantial online overhead, and raw retrieval
+often introduces noisy context rather than actionable guidance.
+In this paper, we presented Tahoe, which reframes Text-to-SQL adaptation as a data management problem
+over a persistent Hint Bank. Instead of repeatedly re-solving the same failures at inference time, Tahoe
+converts compiler and execution feedback into reusable Syntax Hints and scoped Semantic Hints. Its trigger–
+strategy abstraction further enables the system to preserve and rank competing interpretations explicitly,
+providing a structured mechanism for handling ambiguity without modifying model parameters.
+Experiments on Spider 2.0–Snow-0212 show that this design substantially improves robustness in the
+development-phase setting. On the 113 supervised development examples of Spider 2.0–Snow-0212, Tahoe
+
+
+                                                         21
+lifts pass rate from 61.95% to 79.42% and pass@4 from 72.57% to 87.61%, drives the Snowflake syntax pass
+rate to 100%, and reduces average compiler-feedback critic rounds from 2.79 to 0.12 per sampled candidate.
+Crucially, the same Hint Bank, plugged into weaker backbones (Doubao-2.0-lite, GPT-5) without retraining,
+also produces double-digit pp gains. The held-out evaluation further shows strong syntax-level transfer but
+more modest semantic gains, suggesting that semantic improvements depend on how well the development
+examples cover the target workload. These results suggest that explicit, reusable hints can recover much of
+the benefit of expensive adaptation while retaining low-latency inference and model agnosticism.
+More broadly, Tahoe highlights a systems direction for self-improving database interfaces: keep online query
+serving lightweight, and move adaptation into the continuous construction and maintenance of external
+knowledge. While this paper evaluates only the development-phase workflow, the same architecture naturally
+supports deployment-time batch refresh from accumulated feedback. We hope this perspective helps motivate
+future work on deployment evaluation, multi-hint reasoning, and long-term knowledge lifecycle management
+for Text-to-SQL systems.
+
+Acknowledgments
+This work was supported by the ByteDance ByteBrain team. The authors thank Tieying Zhang and Jianjun
+Chen for their guidance and support throughout this project.
+
+References
+ [1] Spider 2.0–snow benchmark. https://spider2-sql.github.io/, 2026. Snowflake dialect adaptation of the Spider
+     2.0 dataset, used for realistic Text-to-SQL evaluation.
+ [2] Lakshya A. Agrawal et al. Gepa: Reflective prompt evolution can outperform reinforcement learning. arXiv
+     preprint arXiv:2507.19457, 2025. URL https://arxiv.org/abs/2507.19457.
+ [3] Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and Deshraj Yadav. Mem0: Building production-
+     ready AI agents with scalable long-term memory. arXiv preprint arXiv:2504.19413, 2025.
+ [4] Dawei Gao, Haibin Wang, Yaliang Li, Xiuyu Sun, Yichen Qian, Bolin Ding, and Jingren Zhou. Text-to-sql
+     empowered by large language models: A benchmark evaluation. arXiv preprint arXiv:2308.15363, 2023.
+ [5] Pushpendu Ghosh, Aryan Jain, and Promod Yenigalla. Sqlgenie: A practical llm based system for reliable
+     and efficient sql generation. In Proceedings of the 63rd Annual Meeting of the Association for Computational
+     Linguistics (Volume 6: Industry Track), pages 1004–1012, 2025.
+ [6] Prakhar Gurawa and Anjali Dharmik.          Balancing content size in rag-text2sql system.        arXiv preprint
+     arXiv:2502.15723, 2025.
+ [7] Chenxu Hu, Jie Fu, Chenzhuang Du, Simian Luo, Junbo Zhao, and Hang Zhao. Chatdb: Augmenting llms with
+     databases as their symbolic memory. arXiv preprint arXiv:2306.03901, 2023.
+ [8] Charles Packer, Vivian Fang, Shishir G Patil, Kevin Lin, Sarah Wooders, and Joseph E Gonzalez. Memgpt:
+     Towards llms as operating systems. arXiv preprint arXiv:2310.08560, 2023.
+ [9] Joon Sung Park, Joseph O’Brien, Carrie Jun Cai, Meredith Ringel Morris, Percy Liang, and Michael S Bernstein.
+     Generative agents: Interactive simulacra of human behavior. In Proceedings of the 36th annual acm symposium
+     on user interface software and technology, pages 1–22, 2023.
+[10] Mohammadreza Pourreza and Davood Rafiei. Din-sql: Decomposed in-context learning of text-to-sql with
+     self-correction. Advances in Neural Information Processing Systems, 36:36339–36348, 2023.
+[11] Mohammadreza Pourreza, Shayan Talaei, Ruoxi Sun, Xingchen Wan, Hailong Li, Azalia Mirhoseini, Amin Saberi,
+     Sercan Arik, et al. Reasoning-sql: Reinforcement learning with sql tailored partial rewards for reasoning-enhanced
+     text-to-sql. arXiv preprint arXiv:2503.23157, 2025.
+[12] Reid Pryzant et al. Automatic prompt optimization with gradient descent and beam search. arXiv preprint
+     arXiv:2305.03495, 2023. URL https://arxiv.org/abs/2305.03495.
+
+
+
+
+                                                          22
+[13] Rafael Rafailov, Archit Sharma, Eric Mitchell, Christopher D Manning, Stefano Ermon, and Chelsea Finn.
+     Direct preference optimization: Your language model is secretly a reward model. Advances in neural information
+     processing systems, 36:53728–53741, 2023.
+[14] Torsten Scholak, Nathan Schucher, and Dzmitry Bahdanau. Picard: Parsing incrementally for constrained
+     auto-regressive decoding from language models. arXiv preprint arXiv:2109.05093, 2021.
+[15] Hong Sun, Xue Li, Yinchuan Xu, Youkow Homma, Qi Cao, Min Wu, Jian Jiao, and Denis Charles. Autohint:
+     Automatic prompt optimization with hint generation. arXiv preprint arXiv:2307.07415, 2023.
+[16] Bailin Wang, Richard Shin, Xiaodong Liu, Oleksandr Polozov, and Matthew Richardson. Rat-sql: Relation-aware
+     schema encoding and linking for text-to-sql parsers. In Proceedings of the 58th annual meeting of the association
+     for computational linguistics, pages 7567–7578, 2020.
+[17] Pengfei Wang, Baolin Sun, Xuemei Dong, Yaxun Dai, Hongwei Yuan, Mengdie Chu, Yingqi Gao, Xiang Qi, Peng
+     Zhang, and Ying Yan. Agentar-scale-sql: Advancing text-to-sql through orchestrated test-time scaling. arXiv
+     preprint arXiv:2509.24403, 2025.
+[18] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen
+     Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+[19] Tao Yu, Michihiro Yasunaga, Kai Yang, Rui Zhang, Dongxu Wang, Zifan Li, and Dragomir Radev. Syntaxsqlnet:
+     Syntax tree networks for complex and cross-domain text-to-sql task. arXiv preprint arXiv:1810.05237, 2018.
+[20] Kun Zhang, Xiexiong Lin, Yuanzhuo Wang, Xin Zhang, Fei Sun, Cen Jianhe, Hexiang Tan, Xuhui Jiang, and
+     Huawei Shen. Refsql: A retrieval-augmentation framework for text-to-sql generation. In Findings of the Association
+     for Computational Linguistics: EMNLP 2023, pages 664–673, 2023.
+
+
+
+
+                                                          23
+A    Atomic diff Schema
+During the Hint Learning Module’s multi-iteration process (Section 5.2), we utilize an LLM to generate atomic
+diffs between the ground truth SQL and the predicted error traces. This structured schema forces the LLM
+to isolate individual logic or syntax deviations, facilitating precise hint generation. The prompt enforces the
+following JSON-like schema, with one object per atomic issue:
+DiffID: "<Phrase-or ’GLOBAL’>::<Category>::<running number>"
+Phrase: "<verbatim or close paraphrase from Question>"
+Category: "<JOIN_TYPE | FILTER_SCOPE | AGG_TIMING |
+WINDOW_FRAME | LIMIT_RANK | FORMULA |
+COLUMN_CHOICE | UNIT_CAST | SEMANTIC |
+GLOBAL_PLAN | OTHER>"
+StepRef: "<Gold Step <n> | CTE name | GLOBAL>"
+GoldStrategy: "<one concise sentence of Gold’s approach>"
+GoldSQL: <concise snippet <=200 chars>
+WrongStrategy: "<one concise sentence of Pred’s approach (mark as unpreferred)>"
+WrongSQL: <concise snippet <=200 chars>
+Impact: "<one sentence explaining how results or preference deviate>"
+
+
+B   Per-Category Results on the Development Set
+The 113 development examples of Spider 2.0–Snow-0212 fall into three sub-categories that reflect how each
+query reaches the Snowflake engine: sf_other (queries against generic Snowflake-hosted databases, n=6),
+sf_local (queries against locally provisioned Snowflake databases, n=36), and sf_bq (queries originally
+authored on BigQuery and converted to the Snowflake dialect, n=71). The three subsets pose visibly different
+challenges: sf_bq is dialect-heavy because converted queries inherit BigQuery idioms that must be rewritten
+to Snowflake-compatible forms, while sf_other contains a small set of relatively standard analytical queries.
+Table 5 reports vanilla GPT-5.5 vs. Tahoe (with the GPT-5.5-learned, attribution-finalized Hint Bank)
+on each sub-category, using pass@4 and pass rate. The aggregate gains in Section 6.2 concentrate on the
+harder sub-categories: Tahoe delivers +18.31 pp pass@4 and +19.72 pp pass rate on sf_bq, and +11.11 pp /
++15.28 pp on sf_local, while the small sf_other subset is already near-saturated under the vanilla baseline
+(83.33% pass@4) and shows only marginal pass-rate movement. This pattern is consistent with our hypothesis
+that the Hint Bank captures dialect- and schema-specific knowledge whose marginal value grows with subset
+difficulty.
+
+          Table 5 Per-category results on the 113 development examples (GPT-5.5): Vanilla vs. Tahoe.
+
+                                                 pass@4 ↑            pass rate ↑
+                           Category     n    Vanilla    Tahoe    Vanilla   Tahoe
+                           sf_other      6   83.33%     83.33%   79.17%    83.33%
+                           sf_local     36   72.22%     83.33%   61.81%     77.08%
+                           sf_bq        71   71.83%     90.14%   60.56%     80.28%
+
+
+
+
+                                                       24
+

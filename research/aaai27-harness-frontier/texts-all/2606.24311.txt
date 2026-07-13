@@ -1,0 +1,496 @@
+                                                              LemonHarness Technical Report
+
+
+                                                   Kailong Ren1,∗ , Fubo Sun1,∗ , Jiachen Liu1 , Liu Yang1 , Zimo Yin1 , Jiaying Li1 ,
+                                                          Congli Yin1 , Ming He1,† , Yu Huo1 , Jiawei Liu1 , Zeping Chen1 ,
+                                                        Yubin Huangfu1 , Ronghua Li1 ,Yixuan Wu1 , Xing Su1 , Yanzhi Xu1 ,
+                                                     Likang Wu2 , Hongke Zhao2 , Lei Zhang3 , Xiaohui Geng4 , Jianping Fan1
+                                                                              1
+                                                                              AI Lab @ Lenovo CTO Org
+                                                                                  2
+                                                                                    Tianjin University
+
+
+
+
+arXiv:2606.24311v1 [cs.AI] 23 Jun 2026
+                                                                                  3
+                                                                                    Anhui University
+                                                       4
+                                                         Department of Psychological and Cognitive Sciences, Tsinghua University
+
+
+
+                                                                                       Abstract
+
+                                                    As large language model (LLM) agents are applied to longer tasks, they in-
+                                                    creasingly modify workspace state across multiple rounds of iteration. However,
+                                                    agents typically observe only tool outputs and log fragments, while the actual
+                                                    state changes occur in the ﬁle system. Without explicit workspace boundaries,
+                                                    state-changing operations such as ﬁle writes and temporary artifact generation
+                                                    may scatter changes across paths. Over time, these weakly constrained changes
+                                                    accumulate, making states such as modiﬁed ﬁles difﬁcult to track. This paper
+                                                    presents LemonHarness, an integrated execution framework for long-horizon
+                                                    agents. LemonHarness establishes an explicit execution boundary by constraining
+                                                    state-changing operations within a clearly deﬁned workspace and bringing model
+                                                    invocation, tool execution, and rule knowledge within a single controlled bound-
+                                                    ary. State-changing operations, including ﬁle writes, dependency installation, and
+                                                    temporary artifact creation, are executed through structured tool interfaces, with
+                                                    execution feedback recorded as observations available to subsequent model deci-
+                                                    sions. The system also introduces a reusable rule knowledge base, which turns
+                                                    recurring execution rules and acceptance criteria into runtime knowledge. Lemon-
+                                                    Harness further adds a time-aware execution mechanism that exposes elapsed and
+                                                    remaining budget to the model, so it can rebalance exploration, implementation,
+                                                    and validation effort as time pressure shifts and avoid timeouts from long waits or
+                                                    excessive veriﬁcation. On Terminal-Bench 2.0, LemonHarness_GPT-5.3-CodeX
+                                                    reached 84.49% accuracy over 445 trials; pairing the same framework with the
+                                                    stronger GPT-5.5 backbone raised the average accuracy to 86.52% across ﬁve jobs.
+                                                    The results suggest that a uniﬁed runtime boundary, callable rule knowledge, and
+                                                    time-aware execution can improve the stability of long-horizon agent execution.
+
+
+                                         1   Introduction
+                                         LLM agents are increasingly used for tasks that are longer, more stateful, and closer to real exe-
+                                         cution environments [2, 6, 14, 5]. In these tasks, a model may need to call tools, edit ﬁles, install
+                                         dependencies, create temporary artifacts, start external processes, and revise later actions based on
+                                         intermediate results. The key challenge is therefore not only whether each individual reasoning step
+                                         is correct, but also whether the agent can maintain an accurate view of the workspace after many
+                                         state-changing operations. In practice, the model usually observes only tool outputs, error messages,
+                                         and log fragments, while the actual state changes occur in the shell, ﬁle system, temporary direc-
+                                             ∗
+                                                 Equal contribution.
+                                             †
+                                                 Corresponding Author. Email: heming01@foxmail.com
+tories, dependency environment, and external processes. Without a clear workspace boundary and
+explicit constraints on state-changing actions, ﬁle writes, dependency installation, and temporary
+directory creation may be scattered across different paths and processes. As the execution chain
+grows longer, these weakly constrained state changes accumulate, making it difﬁcult for the model
+to determine which ﬁles have been modiﬁed, which commands have changed the environment, and
+which validation results remain valid, thereby causing state drift.
+SABER [1] shows that failures in long-horizon agents are not spread evenly across all steps. They
+concentrate around a small number of mutating actions, such as ﬁle creation. These actions account
+for only about 14–18% of all steps, but one incorrect mutating deviation can reduce task-success
+odds by 57–82%, while a similar non-mutating deviation reduces success odds by only 7–15%.
+Other studies also suggest that long-horizon task success depends not only on individual actions, but
+also on whether the environment state remains consistent across multiple rounds of execution [11,
+16]. These ﬁndings suggest that state-changing operations in long-horizon tasks should be executed
+under explicit workspace constraints, which can mitigate state drift.
+Motivated by this observation, LemonHarness makes the execution boundary explicit. It constrains
+state-changing operations within a clearly deﬁned workspace and organizes model invocation, tool
+execution, structured tool deﬁnitions, task knowledge, workspace state, and execution logs within
+the same controlled framework. State-changing operations such as ﬁle writes, dependency instal-
+lation, temporary artifact creation, and validation commands are executed through structured tool
+interfaces inside a designated workspace. Their feedback is recorded as observations for later deci-
+sions, so the model can continue from a coherent workspace state rather than infer the environment
+from scattered logs. This design keeps observation, execution, modiﬁcation, and veriﬁcation aligned
+around the same task context, reducing the risk of state drift in long-running tasks.
+Prior studies have shown that reusable experiential knowledge can effectively improve model per-
+formance and execution stability [12, 17, 19]. LemonHarness further introduces general procedural
+knowledge by transforming task-transferable execution heuristics and validation criteria into run-
+time priors. Many tasks share reusable execution patterns. For example, in deep learning tasks, a
+decreasing loss alone does not necessarily indicate task completion; general constraints such as data
+splits, random seeds, and validation metrics must also be considered. If these constraints are not
+incorporated into runtime knowledge, the model may produce solutions that appear plausible but are
+invalid in practice. General procedural knowledge exposes such task boundaries in advance, giving
+the agent an early sense of direction and thereby enabling more stable task execution.
+Long-horizon tasks are constrained not only by correctness requirements but also by strict execu-
+tion budgets [4, 9]. In terminal environments, an agent may spend too much time on open-ended
+exploration, wait for long-running commands, or repeatedly verify intermediate results even when
+an acceptable solution has already been produced. Such behavior can turn an otherwise solvable
+task into a timeout failure. To address this issue, LemonHarness introduces a time-aware execution
+mechanism. Before execution, LemonHarness assigns the task to a time tier and then feeds elapsed
+time and remaining time back to the model during execution. With this signal, the model can shift
+effort between exploration, implementation, and validation as the deadline approaches, instead of
+stalling on long-running commands or piling on redundant late-stage checks.
+On Terminal-Bench 2.0 [7], LemonHarness_GPT-5.3-CodeX achieved 84.5% accuracy over 445
+trials. In additional validation with GPT-5.5 [13], LemonHarness reached 86.52% average accuracy
+across ﬁve jobs, solving 385 out of 445 trials. These results suggest that the combination of a
+uniﬁed runtime boundary, reusable general rule knowledge, and time-aware execution can deliver
+strong performance on realistic long-horizon tasks.
+The main contributions are as follows:
+
+• LemonHarness designs an integrated execution framework that manages prompts, tool executors,
+  skills, execution logs, and model calls in one place, keeping observation, execution, modiﬁcation,
+  and veriﬁcation under the same runtime boundary.
+• LemonHarness introduces reusable general rule knowledge, turning recurring execution rules and
+  acceptance criteria into runtime priors that guide the model early in a task.
+• LemonHarness adds a time-aware execution mechanism, allowing the model to adjust exploration,
+  implementation, and validation according to elapsed and remaining time.
+
+
+                                                 2
+• LemonHarness is evaluated on Terminal-Bench 2.0, where LemonHarness_GPT-5.3-CodeX
+  achieved 84.5% accuracy over 445 trials, and additional validation with GPT-5.5 reached 86.52%
+  average accuracy across ﬁve jobs.
+
+
+2     Related Work
+
+2.1   Integrated LLM Agent Frameworks
+
+Recent work has explored how to integrate reasoning, acting, and tool usage within uniﬁed agent
+frameworks [8, 5, 18]. ReAct [20] interleaves chain-of-thought reasoning with tool invocation,
+demonstrating that reasoning traces can guide action selection in a single execution loop. Tool-
+former [10] enables language models to self-supervise API usage by inserting tool calls into training
+data, providing a mechanism for structured external interaction. PAL [3] separates natural language
+reasoning from program execution by delegating computation to external interpreters, emphasiz-
+ing modular execution. Voyager [15] further introduces a lifelong skill library that accumulates
+executable programs over time, forming a persistent action space. While these approaches con-
+nect models with tools or execution environments, they typically treat prompting, execution logs,
+and runtime control as loosely coupled components. In contrast, LemonHarness uniﬁes prompts,
+tool executors, skill management, execution traces, and model calls within a single runtime bound-
+ary, enabling consistent observation, modiﬁcation, and veriﬁcation under one integrated execution
+framework.
+
+2.2   Reusable Knowledge and Time-Aware Control
+
+Several recent agent systems reuse knowledge from previous experience or discovered action pat-
+terns. ExpeL extracts natural-language insights from past trajectories, while WebXSkill converts
+recurring web-action subsequences into reusable skills [21, 17]. LemonHarness follows this direc-
+tion but focuses on general execution rules. It turns recurring constraints, evaluator requirements,
+and acceptance criteria into runtime priors, so the agent can begin a task with clearer boundaries
+before detailed exploration.
+Beyond knowledge reuse, long-horizon agents face a second orthogonal challenge: managing time.
+Long-horizon agents must also decide how much effort to spend on exploration, implementation, and
+validation. Prior work on dynamic planning shows that planning before every action can introduce
+unnecessary test-time cost in long-horizon settings [9]. LemonHarness makes this tradeoff explicit
+through time-aware execution: elapsed and remaining time are treated as runtime state, allowing
+the agent to shift from broad exploration toward result preservation and targeted validation as the
+deadline approaches.
+
+
+3     Method
+
+3.1   Overall Architecture
+
+LemonHarness builds a layered execution framework for long-horizon tasks. The system is or-
+ganized around task intake, model decision-making, tool execution, knowledge support, and log
+recording. When a task enters the system, the runtime ﬁrst creates a controlled workspace and loads
+the system prompt, tool deﬁnitions, and generalizable rule knowledge. The model then produces an
+action intention based on the current task state; this intention is translated into a structured tool call,
+executed inside the controlled workspace, and returned as feedback for later decisions. Figure 1
+gives an overview of this execution framework. By scheduling these steps within the same execu-
+tion boundary, LemonHarness keeps model judgments, tool actions, and environment state aligned
+around a shared task context. A time-aware mechanism feeds remaining budget back to the model,
+so it can pace inspection, building, and validation according to how much time is left, rather than
+stalling on long-running commands or accumulating redundant checks near the deadline.
+These design choices allow the agent to keep environment state and time pressure synchronized
+across long execution chains, while generalizable rule knowledge helps it establish a feasible direc-
+tion early. Together, they make task execution more stable.
+
+
+                                                    3
+                                                LemonHarness
+                                            General Rule Knowledge
+                                                     ✓
+                                                     ✓
+                                                     ✓
+                                    Rules            Criteria                 Task Priors
+                                                             Rule Injection
+
+                                            Unified Runtime Boundary
+             Task                                                                                        Verified State
+                                      Observe                          Execute
+
+                         Input                            Model                             Validation     ✓
+
+                                                                              ⚙                            ✓
+                                                                                                           ✓
+                                                                                                                 ✓
+                                    Logs                                         Tools
+             >_
+                                                     Workspace
+
+                                                             Budget Signal
+
+                                                  Time-Aware Control
+
+
+                                 Elapsed        Explore       Implement        Validate
+
+
+
+Figure 1: Overview of the LemonHarness framework. A task is processed through a uniﬁed runtime
+boundary that integrates model reasoning, tool execution, workspace state, and execution logs. Gen-
+eral rule knowledge provides reusable execution rules, criteria, and task priors, while time-aware
+control adjusts exploration, implementation, and validation according to elapsed and remaining bud-
+get. The ﬁnal task state is checked through external validation, while traceable execution records
+are retained.
+
+
+
+3.2   Integrated Execution Framework
+
+The core method of LemonHarness is to bring the main components of agent execution into one
+framework. The system prompt, tool executor, skill library, execution logs, and model-control loop
+are managed together rather than being left as separate pieces around the model. This design puts
+the agent’s observation, action, modiﬁcation, and veriﬁcation steps under the same set of runtime
+constraints.
+For long-horizon tasks, this integrated boundary is important because the model’s belief about the
+task can easily drift away from the actual environment state. A ﬁle may have been modiﬁed, a
+dependency may have been installed, or a command may have changed the workspace in ways that
+affect later decisions. By keeping model control, tool execution, task knowledge, and logs inside the
+same framework, LemonHarness reduces this disconnect and makes the execution process easier to
+track and correct.
+
+
+
+3.3   Reusable Rule Knowledge
+
+LemonHarness organizes reusable execution rules and acceptance criteria as runtime knowledge, so
+the model does not have to start each task from a blank slate. This knowledge captures patterns that
+recur across task families, including input-output conventions, evaluator constraints, environment
+restrictions, and common failure modes. It gives the agent an early sense of what a valid solution
+should look like before it begins detailed exploration. The role of generalizable rule knowledge is
+to expose these boundaries up front, thereby reducing blind trial and error and aligning the agent’s
+early actions with the acceptance conditions the evaluator will ultimately apply.
+Table 1 summarizes the current coverage of reusable rule knowledge in LemonHarness. Across these
+areas, the knowledge base captures recurring input-output contracts, environment assumptions, and
+validation orders.
+
+
+                                                            4
+Table 1: Coverage of reusable rule knowledge in LemonHarness. Each area is supported by reusable
+rules that capture recurring constraints and validation habits for a task family.
+ Coverage area                   Rule Knowledge Overview
+ ML workﬂows                     Keep training, validation, and submission artifacts separate; preserve
+                                 reproducibility; validate metrics against the task goal.
+ Bio-design                      Retrieve source data through stable APIs; preserve biological validity; check
+                                 ﬁnal constructs against synthesis constraints.
+ Vision media                    Keep command interfaces stable; preserve row, frame, or mask alignment;
+                                 validate serialized visual outputs before submission.
+ Systems recovery                Work inside controlled paths; create recoverable artifacts early; use build,
+                                 integrity, and runtime probes to avoid blind repair.
+ Game logic                      Preserve formal rules and state transitions; bound strategic search; verify the
+                                 ﬁnal state against scoring conditions.
+
+
+3.4   Time-Aware Execution
+
+LemonHarness introduces a time-aware execution mechanism that treats time as part of the runtime
+state rather than as an external timeout only. At the start of a task, the system assigns a total time
+budget T according to the task’s expected difﬁculty and execution cost. During execution, elapsed
+time and remaining time are surfaced to the model at every turn, so the agent can judge not only
+what has been done, but also how much time is left to ﬁnish.
+
+Phase schedule. Within T , LemonHarness partitions execution into three behavioral phases using
+cumulative budget ratios, mirroring the explore–implement–validate rhythm that long-horizon prob-
+lem solving naturally follows. Each transition is guarded by a small grace band, so the agent is not
+forced to abandon a near-ﬁnished step on the exact boundary. Defaults are summarized in Table 2.
+When elapsed time crosses a phase boundary (e.g., 0.3T ), the runtime does not switch immediately;
+instead it grants a 0.05T grace window before instructing the model to advance to the next phase.
+This avoids cutting off an exploration step that is one or two commands from completing, while still
+preventing open-ended drift. Transitions are monotonic: once the agent enters P2 or P3, it does not
+roll back to an earlier phase even if a later step turns out to be cheap, which keeps the schedule stable
+against short-term timing noise. The ﬁnal 0.1T (P4) is treated as a hard reserve in which the model
+is instructed to stop initiating new state-changing actions and preserve whatever acceptable result is
+already on disk.
+Across all four phases, the model receives an explicit signal at every turn indicating both the current
+phase label and the remaining fraction of T . This converts timing from an opaque external deadline
+into a ﬁrst-class input to the decision loop. The phase schedule does not prescribe speciﬁc actions
+within each window; rather, it tilts the agent’s prior so that early turns favour broad inspection while
+later turns favour preserving a working result over pursuing a marginally better one. The net effect
+is that timeouts from runaway exploration or last-minute over-checking are avoided not by hard
+interruption, but by a continuous adjustment of the agent’s own priorities.
+Table 2: Default phase schedule used by time-aware execution. Ratios are cumulative fractions of
+the total task budget T . The grace band allows the agent to ﬁnish an in-ﬂight step that is close to
+completion before being prompted to advance.
+ Phase           Budget window      Parameter (default)       Strategy                                         Grace
+ P1 Explore      0%–30%             explore_ratio 0.3         Inspection, planning, environment setup           5%
+ P2 Implement    30%–60%            implement_ratio 0.6       Primary solution construction                     5%
+ P3 Validate     60%–90%            validate_ratio 0.9        Lock in result, targeted veriﬁcation              5%
+ P4 Reserve      90%–100%           –                         Preserve output, no new state-changing actions     –
+
+
+
+3.5   Structured Tool Boundary
+
+LemonHarness provides environment operations through structured tools. Capabilities such as ﬁle
+reading, ﬁle editing, command execution, and web access are wrapped as explicit interfaces with
+
+
+                                                          5
+deﬁned inputs, outputs, and usage constraints. The model observes and modiﬁes the environment
+through these interfaces, which makes each operational step easier to interpret and record.
+State-changing actions receive stricter treatment. File writes, temporary directory creation, depen-
+dency installation, and background process startup can all affect later execution. LemonHarness
+keeps these actions inside the controlled workspace and the structured tool-call boundary, so their
+effects remain tied to the current task context. This reduces the chance that the meaning of an action
+is lost or misread in a long context, and it helps the model reason later about which parts of the
+environment have changed.
+
+3.6   Execution Records and Validation Feedback
+
+Long-horizon tasks require intermediate checks throughout execution, rather than leaving all risk to
+the ﬁnal step. LemonHarness records model outputs, tool calls, and execution feedback in runtime
+logs, and feeds tool results back into the later context. This allows the model to revise its plan
+based on the current state instead of restarting from scattered observations or repeating the same
+exploration.
+Validation feedback is treated as part of the execution process. Commands used for testing, veriﬁer-
+like checks, ﬁle modiﬁcation results, and error messages are kept as traceable records. These records
+help the agent understand what has already been tried, which changes affected the environment, and
+where a failure may have entered the task trajectory. They also provide evidence for later failure
+analysis and targeted correction.
+
+4     Experiments
+4.1   Experimental Setup
+
+LemonHarness is evaluated on Terminal-Bench, which covers a range of real terminal-task scenarios.
+Each trial asks the agent to follow a natural-language instruction, operate on the environment, modify
+ﬁles, and reach a ﬁnal state accepted by the evaluator.
+For the Terminal-Bench 2.0 submission, the conﬁguration name is LemonHarness_GPT-5.3-CodeX.
+The main model is GPT-5.3-CodeX, with gemini-3.1-pro-preview used as an auxiliary model for
+image and video question answering.
+
+4.2   Terminal-Bench 2.0 Results
+
+LemonHarness_GPT-5.3-CodeX submitted 5 jobs on Terminal-Bench 2.0, covering 445 trials in
+total. Each job contained 89 trials. The system solved 376 trials, failed 67 trials, and had 2 trials
+without reward. As shown in Table 3, the accuracy of the ﬁve jobs ranged from 80.90% to 89.89%,
+with an average accuracy of 84.49%. On average, each job solved 75.2 trials. The roughly 9-point
+spread across jobs suggests that long-horizon agent evaluation is still affected by model sampling,
+task-path choices, and model-interface stability.
+The remaining failures are mainly concentrated in tasks involving long compilation, training, multi-
+modal processing, and cross-environment adaptation. These tasks usually require longer execution
+chains and stricter intermediate validation. Across 445 trials, 39 trials reported exceptions, mostly
+due to task timeout. This indicates that future work should further improve long-task planning and
+control of unproductive exploration.
+
+                   Table 3: Terminal-Bench 2.0 results across ﬁve validated jobs.
+                 Job date      Trials Solved Failed Exception Accuracy
+                 2026-04-25      89        76         12         7        85.39%
+                 2026-04-26      89        80          9         4        89.89%
+                 2026-04-27      89        72         17        14        80.90%
+                 2026-04-28      89        72         16         7        80.90%
+                 2026-04-29      89        76         13         7        85.39%
+                 Average         89       75.2        13.4      7.8       84.49%
+
+                                                  6
+Table 4 reports the additional Terminal-Bench 2.0 validation results using GPT-5.5 as the backbone
+model. Across ﬁve validation jobs, LemonHarness covers 445 trials in total and solves 385 trials,
+reaching an average accuracy of 86.52%. The job-level accuracy ranges from 85.39% to 89.89%,
+showing relatively stable performance across different runs. Compared with the GPT-5.3-CodeX
+submission, this validation setting obtains a higher average accuracy and fewer exceptions per job,
+suggesting that LemonHarness can beneﬁt from a stronger backbone model while maintaining sta-
+ble runtime behavior. The remaining failures still mainly come from long-chain tasks that require
+extended compilation, training, or strict intermediate validation.
+
+           Table 4: Terminal-Bench 2.0 validation results with GPT-5.5 across ﬁve jobs.
+                Job date      Trials Solved Failed Exception Accuracy
+                 2026-04-26      89        77         12         3         86.52%
+                 2026-05-06      89        76         13         8         85.39%
+                 2026-05-07      89        80          9         5         89.89%
+                 2026-05-15      89        76         13         4         85.39%
+                 2026-05-15      89        76         13         3         85.39%
+                 Average         89       77.0        12.0      4.6        86.52%
+
+4.3   Terminal-Bench 2.1 Supplementary Validation
+
+Terminal-Bench 2.1 introduces task ﬁxes, continuous validation, and ATIF trajectory requirements.
+As shown in Table 5, in supplementary validation with GPT-5.5, the latest three jobs reached an av-
+erage accuracy of 91.76%, with 6 total exceptions over 267 trials. This indicates that LemonHarness
+remains effective under the updated evaluation setting.
+The difﬁcult task types in this supplementary validation were similar to those in Terminal-Bench 2.0.
+They were mainly associated with complex builds, training processes, and multi-step validation. The
+benchmark update ﬁxed part of the task set, but the main bottlenecks in long-horizon execution re-
+mained: long execution chains, complex environment dependencies, and strict validation conditions.
+
+
+                   Table 5: Supplemental Terminal-Bench 2.1 validation results.
+                 Job date      Trials Solved Failed Exception Accuracy
+                 2026-05-08      89        84          5         2         94.38%
+                 2026-05-09      89        82          7         1         92.13%
+                 2026-05-11      89        79         10         3         88.76%
+                 Average         89       81.7        7.3       2.0        91.76%
+
+
+5     Limitations and Future Work
+The current LemonHarness design is more closely aligned with GPT-style tool calling and model
+behavior. Its generality across other model families has not been fully validated. Different models
+vary in tool-call formatting, long-context retention, instruction following, and error recovery. The
+transferability of the same runtime boundary, general rule knowledge, and time-aware execution
+mechanism to other model families has not yet been validated. Future work should test Lemon-
+Harness across more model families and adjust tool constraints, prompt structure, and knowledge
+retrieval for different model behaviors.
+
+6     Conclusion
+This paper presents LemonHarness, an integrated execution framework for long-horizon tasks. The
+system manages model control, tool execution, task knowledge, and execution records within the
+same runtime boundary. It also uses generalizable rule knowledge to provide reusable execution
+rules and acceptance criteria, so the model can start from a clearer task direction instead of relying
+
+
+                                                  7
+only on trial and error. A time-aware execution mechanism further lets LemonHarness rebalance
+its effort as the budget is spent down, lowering the chance that an otherwise solvable task is lost to
+long waits or redundant checking. Overall, the design targets common long-horizon failures such
+as state drift and forgotten constraints, enabling the model to carry out multi-step tool use under a
+more stable environment state.
+
+References
+ [1] Cuadron, A., Yu, P., Liu, Y., & Gupta, A. (2025) SABER: Small actions, big errors–
+safeguarding mutating steps in LLM agents. arXiv preprint arXiv:2512.07850.
+ [2] Erdogan, L. E., Lee, N., Kim, S., Moon, S., Furuta, H., Anumanchipalli, G., Keutzer, K., &
+Gholami, A. (2025) Plan-and-act: Improving planning of agents for long-horizon tasks. In Forty-
+second International Conference on Machine Learning (ICML).
+ [3] Gao, L., Madaan, A., Zhou, S., Alon, U., Liu, P., Yang, Y., Callan, J., & Neubig, G. (2023)
+PAL: Program-aided language models. In International Conference on Machine Learning, pages
+10764–10799. PMLR.
+ [4] Kamath, A., Zhang, S., Xu, C., Ugare, S., Singh, G., & Misailovic, S. (2025) Enforcing tem-
+poral constraints for LLM agents. arXiv preprint arXiv:2512.23738.
+ [5] Lin, J., Liu, S., Pan, C., Lin, L., Dou, S., Huang, X., Yan, H., Han, Z., & Gui, T. (2026)
+Agentic harness engineering: Observability-driven automatic evolution of coding-agent harnesses.
+arXiv preprint arXiv:2604.25850.
+ [6] Luo, H., Zhang, H., Zhang, X., Wang, H., Qin, Z., Lu, W., Ma, G., He, H., Xie, Y., Zhou, Q.,
+et al. (2025) UltraHorizon: Benchmarking agent capabilities in ultra long-horizon scenarios. arXiv
+preprint arXiv:2509.21766.
+ [7] Merrill, M. A., Shaw, A. G., Carlini, N., Li, B., Raj, H., Bercovich, I., Shi, L., Shin, J. Y.,
+Walshe, T., Buchanan, E. K., et al. (2026) Terminal-Bench: Benchmarking agents on hard, realistic
+tasks in command line interfaces. arXiv preprint arXiv:2601.11868.
+ [8] Ning, X., Tieu, K., Fu, D., Wei, T., Li, Z., Bei, Y., Zou, J., Ai, M., Liu, Z., Li, T.-W., et al.
+(2026) Code as agent harness. arXiv preprint arXiv:2605.18747.
+ [9] Paglieri, D., Cupiał, B., Cook, J., Piterbarg, U., Tuyls, J., Grefenstette, E., Foerster, J. N.,
+Parker-Holder, J., & Rocktäschel, T. (2025) Learning when to plan: Efﬁciently allocating test-time
+compute for LLM agents. arXiv preprint arXiv:2509.03581.
+[10] Schick, T., Dwivedi-Yu, J., Dessì, R., Raileanu, R., Lomeli, M., Hambro, E., Zettlemoyer, L.,
+Cancedda, N., & Scialom, T. (2023) Toolformer: Language models can teach themselves to use
+tools. Advances in Neural Information Processing Systems, 36:68539–68551.
+[11] Shen, H., Chen, X., Xu, W., Ma, Y., Chen, L., & Li, K. (2026) EvoCode-Bench: Evaluating
+coding agents in multi-turn iterative interactions. arXiv preprint arXiv:2605.24110.
+[12] Shinn, N., Cassano, F., Gopinath, A., Narasimhan, K., & Yao, S. (2023) Reﬂexion: Language
+agents with verbal reinforcement learning. Advances in Neural Information Processing Systems,
+36:8634–8652.
+[13] Singh, A., Fry, A., Perelman, A., Tart, A., Ganesh, A., El-Kishky, A., McLaughlin, A.,
+Low, A., Ostrow, A., Ananthram, A., et al. (2025) OpenAI GPT-5 system card. arXiv preprint
+arXiv:2601.03267.
+[14] Song, X., Chang, H., Dong, G., Zhu, Y., Wen, J.-R., & Dou, Z. (2026) EnvScaler:
+Scaling tool-interactive environments for llm agent via programmatic synthesis. arXiv preprint
+arXiv:2601.05808.
+[15] Wang, G., Xie, Y., Jiang, Y., Mandlekar, A., Xiao, C., Zhu, Y., Fan, L., & Anandkumar,
+A. (2023) Voyager: An open-ended embodied agent with large language models. arXiv preprint
+arXiv:2305.16291.
+
+
+                                                  8
+[16] Wang, X. J., Bai, H., Sun, Y., Wang, H., Zhang, S., Hu, W., Schroder, M., Mutlu, B., Song, D.,
+& Nowak, R. D. (2026) The long-horizon task mirage? Diagnosing where and why agentic systems
+break. arXiv preprint arXiv:2604.11978.
+[17] Wang, Z., Wu, Q., Zhang, X., Zhang, C., Yao, W., Faisal, F. E., Peng, B., Qin, S., Nath,
+S., Lin, Q., et al. (2026) WebXSkill: Skill learning for autonomous web agents. arXiv preprint
+arXiv:2604.13318.
+[18] Xu, T., Wen, H., & Li, M. (2026) Adapting the interface, not the model: Runtime harness
+adaptation for deterministic LLM agents. arXiv preprint arXiv:2605.22166.
+[19] Yang, Y., Gong, Z., Huang, W., Yang, Q., Zhou, Z., Huang, Z., Li, Y., Gao, X., Dai, Q.,
+Liu, B., et al. (2026) SkillOpt: Executive strategy for self-evolving agent skills. arXiv preprint
+arXiv:2605.23904.
+[20] Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2022) ReAct: Syner-
+gizing reasoning and acting in language models. arXiv preprint arXiv:2210.03629.
+[21] Zhao, A., Huang, D., Xu, Q., Lin, M., Liu, Y.-J., & Huang, G. (2024) ExpeL: LLM agents
+are experiential learners. In Proceedings of the AAAI Conference on Artiﬁcial Intelligence 38, pages
+19632–19642.
+
+
+
+
+                                                 9
+

@@ -1,0 +1,1015 @@
+                                                  SPORK: Self-Speculative Forking to Accelerate
+                                                            Agentic LLM Inference
+                                                         Huajun Bai∗                             Weiwei Lv                                       Huichuan Zheng
+                                                     Tsinghua University                            Meituan                                      Tsinghua University
+
+                                                                              Youyou Lu                                   Jiwu Shu†
+                                                                           Tsinghua University                       Tsinghua University
+
+                                        Abstract                                                                 Q: How many studio albums did Mercedes Sosa publish 2000–2009?
+
+                                        LLM agents are becoming a common interface for research,                 I should search ...                name: "search"
+                                        coding, and question answering, yet their Thought–Action–                (+ ~2,000 more CoT tokens)         args: "Sosa albums 2000-2009"
+
+
+
+
+arXiv:2607.03333v1 [cs.DC] 3 Jul 2026
+                                        Observation loop is often serial: the model reasons, emits a               Main thread
+                                                                                                                   Speculative thread                      ✓ correct prediction
+                                        tool call, then idles the GPU until the result returns. This
+                                                                                                                   forked at start
+                                        wait consumes 16–37% of wall time in our workloads and                                                      name: "search"
+                                                                                                                 <tool_call>{"name":
+                                        35–61% in prior reports. Speculative tool execution can hide                                                args: "Sosa albums 2000-2009"
+
+                                        this wait, but existing systems need auxiliary predictors,
+                                                                                                             Figure 1. Tool intent is visible early. A speculative
+                                        historical traces, or static workflow graphs, leaving a gap
+                                                                                                             thread, forked at the main thread’s first token with a forced
+                                        for training-free, day-one deployment. We observe that the
+                                                                                                             tool-call prefix, predicts the exact tool call that the main
+                                        model can be its own predictor: a probe forked at the start
+                                                                                                             thread emits ∼2,000 CoT tokens later.
+                                        of generation predicts Qwen3-32B’s upcoming tool name
+                                        with 74.6–99.6% accuracy across five benchmarks. We                  tool-assisted question answering [3, 9, 20, 25, 29, 39]. In
+                                        present Spork (Self-sPeculative fORKing), a training-free            these systems, the LLM acts as the controller: it reasons
+                                        controller that dispatches the speculated tool call early,           over the user request, emits a structured tool call, waits for
+                                        overlapping its execution with the remaining chain-of-               the external tool to finish, and then resumes generation
+                                        thought decode. A cost model captures when speculation               using the tool result. This Thought–Action–Observation
+                                        breaks even, and each component improves one of its terms:           loop [39] is simple and safe, but it is also often serial: each
+                                        a prefix-cache fork cuts probe cost, a confidence gate filters       tool result conditions all subsequent tokens, so the serving
+                                        mispredictions, and partial-token accept turns rejected              system cannot resume generation until the result arrives.
+                                        probes into speculative-decoding drafts. On acceptance,              While the tool is running, the GPU often has no useful
+                                        the tool result is ready when reasoning ends; on rejection,          work to do for that agent turn.
+                                        Spork falls back to serial execution with no correctness                This tool wait is hard to engineer away because it is
+                                        penalty. On real-tool benchmarks, Spork cuts Qwen3-32B’s             structurally bounded by network round-trips, container
+                                        GAIA 𝑃 95 by 18% (131.9→108.1 s); the mechanism holds                cold-starts, and database I/O that resist the exponential
+                                        across model sizes from 4B to 32B and across dense and               improvements seen in model serving. It is also large. Our
+                                        mixture-of-experts models, with task accuracy within 1 pp            profiling across three benchmarks in Figure 2 shows that
+                                        of baseline or better wherever measured. Spork deploys               tool execution accounts for 16–37% of end-to-end wall
+                                        as a thin controller over standard completion APIs (no               time, and on turns with real network tools the GPU is idle
+                                        retraining, no auxiliary models, no offline traces) and is           for the majority of the turn; Sui et al. [32] report even
+                                        orthogonal to token-level speculative decoding. Spork is             higher fractions, 35–61% of total agent latency across agent
+                                        open source at https://github.com/baihuajun24/spork.                 workloads.
+                                        Keywords: LLM agents, tool use, speculative execution, in-              As LLM inference grows faster (through speculative
+                                        ference acceleration                                                 decoding [14], hardware scaling, and disaggregated serv-
+                                                                                                             ing [41]), the fraction of wall time spent waiting for
+                                        1    Introduction                                                    external tools increases, not decreases, making tool-wait the
+                                                                                                             asymptotic bottleneck of agent latency. Figure 1 illustrates
+                                              “Treat things before they exist. Regulate things
+                                                                                                             the opportunity this paper exploits: after a single streaming
+                                              before disorder begins.”              — Lao Tzu
+                                                                                                             token, a forked probe (sharing the same KV cache prefix)
+                                        LLM-powered agents are becoming a common interface                   predicts the identical web-search query that the main
+                                        for complex work such as deep research, coding, and                  stream will emit after 2,000 tokens of chain-of-thought.
+                                        ∗ Contact: baihuajun24@gmail.com                                     The tool can be dispatched speculatively during those 2,000
+                                        † Corresponding author.
+
+
+                                                                                                         1
+                                                                          Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+                                                                     logprobability confidence separates correct from incorrect
+                                                                     predictions (0.90 vs. 0.46 mean span probability on GAIA),
+                                                                     and argument accuracy climbs from 7.6% to 97.5% as more
+                                                                     chain-of-thought context is observed (§3.2). Third, even
+                                                                     when strict matching rejects a probe, the probe shares a
+                                                                     median of 18 verified tokens with the final tool call. Reused
+                                                                     as a speculative-decoding draft, these tokens let the main
+                                                                     stream skip re-decoding 35–50% of the tool-call body (§3.3).
+Figure 2. Tool time is significant across agent tasks.                  Spork realizes this opportunity as a training-free con-
+Across search, browsing, and database-style tasks, tool ex-          troller for GPU-served tool agents. At each agent turn it
+ecution accounts for 16–37% of end-to-end wall time.                 forks the KV cache after the main generation’s first token
+                                                                     (D1: near-zero overhead via prefix-cache sharing, reducing
+tokens of decode, hiding most of its network latency behind          probe cost from 1.6 s to 0.35 s), gates speculative dispatch
+useful computation.                                                  on the probe’s own logprob confidence (D2: maximizes the
+   Existing systems attack adjacent parts of this problem but        accepted overlap by committing at the earliest confident
+leave a gap for day-one, training-free deployment without            probe), and recovers verified prefix tokens from rejected
+predictors or historical traces. Token-level speculative de-         probes via speculative-decoding verification (D3: a median
+coding [5, 14, 16] and LLM serving systems [1, 13, 18, 41]           of 18 tokens recycled as drafts, avoiding ∼0.6 s of re-decode
+reduce generation or serving overhead, but they do not dis-          per rejected turn in offline analysis). On a strict name-
+patch external tools earlier: the tool stall begins only af-         and-arguments match, Spork uses the pre-computed tool
+ter the model has finished emitting the call. Workflow and           result; otherwise it falls back to serial execution with no
+serverless optimizers [8, 19, 31] can prewarm or schedule            correctness penalty.
+known execution graphs, whereas tool-using agents gener-                On GAIA (N=165, real web search, Qwen3-32B), the
+ate their next tool call online; there is no static graph to         full Spork configuration (D1+D2+D3) reduces median per-
+prefetch.                                                            query latency by 10% (P50: 34.7 s → 31.2 s) and tail latency
+   Recent agent-speculation systems move closer to                   by 18% (P95: 131.9 s → 108.1 s) while preserving task accu-
+execution-level overlap, but they rely on a separate source          racy (EM within 1 pp of baseline). On HotpotQA (N=200,
+of predictions: Speculative Actions [40] and DualSpec [42]           real Wikipedia API, Qwen3-32B), the full D1+D2+D3
+use predictors or verifier policies, while PASTE [32] mines          configuration is Pareto dominant: faster and higher quality
+recurring tool-call patterns from historical traces. These           than the baseline simultaneously (P95 speedup 1.06×, EM
+designs are powerful when traces, predictors, or repeated            +1.5 pp). A latency sweep on tau2-bench (airline domain,
+workflows are available; they do not speculate from the              N=43, simulated tool latency 0.5–5 s) validates the cost
+currently running model alone.                                       model: mean speedup grows monotonically with tool
+   The analogy to speculative execution in microprocessors           duration, from 1.09× at a 0.5 s tool floor to 1.18× at 5 s,
+is instructive: a CPU executes past an unresolved branch             matching EQ1’s prediction within 2%. The mechanism
+and rolls back on misprediction. The difference is the pre-          generalizes across model scale and architecture: it holds
+diction source: where CPUs use branch predictors trained             on Qwen3-4B (on tau2; neutral elsewhere) and on the
+on instruction history, Spork uses the running model itself,         Qwen3.5-35B-A3B [27] mixture-of-experts (16–20% 𝑃95
+with no auxiliary model, no trace collection, and no retrain-        reduction across tau2, GAIA, and HotpotQA). We also
+ing.                                                                 characterize when Spork does not help: without thinking-
+   Spork exploits a different opportunity: instruction-tuned         mode chain-of-thought the overlap window vanishes, and
+models often reveal their next tool call before completing           a model whose forced probe diverges from its own tool-call
+the full chain-of-thought (§3.1). The fork also emits logprob-       format defeats self-speculation (§6).
+abilities that indicate prediction confidence, and even failed          This paper makes the following contributions:
+probes share a verified prefix with the final tool call. These
+                                                                         1. Empirical insights (§3). We show that Qwen3-32B
+properties let the serving system turn the target model into
+                                                                            predicts its own tool names with high accuracy
+its own speculative tool predictor.
+                                                                            (74.6–99.6%) at the fork point, exposes confidence
+   In this paper, we establish three empirical insights that
+                                                                            through logprobabilities, and leaves recoverable
+make self-speculative tool use viable. First, Qwen3-32B [35]
+                                                                            prefixes when strict matching rejects; we formalize
+predicts its own next tool call with high name accuracy
+                                                                            the conditions under which speculation breaks even
+(74.6–99.6% across GAIA [21], tau2-bench [4], BrowseC-
+                                                                            via a cost model (EQ1, §2.2).
+omp [34], HotpotQA [38], and BFCL [26]) at the first-token
+                                                                         2. Training-free system design (§4). We present
+fork point; the model already “knows” what it will do
+                                                                            three mechanisms (D1–D3) that realize speculative
+before finishing its reasoning (§3.1). Second, the probe’s
+                                                                 2
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+         overlap within the standard vLLM serving stack                   predictors, verifier policies, or historical traces. None
+         (<0.3% TPOT overhead), requiring no model changes,               speculates from the currently running model alone.
+         no auxiliary predictors, and no historical traces.
+      3. End-to-end evaluation with real tools (§6). On                   2.2    Cost Model for Speculative Overlap
+         GAIA and HotpotQA with real network tools, Spork                 If we could predict the next tool call before the model fin-
+         reduces 𝑃95 latency by 6–18% while improving                     ishes generating it, we could dispatch the tool speculatively
+         or preserving task accuracy, and the mechanism                   and overlap its execution with ongoing model decode. The
+         generalizes across architecture (dense and MoE),                 realized speedup depends on four measurable parameters:
+         with gains tapering to neutral at 4B scale on real-tool              • 𝛼: the fraction of tool-call turns where speculation is
+         benchmarks. We validate the cost model against                          accepted (gate rate). 𝛼 is always measured per turn,
+         measured operating points and characterize when                         not per dispatched probe; a retrying gate may issue
+         speculation wins and when it does not.                                  several probes within one turn.
+                                                                              • 𝑡 overlap : mean realized time overlap per accepted turn
+2     Background & Preliminaries                                                 (how much tool latency is hidden behind decode).
+2.1     The Serial Tool-Wait Bottleneck                                            ∗ : the realized main-stream decode cost on the
+                                                                              • 𝑇base
+The dominant execution model for LLM agents follows the                          speculative path. It equals the baseline 𝑇base unless
+ReAct loop [39]: the model reasons (Thought), emits a struc-                     prefix recovery is active, which lowers it by letting
+tured tool invocation (Action), waits for the external ser-                      the main stream skip re-decoding the verified tool-
+vice to return a result (Observation), and then resumes rea-                     call tokens it recovers from the rejected probe on a
+soning conditioned on that result. This Thought–Action–                          miss.
+Observation cycle enforces a strict serial dependency:                        • 𝑇oh : per-turn overhead from probe computation and
+                                                                                 wasted speculative execution on rejected turns.
+      [(Re)prefill] → [Decode] → [Tool wait] → · · ·
+                                                                          The resulting latency-ratio formula (full derivation in Ap-
+Each turn (re)prefills the context (the user prompt on the                pendix A):
+first turn, the appended tool result thereafter), decodes the
+reasoning and tool call, then stalls on the tool wait. The                                                    𝑇base
+                                                                                          Ratio =    ∗                                 (1)
+tool call cannot be dispatched until decoding completes; the                                        𝑇base − 𝛼 · 𝑡 overlap + 𝑇oh
+next decode cannot begin until the tool result arrives and is
+                                                                          Speculation improves latency when Ratio ≥ 1, which ap-
+(re)prefilled into the context window. This creates a struc-
+                                                                          proximately requires 𝛼 · 𝑡 overlap ≥ 𝑇oh (exact form in Ap-
+tural pipeline stall regardless of how fast individual compo-
+                                                                          pendix A): the time saved by overlapping tool execution on
+nents are.
+                                                                          accepted turns must exceed the overhead incurred across all
+Tool latency dominates agent wall time. Figure 2                          turns. The upper bound is set by the tool-time fraction 𝑓tool :
+shows that tool execution consumes a substantial share of                 with perfect prediction (𝛼 = 1, 𝑇oh = 0), Ratio = 1/(1 − 𝑓tool ).
+end-to-end agent latency across three workloads: 16% on                   For BrowseComp (𝑓tool = 0.366), this ceiling is 1.58×.
+tau2-bench (enterprise database APIs with 2 s simulated                      The next section establishes empirically that these param-
+floor), 19% on GAIA (real web search APIs), and 37% on                    eters are achievable: 𝛼 is high, 𝑇oh is low, and even rejected
+BrowseComp (web search + page browse). On BrowseC-                        probes contribute via prefix recovery.
+omp, the distribution is heavily right-skewed: median tool
+latency is 1.19 s but 𝑃95 reaches 70 s, meaning tail-latency              3     Self-Speculative Tool Use
+optimization requires addressing tool stalls, not just model
+                                                                          The cost model in §2.2 identifies three conditions for specu-
+serving.
+                                                                          lation to succeed: high gate acceptance (𝛼), sufficient over-
+Why existing solutions fall short. Token-level specu-                     lap time (𝑡 overlap ), and low overhead (𝑇oh ). Whether these
+lative decoding [5, 14, 16] reduces generation latency but                are achievable depends on an empirical question about the
+does not dispatch external tools earlier. Parallel tool calling           model itself:
+(e.g., OpenAI function calls) helps only when the model
+can identify independent tools upfront; empirically, only                     Research question. Can a running LLM predict its own
+15–25% of tool calls in GAIA and SWE-bench [12] are                           next tool call accurately enough, early enough, and re-
+parallelizable with their predecessor. Workflow optimiz-                      coverably enough that speculative tool use pays off?
+ers [8, 19, 31] prewarm known execution graphs, but agent
+tool calls are generated online: there is no static graph to              We constrain the prediction source to the running model’s
+prefetch. Recent agent-speculation systems [32, 40, 42]                   own state: no auxiliary model, no historical traces. We an-
+move closer to execution-level overlap but require separate               swer affirmatively with three empirical insights, established
+
+                                                                      3
+                                                                           Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+
+
+                                                                     Figure 4. Fork accuracy rises monotonically with
+                                                                     CoT context. On GAIA (Qwen3-32B), args-exact accuracy
+                                                                     climbs from 7.6% at fork-at-start to 61.0% at 80% CoT and
+                                                                     97.5% at think-end. Later probes are more accurate but leave
+Figure 3. Fork-at-start probes recover the next tool                 a smaller overlap budget.
+name across workloads. On Qwen3-32B, forced tool-call
+probes near decode start predict the eventual tool name              confidence gating. The remaining challenge is argument ac-
+across five benchmarks (sorted by argument exact-match;              curacy, which Insight 2 addresses.
+hatched bars). Protocols: replay pos=0 (GAIA, tau2-bench,
+BFCL) and online first-token (BrowseComp, HotpotQA).                 3.2   Insight 2: Confidence Improves with
+                                                                           Chain-of-Thought
+on Qwen3-32B across five real-tool and simulated bench-              The useful operating point is not necessarily the latest or
+marks (GAIA, HotpotQA, tau2-bench, BrowseComp, BFCL):                most accurate probe; it is the earliest probe whose confi-
+the model already knows its next tool call (Insight 1, accu-         dence justifies committing tool execution time.
+racy), its own confidence signals when to commit (Insight 2,
+                                                                     Logprob separability. The probe’s own generation log-
+timing), and even rejected probes leave verified prefixes (In-
+                                                                     probabilities over the tool-name span separate correct from
+sight 3, recovery). How these properties scale to a smaller
+                                                                     incorrect predictions without any classifier training. On
+model (Qwen3-4B) and where they break (native XML tool
+                                                                     GAIA (Qwen3-32B, think mode): the mean span probability
+formats) is examined in §6.6.
+                                                                     is 0.90 for correct predictions versus 0.46 for incorrect
+3.1   Insight 1: Models Already Know Their Next                      ones. This makes confidence observable without external
+      Tool Call                                                      classifiers: low confidence probes can be delayed or rejected
+                                                                     before they spend real tool time. On tau2-bench no-think
+A short forced-prefix probe can expose the next tool iden-
+                                                                     mode the signal saturates (correct ≈ incorrect ≈ 0.979):
+tity well before the serial tool boundary. We force a tool-
+                                                                     tool selection is a first-token reflex, so confidence is most
+call prefix immediately after the model’s first decode token
+                                                                     informative on reasoning-mode workloads with diverse
+(fork-at-start) and compare the probe’s predicted tool name
+                                                                     tool sets.
+and arguments against the model’s unrestricted generation.
+                                                                     CoT length amplifies accuracy. Fork accuracy at six po-
+Foresight across benchmarks. On Qwen3-32B, near-
+                                                                     sitions along the CoT trajectory (0–100% of tokens, gold-
+decode-start tool-name accuracy is consistently high across
+                                                                     CoT replay) rises monotonically (Figure 4). On GAIA (N=118
+the five benchmarks in Figure 3: 98.3% on GAIA, 74.6% on
+                                                                     tool-call questions, Qwen3-32B), argument-exact accuracy
+tau2-bench, 83.7% on BrowseComp, 99.6% on HotpotQA,
+                                                                     climbs from 7.6% at position 0 to 61.0% at 80% CoT and 97.5%
+and 99.2% on BFCL. Argument-exact accuracy is lower
+                                                                     at think-end, a +53 pp gap that a later probe can exploit, at
+and more variable (7.6–83.9%), reflecting the difficulty of
+                                                                     the cost of a smaller overlap budget (the decode time remain-
+predicting precise parameter values before observing the
+                                                                     ing to hide the tool, distinct from EQ1’s realized 𝑡 overlap ).
+chain-of-thought. This is the gap that Insight 2 addresses.
+                                                                     Implication for EQ1. The accuracy–timeliness tradeoff
+No-op recovery. On 11 tau2-bench turns where the base-
+                                                                     means a dynamic gate is better than a fixed fork position:
+line declined to call any tool, 9/11 forced-probe outputs were
+                                                                     commit early when confident, wait when uncertain. This is
+correct tool calls the model should have made; fork-prefix
+                                                                     the foundation of D2’s adaptive confidence gate (§4.2).
+can act as a cheap correction against model over-caution.
+Implication for EQ1. High name accuracy means 𝛼 (gate
+acceptance on name match) is intrinsically high before any
+                                                                 4
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+                                                                          4     Spork Design
+                                                                              Systems question. How can we overlap tool execution
+                                                                              with main generation at minimal added overhead, while
+                                                                              keeping the agent lossless with respect to its serial exe-
+                                                                              cution?
+
+                                                                          Spork answers with three mechanisms: Design 1 (D1), De-
+                                                                          sign 2 (D2), and Design 3 (D3), each grounded in one in-
+                                                                          sight from §3 and targeting a specific parameter of the cost
+                                                                          model (EQ1, §2.2).
+                                                                             At each agent turn, Spork runs the following pipeline
+                                                                          (Figure 6):
+                                                                              1. Dispatch the main generation as a streaming chat-
+Figure 5. Most rejected probes share recoverable pre-                             completion request.
+fixes. On GAIA, the 25th-percentile shared prefix is 14 to-                   2. After the first streaming token, launch a fork thread
+kens: 75% of rejected probes share at least 14 tokens with                        that issues a raw completion request with a forced
+the main tool call.                                                               tool-call prefix.
+                                                                              3. The fork thread monitors its generation logprobs
+3.3   Insight 3: Rejected Probes Still Contain Verified                           (D2); once confidence reaches a threshold 𝜃 (the
+      Prefixes                                                                    confidence gate, §4.2), dispatch speculative tool
+Strict matching is necessary for correctness, but rejection                       execution.
+does not mean the probe was useless: a rejected probe can                     4. When the main stream reaches its tool call, compare it
+serve as a draft that the main stream verifies and partially                      against the committed probe under the gate criterion.
+reuses via speculative decoding.                                                  On match: use the pre-computed result. On mismatch:
+Prefix overlap after strict rejection. When the strict gate                       fall back to serial tool execution. In the engine config-
+rejects a probe (tool name or arguments differ from main),                        uration, D3 has meanwhile served the probe’s tool-
+the probe’s tool-call token sequence still shares a long ver-                     call body to the main stream as speculative-decoding
+ified prefix with the eventual main output. Figure 5 quanti-                      draft tokens, so the main decode re-emits only the to-
+fies this on two GAIA N=165 seeds (𝑛 = 657 rejected-probe                         kens after the first mismatch rather than the whole
+events): the median shared prefix is 18 tokens, with a mean                       call.
+of 21.1 and 25th/75th percentiles of 14 and 25 tokens (often                 The D1/D2 controller is a Python application-layer
+35–50% of the full tool-call body). A rejected probe need not             component that uses standard serving APIs and collects
+be pure waste: if the shared prefix can be verified, the main             no training data. D3 additionally integrates with vLLM’s
+generation can reuse those tokens and decode only the re-                 speculative-decoding proposer path to inject verified probe
+maining suffix.                                                           tokens as drafts; we describe this as a prototype integration
+Implication for EQ1. Prefix recovery reduces the effective                rather than a generic no-engine-modification claim.
+𝑇oh on the miss branch: instead of discarding the probe and               EQ1 parameter mapping. Each mechanism targets a dif-
+re-decoding the full tool call from scratch (∼50 tokens), the             ferent term in the cost model (Table 1; Eq. 1, §2.2): D1 follows
+system verifies and accepts 𝑘 matching tokens and decodes                 Insight 1 and minimizes the overhead term 𝑇oh : by reusing
+only the 50 − 𝑘 suffix. This is the foundation of D3 (§4.3).              the main’s prefix KV cache, the probe’s cost collapses from
+                                                                          1.6 s to 0.35 s, and its dispatch at the first streaming token
+  Summary. The three insights establish that self-                        opens the overlap window. D2 follows Insight 2 and maxi-
+  speculative tool use is feasible, steerable, and recoverable:           mizes the expected overlap 𝛼 · 𝑡 overlap : gating dispatch on the
+  the model predicts its next tool identity early, its own                probe’s own logprob confidence, it commits at the earliest
+  confidence signals when to commit, and even rejected                    probe confident enough to act on, trading a slightly smaller
+  probes yield verified prefixes.                                         window for much higher acceptance. D3 follows Insight 3
+                                                                                         ∗ on misses by recycling the probe’s verified
+                                                                          and lowers 𝑇base
+The next section translates these insights into three system              prefix as draft tokens, so the main stream re-decodes only
+mechanisms that jointly push the operating point toward                   the suffix after the first mismatch. Together, all three push
+the EQ1 break-even condition from both sides.                             the operating point toward the 𝛼 · 𝑡 overlap ≥ 𝑇oh break-even
+                                                                          condition from both sides.
+                                                                             Spork composes the three mechanisms. D1+D2 form
+                                                                          the training-free controller, and D3 adds engine-side
+                                                                      5
+                                                                          Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+
+
+Figure 6. Spork method overview. Top: the baseline turn is strictly serial: (re)prefill, CoT decode, tool-call decode, then a
+stall while the tool executes. Bottom: Spork forks the KV cache after the main’s first token and launches a forced tool-call
+probe (D1); once the probe’s logprob confidence clears the gate (D2), the predicted tool executes during the remaining decode,
+producing the overlap 𝑡 overlap . A strict match at main-stream completion accepts the pre-computed result; on mismatch the
+turn falls back to serial execution and D3 recycles the rejected probe’s tokens as a speculative-decoding draft.
+
+Table 1. Design rationale. Each mechanism is tied to one            streaming token. Because the main request has by then
+insight and one EQ1 term.                                           populated the prefix cache, the fork’s prefill is a cache hit at
+       Design   Insight     EQ1 effect                              near-zero cost (∼0.05 s), and the staggered dispatch reduces
+                                                                    prefill interference to < 1%. With D1, probe overhead
+       D1       Insight 1   minimizes 𝑇oh                           collapses from 1.6 s (1.3 s prefill + 0.3 s decode) to 0.35 s
+       D2       Insight 2   maximizes 𝛼 · 𝑡 overlap
+                                    ∗                               (0.05 s cache-hit prefill + 0.3 s decode). Figure 7 shows the
+       D3       Insight 3   lowers 𝑇base (miss re-decode)
+                                                                    resulting end-to-end effect: the fork’s measured TPOT
+partial-token recovery. The ablation in §6.4 measures each          overhead on the main stream is within intrinsic batching
+mechanism’s contribution. The controller is stateless across        noise.
+turns except for the shared prefix cache inside the serving         4.2   D2: Adaptive Confidence Gate
+engine: each agent turn forks independently, and the gate
+always compares against the main stream’s final tool call           Motivation. Without gating, D1 dispatches speculative
+before any result is committed to the conversation history.         tool execution on every fork, regardless of whether the
+                                                                    probe is likely correct. Each wasted dispatch consumes net-
+4.1   D1: Prefix-Cache Fork for Near-Zero Probe                     work/compute resources and, on side-effecting tools, must
+      Overhead                                                      be rolled back. Insight 2 (§3) shows that probe accuracy
+Mechanism. The probe is not free, since it must generate            improves dramatically with context: argument accuracy
+a tool call of its own; its overhead decomposes into a              rises from 7.6% at 0% CoT to 97.5% at 100% CoT (Figure 4).
+decoding cost and a prefilling cost. The decoding cost is           D2 exploits this by not committing until the fork’s own
+small. The fork decodes only the tool-call body (typically          token-level confidence signals that the generated tool call is
+≤ 50 tokens, stopping at the tool-call close), 10–50× shorter       likely correct, enabling the system to filter out low-quality
+than the main’s CoT, about 0.3 s on Qwen3-32B at 15K                probes before they trigger wasted work.
+context. The prefilling cost is the heavy part: the fork            Confidence metric. The fork generates tool-call tokens
+shares the full prompt prefix (system + user + history)             with per-token logprobs enabled. We define the confidence
+with the main request, and re-prefilling it costs ∼1.3 s at         score as the minimum top-1 token probability over the
+the same context; worse, we measure that dispatching the            tool-name span (the first 𝐿 tokens after the "name": "
+fork simultaneously with the main request causes 2.5×               prefix):
+                                                                                                  𝐿
+prefill contention. Modern LLM serving systems such                                         𝑐 = min exp(ℓ𝑖 ),                        (2)
+as vLLM [13] and SGLang [41] cache prefix KV states;                                             𝑖=2
+
+D1 therefore dispatches the fork after the main’s first
+                                                                6
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+
+
+                                                                          Figure 8. D2 confidence gate threshold selection (GAIA
+Figure 7. D1 reuses the prefix KV cache to keep probe                     N=127, 997 probes). (a) Correct probes cluster above 𝜃 =0.90;
+overhead small. Probe TPOT overhead (+0.22%) is within                    incorrect probes spread below. The threshold cleanly sepa-
+intrinsic batching noise (+0.3%).                                         rates them. (b) Precision/Recall/F1 vs. 𝜃 : the operating point
+where ℓ𝑖 is the log-probability of the top-1 token at position 𝑖,         𝜃 =0.90 maximizes F1 (0.937) with 88% precision and 100% re-
+and 𝐿 is the length of the generated tool name (typically 1–4             call. D2 filters 77% of probes (saving wasted tool executions)
+tokens). The minimum starts at 𝑖 = 2 because the first token              while committing every probe that would have been correct.
+of the span (the opening quote) is always high-probability                achieves 88% precision with 100% recall (F1 = 0.937), filter-
+boilerplate. The minimum operator is deliberately conser-                 ing 77% of all probes while retaining every correct one. We
+vative: a single low-confidence token in the name span sig-               select 𝜃 = 0.90 as the operating point that maximizes F1.
+nals that the model is uncertain about the tool selection, and            Alternatives considered. (1) Fixed token-count delay (wait
+committing would likely waste a tool execution.                           𝑁 main tokens before forking): rigid, does not adapt to
+Gate logic. Once 𝑐 ≥ 𝜃 , the fork commits to speculative tool             per-task difficulty, and delays correct probes unnecessarily.
+execution. If the fork finishes without 𝑐 reaching 𝜃 , no spec-           (2) Entropy-based gate (threshold on next-token entropy):
+ulative dispatch occurs and the turn falls back to serial exe-            entropy over the full vocabulary correlates poorly with tool-
+cution at zero additional cost (the fork decoding is already              name correctness; min-prob over the specific name span is
+overlapped with main CoT).                                                a more direct signal. (3) Learned classifier: adds inference
+Strict acceptance. Spork accepts the probe if and only if                 latency and a training dependency; the zero-parameter
+its full tool call (name and serialized arguments) matches                min-prob gate achieves F1 > 0.93 with no training.
+the main generation exactly. We deliberately do not ship a                Effect on EQ1. D2 maximizes the expected overlap
+name-only gate: a name-only match can silently change tool                𝛼 · 𝑡 overlap : by waiting for the earliest confident probe
+behavior on side-effecting tools, and D3 (§4.3) already recov-            it trades a slightly smaller window for much higher
+ers most of the savings that name-only acceptance would                   acceptance, and by filtering low-confidence turns before
+deliver without compromising correctness.                                 dispatching spec_tool it avoids wasted work (on BrowseC-
+Threshold selection. Figure 8 shows the confidence dis-                   omp, 52% of strict-gate turns are rejected and never trigger
+tribution across 997 probes on GAIA (N=127, Qwen3-32B).                   a tool). Under the strict gate without D2, 𝛼 ≈ 0.22 on GAIA;
+Correct probes (those whose tool name matches the main                    with D2, 𝛼 rises to 0.37 (49 vs. 101 accepted probes). Recall
+generation) cluster tightly above 𝑐 = 0.9, while incorrect                that 𝛼 counts tool-call turns (§2.2); the dispatched-probe
+probes spread broadly over [0.2, 0.9]. At 𝜃 = 0.90, the gate              totals are larger (434 for D1, 2124 for D1+D2) because the
+                                                                          retry cadence can issue several probes within one turn.
+
+                                                                      7
+                                                                            Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+4.3   D3: Partial-Token Accept for Rejected Probes                               D3: rejected fork becomes draft tokens
+When the strict gate rejects a probe, the main thread must
+otherwise generate the full tool call from scratch (∼50 to-                   Main stream
+kens, ∼1.5 s at 32B scale). Empirical analysis of 1268 probe–                 actual tool call
+
+baseline pairs (BrowseComp, Appendix B) shows that even                       {"name":       ··· 17 tokens ···           "discography         2000s"}
+
+rejected probes match the main’s greedy output for the first
+𝑘 tokens: mean 𝑘 ≈ 29.5, median 27, 𝑃25 = 17, 𝑃75 = 35.                       Rejected fork
+Mechanism. D3 turns the probe into draft tokens for the                       reused as draft tokens
+
+main stream’s own speculative decoding rather than re-                        {"name":       ··· 17 tokens ···             "albums        2000-09"}
+
+decoding the tool call from scratch (Figure 9). We integrate                         accepted prefix (k = 18)              rejected from first mismatch
+
+a SporkProposer into the serving engine’s speculative-                                                                one verify pass
+decoding proposer path: as the main request decodes, the
+proposer watches for the <tool_call> boundary and, at                         accept k = 18                     reject "albums"                   main
+                                                                               skip 18 decodes                  first divergent token            continues
+that point, supplies the probe’s tool-call body as the draft
+for that request.
+    1. When the main stream reaches the tool-call opener,              Figure 9. D3 treats the rejected fork as a draft for
+       the probe body is registered as the per-request draft.          speculative verification. Instead of discarding the probe,
+    2. The engine verifies the draft against the main model            Spork verifies its tool-call tokens, accepts the longest match-
+       in the same decode step (no separate verification               ing prefix, and lets the main stream decode only the suffix
+       pass, no second prompt); it accepts the longest prefix          after the first mismatch.
+       matching the main model’s greedy tokens.
+    3. The first 𝑘 matching tokens are accepted; the main              Algorithm 1 Spork Controller with D1+D2+D3
+       stream decodes only the tool-call tokens after the first        Require: User request, tool set T , threshold 𝜃 , retry budget
+       mismatch.                                                           𝑅, token step 𝑠
+D3 runs only in the in-process (engine) configuration,                  1: Dispatch main stream (streaming chat completions)
+whose baseline is ngram speculative decoding; the HTTP                  2: Wait for main’s first streaming token
+controller configuration (§5) runs D1+D2 only. D3 reduces               3: spec ← ∅; (𝑡ˆ, 𝑎) ˆ ←∅
+the per-rejected-turn cost to approximately 𝑇base    ∗   + 𝑇oh ,        4: for 𝑟 = 0, 1, . . . , 𝑅 − 1 do
+         ∗
+where 𝑇base = 𝑇base −𝑇D3 is the realized base decode after re-          5:    Wait until main has decoded 𝑟 · 𝑠 further CoT tokens
+cycling the verified prefix as drafts (≈0.6 s per rejected turn,        6:    Fork a completions request with forced prefix over
+≈0.31 s amortized per turn on BrowseComp; Appendix B).                        observed CoT {D1 cache hit}
+D3 is complementary to D1+D2: tool-level speculation on                 7:     (𝑡ˆ, ˆ
+                                                                                   𝑎) ← parse(fork); 𝑐 ← min 𝑗 ∈name_span exp(ℓ 𝑗 )
+accepted turns, token-level recycling on rejected turns; the                  {D2}
+fork itself is the draft, avoiding a separate draft model.              8:    if (𝑡ˆ, ˆ
+                                                                                      𝑎) valid and 𝑐 ≥ 𝜃 then
+                                                                        9:         spec ← async_tool(𝑡ˆ, ˆ    𝑎) {commit; overlaps main
+5     Implementation                                                               decode}
+                                                                       10:         break
+Overview. Spork is implemented in Python as a controller
+                                                                       11:    end if
+layer plus an optional D3 proposer integration. The D1/D2
+path (fork dispatch, logprob monitoring, asynchronous tool             12:    if main stream finished then
+                                                                       13:         break
+execution, and gate verification) uses standard OpenAI-
+                                                                       14:    end if
+compatible vLLM endpoints (/v1/chat/completions
+                                                                       15: end for
+for the main stream, /v1/completions for the fork). D3
+                                                                       16: Wait for main tool call (𝑡 ∗, 𝑎 ∗ )
+adds a small SporkProposer integration with vLLM’s
+speculative-decoding proposer path so that verified probe              17: if spec ≠ ∅ and (𝑡ˆ, ˆ   𝑎) = (𝑡 ∗, 𝑎 ∗ ) then
+tokens can be injected as draft tokens at the tool-call                18:    return pre-computed spec result {strict match}
+                                                                       19: else
+boundary. Algorithm 1 summarizes the end-to-end control
+flow. The HTTP controller realizes D1+D2; the engine                   20:    return tool(𝑡 ∗, 𝑎 ∗ ) {serial fallback; D3 draft-injects
+configuration additionally performs D3, which the HTTP                        the probe body during decode}
+                                                                       21: end if
+path omits.
+vLLM compatibility. Spork’s D1/D2 controller re-                       /v1/completions with per-token logprobs and an arbi-
+quires a serving backend that supports: (1) streaming                  trary prompt prefix (for the fork thread); and (3) prefix
+/v1/chat/completions with per-token logprobs; (2)                      KV-cache sharing between concurrent requests (D1 relies
+
+                                                                   8
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+
+
+Figure 10. Spork reduces 𝑃95 tail latency across models and benchmarks. Teal: baseline; orange: the paper-facing
+Spork configuration for each run (engine D1+D2+D3; HTTP D1+D2). 𝑃 95 latency on GAIA, HotpotQA, and tau2 (2 s tool
+floor) for Qwen3.5-35B-A3B, Qwen3-32B, and Qwen3-4B (note the per-panel 𝑦-scales); the percentage above each pair is the
+𝑃95 reduction. Spork generalizes across model scale (4B→32B) and architecture (dense and MoE). Per-model measurement
+setup is described in §6.1; quality is preserved across all configurations (Figure 11).
+
+on this). vLLM (our serving version, §6.1) satisfies all three            history exactly as in the serial baseline, so correctness
+with prefix caching enabled; among the broader wave                       reduces to matching the eventual tool name and arguments
+of serving engines [10, 30], any backend exposing these                   at turn end. No changes to model weights or offline datasets
+three interfaces can host the controller. D3 additionally                 are required: only serving configuration (prefix caching
+requires access to the serving engine’s speculative-draft                 on, logprobs enabled) and the controller process colocated
+proposer interface; in our prototype this is implemented by               with the agent.
+wrapping vLLM’s ngram proposer.
+Concurrency and safety. The main stream and the                           6     Evaluation
+fork run as concurrent asyncio tasks against the same                     6.1   Setup
+vLLM endpoint. A shared state dictionary (guarded by                         Models, Hardware, Frameworks. We evaluate Qwen3-
+a threading.Lock) exposes the main stream’s growing                       32B and Qwen3-4B (dense) [35] and Qwen3.5-35B-A3B
+chain-of-thought to each fork, so successive probes condi-                (a 3B-active mixture-of-experts) [27] to test generalization
+tion on more context; the speculative tool runs in a worker               across both scale and architecture, all self-hosted via
+thread via asyncio.to_thread while the main stream                        vLLM 0.19.1 (TP=1) on NVIDIA H20-3e GPUs (143 GiB
+continues decoding. Concurrent agent episodes, each                       each) with bf16 precision. All runs use greedy decoding
+contributing a main stream and a fork, run against vLLM                   (temperature 0, seed 42) with thinking mode enabled,
+without observable throughput degradation (§6). By design,                producing 2–20 s of chain-of-thought decode that creates
+only tools marked read-only in a manifest are speculated.                 the overlap budget Spork exploits.
+Write and non-idempotent tools are not supported yet and
+always take the serial fallback path; supporting them is                    Benchmarks. Table 2 (Appendix E) profiles the three
+feasible with sandboxing or agent-state checkpointing that                benchmarks. GAIA and HotpotQA execute real net-
+can roll back a mispredicted speculative call. Our prototype              work tools (web search + page browse, and a Wikipedia
+evaluates read-only benchmarks (web search, page browse,                  search API, respectively); tau2-bench executes structured
+Wikipedia, DB-read), where the strict gate already bounds                 DB-query tools with simulated latency floors, giving a
+correctness on every turn.                                                controlled sweep over 𝑇tool .
+Deployment overhead. The controller adds ≤ 0.05 s of                        Metrics. Latency: per-query end-to-end wall-clock time.
+Python-level overhead per turn (thread management, JSON                   Quality: exact-match accuracy (EM) for GAIA/HotpotQA,
+parsing, lock acquisition) on top of the vLLM call latency.               F1 for HotpotQA. Speedup: 𝑃 95 ratio (baseline / Spork).
+This overhead is accounted for in 𝑇oh and is visible in the
+EQ1 validation (§6.2).                                                      Configurations. Per-model serving mode, baseline, and
+                                                                          Spork configuration appear in Table 3 (Appendix E); the
+Agent integration. In our agent harness, each turn wraps
+                                                                          dense-model baseline is vLLM’s built-in ngram speculative
+the stock ReAct-style loop: the main stream runs through
+                                                                          decoding [28], and each model is compared against its own
+the chat API with tools registered in the request; the
+                                                                          baseline under the same serving mode.
+fork thread uses the same prompt prefix plus a forced
+<tool_call> opener and a JSON schema the model was
+fine-tuned on. Tool results are injected back into the chat
+                                                                      9
+                                                                             Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+
+
+Figure 11. Spork preserves task accuracy. Paired com-
+parison of baseline (teal) vs. Spork (orange) exact-match              Figure 12. Ablation: full Spork (D1+D2+D3) achieves
+scores across benchmarks and model sizes. Quality stays                the best tail latency. GAIA N=165, Qwen3-32B; black
+within 1 pp of baseline on all settings and sometimes im-              dashes mark 𝑃 50 . Ngram alone gives −31% at 𝑃 50 ; D1+D2+D3
+proves (+1.5 pp EM on HotpotQA with Qwen3-32B). The                    adds −18% at 𝑃 95 . No single config wins on all metrics: D1
+strict gate prevents speculative side effects from corrupting          for mean, D1+D2+D3 for 𝑃 95 .
+conversation history.
+                                                                       GAIA and HotpotQA instead call search APIs whose results
+6.2   End-to-End Speedup                                               are non-deterministic even under identical arguments, so
+                                                                       baseline and Spork trajectories cannot be token-identical
+Figure 10 reports end-to-end 𝑃95 latency across models and
+                                                                       despite temperature 0; quality on these benchmarks is
+benchmarks. With Qwen3-32B, Spork achieves −18% 𝑃95
+                                                                       therefore compared via aggregate scores (EM, F1) rather
+on GAIA (131.9 s → 108.1 s, real web search, 𝑇tool = 4.8 s),
+                                                                       than per-token equality. On HotpotQA with Qwen3-32B,
+while HotpotQA shows a modest 1.06× improvement
+                                                                       Spork is faster and higher quality (+1.5 pp EM, +0.012 F1)
+because its short tools (𝑇tool = 0.9 s) sit near the EQ1 break-
+                                                                       than the baseline.
+even. The benefit transfers across model size: Qwen3-4B
+                                                                         Spork preserves accuracy (within −1 pp of baseline) re-
+achieves 1.15× mean speedup on tau2-bench (simulated 2 s
+                                                                       gardless of model size or benchmark. The strict gate is the
+tool floor), with full benchmark coverage in Appendix G. It
+                                                                       key mechanism: it rejects any probe that does not exactly
+also transfers across model architecture: Qwen3.5-35B-A3B
+                                                                       match the main generation, ensuring the conversation his-
+reduces 𝑃95 by 16% on tau2 (59.4 s → 49.8 s, N=155), 16% on
+                                                                       tory is never corrupted by speculative side effects.
+GAIA (222.4 s → 187.3 s, N=53, tail-positive), and 20% on
+HotpotQA (18.9 s → 15.2 s, N=200).                                     6.4   Ablation
+   Spork achieves −18% 𝑃95 on GAIA (Qwen3-32B) and
+                                                                       We expect each component (D1, D2, D3) to contribute inde-
+1.15× mean on tau2 (Qwen3-4B), confirming that the
+                                                                       pendently to the final result, with no single configuration
+overlap window dominates when tool latency ≥ 2 s. §6.6
+                                                                       dominating all metrics simultaneously.
+locates these points in the EQ1 envelope.
+                                                                          Figure 12 decomposes contributions:
+6.3   Quality Preservation                                                  • Ngram spec-dec (the baseline): accelerates decode
+We expect Spork to preserve task accuracy: the strict                         TPOT (𝑃50 50.5→34.7 s, −31%); every Spork configu-
+gate ensures only exact-matching tool calls are accepted,                     ration stacks on top of it, so the contributions below
+and D3 recycles only the rejected probe’s verified prefix                     are orthogonal to token-level speculative decoding.
+as a speculative-decoding draft. Speculative decoding’s                     • D1 on ngram: additional 𝑃 50 −12%, mean −10%. Fork-
+verification step preserves the target model’s output distri-                 prefix overlap adds on top of per-token spec-dec.
+bution [14]; in Spork the target is the running model itself,               • D1+D2+D3: best 𝑃95 (108.1 s, −18%). D2+D3 synergy
+so D3 inherits this guarantee.                                                helps tail queries where rejected retries leave verified
+   Figure 11 shows that Spork keeps EM within 1 pp of                         prefixes that D3 recycles as drafts.
+baseline on every benchmark and model, and sometimes                      Per-configuration EM differences exist but stem from
+improves it. tau2-bench is not plotted because its quality             search-API and vLLM-batching nondeterminism, both
+is identical by construction: the simulated DB tools return            present in the baseline as well (§6.3); they do not originate
+deterministic canned results, matching exactly for baseline            from the gate: D3 accepts only tokens that match the
+and Spork, so the latency sweep exercises timing only.                 main model’s greedy output, so trajectory divergence is
+                                                                       orthogonal to Spork’s correctness guarantee.
+                                                                  10
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+                                                                           6.5   Case Study: Self-Speculation vs. a Draft Model
+                                                                           A natural alternative to self-speculation is to serve a smaller
+                                                                           model as a tool-call drafter, analogous to token-level specu-
+                                                                           lative decoding. Figure 13 compares that choice against self-
+                                                                           speculation in a controlled D1-only HTTP ablation on tau2-
+                                                                           bench: same Qwen3-32B main model, tasks, seed, parser,
+                                                                           and simulated tool floor; only the probe model changes.
+                                                                              The cross-4B probe has lower probe latency, the time
+                                                                           to decode the tool-call token span: 0.315 s mean vs. 0.970 s
+                                                                           for self at the tau2 2 s floor. Its exact-argument agreement,
+                                                                           however, is far lower than self-speculation’s: 0.590 vs. 0.792
+                                                                           on tau2 (Figure 13a), 0.161 vs. 0.296 on HotpotQA, and
+                                                                           0.056 vs. 0.109 on GAIA. Since both probes usually finish
+                                                                           before the tool floor on accepted turns, probe speed is
+                                                                           off the critical path; acceptance rate dominates realized
+                                                                           overlap. Self-speculation therefore hides more tool latency
+                                                                           at every floor in the sweep and wastes fewer speculative
+                                                                           tool executions (154 vs. 317 at N=155; Figure 13b). It also
+                                                                           avoids a second served model: in our measurement the
+                                                                           cross-model arm serves two models (Qwen3-32B and the
+                                                                           Qwen3-4B drafter, each TP=1 on its own GPU), while
+Figure 13. Self-speculation trades a slower probe for
+                                                                           self-speculation needs only the target model’s single GPU;
+higher useful overlap. D1-only HTTP ablations with the
+                                                                           a colocated drafter would instead compete with the target
+same Qwen3-32B main model. (a) Self has higher exact-
+                                                                           for request scheduling and KV-cache capacity. This result
+argument agreement than a Qwen3-4B cross probe on all
+                                                                           places a boundary on external drafters: they help only if
+three benchmarks. (b) On tau2, self hides more mean tool la-
+                                                                           their lower probe cost offsets the lower 𝛼 and the additional
+tency across floors; cross wastes 2.1× more speculative tools
+                                                                           serving contention.
+at the 2 s floor.
+                                                                           6.6   Operating Envelope
+D2 confidence gate analysis. D2 is a trade-off knob. The
+gate raises per-turn acceptance from 𝛼 ≈ 0.22 (D1, 49 ac-                  We expect Spork to break even when tool latency exceeds
+cepted probes) to 𝛼 ≈ 0.37 (D1+D2, 101 accepted) and avoids                probe overhead (𝑇tool ≥ 𝑇oh , the probe overhead of §4.1) and
+wasted real tool calls by filtering low-confidence probes be-              the model produces sufficient CoT for overlap. Below this
+fore dispatch; the dispatched-probe totals (434 for D1, 2124               threshold, probe overhead dominates and Spork is neutral
+for D1+D2) exceed the turn counts because the retry ca-                    or negative.
+dence re-probes low-confidence turns (§2.2). The confidence                EQ1 calibration. The tau2 latency sweep validates EQ1’s
+threshold 𝜃 = 0.90 was selected by sweeping min-prob over                  structural prediction: speedup grows monotonically with
+997 probes: precision 88%, recall 100%, F1=0.937 (Figure 8).               tool latency (1.09× at 0.5 s floor → 1.18× at 5.0 s floor
+This filtering pays when tools are slow or costly; when tools              on airline domain). EQ1 predicts observed speedup with
+are cheap, the added wait can outweigh the savings, and                    at most 1.84% residual across all operating points (1.84%
+D2 alone can hurt mean latency on short-tool benchmarks.                   on tau2, 0.88% on GAIA), confirming the cost model is a
+With D3, the gate’s rejected retries become useful drafts,                 reliable predictor of when Spork helps.
+and D2+D3 together give the best 𝑃 95 : the full configuration                Figure 14 traces this envelope on the controlled tau2
+wins the tail while D1 alone wins the mean.                                sweep. The real-tool benchmarks land where the cost
+   Each component contributes to different metrics: D1 for                 model places them: GAIA’s 4.8 s tool latency sits well inside
+mean/P50, D2+D3 for 𝑃 95 . All three are needed for the best               the beneficial region, while HotpotQA’s 0.9 s latency sits
+tail latency.                                                              near break-even, exactly where EQ1 predicts the gains
+                                                                           should shrink toward neutrality.
+                                                                           When Spork wins. The largest gains appear when 𝑇tool
+                                                                           is large relative to probe overhead, tool schemas are regu-
+                                                                           lar enough for high 𝛼, and speculation is restricted to read-
+                                                                           only tools (§5): GAIA’s multi-second real web search is the
+                                                                           clearest favorable regime (𝑃95 −18%). On HotpotQA (0.9 s
+                                                                           Wikipedia API), Spork is Pareto-dominant with Qwen3-32B
+                                                                      11
+                                                                             Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+                                                                        extra heads that propose tokens the target model verifies in
+                                                                        parallel [2, 5, 15–17]; model-free variants draft from prompt
+                                                                        or prior-output n-grams [24, 28]. Both families shorten the
+                                                                        decode portion of a turn but leave the tool wait untouched:
+                                                                        the external call is still issued only after the model finishes
+                                                                        emitting it. Spork is orthogonal: our partial-token accept
+                                                                        reuses vLLM’s speculative-decoding verification path to
+                                                                        recycle a rejected probe’s verified prefix as draft tokens, so
+                                                                        the two mechanisms stack.
+                                                                           Action- and execution-level speculation. Speculative
+                                                                        Actions [40], SPAgent [11], DualSpec [42], and PASTE [32]
+                                                                        move speculation up to the action level, pre-executing
+                                                                        likely tool calls; Nichols et al. [23] speculate tool calls inside
+Figure 14. Spork stays at or above break-even across                    the serving engine, targeting agent-serving throughput.
+the operating envelope. Mean per-task speedup vs. tool                  They differ from Spork in the source of the prediction:
+latency on the tau2 sweep (N=155). Full Spork (D1+D2+D3)                Speculative Actions and DualSpec rely on auxiliary predic-
+stays above break-even and rises with tool latency; the gated           tor models or verifier policies, Nichols et al. [23] draft with
+D1+D2 line approaches break-even on the shortest floors,                a smaller speculative model, and PASTE mines recurring
+matching EQ1’s 𝛼 · 𝑡 overlap ≥ 𝑇oh condition. Stars mark the            tool-call patterns from historical traces and replays them
+two real-tool operating points (Qwen3-32B mean speedup):                through a middleware interceptor. IdleSpec [6] fills the
+near-neutral HotpotQA at EQ1’s break-even, GAIA well in-                same tool-wait windows with speculative plans, improving
+side the beneficial region.                                             task accuracy rather than hiding tool latency. Spork
+                                                                        instead forks the running model’s own state and reads
+(faster and higher EM) and Pareto-neutral with Qwen3-4B:                its probe logprobs: day-one speculation with no auxiliary
+it never hurts, and occasionally helps on tail queries. The             model, no trace collection, and the prefix-cache sharing
+case study (§6.5) reinforces the principle: once the probe fin-         an interceptor lacks. Atomix [22] adds complementary
+ishes before the tool floor, acceptance rate, not probe speed,          transactional semantics for speculative side effects, which
+determines hidden tool latency.                                         our read-only-tool restriction sidesteps.
+When Spork does not help. The primary boundary is a
+                                                                           Early intent in LLMs. Certaindex [7] finds that reason-
+vanishing overlap window (𝑡 overlap → 0): from the decode
+                                                                        ing programs’ intermediate answers stabilize well before
+side, no-think mode cuts main decode to 0.3–0.9 s, too fast
+                                                                        generation ends and allocates test-time compute from
+for the probe to finish before the main stream needs the tool
+                                                                        that certainty; When2Tool [33] shows tool-call necessity
+result (0.79× on tau2), while thinking-mode CoT, typically
+                                                                        is linearly decodable from pre-generation hidden states.
+≥2 s in our workloads, creates the window; from the tool
+                                                                        DEER [36] induces an early final answer to stop reasoning,
+side, very fast tools (e.g., local file reads) finish before any
+                                                                        and SpecExit [37] reads exit signals from draft-model
+probe can pay off, leaving nothing to hide. The window also
+                                                                        hidden states; inspired by this line of work, Spork inserts a
+bounds long tools: 𝑡 overlap ends when either side finishes, so
+                                                                        forced tool-call prefix to surface the next tool call early and
+tool time that runs past the main stream’s stop is not hid-
+                                                                        overlap the tool wait with the remaining decode.
+den, and the relative gain saturates once 𝑇tool exceeds the
+decode remaining at dispatch. A second boundary, a native               8    Conclusion
+tool-call format that diverges from the forced probe (𝛼 → 0),
+is detailed in Appendix F.                                              We presented Spork. Our central finding is that agentic
+   Spork’s operating boundary is well-defined: thinking-                LLM workloads exhibit exploitable early intent: the running
+mode CoT long enough to host the probe, and tool latency                model already knows its next tool call before finishing its
+above the probe-overhead break-even, with gains growing                 reasoning, with fork-at-start name accuracy of 74.6–99.6%
+until 𝑇tool fills the available decode window. Practitioners            on Qwen3-32B against a tool wait of 16–37% of agent wall
+can evaluate applicability before full deployment with a                time. Spork turns this into latency with the lightest possible
+lightweight pilot trace measuring fork name accuracy, 𝛼,                machinery, requiring no draft model, no historical traces,
+and 𝑇tool , plugged into EQ1.                                           and no retraining: D1–D3 map the early-intent signals onto
+                                                                        EQ1’s terms, and our experiments validate the cost model
+7   Related Work                                                        on real web tools (GAIA), short-latency APIs (HotpotQA),
+                                                                        and the controlled tau2 latency sweep. The mechanism
+  Token-level speculative decoding. Speculative de-
+                                                                        generalizes across scale and architecture, from Qwen3-4B
+coding [14] accelerates generation with draft models or
+                                                                   12
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+to Qwen3-32B and a 3B-active mixture-of-experts, while                                 [13] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez,
+preserving task accuracy.                                                                   H. Zhang, and I. Stoica. Efficient memory management for large lan-
+                                                                                            guage model serving with PagedAttention. In Proceedings of the 29th
+Limitations. Spork speculates only read-only tools today;                                   Symposium on Operating Systems Principles, pages 611–626, 2023.
+supporting write operations is future work, requiring                                  [14] Y. Leviathan, M. Kalman, and Y. Matias. Fast inference from trans-
+sandboxing or agent-state checkpointing so a mispredicted                                   formers via speculative decoding. In International Conference on Ma-
+speculative call can be rolled back. It relies on open-weight                               chine Learning, pages 19274–19286, 2023.
+models served by an engine that exposes per-token logprobs                             [15] Y. Li, F. Wei, C. Zhang, and H. Zhang. EAGLE-2: Faster inference of
+                                                                                            language models with dynamic draft trees, 2024. URL https://arxiv.
+and a completion endpoint; closed-source APIs cannot host                                   org/abs/2406.16858.
+the fork thread. Finally, we target latency-oriented serving                           [16] Y. Li, F. Wei, C. Zhang, and H. Zhang. EAGLE: Speculative sampling
+with spare capacity; under heavy batching, probe traffic                                    requires rethinking feature uncertainty. International Conference on
+competes with foreground decode and the overlap benefit                                     Machine Learning, 2024.
+shrinks.                                                                               [17] Y. Li, F. Wei, C. Zhang, and H. Zhang. EAGLE-3: Scaling up inference
+                                                                                            acceleration of large language models via training-time test, 2025.
+Future work. Sandboxed or checkpointed execution would                                      URL https://arxiv.org/abs/2503.01840.
+extend speculation to write tools: a mispredicted call rolls                           [18] C. Lin, Z. Han, C. Zhang, Y. Yang, F. Yang, C. Chen, and L. Qiu. Par-
+back to the pre-speculation agent state. Deeper engine inte-                                rot: Efficient serving of llm-based applications with semantic variable.
+gration could schedule probes into idle batch slots, shrink-                                In Proceedings of the 18th USENIX Symposium on Operating Systems
+                                                                                            Design and Implementation. USENIX Association, 2024.
+ing 𝑇oh further and widening the favorable regime.
+                                                                                       [19] A. Mahgoub, E. B. Yi, K. Shankar, S. Elnikety, S. Chaterji, and S. Bagchi.
+                                                                                            ORION and the three rights: Sizing, bundling, and prewarming for
+References                                                                                  serverless DAGs. In 16th USENIX Symposium on Operating Sys-
+ [1] A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani,                  tems Design and Implementation, pages 303–320. USENIX Association,
+     A. Tumanov, and R. Ramjee. Taming throughput-latency tradeoff in                       2022.
+     LLM inference with Sarathi-Serve. In 18th USENIX Symposium on                     [20] Manus. Manus: Hands on ai. https://manus.im/, 2025.
+     Operating Systems Design and Implementation. USENIX Association,                  [21] G. Mialon, C. Fourrier, C. Swift, T. Wolf, Y. LeCun, and T. Scialom.
+     2024.                                                                                  GAIA: A benchmark for general AI assistants. In International Con-
+ [2] Z. An, H. Bai, Z. Liu, D. Li, and E. Barsoum. PARD: Accelerating                       ference on Learning Representations (ICLR), 2024. URL https://arxiv.
+     LLM inference with low-cost PARallel draft model adaptation. In In-                    org/abs/2311.12983.
+     ternational Conference on Learning Representations (ICLR), 2026. URL              [22] B. Mohammadi, N. Potamitis, L. Klein, A. Arora, and L. Bindschaedler.
+     https://arxiv.org/abs/2504.18583.                                                      Atomix: Timely, transactional tool use for reliable agentic workflows,
+ [3] Anthropic. Claude code. https://www.claude.com/product/claude-                         2026. URL http://arxiv.org/abs/2602.14849.
+     code, 2025.                                                                       [23] D. Nichols, P. Singhania, C. Jekel, A. Bhatele, and H. Menon. Optimiz-
+ [4] V. Barres, H. Dong, S. Ray, X. Si, and K. Narasimhan. 𝜏 2 -bench: Evalu-               ing agentic language model inference via speculative tool calls, 2025.
+     ating conversational agents in a dual-control environment, 2025. URL                   URL http://arxiv.org/abs/2512.15834.
+     https://arxiv.org/abs/2506.07982.                                                 [24] G. Oliaro, Z. Jia, D. Campos, and A. Qiao. SuffixDecoding: Extreme
+ [5] T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao. Medusa:               speculative decoding for emerging AI applications, 2024. URL https:
+     Simple LLM inference acceleration framework with multiple decod-                       //arxiv.org/abs/2411.04975.
+     ing heads. International Conference on Machine Learning, 2024.                    [25] OpenAI. Introducing deep research. https://openai.com/index/
+ [6] D. Choi, K. Park, W. Song, S. Dingliwal, S. M. Jayanthi, J. Shin, and                  introducing-deep-research/, Feb. 2025.
+     A. Galstyan. IdleSpec: Exploiting idle time via speculative planning              [26] S. G. Patil, H. Mao, F. Yan, C. C.-J. Ji, V. Suresh, I. Stoica, and J. E. Gon-
+     for LLM agents, 2026. URL https://arxiv.org/abs/2605.22154.                            zalez. The berkeley function calling leaderboard (BFCL): From tool
+ [7] Y. Fu, J. Chen, S. Zhu, Z. Fu, Z. Dai, Y. Zhuang, Y. Ma, A. Qiao, T. Ros-              use to agentic evaluation of large language models. In International
+     ing, I. Stoica, and H. Zhang. Efficiently scaling LLM reasoning with                   Conference on Machine Learning (ICML), 2025.
+     certaindex, 2024. URL http://arxiv.org/abs/2412.20993.                            [27] Qwen Team. Qwen3.5: Towards native multimodal agents, 2026. URL
+ [8] Y. Fu, L. Xue, Y. Huang, A.-O. Brabete, D. Ustiugov, Y. Patel, and L. Mai.             https://qwen.ai/blog?id=qwen3.5.
+     ServerlessLLM: Low-latency serverless inference for large language                [28] A. Saxena. Prompt lookup decoding, 2023. URL https://github.com/
+     models. In 18th USENIX Symposium on Operating Systems Design and                       apoorvumang/prompt-lookup-decoding. Model-free n-gram draft-
+     Implementation, pages 135–153. USENIX Association, 2024.                               ing; basis of vLLM’s ngram speculative decoding.
+ [9] GitHub. GitHub Copilot. https://github.com/features/copilot, 2025.                [29] T. Schick, J. Dwivedi-Yu, R. Dessì, R. Raileanu, M. Lomeli, E. Hambro,
+[10] J. Hu, J. Xu, Z. Liu, Y. He, Y. Chen, H. Xu, et al. DeepServe: Serverless              L. Zettlemoyer, N. Cancedda, and T. Scialom. Toolformer: Language
+     large language model serving at scale, 2025. URL https://arxiv.org/                    models can teach themselves to use tools. Advances in Neural Infor-
+     abs/2501.14417.                                                                        mation Processing Systems, 36, 2024.
+[11] Z. Huang, W. Zeng, T. Fu, T. Liu, Y. Sun, K. Hong, X. Yang, C. Liu,               [30] Y. Song, Z. Mi, H. Xie, and H. Chen. PowerInfer: Fast large language
+     Y. Li, Q. Zhang, G. Dai, Z. Zhu, and Y. Wang. Reducing latency of                      model serving with a consumer-grade GPU. In Proceedings of the
+     LLM search agent via speculation-based algorithm-system co-design,                     ACM SIGOPS 30th Symposium on Operating Systems Principles (SOSP),
+     2025. URL http://arxiv.org/abs/2511.20048.                                             2024. URL https://arxiv.org/abs/2312.12456.
+[12] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and                  [31] J. Stojkovic, T. Xu, H. Franke, and J. Torrellas. SpecFaaS: Accelerating
+     K. Narasimhan. SWE-bench: Can language models resolve real-world                       serverless applications with speculative function execution. In 2023
+     GitHub issues? International Conference on Learning Representations,                   IEEE International Symposium on High-Performance Computer Archi-
+     2024.                                                                                  tecture, pages 814–827, 2023. doi: 10.1109/HPCA56546.2023.10071120.
+                                                                                       [32] Y. Sui, H. Zhao, R. Ma, Z. He, H. Wang, J. Li, and Y. Yang. Act while
+                                                                                            thinking: Accelerating LLM agents via pattern-aware speculative tool
+
+                                                                                  13
+                                                                                          Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+     execution, 2026. URL http://arxiv.org/abs/2603.18897.                           A    Full EQ1 Derivation
+[33] C.-E. Sun, L. Liu, G. Yan, Z. Wang, and T.-W. Weng. LLM agents al-
+     ready know when to call tools – even without reasoning, 2026. URL
+                                                                                     Let a single agent turn have:
+     https://arxiv.org/abs/2605.09252.                                                   • 𝑇dec : main generation wall time (post-prefill, includes
+[34] J. Wei, Z. Sun, S. Papay, S. McKinney, J. Han, I. Fulford, H. W. Chung,                CoT and tool-call decode)
+     A. T. Passos, W. Fedus, and A. Glaese. BrowseComp: A simple yet                     • 𝑇tool : tool execution wall time
+     challenging benchmark for browsing agents, 2025. URL https://arxiv.
+     org/abs/2504.12516.
+                                                                                         • 𝑇base = 𝑇dec + 𝑇tool : serial baseline cost
+[35] A. Yang et al. Qwen3 technical report, 2025. URL https://arxiv.org/             Under Spork, let 𝛼 be the gate acceptance rate and 𝑡 overlap
+     abs/2505.09388.                                                                 be the mean realized overlap on accepted turns.
+[36] C. Yang, Q. Si, Y. Duan, Z. Zhu, C. Zhu, Q. Li, M. Chen, Z. Lin, and               On accepted turns (𝑝 = 𝛼), the speculative tool execu-
+     W. Wang. Dynamic early exit in reasoning models. In International
+     Conference on Learning Representations (ICLR), 2026. doi: 10.48550/
+                                                                                     tion overlaps 𝑡 overlap seconds of tool time with decode:
+     arXiv.2504.15895. URL https://arxiv.org/abs/2504.15895.                                               𝑇hit = 𝑇base − 𝑡 overlap
+[37] R. Yang, H. Bai, S. Liu, G. Yu, et al. SpecExit: Accelerating large rea-
+     soning model via speculative exit, 2025. URL https://arxiv.org/abs/             On rejected turns (𝑝 = 1 − 𝛼), the agent falls back to se-
+     2509.24248.                                                                     rial execution with overhead 𝑇oh , but prefix recovery (D3)
+[38] Z. Yang, P. Qi, S. Zhang, Y. Bengio, W. W. Cohen, R. Salakhutdinov,             lets the main stream skip re-decoding the recovered tool-
+     and C. D. Manning. HotpotQA: A dataset for diverse, explainable                                                                           ∗
+                                                                                     call tokens, replacing 𝑇base with the realized base cost 𝑇base =
+     multi-hop question answering. In Conference on Empirical Methods                               ∗
+     in Natural Language Processing, 2018.
+                                                                                     𝑇base − 𝑇D3 (𝑇base = 𝑇base without D3):
+[39] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao.                                           ∗
+                                                                                                            𝑇miss = 𝑇base + 𝑇oh
+     ReAct: Synergizing reasoning and acting in language models. In In-
+     ternational Conference on Learning Representations, 2023.                       Expected per-turn cost:
+[40] N. Ye, A. Ahuja, G. Liargkovas, Y. Lu, K. Kaffes, and T. Peng. Specu-             E[𝑇 ] = 𝛼 · 𝑇hit + (1 − 𝛼) · 𝑇miss
+     lative actions: A lossless framework for faster agentic systems. 2026.
+                                                                                                                                  ∗
+     doi: 10.48550/arXiv.2510.04371. URL http://arxiv.org/abs/2510.04371.                     = 𝑇base − 𝛼 · 𝑡 overlap + (1 − 𝛼) (𝑇base − 𝑇base + 𝑇oh )
+[41] L. Zheng, L. Yin, Z. Xie, J. Huang, C. Sun, C. H. Yu, S. Cao, C. Kober,
+                                                                                     Latency ratio:
+     Y. Sheng, J. E. Gonzalez, I. Stoica, and H. Zhang. SGLang: Efficient
+     execution of structured language model programs. In Advances in                                                    𝑇base
+     Neural Information Processing Systems, 2024.
+                                                                                         𝑆=                                       ∗ −𝑇
+                                                                                              𝑇base − 𝛼 · 𝑡 overlap + (1 − 𝛼) · (𝑇base base + 𝑇oh )
+[42] S. Zhong, B. Lu, Q. Chen, C. Liu, F. Yang, and M. Li. DualSpec: Ac-
+                                                                                     For notational simplicity, the main text uses 𝑇base∗ in place of
+     celerating deep research agents via dual-process action speculation,
+     2026. URL http://arxiv.org/abs/2603.07416.                                      𝑇base on the speculative path and 𝑇oh as a uniform overhead
+                                                                                     (applied regardless of accept/reject), giving the formula
+                                                                                              ∗
+                                                                                     𝑇base /(𝑇base − 𝛼 · 𝑡 overlap + 𝑇oh ). The floor-2s validation in
+                                                                                     §6.6 uses this simplified form.
+                                                                                        Break-even condition. 𝑆 ≥ 1 requires 𝛼 · 𝑡 overlap ≥ (1 −
+                                                                                           ∗ −𝑇
+                                                                                     𝛼) (𝑇base                                ∗
+                                                                                                    base +𝑇oh ); without D3 (𝑇base = 𝑇base ) this reduces
+                                                                                     to 𝛼 ·𝑡 overlap ≥ (1 −𝛼) ·𝑇oh , or approximately 𝛼 ·𝑡 overlap ≥ 𝑇oh
+                                                                                     when 𝑇oh is treated as a fixed overhead.
+                                                                                        Tool-fraction ceiling. When 𝛼 = 1 and 𝑡 overlap = 𝑇tool
+                                                                                     (perfect overlap of all tool time):
+                                                                                                             𝑇dec + 𝑇tool      1
+                                                                                                     𝑆 max =              =
+                                                                                                                𝑇dec        1 − 𝑓tool
+                                                                                     where 𝑓tool = 𝑇tool /𝑇base is the tool-time fraction. On
+                                                                                     BrowseComp (𝑓tool = 0.366): 𝑆 max = 1.58×. The gap between
+                                                                                     𝑆 max and realized speedup is explained by (a) 𝑡 overlap < 𝑇tool
+                                                                                     (probe dispatch lag + turns with 𝑇tool < 𝑇probe ) and (b)
+                                                                                     𝑇oh > 0 on strict mode.
+
+                                                                                     B    D3 Partial-Token Accept: Phase 0 Data
+                                                                                     Offline analysis of 1268 probe–baseline pairs from
+                                                                                     BrowseComp-120, a 120-question probe-analysis run
+                                                                                     (distinct from the 240-question end-to-end evaluation
+                                                                                     run described in Appendix C). Both arms decode under
+                                                                                     identical observations, so the prefix statistics are unbiased:
+
+                                                                                14
+SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference
+
+
+         Statistic                                 Value                            The 36% turns with 𝑇tool < 0.72 s (< probe_wall) have zero
+                                                                                realizable overlap: the tool completes before the probe can
+         Mean first-mismatch position 𝑘        29.5 tokens
+         Median 𝑘                               27 tokens                       even dispatch speculative execution. The 47% turns with
+         𝑃25 / 𝑃 75                           17 / 35 tokens                    𝑇tool ∈ [0.72, 2] s have limited overlap (≤ 1.28 s). Only the
+         % pairs with 𝑘 ≥ 10                        82%                         17% with𝑇tool ≥ 2 s achieve substantial overlap. Hence mean
+         % pairs with 𝑘 ≥ 20                        61%                         𝑡 overlap = 1.03 s despite mean 𝑇tool = 8.92 s: 83% of turns fall
+                                                                                in the first two buckets.
+   Even rejected probes share a substantial token prefix with
+the baseline. Accepting 𝑘 = 29.5 tokens and autoregres-
+                                                                                E     Per-Model Serving Configurations
+sively decoding the remaining 50 − 29.5 = 20.5 tokens re-
+duces the decode time of a full ∼50-token tool call from                        Table 2 profiles the three benchmarks of §6.1; Table 3 lists
+∼ 1.5 s to ∼ 0.9 s (verify pass + 20.5 tokens), saving ∼ 0.6 s on               the serving mode, baseline, and Spork configuration for ev-
+such rejected turns. In this 120-question run, 52% of strict-                   ery model in §6.
+gate turns were rejected, giving a mean per-turn D3 saving                      Table 2. Benchmark and tool profile. Tool vocabulary
+of ≈ 0.31 s.                                                                    size, typical tool latency, and turn depth per benchmark.
+                                                                                    Benchmark     N        #Tools     Typical 𝑇tool           Turns
+C     BrowseComp Experimental Details
+                                                                                    GAIA         165            2     4.8 s mean (real)       1–8
+  Setup. Qwen3-32B via vLLM 0.18.1, TP=4 on 4× NVIDIA
+                                                                                    HotpotQA     200            1     0.9 s mean (real)       multi-hop
+H20-3e (143 GiB each), bf16, max_model_len=40960.                                   tau2-bench   155   30 (2 dom.)    0.5–5 s floors (sim.)   multi-turn
+BrowseComp first 240 questions (indices 0–239, fixed seed).
+Temperature 0, seed 42 on all calls. MAX_TURNS = 15.                               The HTTP configuration drives a stock vLLM server
+Workers = 4 (4 questions in flight). Tools: a production                        through its OpenAI-compatible API and supports D1+D2
+web-search API plus a web-page crawl/browse API.                                only; the engine configuration adds the D3 proposer
+   First-token timeout. 3.4% of turns (50/1487) had probe                       integration inside vLLM (§4.3). Qwen3.5-35B-A3B uses
+dispatch timeout (first-token threshold = 3s). These are                        JSON-format tool prompting throughout, as its native XML
+treated as aborted probes; the turn falls back to serial execu-                 tool-call format is a self-speculation boundary case (§6.6).
+tion. Not catastrophic for overall results but indicates that                   Table 3. Per-model serving mode, baseline, and Spork
+under workers=4 concurrency, probe latency occasionally                         configuration.
+exceeds the 3s window on long real-content prompts. D2                           Model                 Serving mode      Baseline             Spork
+(confidence gating with earlier abort) would reduce this
+failure mode.                                                                    Qwen3-32B             engine            ngram spec. dec.     D1+D2+D3
+                                                                                 Qwen3-4B†             engine            ngram spec. dec.     D1+D2+D3
+    Fork statistics.                                                             Qwen3.5-35B-A3B‡      HTTP (JSON)       serial               D1+D2
+                                                                                † The tau2 run uses HTTP: serial baseline, D1+D2. ‡ The GAIA run uses
+           Metric                               Value
+                                                                                                               D1 only.
+           Total tool turns                     1487
+           Name hit rate                 83.7% (1245/1487)                         All end-to-end runs use greedy decoding with a fixed seed
+           Args-exact rate                38.8% (577/1487)                      (42).
+           Spec used (strict)                577 (38.8%)
+           Spec wasted (strict reject)       687 (46.2%)                        F     Format-Divergence Boundary
+           First-token timeouts               50 (3.4%)
+                                                                                A model whose native tool-call format diverges from the
+                                                                                forced probe defeats self-speculation by collapsing the
+D     BrowseComp Timing Decomposition                                           acceptance term (𝛼 → 0). Qwen3.5-35B-A3B’s native
+Wall-time decomposition of the April HTTP-mode runs of                          XML predicts the end-goal tool rather than the next in-
+Appendix C; the later engine-mode rerun shows the same                          termediate one, collapsing fork-at-start name accuracy to
+tool share (37%) but a larger prefill share (it lacks the HTTP                  𝛼 name =4.5% despite 97% parse success; this is a semantic
+path’s shared prefix cache).                                                    next-step mismatch, not a parser failure, and it motivates
+ Component                                  Fraction of 𝑇base   Mean (s)        the JSON-format prompting of Table 3.
+ 𝑓tool (tool execution)                          36.6%            8.92
+ 𝑓dec (decode: CoT + tool_call)                  57.2%             –            G     Qwen3-4B Full-Benchmark Coverage
+    CoT decode                                   54.6%             –
+    Tool-call decode                              2.6%             –
+                                                                                Figure 15 and Table 4 report the full Qwen3-4B end-to-end
+ Other (prefill, overhead)                        6.2%             –            coverage. These are scaling-boundary diagnostics, not
+ Realized 𝑡 overlap (spec_used turns)              –              1.03
+                                                                                headline speedup claims: on the smaller model the engine
+ Probe dispatch latency (mean probe_wall)          –              0.72          D1+D2+D3 protocol is near-neutral on HotpotQA and
+
+                                                                           15
+                                                                              Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu
+
+
+                                                                          Config               𝛼 (used/disp.)   wasted disp.   superseded
+                                                                          baseline                          –              0              0
+                                                                          OFF (first commit)            0.714             28              0
+                                                                          ON (supersede)                0.762             15             36
+                                                                         Table 5. Effect of continue_after_dispatch on tau2
+                                                                         (Qwen3-32B, HTTP, 2 s floor, 𝑁 =30, deterministic replay).
+
+                                                                            Table 5 reports a controlled A/B on tau2 (Qwen3-32B,
+                                                                         HTTP mode, 2 s tool floor, 𝑁 =30, a subset of the 155-task
+                                                                         suite, seed 42) using deterministic record→replay tool
+                                                                         execution so that tool latency and output are identical
+Figure 15. Qwen3-4B 𝑃95 latency across benchmarks
+                                                                         across arms (zero cache-miss fallbacks). Supersession is
+(scaling boundary). Spork vs. baseline (GAIA/HotpotQA:
+                                                                         mildly beneficial: it raises the gate acceptance rate (𝛼
+engine D1+D2+D3 vs. ngram spec-dec; tau2: HTTP D1+D2
+                                                                         0.714 → 0.762) and roughly halves wasted speculative
+vs. serial). tau2 sees a modest gain, GAIA is marginally posi-
+                                                                         dispatches (28 → 15) through 36 supersessions, with no
+tive, and HotpotQA is neutral. Quality is preserved or im-
+                                                                         latency regression (mean wall 80.1 → 77.5 s, within noise).
+proved (GAIA EM 29 → 36/165; HotpotQA EM 40 →
+                                                                            The effect is small enough that we leave continue_after
+39/200, within −1 pp).
+                                                                         _dispatch as an optional knob rather than a headline mech-
+ Benchmark       N   Baseline 𝑃 95   Spork 𝑃 95   Speedup                anism, and the main-paper results use the default behav-
+                                                                         ior. We do not report a GAIA latency A/B for this switch:
+ GAIA          165         29.95 s      28.67 s   1.03× (agg)
+                                                                         with real free-text search, the main stream’s queries diverge
+ HotpotQA      200         17.36 s      17.39 s   1.00× (agg)
+ tau2          155         44.81 s      43.04 s   1.15× (mean)†          across arms (no API seed under concurrent main/probe de-
+                                                                         code), so a clean replay is not possible in HTTP mode; an
+Table 4. Qwen3-4B end-to-end results. Latency columns                    engine-mode deterministic harness would be required.
+are 𝑃95 ; the GAIA and HotpotQA speedups (agg) are aggre-
+gate wall-clock ratios on real tools. † tau2 reports the mean
+speedup at the 2 s simulated tool-latency floor (21.2→18.5 s),
+not a 𝑃95 ratio.
+
+marginally positive on GAIA, while the tau2 run (2 s simu-
+lated tool-latency floor) shows a modest gain. Even though
+Qwen3-4B in think mode produces long chains of thought
+(mean 3,323 CoT tokens on GAIA, 1,843 on HotpotQA), the
+smaller model decodes quickly, so the overlap window and
+D3 recovery yield limited end-to-end benefit.
+
+H    Late-Probe Supersession (continue
+     _after_dispatch)
+D2 issues a probe after each additional block of CoT, and
+Insight 2 shows that probe accuracy rises as the chain-of-
+thought unfolds. This raises a design choice: should the con-
+troller commit to the first probe that clears the gate, or keep
+probing and upgrade its speculation when a later, higher-
+confidence probe predicts a different call? We expose this
+as a single switch, continue_after_dispatch:
+     • OFF (default): the first probe that clears the confi-
+        dence gate dispatches the speculative tool and the
+        retry loop stops (first commit wins).
+     • ON: the controller keeps probing after dispatch; if a
+        later probe predicts a different call, it cancels the in-
+        flight speculative tool and re-dispatches the new can-
+        didate (a supersession).
+
+
+                                                                    16
+

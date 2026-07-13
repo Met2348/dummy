@@ -1,0 +1,1052 @@
+                                         AutoMegaKernel: A Statically-Checked Agent
+                                        Harness for Self-Retargeting Megakernel Synthesis
+
+
+                                                            Jaber Jaber∗                              Osama Jaber
+                                                           RightNow AI                                RightNow AI
+                                                       jaber@rightnowai.co                        osama@rightnowai.co
+
+
+
+
+arXiv:2606.09682v1 [cs.LG] 8 Jun 2026
+                                                                                    Abstract
+                                                Single-stream LLM decode is bandwidth-bound: each token streams the whole
+                                                weight set through the SMs once, so the latency floor is weights/HBM bandwidth.
+                                                Standard execution launches one kernel per operator and round-trips activations
+                                                through HBM between every op. AUTO M EGA K ERNEL (AMK) compiles a Hug-
+                                                gingFace Llama-family model into a single persistent cooperative kernel that runs
+                                                the entire forward pass in one launch, with no per-model hand-written CUDA. The
+                                                contribution is the system, not raw speed.
+                                                A frozen schedule-IR validator statically certifies deadlock-freedom (DAG acyclic-
+                                                ity, wait-satisfiability 1 ≤ t ≤ #producers, per-SM queue order) and race-freedom
+                                                (shared-counter all-join rule, transitive happens-before provenance) via a set of
+                                                static graph checks (not a mechanized proof), so an unsafe agent-proposed schedule
+                                                is rejected before launch. Across 7,160 adversarially-constructed schedules (6,091
+                                                unsafe), the validator had zero false-accepts and accepted all 360 real lowerings,
+                                                24 of which matched eager bit-for-bit. The same source retargets sm_80, sm_90,
+                                                and sm_120 from one codebase, auto-generates correct megakernels for 10 of
+                                                10 supported HF models, and on a real SmolLM2-135M checkpoint reproduces
+                                                HuggingFace greedy decode token-for-token and matches teacher-forced perplexity
+                                                to 2.5 × 10−7 .
+                                                AMK also auto-generates int8 and int4 weight-only quantized megakernels: int8
+                                                is greedy-lossless and 1.12× faster per token; int4 cuts the weight-traffic floor
+                                                2.42× (blended) at a documented accuracy cost. An unattended, agent-drivable
+                                                autoresearch loop autonomously improves the generated megakernel over its own
+                                                baseline (1.25–1.72× measured).
+                                                The performance study reports every direction. The strongest real-hardware result
+                                                is an inference-class cuBLAS win: a search-found int8 weight-only (W8A16)
+                                                megakernel beats CUDA-graphed cuBLAS bf16 at batch-1 decode across the dat-
+                                                acenter inference fleet: the NVIDIA L4 by up to 1.33× (growing with model
+                                                size), the current-gen L40S by 1.25–1.27×, and the A10G by up to 1.08× at scale,
+                                                and on the consumer RTX 5090 Laptop by 1.19–1.23×, a precision-asymmetric
+                                                comparison (W8A16 vs. bf16), measured on random-initialized weights at real
+                                                Llama shapes (batch-1 latency is shape/byte-determined; the near-lossless W8A16
+                                                quality is shown on the real SmolLM2-135M checkpoint). The ordering is not a
+                                                clean function of bandwidth (the 864 GB/s L40S wins by more than the 600 GB/s
+                                                A10G); the dividing line is the inference-class vs. training-class regime. It trails
+                                                cuBLAS on the training-class A100/H100, where the harness localizes the cross-
+                                                SM-sync bottleneck, the honest boundary, which we disclose rather than hide.
+                                        ∗
+                                            Correspondence: jaber@rightnowai.co
+         All latencies are batch-1 at decode position 0 (empty KV); the largest real check-
+         point is TinyLlama-1.1B. The optimized bf16 GEMV reaches ≈460 GB/s (63%
+         of measured peak) versus a cuBLAS ceiling of ≈90%; we report the gap plainly.
+         Code, data, and the agent harness are open-source at https://github.com/
+         RightNow-AI/AutoMegaKernel.https://www.rightnowai.co/
+
+
+1   Introduction
+
+A single decode step of an autoregressive language model at batch 1 reads every weight once to
+produce one token. The arithmetic intensity is near 1, so the step is bound by memory bandwidth:
+its floor is tmin = weight_bytes/HBM_bandwidth [24]. A conventional PyTorch or cuBLAS [18]
+execution does not approach that floor. It launches one kernel per operator, pays CPU launch latency
+dozens of times per layer, and round-trips activations through HBM at every op boundary [1]. CUDA
+Graphs [12] amortize launch overhead by replaying a captured op sequence, but the inter-op kernel
+boundaries and their HBM round-trips remain.
+A megakernel removes those boundaries. It launches once, keeps a persistent threadblock resident on
+every SM, and walks the model’s dependency graph in place. Recent work shows this is the right
+shape for low-latency decode: Mirage Persistent Kernel (MPK) auto-transforms a tensor program
+into a single persistent kernel with in-kernel scheduling [6], and a hand-built Llama-1B megakernel
+removes all launch bubbles, observing that vLLM and SGLang use at most half of H100 bandwidth
+at low latency [22, 14, 27]. The gap these systems leave open is trust and portability. MPK ships
+no static deadlock/race gate; the hand-built kernel targets one model on one architecture; neither is
+designed as an edit surface a coding agent can drive safely.
+AMK extends AUTO K ERNEL [13], our autonomous, agent-driven GPU kernel optimizer, which
+achieved remarkable single-kernel results: up to 5.29× over PyTorch eager via iterative agent-driven
+search. AMK carries that same propose → evaluate → keep/revert search methodology up one level
+of abstraction: from optimizing one kernel at a time to compiling and self-optimizing an entire model
+as a single persistent megakernel. AMK treats correctness as a structural invariant of the compiler, not
+a property of the output. The forward pass lowers to a typed schedule IR over an SM-level task-DAG
+synchronized by monotonic counters, run by a four-layer system (Section 3; Figure 1 shows the
+pipeline). A validator statically checks the schedule is deadlock-free and race-free before any launch
+(a set of graph checks over a trusted hand-written base, not a mechanized proof). The key insight
+is that a forward pass is a DAG, producers only increment counters, and consumers only wait on
+statically known thresholds, so safety reduces to a small set of static graph checks that an automated
+agent cannot violate at runtime. An invalid schedule becomes a clean REJECTED at validation time
+instead of a hung GPU.
+Our contributions:
+
+1. A statically-checked schedule IR, stress-tested. A frozen validator (schedule/ir.py, 1150
+   lines) statically checks deadlock-freedom and race-freedom: a set of static graph checks, not a
+   mechanized proof, over a trusted hand-written base (the validator itself and the per-architecture
+   VM). The on-device VM refuses to load anything it rejects (Section 4). Across 7,160 adversarial
+   schedules (6,091 unsafe by an independent oracle, spanning 8 unsafe classes), the validator had
+   zero false-accepts and accepted all 360 real lowerings, 24 re-run bit-for-bit vs. eager (Section 5).
+   This is empirical soundness over a trusted base, not formal verification; but it is a static safety
+   gate that MPK and hand-built megakernels do not provide.
+2. Automatic generation coverage. AMK auto-generates a correct megakernel for 10 of 10 sup-
+   ported models with zero hand-written CUDA: three real HF checkpoints (SmolLM2-135M/360M,
+   TinyLlama-1.1B, up to 3,410 IR tasks) plus a 40M–618M from-config sweep, all token-for-token
+   vs eager, and rejects 3 of 4 unsupported variants loudly (the fourth gap documented honestly)
+   (Section 5).
+3. Self-retargeting. The same source built and ran a correct megakernel on sm_120 (RTX 5090),
+   sm_80 (A100), and sm_90 (H100), gencode auto-derived from the live device, matching eager to
+   ≤ 4.2 × 10−7 (fp32) on the toy and synthetic models and 3.8 × 10−5 on the real SmolLM2-135M
+   checkpoint, well within the 10−4 fp32 tolerance (Table 3).
+
+
+                                                   2
+4. An agent-drivable compiler. The Layer-2 edit surface is a structured ScheduleConfig, not
+   kernel code; the frozen VM deterministically lowers it and the validator gates it (Section 4).
+5. A real-checkpoint path with quantization. AMK imports SmolLM2-135M, reproduces Hug-
+   gingFace greedy decode token-for-token, and matches HuggingFace teacher-forced perplexity
+   to 2.5 × 10−7 (Section 5). It also auto-generates int8 and int4 weight-only quantized megaker-
+   nels: int8 is greedy-lossless and 1.12× faster per token; int4 is correct-but-lossy and cuts the
+   weight-traffic floor 2.42×.
+6. A self-improving, agent-drivable harness. Beyond a static edit surface, AMK ships an unat-
+   tended knob-autotuning loop (propose → validate → correctness-gate → measure → keep/re-
+   vert) over a small schedule-and-kernel-knob grid (cols/warp, tile width, threads, cp.async depth),
+   with drift-robust per-sample-interleaved measurement and a physical-roofline-floor honesty guard.
+   It improves the megakernel over its own default (1.25–1.72×, a self-relative gain, not a win over
+   an external baseline) (Section 5).
+7. An honest performance study, with a real cuBLAS win on inference-class GPUs. Wall-clock
+   CUDA-event timing plus an analytic roofline against both spec and measured HBM peak, across
+   seven GPUs (Section 5). The auto-tuned int8 weight-only megakernel outperforms CUDA-
+   graphed cuBLAS bf16 at batch-1 across the datacenter inference-class fleet: the NVIDIA L4
+   by up to 1.33× (growing with model size), the current-gen L40S by 1.25–1.27×, and the A10G
+   by up to 1.08× at scale, and on the consumer RTX 5090 by 1.19–1.23×. The ordering is not
+   a clean function of bandwidth (the 864 GB/s L40S wins by more than the 600 GB/s A10G), so
+   the dividing line is the inference-class vs. training-class regime; this is a precision-asymmetric
+   comparison (W8A16 vs. bf16), and we say so. It trails cuBLAS on the training-class A100/H100,
+   where the harness localizes the cross-SM-sync bottleneck, the honest boundary, disclosed in the
+   Limitations (Section 6). All latencies are batch-1 at decode position 0; the largest real checkpoint
+   is TinyLlama-1.1B. Figure 5 summarizes; we report every direction plainly.
+
+
+2   Related Work
+
+Megakernels and persistent execution. MPK [6] is the closest system: a compiler and runtime
+that mega-kernelizes a tensor program through an SM-level task graph with decentralized in-kernel
+scheduling, cutting end-to-end latency up to 1.7×. AMK targets the same single-launch shape but
+adds a static safety gate and a structured agent edit surface. The hand-built Llama-1B megakernel of
+Spector et al. [22] removes launch bubbles for one model; AMK auto-generates the megakernel from
+any HF Llama-family model with no per-model CUDA, at the cost of a kernel quality gap we report.
+
+Serving systems. vLLM [14], SGLang [27], Orca [25], and TensorRT-LLM [17] optimize high-
+batch throughput with per-op or per-engine kernels and advanced batching and KV management.
+AMK optimizes single-stream batch-1 latency and does not beat these systems on throughput, nor
+does it claim to.
+
+Kernel authoring and attention. FlashAttention and its successors [7, 8, 19] and Flash-
+Decoding [9] optimize attention as a best-in-class op; Triton [23] and ThunderKittens [21] are
+kernel-authoring frameworks. These are instruction-level optimizations AMK consumes as Layer-1
+micro-kernels rather than alternatives to whole-model fusion.
+
+Compilers and auto-schedulers. TVM [3], AutoTVM [4], Ansor [26], Hidet [10], Welder [20],
+and PyTorch 2 [1] schedule operators or fused groups, but emit a graph of separate kernel launches.
+AMK’s search axis is the whole-model schedule realized by one persistent kernel, gated by a static
+correctness certificate.
+
+Weight-only quantized GEMV. Hand-built mixed-precision kernels such as Marlin [11] reach near-
+roofline batch-1 throughput for weight-only-quantized (e.g. int4/int8 WnA16) GEMV by carefully
+engineering memory-level parallelism and dequant scheduling for one precision and layout. AMK
+instead auto-generates its int8/int4 weight-only GEMV from the same schedule-IR path with no
+per-precision hand CUDA, folding dequant into the GEMV; the trade-off is a kernel-quality gap to
+such hand-built kernels (our int8 win over cuBLAS bf16 on the RTX 5090 is precision-asymmetric,
+
+
+                                                  3
+      Table 1: Property comparison. ✓ yes, ✗ no, ∼ partial. Column meanings in Section 2.
+
+    System                 Whole-model       Auto-gen,            Correctness-            Self-      Agent-
+                             fused         no hand CUDA          by-construction       retargeting   drivable
+    MPK [6]                      ✓                  ✓                    ✗                 ∼            ✗
+    vLLM [14]                    ✗                  ✗                    ✗                 ∼            ✗
+    SGLang [27]                  ✗                  ✗                    ✗                 ∼            ✗
+    TensorRT-LLM [17]            ∼                  ✗                    ✗                 ✗            ✗
+    Ansor/TVM [26, 3]            ✗                  ✓                    ✗                 ✓            ✗
+    AMK                          ✓                  ∼                    ✓                 ✓            ✓
+
+
+                                                    0 false-accepts / 7160 schedules
+
+                             Schedule IR                     validate()                         retargets
+    HF Llama                                                                             sm_80 / sm_90 / sm_120
+                            SM-level task-DAG,               static deadlock
+     model                                                                                  from one source
+                              counter-sync’d                + race-free gate
+
+
+
+
+ Persistent cooperative megakernel
+                                                            decoded
+    one threadblock per SM, grid.sync,
+                                                             token
+         counter producer/consumer
+
+     1 launch = 1 forward pass = 1 token
+                                           SM0               SM1             SM2
+                                           ctr ++           wait ≥ t         ctr ++
+
+                                            per-SM counters: producer ++,
+                                             consumer waits on threshold
+
+
+Figure 1: Correctness-by-construction compilation pipeline. A HuggingFace Llama model lowers
+to a typed schedule IR, an SM-level task-DAG whose only cross-task signalling is monotonic counters,
+then passes the static validate() gate, which certifies deadlock- and race-freedom before any launch
+(0 false-accepts over 7,160 adversarial schedules). The accepted schedule runs as one persistent
+cooperative megakernel: a single cudaLaunchCooperativeKernel co-resides one threadblock per
+SM, synchronizing with grid.sync and counter-based producer/consumer handoffs (inset), so one
+launch is one forward pass is one decoded token. The same source retargets sm_80/sm_90/sm_120.
+
+
+from streaming fewer bytes, not a faster per-byte kernel), and a Marlin-class quantized GEMV is
+exactly the Layer-1 micro-kernel AMK would consume to close it.
+
+Orthogonal decode acceleration. Speculative decoding and its variants [15, 5, 2, 16] cut the
+number of serial steps. AMK cuts the cost of each step’s execution; the two compose.
+Table 1 compares systems on the five properties AMK claims. AMK’s auto-generated column is
+partial: schedules are auto-lowered and there is zero per-model hand CUDA, but the Layer-0 VM is a
+hand-written, frozen, per-arch trusted base.
+
+3   System Design
+AMK is four layers and two autoresearch loops (Figure 2). Generation is confined inside a verified
+structure: correctness is a property of the architecture, not of the generated schedule.
+Layer 0, the VM (vm/scheduler.cu, 132 lines; vm/loader.py, 857 lines) is the persistent megak-
+ernel. One cudaLaunchCooperativeKernel co-resides one block per SM; each block owns one
+SM-queue and walks it in global topological order, executing wait → dispatch → signal per instruc-
+tion. It is hand-written, exhaustively verified, and frozen per architecture. Layer 1 (instructions/)
+
+
+                                                        4
+                        Layer 3: Dynamism (roadmap)
+                           continuous batching, dy-
+                             namic shapes, MoE
+
+
+                      Layer 2: Scheduler (schedule/)
+                                                                        Loop 2:
+                     HF model → graph IR → task-DAG                 schedule search
+                         + validate() safety gate
+
+
+                             Layer 1: Instruc-
+                          tions (instructions/)                          Loop 1:
+                       ABI-conformant micro-kernels                 instruction tuning
+                    (GEMV, attention, RMSNorm, RoPE. . . )
+
+
+                              Layer 0: VM (vm/)
+                       persistent cooperative megakernel
+                       per-SM scheduler, counters, pages
+
+Figure 2: The four layers and two loops. Layer 0 is the trusted, frozen, hand-written per-arch base;
+Layers 1–2 are searched by agents but gated by isolated correctness checks (Loop 1) and the static
+schedule validator (Loop 2).
+
+Algorithm 1 Per-SM scheduler loop (one block per SM, run cooperatively)
+ 1: grid.sync() {entry barrier: host-zeroed counters + table copies visible}
+ 2: if sm < num_sms then
+ 3:    for each instruction i in SM-queue[sm], in global topological order do
+ 4:      prefetch next GEMV weight tile to L2 if pipelining_depth > 0 {pure hint}
+ 5:      if not wait_all(i) then
+ 6:         break {abort_flag set: WDDM/TDR escape}
+ 7:      end if
+ 8:      dispatch(i) {pure block-cooperative compute (Layer 1)}
+ 9:      signal(i.out_counter) {release fence, then atomicAdd(+1)}
+10:    end for
+11: end if
+12: grid.sync() {exit barrier}
+
+
+
+holds ABI-conformant micro-kernels, each correctness-checked against its reference op in isolation.
+Layer 2 (schedule/ir.py, 1150 lines; schedule/graph.py, 548 lines) imports an HF model,
+lowers it to a tiled task-DAG, and validates it. Layer 3 is a roadmap placeholder. Loop 1 edits one
+micro-kernel under an isolated test; Loop 2 edits a ScheduleConfig that the frozen VM lowers
+deterministically and the validator gates.
+Algorithm 1 is the per-SM scheduler loop run by every block (vm/scheduler.cu). Two grid-wide
+barriers bracket the walk so host-zeroed counters are visible before any spin and all stores are visible
+after.
+
+
+4   Technical Details
+
+Synchronization model. Cross-task signalling is only through monotonic uint32 counters. Each
+task, on completion, issues a device-scope release fence ordering all its output-buffer stores, then
+increments exactly one out_counter by 1: “all my outputs are written and visible.” Before
+executing, a task waits on a set of (counter, threshold) pairs with statically known thresholds
+via an acquire-load spin the compiler may not hoist, with exponential backoff and an abort_flag
+poll for the WDDM watchdog escape. There are no locks and no arbitrary signalling. One kernel
+launch is one forward pass is one decoded token; counters are host-memset to zero before each launch
+and the KV cache persists in HBM across launches.
+
+
+                                                   5
+Table 2: Static checks in validate() (schedule/ir.py). A failed check returns REJECTED before
+any GPU launch.
+
+    Check                                  Property            Reject condition
+    Referential integrity, arity, params   well-formed         missing buffer/counter, bad arity, missing param
+    ABI capacity caps                      well-formed         inputs>8, outputs>4, waits>8, rank>4
+    Wait satisfiability                    deadlock-free       threshold < 1, no producer, or t > #producers
+    DAG acyclicity                         deadlock-free       a cycle in producer→consumer graph
+    Per-SM queue order                     deadlock-free       edge a → b, same SM, b before a in queue
+    Shared-counter all-join                race-free           1 < t < #producers on a multi-producer counter
+    Transitive happens-before              race-free           a read whose writer is not an ordered predecessor
+    KV_CACHE ordering                      race-free           reader of this-pass append without an ordering edge
+    Output reachability                    correctness         an IO_OUTPUT buffer no task produces
+
+
+The invariants validate() proves. schedule.ir.validate returns a ValidationResult
+and never raises; a rejected result must prevent launch. Table 2 lists the checks. Deadlock-freedom
+rests on three: every wait threshold satisfies 1 ≤ t ≤ #producers (a wait on a counter with no
+producer, or above its producer count, is unsatisfiable); the producer→consumer graph is acyclic
+(checked by Kahn’s algorithm with an iterative-DFS cycle witness, safe at 5000+ nodes); and each
+SM’s serial queue is a linear extension of the DAG, so no SM blocks on a counter only its own
+later entry could signal. Race-freedom rests on the fact that a counter carries a count, not which
+producer finished. A counter with more than one producer is a true join, so every wait on it must use
+threshold = #producers; a partial wait 1 < t < #producers is a first-k-of-N race and is rejected.
+For every activation or KV read, the validator walks the topological order maintaining per task the
+bitmask of buffers written by transitive predecessors, and rejects any read whose every writer is not
+ordered before it. A KV_CACHE written this pass may be read only by tasks ordered after the append.
+
+ABI. Each Task maps 1:1 onto a fixed-size amk_instruction_t POD (op, up to 8 inputs / 4 out-
+puts / 8 waits, one out_counter, an SM index, and a typed scalar param blob). Buffers carry {ptr,
+numel, rank, dtype, space, shape[4], stride[4]}. The numeric enum codes and capac-
+ity constants in schedule/ir.py and vm/abi.h are canonical, and tests/test_abi_sync.py
+fails the build on any drift. An instruction is pure compute: it must not touch counters or any
+undeclared buffer and must not launch work; the VM owns all synchronization.
+
+The ScheduleConfig edit surface. The Layer-2 agent proposes a structured object, not ker-
+nel code: tiling (per-op tile sizes), fusion_grouping, sm_assignment (round_robin /
+load_balance / explicit), pipelining_depth (weight-prefetch lookahead), page_allocation
+(linear / graph_color / none), threads_per_block, and smem_bytes_per_block. The frozen
+VM lowers any point deterministically into a MegakernelProgram, and validate() guarantees
+the result is safe regardless of the point chosen. A new GPU is a new GpuTarget data record, never
+a scheduler edit.
+
+5      Experimental Evaluation
+Hardware and software. We measure on seven GPUs. Three carry the real-checkpoint and
+validator results: an RTX 5090 Laptop GPU (sm_120, 82 SMs, 896 GB/s spec HBM), an A100-
+SXM4-40GB (sm_80, 1555 GB/s), and an H100-80GB-HBM3 (sm_90, 3350 GB/s). Four additional
+inference-class GPUs run the int8 bandwidth sweep (Table 10) on random-initialized, Llama-shaped
+models: the L4 (sm_89, 300 GB/s), L40S (sm_89, 864 GB/s), A10G (sm_86, 600 GB/s), and T4
+(sm_75, 320 GB/s). All use torch 2.11.0+cu128. The datacenter and inference-class GPUs run on
+Modal. The laptop GPU was built under CUDA 13.1 (README) with the timing run reporting the
+cu128 toolkit; the datacenter builds use CUDA 12.8.
+
+Methodology. Latency is CUDA-event timing, 25 warmup then 100 iterations, reported as me-
+dian with p10/p90. Clocks were not pinned: the laptop GPU starts power-capped (180 MHz
+at the start of the local run, climbing under load) and the datacenter SM clocks were unpinned,
+which inflates both absolute latency and variance (e.g. A100 std up to 4.5 ms on a 15.6 ms decode).
+Every reported latency is correctness-gated: eval/bench.py refuses to emit a latency without a
+
+
+                                                           6
+Table 3: Correctness and self-retargeting. Source: local_5090.json, a100.json, h100.json.
+“match eager” = full-model logit equivalence within tolerance; “tokens = eager” = generated-id
+agreement over a sequence.
+
+ GPU (arch)           Model                             dtype   Max abs err vs eager   Result
+ RTX 5090 (sm_120)    toy 2L (h256, v512)               fp32    3.58 × 10−7            match eager
+ RTX 5090 (sm_120)    Llama 3L (from-config)            fp32    4.17 × 10−7            match eager
+ RTX 5090 (sm_120)    SmolLM2-135M (checkpoint)         fp32    3.81 × 10−5            match eager
+ RTX 5090 (sm_120)    toy 2L, 32-token greedy           fp32    n/a                    tokens = eager
+ A100 (sm_80)         retarget decode 2L                fp32    2.98 × 10−7            match ref + eager
+ A100 (sm_80)         SmolLM2-135M, greedy              fp32    n/a                    tokens = eager
+ H100 (sm_90)         retarget decode 2L                fp32    2.38 × 10−7            match ref + eager
+ H100 (sm_90)         Llama-1B-shaped 16L, 3202 tasks   bf16    3.12 × 10−2            match eager (bf16)
+ H100 (sm_90)         SmolLM2-135M, greedy              fp32    n/a                    tokens = eager
+
+
+
+logit/argmax equivalence PASS vs. eager from eval/oracle.py. The roofline floor is the ana-
+lytic weight_bytes/HBM_bandwidth. ncu/Nsight perf counters were unavailable on our Modal
+account (LibraryNotLoaded), so we report no hardware-counter data; all utilization figures are
+derived from wall-clock time and the analytic roofline. This is a methodology limitation. Two
+AMK timing paths, not conflated. The int8/bf16-vs-cuBLAS ratios in Table 10 and Figures 5–6
+are kernel-only, per-sample paired-interleaved (AMK’s vm.relaunch of the whole forward against
+cuBLAS g.replay of a captured graph), whereas Table 11 reports whole-decode per-token latency
+(host re-pack and dispatch included); the two are therefore not directly comparable, and we never
+silently promote the more favorable number across them. Position 0, empty KV. Every reported
+decode latency is measured at position 0 with an empty KV cache, a length-1, attention-light, weight-
+dominated step. This is the regime the bandwidth-bound thesis targets (the step streams the full
+weight set once and the floor is weight_bytes/HBM_bandwidth), so it isolates the lever we study; it
+does not capture the growing attention/KV-read cost at long context (see Limitations).
+
+Correctness and retargeting. Table 3 shows the same source producing correct megaker-
+nels on three architectures. On the RTX 5090, a toy 2-layer model, a from-config 3-layer
+LlamaForCausalLM, and the real SmolLM2-135M checkpoint all match eager and the CPU ref-
+erence VM to fp32 tolerance, and multi-token greedy decode matches eager (first divergence at
+token 32 of 32). On A100 and H100 the SmolLM2-135M megakernel reproduces HuggingFace
+greedy decode token-for-token (divergence index 8 of 8 tokens), and a 3202-task, ≈3 GB bf16
+Llama-1B-shaped decode runs correctly as one cooperative launch. Beyond first-token equivalence,
+AMK’s teacher-forced perplexity over 187 real next-token predictions on SmolLM2-135M matches
+HuggingFace eager to 6 significant figures (14.948473 vs 14.948473, absolute gap 2.45 × 10−7 ), and
+a 64-token greedy decode is byte-identical to model.generate (64 of 64 tokens; quality.json).
+
+Generation-capability evaluation. The central claim of AMK is not speed but that it generates
+provably-safe whole-model megakernels automatically, across models. We establish this with two
+experiments whose every number runs on CPU via the bit-exact ReferenceVM (the same fp32 oracle
+the CUDA kernel is independently checked against to ∼10−7 ), so both are reproducible on any
+machine. (1) Coverage. For every model in a zoo we run the full import → lower → validate
+→ ReferenceVM path and compare to the model’s own eager forward (single-step logit error plus
+16-token greedy agreement). AMK auto-generated a correct megakernel, with zero hand-written
+CUDA, for all 10 supported models (Table 4), including three real downloaded checkpoints up
+to TinyLlama-1.1B (a 3,410-task program) whose greedy decode equals HuggingFace generate
+token-for-token (3 of 3). The IR task count grows structurally with depth (182 at 2 layers to 1,634
+at 8 layers in the from-config sweep). Of four deliberately incompatible variants, 3 are refused at
+import with a precise reason (biased projections, linear RoPE scaling, GELU activation); the fourth,
+a Qwen2 with hardcoded q/k/v biases that the config-only check cannot see, is silently accepted and
+disagrees with eager (logit error 2.47), reported honestly as a config-inspection blind spot.
+(2) Validator soundness (the safety moat). The entire safety story rests on one promise: the
+frozen validate() rejects every schedule that would deadlock or race, before launch, with zero
+false-accepts. We stress this against a population of 7,160 schedules (360 real lowerings, 2,800 single-
+injection mutants across 8 unsafe classes, 4,000 random DAGs), each labelled by an independent
+
+
+                                                   7
+Table 4: Generation coverage: every supported model auto-generates a correct megakernel (no hand
+CUDA). Source: coverage.json. “IR tasks” is the auto-generated program size; “logit err” is fp32
+single-step max-abs vs eager; “tok==eager” is 16-token greedy agreement.
+ Model                    Source          Params (M)     Layers    IR tasks       Logit err    tok==eager    ==HF greedy
+ SmolLM2-135M             real HF ckpt          134.5         30      1716     3.9 × 10−5      yes           yes
+ SmolLM2-360M             real HF ckpt          361.8         32      2690     2.5 × 10−5      yes           yes
+ TinyLlama-1.1B-Chat      real HF ckpt         1100.1         22      3410     1.3 × 10−5      yes           yes
+ Llama h512 L2            from-config            40.4          2       182     1.8 × 10−6      yes           n/a
+ Llama h512 L8            from-config            63.2          8       530     1.7 × 10−6      yes           n/a
+ Llama h1024 L4           from-config           126.4          4       482     2.7 × 10−6      yes           n/a
+ Llama h1024 L8           from-config           187.2          8       898     3.1 × 10−6      yes           n/a
+ Llama h2048 L4           from-config           374.4          4       850     7.0 × 10−6      yes           n/a
+ Llama h2048 L8           from-config           617.7          8      1634     8.6 × 10−6      yes           n/a
+ ToyLlama L2              from-toy                0.1          2        42     3.6 × 10−7      yes           n/a
+ Unsupported variants: 3 of 4 rejected loudly at import; 1 (Qwen2 hardcoded bias) silently accepted (logit err 2.47).
+
+Table 5: Validator soundness over 7,160 schedules. Source: validator_soundness.json. “oracle
+unsafe” counts injected mutants an independent oracle confirmed unsafe; “rejected” is how many of
+those validate() caught; “false-accept” must be 0.
+
+                  Unsafe class (350 mutants each)        Oracle unsafe        Rejected        False-accept
+                  cycle                                              342          342                    0
+                  drop_wait (race)                                   331          331                    0
+                  kv_before_append                                   171          171                    0
+                  self_wait                                          197          197                    0
+                  oob_counter                                        350          350                    0
+                  oob_buffer                                         350          350                    0
+                  capacity_overflow                                  350          350                    0
+                  partial_shared                                      0†            0                    0
+                  Whole population                               6,091       6,091             0
+                  real lowerings accepted                360 / 360 (24 / 24 ReferenceVM == eager)
+†
+    The which-producer race the counter-driven oracle cannot observe; validate() still rejects all 350 (stricter
+                                                than the oracle).
+
+
+structural-plus-dynamic oracle that does not call validate(). The result is the headline novelty of
+the paper: across 6,091 schedules the oracle confirmed unsafe, validate() produced zero false-
+accepts (rate 0.0000%), rejecting all 6,091 while accepting all 360 real lowerings; 24 of 24 re-lowered
+accepted schedules ran in the ReferenceVM and matched eager PyTorch bit-for-bit. Validation runs
+at ≈5,150 schedules/s on CPU. Table 5 gives the per-class breakdown. The 692 “false rejects” are
+not over-conservatism: 0 of 360 real lowerings were rejected, and every one is a mutant the validator
+caught on a real hazard (chiefly the which-producer race) that a counter-driven dynamic oracle
+structurally cannot observe, so the static proof is stricter and more correct than the runtime sampler.
+
+Quantized generation. AMK auto-generates int8 and int4 weight-only quantized megakernels
+from the same path, with the dequant folded into the GEMV; the GPU output equals the int8/int4
+reference to ulp (tests/test_cuda_int4.py asserts GPU vs. CPU reference agreement, the
+int8 path exact and the int4 path within the fp16-store delta of ∼10−6 ). Quality is honest and
+asymmetric: int8 is greedy-lossless versus fp16 (100% token agreement over 32 tokens on the real
+SmolLM2-135M checkpoint), while naive int4 round-to-nearest is lossy (≈22% token agreement,
+but coherent text); both are measured in tests/test_cuda_int4.py. On the speed side, weight-
+only quantization shrinks only the weight stream, so the int4 weight-traffic floor drops 2.42× (the
+linear GEMV weights move from bf16 to int4, but the tied-embedding matrix, fp16 dequant scales,
+and all non-GEMV buffers stay in bf16, so the blended byte ratio is ≈ 0.41× the bf16 total, i.e.
+a 2.42× drop rather than the naïve 4×), but the measured decode wins are modest because the
+per-element dequant ALU and Amdahl’s law on the non-GEMV work cap them. On the 4-layer
+“small” model (RTX 5090), int8 runs at 1371.2 µs/token versus bf16 1537.4 (kernel-only 1126.6 vs
+1324.1), a 1.12× per-token (1.18× kernel-only) speedup that is lossless; int4 reaches 1450.6 µs/token
+(1.06× per-token, 1.10× kernel-only) but lossy (Table 6). The honest headline is int8: a lossless
+
+
+                                                             8
+Table 6: Weight-only quantized decode on the 4-layer “small” model, RTX 5090. Source:
+eval/bench_quant.py, committed run paper/results/quant_decode.json. Speedup is per-
+token vs bf16; quality (lossless / lossy) is greedy-token agreement vs fp16 on SmolLM2-135M,
+measured in tests/test_cuda_int4.py.
+
+        Precision     µs/token   Kernel µs             Speedup vs bf16    Quality vs fp16
+        bf16           1537.4          1324.1                 1.00×       reference
+        int8           1371.2          1126.6   1.12× (1.18× kernel)      lossless (32/32 tokens)
+        int4           1450.6          1207.3   1.06× (1.10× kernel)      lossy (22% tokens, coherent)
+
+Table 7: Clock-pinned roofline, both denominators. Source: perf_pinned_a100.json,
+perf_pinned_h100.json. Measured at full boost clocks (sustained-load loop; hard pin denied on
+Modal), 120 correctness-gated iters per row. “small” = 4L hidden-2048; “b1” = 16L Llama-3.2-1B-
+shaped.
+
+               GPU     Scale / dtype     Median (µs)     Achieved GB/s     % spec    % measured
+               A100    small / fp32      6524.9                   190.9    12.3%            13.8%
+               A100    small / bf16      3596.3                   173.2    11.1%            12.5%
+               A100    b1 / fp32         27264.0                  219.8    14.1%            15.9%
+               A100    b1 / bf16         12247.0                  244.7    15.7%            17.7%
+               H100    small / fp32      6416.7                   194.1     5.8%             6.3%
+               H100    small / bf16      4232.8                   147.2     4.4%             4.8%
+               H100    b1 / fp32         22437.5                  267.1     8.0%             8.6%
+               H100    b1 / bf16         12322.6                  243.2     7.3%             7.9%
+
+
+modest speedup, generated automatically. Reproduce with eval/bench_quant.py (committed run
+paper/results/quant_decode.json).
+
+Performance scaling and roofline. Table 8 reports per-decode latency and the fraction of the spec
+HBM roofline reached for the earlier GEMV (a cross-size scaling study; the optimized GEMV is
+characterized separately below (Figure 3) and reaches ≈460 GB/s on the 622.9 MB model, ≈51%
+of spec / ≈63% of measured peak (fat_tile_gemv.json), versus a cuBLAS ceiling of ≈90%
+of measured peak). With that earlier GEMV, larger weights push utilization up: from 12.7% on
+a 221 MB model to 23.4% on a 622.9 MB model. On the datacenter GPUs, with far higher peak
+bandwidth and unpinned clocks, the same kernel reaches only 1.1–16.2% of the spec roofline. AMK
+is bandwidth-bound nowhere yet, and the gap widens with peak bandwidth because the v1 GEMV
+does not scale with it. The SmolLM2-135M decode is an extreme case: a tied-embedding 30-layer
+model with 538 MB of weights but 1716 small tasks, where per-tile sync dominates and utilization
+falls to 1.1–2.2%.
+
+Spec versus measured roofline. The vendor spec bandwidth is not what the silicon sustains. A
+trivial D2D-copy / STREAM-triad microbench (eval/peak_bandwidth.py) measures 731 GB/s on
+the RTX 5090 Laptop (of 896 spec), 1383 GB/s on A100 (of 1555), and 3089 GB/s on H100 (of 3350).
+Since no kernel can beat that trivial streaming kernel, measured peak is the fairer denominator; we
+report both and never use measured peak to hide the gap. Under a clock-controlled re-measurement
+at full boost clocks (Table 7; A100 1410 MHz, H100 1980 MHz, zero idle throttle), AMK reaches
+12.5–17.7% of the measured A100 peak and 4.8–8.6% of the measured H100 peak, within ±0.8
+percentage points of the unpinned numbers, so the gap is a property of the kernel, not the clock
+state. On the tuned coalesced GEMV (the 622.9 MB “small” model, vm_autotune.json), the best
+autotuned point reaches 352.4 GB/s, which is 39.3% of the 896 GB/s spec roofline and ≈48% of the
+731 GB/s measured laptop peak.
+
+Ablations. Table 9 isolates four schedule/kernel choices on the RTX 5090. Two help: coalescing
+the GEMV gives a 2.36× end-to-end speedup (2.48× kernel-only), and resident persistent device
+tables give 2.75× over rebuilding them per launch. Two do not help at the tested scale: SM load-
+balance (LPT vs. round-robin) measures 0.83× and software-pipelining depth-2 vs. depth-0 measures
+0.98×, both within run-to-run noise on a clock-varying GPU. We report the null results rather than
+cherry-picking.
+
+
+                                                         9
+Table 8: Per-decode latency and HBM roofline fraction, earlier GEMV (cross-size scaling). The
+optimized GEMV reaches ≈51% of the spec roofline (≈63% of measured peak) on the 622.9 MB
+model (Figure 3); a full re-measurement of this scaling table on the optimized GEMV is pending.
+Source: local_5090.json (perf), a100.json, h100.json. Median over 100 iters. Best roofline
+fraction per GPU in bold.
+
+     GPU         Model / dtype                           Tasks    Weights (MB)       Median (ms)   % spec roofline
+     RTX 5090    1024h 4L / fp32                          402                221.3          1.94           12.7%
+     RTX 5090    2048h 8L / fp32                         1314                983.6          5.35           20.5%
+     RTX 5090    2048h 4L / fp32                          690                622.9          2.97           23.4%
+     A100        2048h 4L / fp32                          690               1245.8          6.13           13.1%
+     A100        2048h 4L / bf16                          690                622.9          3.41           11.8%
+     A100        1B-shaped 16L / bf16                    3202               2997.0         11.86           16.2%
+     A100        SmolLM2-135M / fp32                     1716                538.1         15.59            2.2%
+     H100        2048h 4L / fp32                          690               1245.8          6.18            6.0%
+     H100        1B-shaped 16L / bf16                    3202               2997.0         11.71            7.6%
+     H100        SmolLM2-135M / fp32                     1716                538.1         14.30            1.1%
+
+
+                                         800       731
+
+
+
+
+                  HBM bandwidth (GB/s)
+                                                                      661
+                                         600
+                                                                                        460
+                                         400
+
+                                         200
+
+                                          0
+                                               Measured peak
+
+Figure 3: Achieved HBM bandwidth versus the measured peak roofline on the 622.9 MB model,
+RTX 5090 (fat_tile_gemv.json). AMK’s optimized bf16 GEMV reaches ≈460 GB/s kernel-only,
+≈63% of the measured 731 GB/s peak (≈51% of the 896 GB/s vendor spec), while the cuBLAS-
+graphed bf16 ceiling on the same weights is ≈661 GB/s (≈90% of the measured peak). The ≈27-point
+gap to cuBLAS is the honest kernel-quality headroom. Achieved bandwidth for A100 (1383 GB/s
+peak) and H100 (3089 GB/s peak) is not yet measured at this model scale (n/a).
+
+
+Self-improving autoresearch (the agent-in-the-loop). The ablations above isolate which knobs
+help; the harness’s purpose is to find them automatically. The Layer-2 search axis is a combined can-
+didate, the ScheduleConfig plus the GEMV build knobs (cols_per_warp, cp.async depth), and
+every trial is gated the same way: lower → validate → correctness vs. the CPU ReferenceVM → a
+CUDA-event median latency that is never emitted without a correctness PASS. Two honesty guards
+make an unattended overnight run trustworthy. First, keep/revert is decided by an interleaved back-
+to-back A/B re-measurement of the candidate against the resident incumbent, so a candidate that
+merely benefits from a cooler clock is reverted (on the unpinned laptop GPU the single-shot speedup
+of the same best config ranged 1.08–1.39× across rounds; the drift-robust median is 1.25×). Second,
+a physical-floor guard withholds any latency below the weights/bandwidth roofline as an artifact:
+this caught a silently-infeasible 1024-thread launch whose cost-model fallback “predicted” 87.6 µs,
+below the 695 µs floor. Driven by a coding agent forming hypotheses from the optimization playbook,
+the loop improved the 622 MB “small” model from its 2514 µs default to 1991 µs (1.25× drift-robust
+median, 12 experiments, 6 kept; best point N_tile=32, cols_per_warp=4, threads=512). Run
+headlessly with the flywheel prior, a cold campaign reached 1.72× within a single run (drift-free,
+default 2168 → 1261 µs, at iteration 2) and a warm campaign, seeded from the corpus of prior runs,
+started 1.41× faster than the cold start, so the search compounds across runs. An --overnight mode
+runs for hours without stopping at a plateau (it basin-hops to fresh regions while always preserving
+the global best), is resumable and crash-proof, and writes a wake-up report. Every speedup here
+is over AMK’s own default schedule, not a claim against cuBLAS/vLLM (Table 11); the loop
+recovers headroom within the megakernel design, and would automatically adopt a faster Layer-1
+
+
+                                                                 10
+Table 9: Ablations on RTX 5090. Source: local_5090.json (ablations). Speedup = baseline
+median / improved median; > 1 means the named optimization helps.
+
+                          Knob                            Comparison                       Median (ms)          Speedup
+                          GEMV coalescing                 scalar 4.65 → coalesced 1.97             1.97            2.36×
+                          GEMV coalescing (kernel-only)   scalar 4.17 → coalesced 1.68             1.68            2.48×
+                          Persistent device tables        off 5.35 → on 1.94                       1.94            2.75×
+                          SM load-balance                 round-robin 1.99 vs. LPT 2.39            2.39     0.83× (noise)
+                          Software pipelining             depth-0 1.91 vs. depth-2 1.96            1.96     0.98× (noise)
+
+
+                                                                                    agent-in-the-loop (1.25×, drift-robust)
+
+
+
+
+ Per-token latency (µs)
+                          2,400                                                     cold run (1.72×, drift-free)
+                                       default 2168 µs
+                          2,100
+
+                          1,800
+                                                                       1.72×, found
+                          1,500                                        autonomously
+                                                                       (best 1261 µs)
+                          1,200                                                                   plateau
+                                   0               1              2                3                4                5
+                                                                  Autoresearch iteration
+
+
+Figure 4: The autoresearch harness autonomously improves the megakernel on the RTX 5090
+(622 MB model): measured per-token decode latency vs. search iteration (lower is better). The
+headless cold run reaches 1.72× (2168 → 1261 µs) by iteration 2 and holds drift-free; the faint
+agent-in-the-loop line is the drift-robust median run (2514 → 1991 µs, 1.25×). Every point is a
+correctness-gated CUDA-event median; no latency is emitted without a PASS against the CPU
+reference.
+
+
+micro-kernel were one added. Source: self_improvement.json, agent_in_the_loop.json,
+autoresearch_measured.json.
+
+What ten minutes of autoresearch buys (vs. cuBLAS). To bound the wall-clock cost of self-
+improvement we ran a single ten-minute campaign on the laptop GPU (537 trials, 19 kept) and
+measured its best megakernel against the strongest local baseline, a CUDA-graphed eager decode
+step (cuBLAS GEMMs, zero launch overhead via graph replay), on the same one-token decode,
+correctness-gated and per-sample paired-interleaved so a clock ramp affects both equally. In ten
+minutes AMK self-improved 1.47× over its own starting point (1805 →≈1225 µs) and reached a
+paired-median 0.88× of cuBLAS-graphed eager (≈1070 µs; p10–p90 0.82–0.93 over three repeats,
+consistently below 1), i.e. within ≈13% but still slower; against naive per-op eager it is 3.6× faster.
+We do not beat cuBLAS in ten minutes; the gap is now small but real, and we report it as measured
+rather than choosing the looser multi-token-prefix baseline that would have flattered AMK to apparent
+parity. Closing the last 13% needs a higher-bandwidth GEMV (deeper cp.async pipelining and
+occupancy to saturate HBM, with coarser cross-SM sync), not more schedule search; batch-1 decode
+is memory-bound, so the lever is bandwidth, not matmul throughput. vLLM is not a local baseline
+(no Windows wheels); see the H100 row below. Source: vs_cublas_10min.json.
+
+Beating cuBLAS with int8: on consumer silicon, and where it does not. The search that
+tunes AMK’s own GEMV knobs finds an int8 weight-only megakernel that outperforms CUDA-
+graphed cuBLAS bf16 at batch-1 on the RTX 5090, robustly and across model sizes (Table 10).
+The comparison is fair and kernel-only: AMK’s single cooperative re-launch (vm.relaunch, whole
+forward) against a CUDA graph of the eager bf16 forward (g.replay, cuBLAS GEMMs, no launch
+overhead), on the same one-token decode, per-sample paired-interleaved (ratio = cuBLAS/AMK,
+drift cancels), correctness-gated (argmax-exact vs. eager, max logit err ≤ 0.03). int8 weight-only
+(W8A16) is a standard near-lossless inference mode; the win is the physics: it streams 0.61× the
+weight bytes (these speed sweeps use random-initialized weights at real Llama shapes: batch-1
+
+
+                                                                       11
+Table 10: AMK auto-generates int8 weight-only megakernels that beat cuBLAS across the in-
+ference fleet: AMK int8 vs. CUDA-graphed cuBLAS [18] bf16, batch-1 decode, kernel-only,
+per-sample paired-interleaved, correctness-gated (ratio = cuBLAS/AMK; > 1 means AMK
+faster). This table shows the inference-fleet and consumer wins; the high-bandwidth training-class
+A100/H100, where the kernel trails cuBLAS, are disclosed in the Limitations (Section 6). Source:
+int8_search_multisize.json (RTX 5090, search-found qc=2/N_tile=16/threads=512),
+int8_scale_datacenter.json (L4/A10G/L40S, self-tuned per arch). Models are random-
+initialized at real Llama shapes: batch-1 decode latency depends on weight shape and byte-count,
+not values, so the speed ratio is well-defined, and each int8 config is numerically gated against its
+dequantized reference per shape. The near-lossless W8A16 quality claim (argmax-exact, greedy-
+token-identical) is established separately on the real SmolLM2-135M checkpoint (Table 3), not on
+these synthetic-shape rows.
+
+ GPU                   Model           int8 vs cuBLAS (median)    p10    verdict
+ Datacenter inference-class GPUs (self-tuned per arch), AMK int8 wins:
+ L4 (sm_89)              1.3B / 1.3 GB                    1.18× 1.13     AMK wins
+ L4 (sm_89)              2.7B / 2.5 GB                    1.25× 1.17     AMK wins
+ L4 (sm_89)              3.5B / 3.2 GB                    1.32× 1.29     AMK wins
+ L4 (sm_89)              4B / 3.8 GB                      1.33× 1.31     AMK wins (peak)
+ L40S (sm_89)            4B / 3.8 GB                      1.25× 1.22     AMK wins (864 GB/s flagship)
+ L40S (sm_89)            6.7B / 6.7 GB                    1.27× 1.25     AMK wins
+ A10G (sm_86)            2.7B / 2.5 GB                    1.00× 0.97     parity
+ A10G (sm_86)            3.5B / 3.2 GB                    1.04× 1.01     AMK wins (at scale)
+ A10G (sm_86)            4B / 3.8 GB                      1.08× 1.05     AMK wins
+ Consumer GPU (local dev machine; int8_search_multisize.json):
+ RTX 5090 (sm_120) 4L / 623 MB                            1.19× 1.04     AMK wins
+ RTX 5090 (sm_120) 8L / 984 MB                            1.23× 1.20     AMK wins
+
+
+
+latency is shape- and byte-determined, not value-determined, and each config is numerically gated
+against its dequantized reference; the near-lossless quality of W8A16 is established separately on
+the real SmolLM2-135M checkpoint, not claimed from these shapes), realized by the search finding
+qc=2, N_tile=16, threads=512 (the default qc=4 is occupancy-limited and does not cross). We
+are explicit that this is a precision-asymmetric comparison: AMK int8 (W8A16) versus cuBLAS
+bf16. Per byte streamed, AMK’s GEMV is still slower than cuBLAS: the AMK bf16 row, which
+trails cuBLAS at every depth (0.76–0.88×, Figure 6), is the like-for-like control that shows this. The
+int8 win therefore comes from streaming fewer weight bytes (W8A16, near-lossless as established on
+the real SmolLM2-135M checkpoint), not from a faster kernel; on equal precision cuBLAS remains
+ahead. The win is robust (10th-percentile > 1 at every size, tens of thousands of paired samples) and,
+notably, AMK found it autonomously. The cuBLAS win is real but regime-specific to inference-class
+GPUs: the consumer RTX 5090 and, as we show next (Figure 5), the datacenter inference fleet (L4,
+L40S, and the A10G at scale). It does not hold on the high-bandwidth training-class A100/H100,
+where the harness measures and localizes its own boundary; we disclose that case in full in the
+Limitations (Section 6). The correctness and self-retargeting proofs do hold at datacenter scale: the
+decode matches eager and the CPU reference to ≤ 3.2 × 10−7 on both A100 (sm_80) and H100
+(sm_90) with the same source. We report all directions plainly.
+
+A datacenter win across the inference-class fleet, and self-tuning into it. The consumer result
+is not a quirk of the RTX 5090; it is an inference-class regime effect. AMK’s megakernel pays
+one fixed cost cuBLAS does not, a grid-wide counter sync per tile, whose weight relative to the
+byte stream is amortized by larger, GEMV-dominated models, so the int8 win should reappear on
+the inference-class server GPUs that actually run batch-1 decode in production. It does, across the
+fleet. Self-tuning each GPU (same fair kernel-only paired-interleaved correctness-gated protocol),
+AMK int8 beats CUDA-graphed cuBLAS bf16 on the NVIDIA L4 (sm_89, 300 GB/s, the dominant
+cloud inference GPU) by 1.18× at 1.3B, 1.25× at 2.7B, 1.32× at 3.5B, and 1.33× at 4B (p10
+1.13/1.17/1.29/1.31), the margin growing with model size (peak 1.33× at 4B, still climbing); on the
+current-gen datacenter inference flagship L40S (sm_89, 864 GB/s) by 1.25× at 4B and 1.27× at
+6.7B; and on the A10G (sm_86, 600 GB/s), which crosses parity at scale (1.04× at 3.5B, 1.08× at
+4B). Critically, the ordering is not a clean function of bandwidth: the 864 GB/s L40S wins by more
+than the 600 GB/s A10G, so the dividing line is the inference-class vs. training-class regime and the
+
+
+                                                  12
+                                                                                                                 AMK faster
+                                   1.3
+
+
+
+
+ Speed ratio (cuBLAS / AMK int8)
+                                   1.2
+                                   1.1
+                                    1
+                                                                                                              cuBLAS parity
+                                   0.9
+                                                                                                       3.5B configs evaluated
+                                   0.8
+                                                                                                       3.5B best (1.28x)
+                                   0.7                                                                 2.7B best (1.19x)
+                                   0.6
+                                         0   20   40   60     80     100 120 140 160 180 200                  220    240        260
+                                                            AMK self-tuning search time on the L4 (seconds)
+
+Figure 5: AMK self-tunes past cuBLAS on the L4 inference GPU, and the win grows with model
+size (batch-1 decode). Gray dots: each config the search evaluates at 3.5B (kernel-only, per-sample
+paired-interleaved, correctness-gated; ratio = cuBLAS / AMK int8). Solid green: best-so-far at 3.5B,
+reaching 1.28× (p10 1.26; 36/36 configs passed the dequant-reference gate), this curve is the original
+search run (int8_l4_trajectory.json, n=80); the higher-sample re-sweep in Table 10 reports
+1.32× for the same 3.5B point (n=120). Dashed blue: best-so-far at 2.7B, where the un-tuned
+default loses (0.97×) and the search crosses parity to 1.19×. The near-lossless (W8A16) win climbs
+1.18 → 1.25 → 1.32 → 1.33× over 1.3 → 2.7 → 3.5 → 4B (peak 1.33× at 4B, still climbing): bigger
+GEMV-dominated models amortize the megakernel’s fixed cross-SM sync. The same win holds
+across the inference fleet (L40S 1.25–1.27×, A10G up to 1.08× at scale); on the high-bandwidth
+training-class A100/H100 cuBLAS stays ahead (Table 10).
+
+
+per-tile cross-SM sync cost (amortized by larger GEMV-dominated models), not bandwidth alone.
+The high-bandwidth training-class A100/H100 (≥ 1.4 TB/s) stay below parity (sync-dominated), and
+the Turing T4 (320 GB/s) is occupancy-limited (64 KB SMEM ⇒ one block/SM) and does not cross
+(0.95–0.97×) despite its low bandwidth, confirming the win is a regime effect bounded by occupancy,
+not bandwidth alone. Figure 5 shows AMK self-tuning into the win on the L4: the un-tuned default
+config loses to cuBLAS (0.97×), and the search, editing only AMK’s own GEMV knobs (cols/warp,
+N_tile, threads) with no hand-written CUDA, crosses parity within ≈50 s and reaches 1.19× at
+2.7B. The size-scaling is measured, not projected: the lead grows 1.18 → 1.25 → 1.32 → 1.33× over
+1.3 → 2.7 → 3.5 → 4B as larger GEMV-dominated models amortize the fixed per-tile sync, and is still
+climbing at 4B rather than saturating. Notably int4’s larger byte saving does not help: its scalar nibble-
+unpack is compute-bound (only 0.18× cuBLAS on the L4), so int8 W8A16, near-lossless and faster,
+is the honest win, and lifting the ceiling further needs coarser cross-SM synchronization, not more
+aggressive quantization. Source: int8_scale_datacenter.json, int8_l4_trajectory.json.
+
+
+Baselines, including where AMK loses. Table 11 is the honest comparison. All RTX 5090 rows
+are measured on the same 622.9 MB 4-layer model and the same single-token decode, correctness-
+gated and per-sample paired-interleaved (vs_cublas_10min.json); the auto-tuned megakernel
+(≈1.23 ms/token) beats naive per-op eager (≈4.44 ms) by 3.6× by removing the dozens of per-op
+launches and inter-op HBM round-trips that dominate eager at this scale. But CUDA-graphed eager
+(≈1.08 ms) still beats AMK by 1.13× (≈13%): graph replay keeps cuBLAS-quality GEMMs while
+amortizing launch overhead, and AMK’s GEMV, though much improved, remains below cuBLAS.
+The gap is now small but real. On the datacenter GPUs the vLLM comparison was measured on the
+real SmolLM2-135M checkpoint with an earlier AMK GEMV (h100.json/a100.json, predating
+the optimized kernel above, so these rows are conservative): on H100, AMK ran at 14.30 ms/token
+versus vLLM’s default cudagraph 8.65 ms/token (1.65× slower) and its enforce_eager 13.51
+ms/token; on A100, AMK 15.59 ms beat vLLM enforce_eager 32.06 ms. Disclosure: the vLLM
+measurements used dtype=float32 (not vLLM’s default bf16, which would be faster), and the
+A100 row is enforce_eager only (no CUDA-graph baseline was collected on A100). The fair
+default-mode comparison is the H100 cudagraph row, where AMK loses. We do not claim to beat
+vLLM.
+
+
+                                                                              13
+ Speed ratio (cuBLAS / AMK)
+                                                     1.19
+                                               AMK bf16         AMK int8             1.23                           1.21
+                               1.25
+                                                                                                              cuBLAS bf16 (parity)
+                                    1                                             0.87                          0.88
+                                                     0.76
+                               0.75
+
+                                0.5
+
+                               0.25
+
+                                    0
+                                                       4L                          8L                              16L
+                                                                     Model depth (RTX 5090, sm_120)
+
+Figure 6: Consumer win on RTX 5090: per-token decode speedup vs. CUDA-graphed cuBLAS
+bf16 (dashed line = 1.0 parity). AMK int8 weight-only (near-lossless W8A16) clears parity at
+every depth (1.19–1.23×, i.e. +19–23%), while AMK bf16 trails cuBLAS (0.76–0.88×). This is
+a precision-asymmetric win: AMK int8 (W8A16) vs. cuBLAS bf16. The bf16 bars (below parity)
+are the equal-precision control: per byte, AMK’s GEMV is still slower than cuBLAS; the int8 win
+comes from streaming ≈0.61× the weight bytes at near-lossless quality, not from a faster kernel.
+Ratios are cuBLAS/AMK median, batch-1, kernel-only, correctness-gated (Table 10).
+
+Table 11: Single-stream decode baselines. RTX 5090 rows: same 622.9 MB 4-layer model, single-
+token decode, correctness-gated, per-sample paired-interleaved (vs_cublas_10min.json, auto-
+tuned megakernel; CUDA-graphed cuBLAS [18] as the eager baseline). Datacenter rows: real
+SmolLM2-135M, an earlier AMK GEMV (h100.json/a100.json), so conservative. Disclosure:
+vLLM was run with dtype=float32 (not its bf16 default, which would be faster); the A100 row is
+enforce_eager only (no CUDA-graph A100 baseline collected). Bold marks the faster system per
+comparison.
+
+                              GPU             Comparison                                    ms/token                       Verdict
+                              RTX 5090        AMK 1.23 vs. eager per-op 4.44                1.23 / 4.44          AMK 3.6× faster
+                              RTX 5090        AMK 1.23 vs. CUDA-graph eager 1.08            1.23 / 1.08     cudagraph 1.13× faster
+                              H100†           AMK 14.30 vs. vLLM cudagraph 8.65             14.30 / 8.65        vLLM 1.65× faster
+                              H100†           AMK 14.30 vs. vLLM enforce-eager 13.51        14.30 / 13.51       vLLM 1.06× faster
+                              A100†           AMK 15.59 vs. vLLM enforce-eager 32.06        15.59 / 32.06       AMK 2.06× faster
+                                    †
+                                        Datacenter rows predate the optimized GEMV (earlier AMK); re-measurement is pending.
+
+
+The picture is consistent. AMK wins where the competition is per-op launch overhead and loses
+where the competition is kernel quality. The launch-fusion win is real and additive with future
+kernel-efficiency work, but it does not yet close the gap to graph-replayed cuBLAS or to vLLM’s
+default path.
+
+
+6                             Discussion and Limitations
+
+Kernel quality below cudagraph and vLLM. On the optimized bf16 GEMV AMK reaches ≈460
+GB/s on the 622.9 MB model (≈51% of spec / ≈63% of measured peak), versus a cuBLAS bf16
+ceiling of ≈661 GB/s (≈90% of measured peak), and at the whole-decode level loses to CUDA-
+graphed cuBLAS by 1.13× (≈13%); on the datacenter GPUs, with an earlier GEMV, it reached
+1–16% of spec (12.5–17.7% of measured A100 peak, 4.8–8.6% of measured H100 peak, clock-
+pinned) and lost to default vLLM by 1.65×. The diagnosed cause is the v1 GEMV: a coalesced-scalar
+warp-per-row dot product with a serial K-loop, no tensor-core path (which a memory-bound batch-1
+GEMV would not benefit from anyway), and a grid-wide counter sync per tile. The next lever is more
+memory-level parallelism (deeper load pipelining, cp.async multi-buffered SMEM staging) and far
+fewer, coarser sync points. The correctness-bearing architecture that makes such a rewrite safe and
+automatic is already in place; this is a kernel-quality push, not a redesign.
+
+
+                                                                                14
+Limitations: where the auto-generated kernel does not win. The win over cuBLAS holds
+across the datacenter inference-class GPUs (L4 up to 1.33×, the current-gen L40S 1.25–1.27×,
+and the A10G up to 1.08× at scale) and the consumer RTX 5090 (1.19–1.23×), but not on the
+high-bandwidth training-class A100/H100 (1.4–3.0 TB/s), where the auto-generated int8 megakernel
+trails cuBLAS. Self-tuning the int8 knobs on each part (not transplanting the laptop config), the
+best per-arch config narrows the gap monotonically with scale but plateaus below parity: A100
+reaches ≈0.79× at 1.3B down to ≈0.55× at 13B, and H100 ≈0.72× down to ≈0.60×. We treat
+this as a result, not an apology: the harness measured the boundary and then localized its cause, by
+directly A/B-testing the two obvious levers: both regressed. A cp.async weight-staging ring for
+the int8 GEMV (the same double-buffered SMEM ring AMK’s fp GEMV already uses, mirrored to
+stage raw int8 granules and dequantize per group) was slower than the synchronous path (ring/sync
+0.82× on the A100, 0.87× on the L4), so the decode GEMV is not load-latency-bound; and split-KV
+attention, which likewise adds cross-SM synchronization, also regressed. Together these isolate the
+per-tile cross-SM synchronization (a fixed cost the megakernel pays and cuBLAS does not, worst
+exactly on the fastest training silicon) as the structural binder; the remaining lever is a coarser-sync
+scheduler (fewer grid-wide barriers per layer), which is future work, not GEMV load-pipelining or
+more aggressive quantization. The ordering is not a clean function of bandwidth: the 864 GB/s L40S
+wins by more than the 600 GB/s A10G, the deficit is worst on the highest-bandwidth A100/H100, and
+the Turing T4 stays just below parity (0.95–0.97×) for the orthogonal reason of occupancy (64 KB
+SMEM ⇒ one block/SM) despite low bandwidth, and so does not cross at batch-1 pos-0 either. This
+is the honest scope of single-stream megakernels: they help on inference-class GPUs at batch 1, and
+a coarser-sync GEMV is what would extend the win onto training-class silicon.
+Clocks and the spec-versus-measured denominator. The laptop GPU is power-capped (it begins a
+run at 180 MHz and ramps under load) and the datacenter SM clocks were not pinned in the main
+study, which inflates both latency and variance. The clock-pinned re-measurement (Table 7) shows
+the roofline fraction is within ±0.8 percentage points of the unpinned numbers, confirming the gap is
+kernel quality, not throttling. We report both the spec and the measured HBM peak as denominators;
+measured peak is the fairer floor but does not close the gap.
+Quantization is modest, and int4 is lossy. The auto-generated int8 megakernel is greedy-lossless
+but only 1.12× faster per token; the int4 path drops the weight-traffic floor 2.42× but with naive
+round-to-nearest is lossy (≈22% greedy-token agreement). Dequant ALU and Amdahl’s law on the
+non-GEMV work cap the speedup; a calibrated int4 scheme and a quantization-aware GEMV are
+future work.
+No hardware counters. ncu/Nsight was unavailable on our Modal account, so every utilization
+number is wall-clock plus analytic roofline, not a measured DRAM-throughput counter. Pinning
+clocks and capturing ncu traces are the obvious next measurement steps.
+Position-0, empty-KV measurement. Every reported decode latency is a single batch-1 step
+at position 0 with an empty KV cache; it is weight-dominated by construction and matches the
+bandwidth-bound floor we study, but it does not capture the attention/KV-read cost that grows with
+context length. Long-context per-token latency, where KV traffic becomes a second bandwidth term,
+is not measured here and is future work.
+A self-funded effort with constrained compute. This research was self-funded by the authors, with
+no institutional or industry compute grant; every datacenter measurement was a short, budgeted cloud
+rental (on the order of a few GPU-hours in total). That budget bounded the experimental scope: we
+could not run the long, sustained autotuning/search campaigns, nor the iterative tensor-core/DP4A
+GEMV development and on-hardware tuning, that would be required to push AMK’s kernel quality
+toward hand-built, manually-optimized novel megakernels on datacenter silicon. The datacenter
+performance gap therefore reflects, in part, optimization effort and compute we could not afford
+rather than a fundamental ceiling; the correctness-bearing architecture is already in place to absorb
+that work once resources allow. We report only what we could afford to measure, and we report it
+plainly.
+Architecture coverage. Self-retargeting is proven on the bias-free, full-rotary, SiLU-SwiGLU,
+RMSNorm, GQA Llama family across sm_80/90/120 (10 of 10 supported models). Other HF
+architectures (MoE routing, sliding-window or fused-QKV attention, partial or scaled RoPE, biased
+projections) are out of scope and rejected at import, with one documented exception: a Qwen2 with
+hardcoded q/k/v biases passes the config-only check and is silently accepted, which a state-dict bias
+
+
+                                                  15
+scan would close. bf16 logit error on a real checkpoint exceeds the strict fp32 tolerance (we gate bf16
+on token agreement, which holds). The harness itself, however, is not Llama-specific: the schedule-IR
+validator, the reference-oracle correctness gate, and the propose/evaluate/keep loop are architecture-,
+language-, and target-agnostic. Generalizing the importer (other architectures), the backend (beyond
+CUDA), and the deployment targets is future work that this agent-driven loop is built to absorb rather
+than a redesign; the agent is what supplies that generality, and broadening coverage into a general
+megakernel-synthesis harness is the central direction of the work going forward.
+
+7   Conclusion
+AMK compiles a HuggingFace Llama-family model into a single persistent cooperative kernel with
+no per-model hand CUDA, and makes safety a static property: across 7,160 adversarial schedules the
+validator had zero false-accepts, so an unsafe agent-proposed schedule is rejected rather than hung. It
+auto-generates a correct megakernel for all 10 supported models (including three real checkpoints
+up to TinyLlama-1.1B) and for int8 and int4 weight-only quantized variants, the int8 path lossless.
+The same source retargets across sm_80, sm_90, and sm_120 with the gencode derived from the live
+device, and on a real SmolLM2-135M checkpoint reproduces HuggingFace greedy decode token-for-
+token and matches its perplexity to 2.5 × 10−7 . The performance study is deliberately honest and
+reports both directions: a search-found int8 weight-only megakernel beats CUDA-graphed cuBLAS
+bf16 at batch-1 across the datacenter inference fleet: the L4 by up to 1.33×, the current-gen L40S
+by 1.25–1.27×, and the A10G by up to 1.08× at scale (a precision-asymmetric W8A16-vs-bf16
+win that holds across the inference-class regime but not the training-class A100/H100, and is not a
+clean function of bandwidth since the 864 GB/s L40S wins by more than the 600 GB/s A10G), while
+on the equal-precision bf16 path it trails CUDA-graphed cuBLAS by 1.13× (≈13%) and default
+vLLM by 1.65×, its optimized GEMV reaching ≈63% of measured HBM peak versus a cuBLAS
+ceiling of ≈90%; the knob-autotuning loop finds these operating points automatically. The path to
+closing the equal-precision gap is a higher-bandwidth GEMV with coarser synchronization, and the
+statically-checked compiler that makes that work safe, and that self-improvement automatic, is the
+contribution we offer now.
+
+References
+ [1] J. Ansel, E. Yang, H. He, N. Gimelshein, A. Jain, M. Voznesensky, B. Bao, P. Bell, D. Berard,
+     E. Burovski, et al. PyTorch 2: Faster machine learning through dynamic Python bytecode
+     transformation and graph compilation. In Proc. 29th ACM Int. Conf. on Architectural Support
+     for Programming Languages and Operating Systems (ASPLOS), 2024.
+ [2] T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao. Medusa: Simple LLM inference
+     acceleration framework with multiple decoding heads. arXiv preprint arXiv:2401.10774, 2024.
+ [3] T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, H. Shen, M. Cowan, L. Wang, Y. Hu, L. Ceze,
+     C. Guestrin, and A. Krishnamurthy. TVM: An automated end-to-end optimizing compiler for
+     deep learning. In Proc. 13th USENIX Symp. on Operating Systems Design and Implementation
+     (OSDI), pages 578–594, 2018.
+ [4] T. Chen, L. Zheng, E. Yan, Z. Jiang, T. Moreau, L. Ceze, C. Guestrin, and A. Krishnamurthy.
+     Learning to optimize tensor programs. In Advances in Neural Information Processing Systems
+     (NeurIPS), 2018.
+ [5] C. Chen, S. Borgeaud, G. Irving, J.-B. Lespiau, L. Sifre, and J. Jumper. Accelerating large
+     language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318, 2023.
+ [6] X. Cheng, Z. Zhang, Y. Zhou, J. Ji, J. Jiang, Z. Zhao, Z. Xiao, Z. Ye, Y. Huang, R. Lai, H. Jin,
+     B. Hou, M. Wu, Y. Dong, A. Yip, S. Wang, W. Yang, X. Miao, T. Chen, and Z. Jia. Mirage
+     Persistent Kernel: A compiler and runtime for mega-kernelizing tensor programs. arXiv preprint
+     arXiv:2512.22219, 2025.
+ [7] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré. FlashAttention: Fast and memory-efficient
+     exact attention with IO-awareness. In Advances in Neural Information Processing Systems
+     (NeurIPS), 2022.
+
+
+                                                  16
+ [8] T. Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. In Int.
+     Conf. on Learning Representations (ICLR), 2024. arXiv:2307.08691.
+ [9] T. Dao, D. Haziza, F. Massa, and G. Sizov. Flash-Decoding for long-context inference. Stanford
+     CRFM / PyTorch technical blog, 2023.
+[10] Y. Ding, C. H. Yu, B. Zheng, Y. Liu, Y. Wang, and G. Pekhimenko. Hidet: Task-mapping
+     programming paradigm for deep learning tensor programs. In Proc. 28th ACM Int. Conf. on
+     Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2023.
+[11] E. Frantar, R. L. Castro, J. Chen, T. Hoefler, and D. Alistarh. MARLIN: Mixed-precision
+     auto-regressive parallel inference on large language models. arXiv preprint arXiv:2408.11743,
+     2024.
+[12] A. Gray. Getting started with CUDA graphs. NVIDIA Technical Blog, 2019.
+[13] J. Jaber and O. Jaber. AutoKernel: Autonomous GPU kernel optimization via iterative agent-
+     driven search. arXiv preprint arXiv:2603.21331, 2026.
+[14] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and
+     I. Stoica. Efficient memory management for large language model serving with PagedAttention.
+     In Proc. 29th ACM Symp. on Operating Systems Principles (SOSP), 2023.
+[15] Y. Leviathan, M. Kalman, and Y. Matias. Fast inference from transformers via speculative
+     decoding. In Proc. 40th Int. Conf. on Machine Learning (ICML), pages 19274–19286, 2023.
+[16] Y. Li, F. Wei, C. Zhang, and H. Zhang. EAGLE: Speculative sampling requires rethinking feature
+     uncertainty. In Proc. 41st Int. Conf. on Machine Learning (ICML), 2024. arXiv:2401.15077.
+[17] NVIDIA. TensorRT-LLM: A library for optimizing large language model inference. https:
+     //github.com/NVIDIA/TensorRT-LLM, 2023.
+[18] NVIDIA. cuBLAS Library. https://docs.nvidia.com/cuda/cublas/, NVIDIA, ac-
+     cessed 2026.
+[19] J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao. FlashAttention-3: Fast
+     and accurate attention with asynchrony and low-precision. In Advances in Neural Information
+     Processing Systems (NeurIPS), 2024.
+[20] Y. Shi, Z. Yang, J. Xue, L. Ma, Y. Xia, Z. Miao, Y. Guo, F. Yang, and L. Zhou. Welder:
+     Scheduling deep learning memory access via tile-graph. In Proc. 17th USENIX Symp. on
+     Operating Systems Design and Implementation (OSDI), 2023.
+[21] B. F. Spector, S. Arora, A. Singhal, D. Y. Fu, and C. Ré. ThunderKittens: Simple, fast, and
+     adorable AI kernels. arXiv preprint arXiv:2410.20399, 2024.
+[22] B. Spector, J. Juravsky, S. Sul, O. Dugan, D. Lim, D. Y. Fu, S. Arora, and C. Ré. Look ma, no
+     bubbles! Designing a low-latency megakernel for Llama-1B. Hazy Research blog, Stanford
+     University, 2025.
+[23] P. Tillet, H. T. Kung, and D. Cox. Triton: An intermediate language and compiler for tiled
+     neural network computations. In Proc. 3rd ACM SIGPLAN Int. Workshop on Machine Learning
+     and Programming Languages (MAPL), 2019.
+[24] S. Williams, A. Waterman, and D. Patterson. Roofline: An insightful visual performance model
+     for multicore architectures. Communications of the ACM, 52(4):65–76, 2009.
+[25] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun. Orca: A distributed serving system
+     for transformer-based generative models. In Proc. 16th USENIX Symp. on Operating Systems
+     Design and Implementation (OSDI), 2022.
+[26] L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen,
+     J. E. Gonzalez, and I. Stoica. Ansor: Generating high-performance tensor programs for deep
+     learning. In Proc. 14th USENIX Symp. on Operating Systems Design and Implementation
+     (OSDI), pages 863–879, 2020.
+
+
+                                                 17
+[27] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gon-
+     zalez, C. Barrett, and Y. Sheng. SGLang: Efficient execution of structured language model
+     programs. In Advances in Neural Information Processing Systems (NeurIPS), 2024.
+
+
+
+
+                                                 18
+

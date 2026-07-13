@@ -1,0 +1,1498 @@
+                                         S ETUP X: Can LLM Agents Learn from Past Failures
+                                           in Functionality-Correct Code Repository Setup?
+
+
+                                                       Zihang Zhou1 , Ziqian Ren1 , Yukai Wu2 , Yingjie Xiong1 , Wei Zhou1 ,
+                                                     Chao Peng3 , Dong Zhang4 , Bingheng Yan4 , Xuanhe Zhou B1 , Fan Wu1
+                                                1
+                                                  Shanghai Jiao Tong University 2 Beijing University of Posts and Telecommunications
+                                                         3
+                                                           Independent Researcher 4 Jinan Inspur Data Technology Co., Ltd.
+
+
+
+
+arXiv:2605.26186v2 [cs.SE] 27 May 2026
+                                                                              zzh2024@sjtu.edu.cn
+
+
+
+                                                                                           Abstract
+
+                                                     Functionality-correct repository setup aims to configure execution environments
+                                                     (e.g., dependencies, build scripts) to successfully execute a repository’s documented
+                                                     features. It presents significant challenges due to diverse, repository-specific fail-
+                                                     ures, including dependency incompatibilities, missing toolchains, incomplete instal-
+                                                     lations, and verification-strategy mismatches. Existing LLM agents struggle to ro-
+                                                     bustly resolve these issues, specifically failing to support (1) cross-repository experi-
+                                                     ence transfer, (2) multi-step trial-and-repair under non-invertible state changes, and
+                                                     (3) robust verification of setup outcomes to distinguish setup-induced failures from
+                                                     repository bugs. To address this, we introduce S ETUP X, an experiential learning-
+                                                     based setup framework. First, we construct a Self-Evolving Experience Repre-
+                                                     sentation (XPU), a dual-modality knowledge unit encoding setup signals, textual
+                                                     guidance, executable actions to dynamically transfer verified environment fixes to
+                                                     unseen repositories. Second, we employ Experience-Augmented Speculative Execu-
+                                                     tion backed by a LIFO Docker snapshot stack, enabling the agent to proactively trial
+                                                     fixes and safely roll back to known-good states. Third, we introduce a Prosecutor-
+                                                     Judge Verification Protocol that separates evidence collection from final judgment,
+                                                     enabling more reliable setup verification beyond superficial build-time metrics.
+                                                     Evaluation results on carefully-crafted benchmarks show S ETUP X achieves high-
+                                                     est performance (e.g., 92% pass rate) and outperforms the strongest baseline by
+                                                     over 19%. Crucially, S ETUP X excels in complex multi-repository setup requiring
+                                                     coordinating multiple interconnected services across different containers. The code
+                                                     repository is available at https://github.com/OpenDataBox/SetupX.
+
+                                         1    Introduction
+                                         Large language model (LLM)-based agents demonstrate impressive performance on complex software
+                                         engineering tasks, such as feature implementation and issue resolution [1, 2]. However, most
+                                         benchmarks over these tasks assume pre-configured environments [3, 4], while real-world deployment
+                                         requires building executable environments from scratch (i.e., functionality-correct repository setup).
+                                         This process is notoriously complex, involving the resolution of intricate dependency conflicts, the
+                                         installation of missing build tools, and the reconciliation of version incompatibilities.
+                                         Existing LLM-based coding agents (e.g., Claude Code [5], OpenHands [6]) and specialized setup
+                                         tools (e.g., Repo2Run [7], ExecutionAgent [8]) show promise in automating this process. However,
+                                         they can make significant setup mistakes in many scenarios. For instance, as shown in Figure 1, when
+                                         configuring FHEMPY (Python extension for smart-home automation), Repo2Run [7] enters a stateless
+                                         retry loop: after poetry install fails due to a locked dependency conflict, the agent repeats similar
+                                         commands and falls back to pip install, causing version drift and cascading dependency errors
+                                         without extracting reusable diagnostic evidence.
+
+                                         Preprint.
+    Target Repository                                                                          Existing agent (Repo2Run) ×
+                                                             Attempt 1                                  Attempt 2                                           Attempt 3                                         Attempt N
+     psf/requests
+                                                                A₁                                        A₂                                                  A₃                          ...                   AN
+     pallets/flask
+
+                     ...                            poetry install
+                                                                                                pip fallback
+                                                                                                                                                    pip install pytest
+                                                                                                                                                    pytest
+                                                                                                                                                                                                      patched install
+                                                    python -m pytest
+      fhempy/fhempy
+                                                                                                 lock graph lost                                 ModuleNotFoundError: fhempy
+                                                             Poetry conflict                                                                                                                               cascading conflict
+       files                                                                                     manual pip fallback                             partial setup
+
+   pyproject.toml · poetry.lock · tests/
+                                                                Observed pattern: bypass Poetry → lock graph lost → version drift → cascading conflicts
+
+       declared setup
+                                                                                                        SETUPX with XPU ✓
+   poetry install; python -m pytest
+                                            O: Observation                                     R: Retrieve & Reason                                              E: Execute                                    Verify
+      hidden dependency constraint                                                                       Retrieved XPU                         Rank #1                      Setup Agent
+                                                                                                                                                                                                                Runnable
+                                           Observed                                                                     (eXperience Unit)                                   executes
+                                                                   Retriever   XPU KB
+   poetry.lock: pillow     11.1.0                                                                                                                                                                               ✓ dependency graph
+                                            signals                 Agent      (Knowledge                               xpu_poetry_lock_conflict                                                                  complete
+                                                                                                          id:
+   esphome → pillow    10.4.0                                                     Base)
+                                                                                                                                                                 Use Poetry end-to-end                          ✓ fhempy importable
+                                           poetry conflict                                     rank &     signals       poetry conflict · pillow mismatch
+   locked dependency graph conflict
+                                                                               past setup                                                                        resolve pillow/esphome                         ✓ tests runnable
+                                           pillow mismatch                     experiences retrieve
+                                                                                  past setup             advice_nl      preserve lock graph
+
+      numpy/numpy                          manual pip                                                                                                            poetry install
+                                           fallback risk            query by                             atoms          inspect lock → poetry install                                           Verifier
+                                                                    signals                                                                                                                      Agent
+                                                                                                                                                                 python -m pytest
+      tiangolo/fastapi                                                                                                  hits: 63;                                                                                Not Runnable
+                                                                                                         telemetry      successes:37; failures:15
+
+
+                     ...                                                                                            still failing → observe again
+
+
+
+
+       Figure 1: Comparison between existing setup agents (e.g., Repo2Run [7]) and S ETUP X.
+
+
+
+
+Moving beyond the FHEMPY failure example, we identify three fundamental challenges for effective
+automatic setup: ❶ First, Cross-Repository Failure Patterns: Similar dependency conflicts recur
+across repositories, while agents like ExecutionAgent [8] treat each repository as an isolated episode,
+discarding transferable setup experience. ❷ Second, Non-Invertible State Changes: A failed in-
+stallation can incur package conflicts that simple undo operations cannot reverse, corrupting the
+environment and preventing naive trial-and-error from succeeding. ❸ Finally, Unreliable Success
+Signals: There is no unified, trustworthy criterion for setup completion. Current systems either
+keep setup, execution and success assessment within the same agent-driven workflow (e.g., Claude
+Code [5], ExecutionAgent [8]), or rely on shallow objective proxies (e.g., Repo2Run’s [7] pytest-
+oriented test-execution feedback and EnvBench’s [9] static missing-import checks) that cannot reflect
+functional usability or attribute failures to their root cause. Setup quality thus remains fundamentally
+unverifiable from within the agent itself. Collectively, these challenges motivate our research question:
+Can a unified agentic framework systematically transfer cross-repository experience, safely explore
+complex setup states, and reliably verify setup outcomes within a single continuous loop?
+To answer this question, we introduce S ETUP X, an experience-driven framework for autonomous
+repository setup. In summary, we make the following four contributions:
+• (1) Self-Evolving Experience Representation. To exploit cross-repository failure patterns, we
+design the eXPerience Unit (XPU), a structured knowledge representation that jointly encodes
+diagnostic signals, natural-language advice, and executable atomic operations. Supported by a
+two-layer retrieval mechanism and an anchor-based delayed audit, the XPU database continuously
+self-curates based on real deployment outcomes, ensuring robustness to evolving knowledge.
+• (2) Experience-Augmented Speculative Execution. S ETUP X retrieves fixes from the XPU
+database and trials them under speculative execution, where container snapshots enable rollback to
+any prior known-good state, supporting safe multi-step exploration of non-invertible repairs.
+• (3) Prosecutor-Judge Verification Protocol. To overcome unreliable success signals, we propose
+a two-phase verification mechanism that structurally separates execution from evaluation. An
+independent Prosecutor issues evidence-backed charges against the configured environment, while a
+Judge independently verifies each charge before rendering a final verdict. This structural separation
+reliably distinguishes setup-induced failures from inherent repository defects.
+• (4) Empirical Validation. We evaluate S ETUP X on a curated 100-repository Python benchmark
+drawn from the EnvBench challenge pool [9]. Under unified independent adjudication, S ETUP X
+achieves a 92% pass rate, outperforming the strongest general-purpose agent (Claude Code) by 19%
+and the strongest specialized tool (ExecutionAgent) by 33%. A 22-family multi-repository evaluation
+further confirms S ETUP X’s capability to generalize across complex deployment scenarios.
+
+                                                                                                   2
+     Experience-Augmented Speculative Execution                                                                              ONLINE
+                                                                                                                                               O: Ovservation                                 R: Reasoning                                 E: Execute
+               SETUPX             Checkpoint Adapt      Trial   Check
+                                                                                                                                                                                                                     Update XPU
+                                           Shell Command                       Step 1                                           Step i                                             Step i+1                                                 Step k
+                                                                                              R1                                                Ri                                             Ri+1                                                        Rk
+       You are an expert DevOps                Set Env
+       agent tailored for
+       environment setup.                   Rollback Env
+       You have access to a                                                    O1                                               Oi                                                 Oi+1                                                     Ok
+                                                 Verify
+       Linux terminal and an
+       external eXPerience Unit                  Finish
+                                                                                                                       ...                      Ei                                             Ei+1                    ...                                 Ek
+       (XPU)...                                                                               E1
+                                       Try XPU Suggestion
+
+
+
+            Retriever Agent                  Retrieve XPU
+
+        You are an XPU                          Rank XPU
+                                                                                 Target                     Try XPU Suggestion                                      Sample XPU                                                    Verify
+        experience retrieval                                                   Repository                                                                           id. Sample XPU                      Not Runnable                                 Runnable
+        assistant...                           Audit XPU                                                                                                            context
+                                                                                                                                                                       id. Sample XPU
+                                                                                                                                                                    signals
+                                                                                                                                                                       context
+                                                                                                                                                                         id.
+                                                                                                                                                                    advice_nl
+                                                                                                                                                                       signals
+                                                                                                                                                                         context
+             In-Loop Verifier Agent                                                                                                                                 atoms
+                                                                                                                                                                       advice_nl
+                                                                                                                                                                         signals
+                                                                                                                                                                    telemetry
+                  (read-only)                                                                                                                                          atoms
+                                                                                                                                                                         advice_nl
+                                                                                                                                                                       telemetry
+                                                                                Repository URL                                                                           atoms
+        You are a verification              Test Discovery                                                                            XPU Database                                                                           In-Loop
+                                                                                                                                                                         telemetry
+        agent working inside a                                                                                Retriever Agent
+        Docker container...                Setup Diagnosis                      Version tag                                                                                                                               Verifier Agent
+
+
+      Prosecutor-Judge Verification                                                      ONLINE
+                                                                                                                             Four-Step Experience Distillation                                               OFFLINE(ASYNC)
+
+                                                                                         Container            Full Phase1
+             Prosecutor Agent                                                             Access               Trajectory                                                1 Verdict-Aware Ingestion                            2 Forward Attribution
+                                                                                                                                         Distiller Agent
+                                                     Skeptical Investigation
+       You are the Prosecutor.                                                                                                                                                                                                         dependency conflicts
+                                                                                                                                                                                        O1     R1      E1
+       Your stance is that of a skeptic:              Evidence Collection                        Charge List
+       both the Setup Agent and the                                                                (example)                    You are a senior expert in Python
+       Verifier may make mistakes, take
+                                                         Test Execution                 1. hidden dependency not
+                                                                                                                                project environment configuration
+                                                                                                                                                                                        Oi    ...        E
+                                                                                                                                                                                                                                     pip install numpy==1.26.4
+       shortcuts, or engage in self-                                                                                            and dependency issues.
+                                                                                           installed
+                                                                                                                                You are given a complete agent
+       deception...                                       Charge Filing                 2. fragile env variable hack
+                                                                                                                                trajectory for an automated
+                                                                                        3. runtime asset missing
+                                                                                                                                environment setup...
+                                                                                        4. ...
+
+
+
+               Judge Agent                             Charge Validation
+                                                                                                                                       Trajectory Mining
+                                                                                                                                                                         4 Coarse-to-Fine Deduplication                       3 Schema-Level Distillation
+                                                                                                 Verdict                                                                                                                                             id.
+                                                       Evidence Review                                                                                                                         Vector pre-filter                                     context
+        You are the Judge, responsible                                                                                                Pattern Generalization
+                                                                                               Upheld: Failed                                                                                                                                        signals
+        for verifying each charge
+                                                      Targeted Verification                                                                                                                                                                          advice_nl
+        brought by the Prosecutor and
+                                                                                                                                         XPU Ingestion                                              LLM Judge                                        atoms
+        then delivering a verdict...                                                          Dismissed: Passed
+                                                           Final Verdict                                                                                                                                                                             telemetry
+
+
+
+
+Figure 2: Overview of S ETUP X. We perform the environment setup in a ReAct loop with XPU-guided
+speculative execution and in-loop verification, where the Prosecutor-Judge verification independently
+audits the result transferable lessons are ingested into the XPU Database.
+
+2   Problem Definition
+Prior works [7, 8] primarily verify the configured environment by executing the project’s test suite,
+leaving documented user-facing commands unchecked. In this work, we consider a stricter setting,
+termed functionality-correct repository setup. Given a code repository R = (P, S), where P denotes
+the source code and S specifies a commit, let FR denote the set of functionality-oriented execution
+targets declared by the repository (e.g., test suite, documented commands). The goal is to construct a
+valid execution environment E that (1) is realized as a reproducible container image produced either
+by building from a Dockerfile (as adopted by prior methods such as Repo2Run [7]) or by committing
+an interactively configured container, and (2) executing the targets in FR on this image does not
+produce any setup-induced failure:
+                                                Valid(E, R) ⇐⇒ E ∈ D ∧ ∀f ∈ FR , Run(f, E) ∈
+                                                                                           / Cfail                                                                                                                                                               (1)
+where D denotes the space of reproducible container images, and Cfail denotes the set of setup-induced
+failures, which we empirically group into four recurring categories: dependency incompatibility,
+toolchain missing, invalid or incomplete package installation, and verification-strategy mismatch.
+Note that failures caused by bugs in the repository’s source code, flawed test logic, or unsupported
+functionality are treated as project-intrinsic failures and are not considered in this work.
+To address the three challenges for effective setup, S ETUP X (Figure 2) relies on a self-curating
+knowledge base of eXPerience Units (XPU), which is continuously expanded by distilling offline
+execution trajectories for cross-repository deployments (Section 3). To safely apply this knowledge
+within the irreversible container space D, the agent trials retrieved XPU via snapshot-backed specula-
+tive execution (Section 4). Finally, an adversarial Prosecutor-Judge protocol rigorously audits the
+configured environment to detect any remaining setup-induced failures Cfail (Section 5).
+
+3   Self-Evolving Experience Representation
+Existing memory-augmented agents struggle to efficiently accumulate and transfer setup experience,
+often resorting to storing verbose, non-generalizable trajectories. Moreover, natural-language distilla-
+tions [10, 11] store text advice that is hard to search and track for historical success, and executable
+skill libraries [12, 13] provide runnable code but lack structured indexes for error matching. To
+resolve this, S ETUP X maintains cross-repository setup experience to a self-evolving database: (1) the
+
+
+                                                                                                                                           3
+        Retrieved XPUs at last error                                At St+k                 XPU Rank List
+                         xpu_psycopg2_sysdep_missing                                    xpu_psycopg2_sysdep_missing
+                         xpu_uv_venv_isolation
+                                                                                       xpu_uv_venv_isolation
+         Retriever       xpu_poetry_tool_missing
+         Agent                                                                         xpu_poetry_tool_missing
+                                                           Retriever Agent
+                                                                                          ...
+          St             S t+1    S t+2   S t+3    S t+4
+
+                     S t+5       ...      S t+k
+                                                           1       Was the XPU adopted?
+
+                        Setup trajectory                   2       Did the XPU help solve the problem?
+
+
+Figure 3: Delayed audit feedback loop. When a new retrieval is triggered, the Retriever Agent first
+audits the previous XPU recommendations against the subsequent setup trajectory, assigns verdicts,
+and updates per-XPU telemetry that feeds back into future retrieval ranking.
+
+Structured eXPerience Unit (XPU), a formalized representation mapping setup failures to illustrative
+advice and executable operations; (2) an offline Four-Step Experience Distillation pipeline that
+expands the XPU base by transforming raw trajectories into deduplicated records; and (3) an online
+Anchored-Based Delayed Audit that calibrates each XPU entry based on real deployment feedback.
+▶ (1) Structured eXPerience Unit (XPU). To effectively bridge reasoning with execution, provide
+exact error context, and track historical success, we propose the eXPerience Unit (XPU), a structured
+knowledge record that natively integrating diagnostic context, natural language guidance, and exe-
+cutable code. Formally, an XPU is defined as: XPU = ⟨id, signals, advice_nl, atoms, telemetry⟩,
+where signals indexes the exact error context for precise retrieval, including applicability conditions
+(e.g., OS, build tools) and specific error messages; advice_nl and atoms form a dual representation to
+link reasoning with action, explaining the root cause in natural language and encoding the fix as exe-
+cutable operations, respectively; and telemetry enables online self-curation by tracking a deployment
+record (⟨hits, successes, failures⟩) that the delayed audit updates and the retriever consumes.
+▶ (2) Four-Step Experience Distillation. To systematically incorporate new XPU entries and drive
+continuous evolution, we propose an offline LLM-based distillation process that evaluates every
+execution trajectory and its past evaluations through a four-step pipeline (Figure 2): ❶ Verdict-Aware
+Ingestion: A Distiller Agent analyzes the trajectory using evaluation signals, extracting corrective
+insights from actions, rather than relying exclusively on the agent’s self-reported successes; ❷
+Forward Attribution: Since error recovery is rarely linear and the true impact of a fix frequently
+emerges steps later, an attribution pass localizes concrete environment problems (e.g. dependency
+conflicts, build-tool failures) and traces them forward to the specific actions that resolved them; ❸
+Schema-Level Distillation: An LLM maps each problem-fix pair into the XPU schema, abstracting
+the transferable reasoning pattern instead of merely recording exact commands; ❹ Coarse-to-Fine
+Deduplication: A vector pre-filter (cosine similarity ≥ 0.85) identifies potential duplicates for an
+LLM judge to verify semantic equivalence; confirmed duplicates trigger a merge (unioning signal
+sets and fusing advice), while all remaining candidates are ingested as novel entries.
+▶ (3) Anchor-Based Delayed Audit. To further reliably assess XPU quality and capture delayed
+feedback (where real impact surfaces steps later when downstream dependencies resolve), we
+implement an online anchor-based retrospective evaluation. As shown in Figure 3, the mechanism
+operates by recording the recommended XPU IDs and the current execution history position at every
+retrieval step. When the next retrieval occurs, the Retriever Agent audits the intervening execution
+steps to classify each prior recommendation as a success, failure, or neutral. These classifications
+continuously update the telemetry of each XPU, which dictates future retrieval rankings via tier
+assignment. The complete evaluation prompt and update rules are available in Appendix A.2.
+
+4   Experience-Augmented Speculative Execution
+Once S ETUP X has access to reusable XPUs, the next challenge is to apply them safely inside a
+mutable container. To address this, S ETUP X augments the standard ReAct paradigm [14] with three
+mechanisms: (1) Agentic Experience Retrieval (Section 4.1); (2) Speculative Execution (Section 4.2);
+(3) In-Loop Verifier Agent (Section 4.3). At each step, S ETUP X first observes the container and the
+last action’s output; it automatically invokes the Retriever Agent to identify relevant XPUs based on
+
+
+                                                               4
+setup failures, which are added to the prompt. S ETUP X then reasons over recent history together with
+the retrieved natural-language guidance and executable atoms, and selects one of six actions (provided
+in Appendix C), where three are specialized for experience-driven setup: TRY_XPU_SUGGESTION,
+ROLLBACK_ENV, and VERIFY. The setup loop terminates when S ETUP X emits the FINISH action.
+
+4.1   Agentic Experience Retrieval
+
+Naive embedding-based search over raw error messages yields low retrieval precision since syn-
+tactically similar errors may have entirely different root causes (e.g., ModuleNotFoundError for a
+missing system library vs. a missing pip package), while semantically related problems may produce
+syntactically different error text. To address this, S ETUP X uses a dedicated Retriever Agent that
+operates in an independent context, shielding the main agent’s prompt from retrieval noise. The
+Retriever Agent constructs a hybrid situation (an LLM-generated current state summary paired with
+the raw command output and error text) and runs coarse-to-fine retrieval against the knowledge base.
+Coarse-to-Fine Retrieval. We first perform vector coarse filtering: the hybrid situation is em-
+bedded via text-embedding-3-small and queried against a pgvector index. The top-N (N =10)
+candidates are ranked by a composite score:
+                                                      
+                                                      1.5, if hits ≥ 5 and rsuccess ≥ a (Golden),
+ scomposite = ssim · (1 + rsuccess ) · btier , btier = 0.6, if hits ≥ 5 and rsuccess < b (Cold),   (2)
+                                                      
+                                                        1.0, otherwise (Normal).
+where ssim is cosine similarity, rsuccess = successes/ max(hits, 1) is the historical success rate, and
+btier is a tier boost. We set the thresholds to a=0.2 and b=0.1 based on current XPU telemetry,
+yielding a roughly balanced split across the three tiers while assigning entries with insufficient
+evidence to Normal. This score combines semantic relevance with empirical utility, so experiences
+with high similarity but low success rates are naturally deprioritized. Finally, an LLM refines the
+ranking by reading the full content and selecting the top-K most relevant entries, where K=3.
+4.2   Speculative Execution
+Environment repair is non-monotonic: an earlier fix may appear successful but introduce a latent
+conflict that surfaces only several steps later, leaving the offending step buried beneath subsequent
+attempts. To safely explore candidate fixes under such delayed feedback, we give the agent active,
+multi-step control over the trajectory through a LIFO snapshot stack S exposed via two actions.
+❶ TRY_XPU_SUGGESTION pushes a checkpoint of the current container onto S via Docker’s copy-on-
+write docker commit, then trials the adapted XPU commands:
+                            ′
+                             Ct                   if trial(Ct′ ) = success,
+                  Ct+1 =                                                                   (3)
+                             restore(S.pop()) otherwise.
+where the new state is retained over success trial, otherwise the just-pushed snapshot is restored in
+place. The full five-stage trial protocol is provided in Appendix C.1.
+❷ ROLLBACK_ENV lets the agent actively pop any number of frames off S and return the container
+to any earlier known-good checkpoint, not only the latest one. Once subsequent diagnostics reveal
+that several past attempts have collectively steered the trajectory into a dead end, the agent invokes
+ROLLBACK_ENV to retreat past all of them and explore an alternative path.
+Unlike Repo2Run’s command-level adaptive rollback [7] which restores the environment to the
+pre-execution state of a failed command, S ETUP X exposes rollback as an agent-controlled LIFO
+snapshot stack, allowing entire sub-paths to be abandoned once latent conflicts surface.
+
+4.3   In-Loop Verifier Agent
+
+The In-Loop Verifier Agent is a lightweight read-only ReAct agent invoked when S ETUP X issues
+VERIFY. It operates within the same container under strict constraints: (1) Read Only, prohibited from
+installing packages, modifying environment variables, or altering project files; (2) Structured Protocol,
+fixed sequence of structural reconnaissance, test suite location, test execution via the project’s native
+runner, and failure analysis; (3) Dual-Outcome Semantics, distinguishes setup-induced failures
+(actionable) from inherent project limitations (non-blocking for FINISH). The result is a per-step,
+attribution-aware diagnostic signal that lets S ETUP X drive targeted repair rather than blind retry.
+
+
+                                                   5
+5     Prosecutor-Judge Verification Protocol
+Existing verification falls into two modes, neither providing both independent adjudication and
+per-failure attribution: self-reported verification [5, 6] lets the agent adjudicate its own success,
+conflating execution with adjudication; non-attributable external verification [9, 7] collapses the
+pipeline into a binary verdict that cannot separate setup defects from project intrinsics. To address
+this, we propose a Prosecutor-Judge protocol, an independent post-hoc audit structurally decoupled
+from the setup that pairs an investigative Prosecutor with an adjudicative Judge to expose premature
+success masked by surface signals.
+Prosecutor Agent. The Prosecutor operates as a skeptical investigator with full container access,
+following a forced multi-step investigation protocol designed to prevent superficial assessments:
+(1) identify the project’s language and build system by examining marker files; (2) review the full
+trajectory during setup; (3) verify that core dependencies are importable using the same interpreter
+S ETUP X configured, providing a test-independent verification signal that remains meaningful even
+for repositories with minimal or absent test suites; (4) consult the README for documented entry
+points (e.g., example scripts, CLI commands) and verify a representative subset launches without
+setup-induced failure; (5) run the test suite independently and compare results; (6) formulate specific
+charges backed by concrete evidence, following the principle “when in doubt, prosecute”.
+Judge Agent. The Judge receives the Prosecutor’s charges and performs targeted verification: for
+each charge, it executes 1–2 independent commands to confirm or refute the evidence. A charge is
+dismissed if the evidence is contradicted, the issue concerns optional dependencies, or the failure is
+caused by external factors. If any charge is upheld, the setup is ruled guilty; and not_guilty otherwise.
+This separation creates an effective check: the Prosecutor finds possible failures, while the Judge
+verifies them independently, making the final verdict more reliable.
+
+6     Experiments
+6.1   Benchmark Construction
+
+Our evaluation is built on the EnvBench Python challenge pool, which contains 329 Python reposito-
+ries [9]. We focus on Python because its dependency ecosystem is large and complex, its packaging
+practices are heterogeneous, and it frequently involves native-library interactions, all of which make
+automated setup particularly challenging [15, 16]. From this repository pool, we construct our
+benchmark, a curated benchmark of 100 repositories for systematic comparison. The construction
+proceeds in three steps: we first retain repositories with detectable test assets; then run a preliminary
+agent-based trial to stratify repositories by setup difficulty; finally, sample across application domains
+and project maturity to obtain the final benchmark. For example, lark is a low-difficulty project
+because it has minimal dependencies and a straightforward installation process. In contrast, acme is a
+high-difficulty project because it involves optional ecosystems such as TensorFlow and JAX, with
+strict version coupling that causes the agent to fail even after multiple setup retries.
+The final benchmark contains 44 low-, 37 medium-, and 19 high-difficulty repositories. It covers ten
+major application areas and 148 domain tags, and each repository is pinned to a fixed revision. As
+shown in Figure 4, the benchmark covers diverse application domains and project scales.
+We also construct a multi-repository track with 22 composite scenarios, covering four representative
+patterns: client–server, plugin–host, multi-service deployment, and platform–SDK. Because these
+tasks require workflow-level evidence across repositories, we validate them through manual review
+and use this track as a complementary stress test. The full rubric is placed in Appendix D. Each family
+is rated on a four-tier scale (Full / Mostly / Partial / Shallow) based on a five-check rubric covering
+clone integrity, editable install, module availability, pytest collection, and dependency consistency.
+
+6.2   Experimental Setup
+
+We evaluate eight systems on our benchmark: S ETUP X in two setup variants, with and without
+XPU; three open-source CLI coding agents, Claude Code, Qwen Code, and OpenCode; and three
+specialized setup tools, ExecAgent, Repo2Run, and EnvBench. All systems use qwen3.5-plus as
+the backbone LLM for both setup execution and the unified S ETUP X prosecutor–judge adjudication,
+run inside a fresh ubuntu:22.04 container with a global timeout of 3600 seconds for each run. The
+
+
+                                                    6
+                                                    Domain (N = 148 tags)
+                  Domain                                Toolchain / Testing / Docs: 30
+                                                                                                            16                                                                           30
+                  3% 3%                                 Web/ Networking: 29                                                                     14                                             27
+           4%
+                                  20%                   AI/ML/NLP/CV: 27                                    14       13                                       13
+                     ic
+                D iff u lty
+                                                                                                                                                                                         25                        23
+      7%                                                Data Science /Analysis /Visualization: 22           12                                         11                                                    21
+                19%                                     DevOps /Infrastructure/Monitoring: 14                                                                                            20
+                                                                                                            10                 9
+                                                        CLI/GUI/Desktop: 11                                                          8                                                                16
+ 9%                                                     Database / Storage:6                                    8          7                                         7      7            15
+                                 44%
+                                                        Security / Crypto: 5                                                                                                    6
+                                                                                                                6                          5
+                                            20%         Multimedia / Gaming / FileProcessing:4                                                                                           10
+            37%                                                                                             4                                                                                                            6
+    15%                                             Difficulty (N = 100 repos)                                                                                                            5                                    3    3
+                                                                                                                2
+                                                        Low: 44                                                                                                                                                                           1
+                                                                                                                0           0    0 0                                                      0
+                      18%                               Medium: 37                                                     0 -20 -40 -70 -1k 2k 4k 7k 10k -20k k                                     5k -2k 3k 5k 8k 2k 30k
+                                                        High: 19                                                    ≤10101 201 401 701 1k- 2k- 4k- 7k- 10k >20                                ≤1. 1.5k 2k- 3k- 5k- 8k-1 12k- >30k
+                                                                                                                                          GitHub Stars                                                     Total commits
+                                            (a)                                                                                                (b)                                                                (c)
+
+                                                      Figure 4: Statistics of The Setup-Specific Benchmark.
+                                                                            Difficulty     Low        Medium        High                                      Failure rates              SetupX+XPU fails               Best CLI baseline fails
+
+                                                                                                                                                                                              5/21
+  SetupX+XPU                     100%                             89%                            79%                92%                   AI/ML/NLP/CV                                                                                   Δ -2
+                                                                                                                                                                         3/21
+
+SetupX(no XPU)                   95%                            69%                      72%              82%                                                                                  5/20
+                                                                                                                               Toolchain / Testing / Docs                                                                                Δ -5
+                                                                                                                                                                  0/20
+   Claude Code                  84%                       65%                     63%          73%
+                                                                                                                                                                                2/15
+                                                                                                                                         Web / Networking                                                                                Δ -1
+      OpenCode                   89%                        62%                    53%         72%                                                            1/15
+
+
+    Qwen Code                   82%                     59%                   63%          70%                                                                                                                                          5/9
+                                                                                                                                   DevOps / Infrastructure                                                                               Δ -2
+                                                                                                                                                                                                3/9
+      ExecAgent                 80%                        54%              21%    59%
+                                                                                                                                                                                                     10/35
+                                                                                                                                                     Others                                                                              Δ -9
+                                                                                                                                                                     1/35
+      Repo2Run             64%                30%        32%      45%
+
+                                                                                                                                                                                                 27/100
+      EnvBench            52%           24%       33%      38%                                                                                          All                                                                              Δ -19
+                                                                                                                                                              8/100
+
+                  0                    20                  40                     60                 80                 100                                   0          10         20           30               40         50          60
+
+                                                                      (a)                                                                                                                           (b)
+
+
+Figure 5: Main results on the single-repository track. (a) Setup pass rates by repository difficulty; (b)
+Domain-wise failure rates of SETUPX+XPU versus the best CLI baseline.
+
+XPU knowledge base used by S ETUP X is collected from the full EnvBench Python repository pool
+with 1536-dim text-embedding-3-small embeddings, and all entries corresponding to the 100
+repositories in our benchmark are removed before evaluation. A run passes if the prosecutor files no
+accusation or the judge rejects all accusations; timeout or any guilty verdict is counted as a failure.
+
+6.3        Main Results
+
+We first compare the setup pass rate of eight systems on our benchmark under the prosecutor–judge
+adjudication protocol. In parallel, we use the multi-repository family evaluation as a complementary
+stress test to examine whether setup methods can scale to deployment scenarios involving a host
+repository, component repositories, and sibling services. Figure 5 reports pass rate on the single-
+repository benchmark, and Figure 5 breaks down the failures by repository domain.
+S ETUP X+XPU achieves a 92% pass rate on our benchmark, ranking first overall. It leads the strongest
+LLM agent, Claude Code, by 19 pp; the strongest specialized setup tool, ExecAgent, by 33 pp; and the
+remaining specialized setup tools by 47–54 pp. Stratified by install_complexity, the advantage
+concentrates on medium- and high-difficulty repositories: on the high stratum, S ETUP X+XPU reaches
+79%, outperforming Claude Code by 16 pp and S ETUP X (no XPU) by 7 pp, while the low stratum is
+already close to the 100% ceiling.
+After removing XPU, S ETUP X still reaches an 82% pass rate. This decomposes the overall advantage
+of S ETUP X into two sources: the thought–action–verifier agent loop raises the pass rate to 82%,
+and XPU contributes an additional 10 pp on top of it. Thus, the advantage of S ETUP X is not
+entirely attributable to knowledge-base retrieval. We defer fine-grained attribution of XPU’s internal
+components to Section 6.4.
+Beyond the single-repository benchmark, we further compare S ETUP X with Qwen Code, a representa-
+tive open-source CLI baseline, on 22 non-atomic families. Both agents reach Full or Mostly on 17 of
+the 22 families, but S ETUP X obtains substantially more Full verdicts (6 vs. 1). The gap concentrates
+at the Full–Mostly boundary: both agents can recognize and execute the cross-repository protocol
+layer (starting sibling services, deploying Kubernetes components, registering plugin entry points),
+but a Full verdict further requires each participating repository to be properly installed, importable,
+and consistent with its declared dependencies. Qwen Code’s Mostly families repeatedly stall on
+
+
+                                                                                                                    7
+setup-completeness issues—for example, the default PATH not being linked to the venv, missing
+pytest, or setup stopping at “tests can be collected” without actually running them. S ETUP X is more
+robust along this dimension; per-family verdicts and a representative case are provided in Appendix
+E and F.
+Beyond overall pass rate and multi-repo verdicts, we inspect failure distributions on the 100-repository
+benchmark from two complementary perspectives. As shown in Figure 5, S ETUP X+XPU has no
+more failures than the strongest CLI baseline in any domain, with the total failure count reduced from
+27 to 8. The largest gap appears in Toolchain (n = 20), where S ETUP X+XPU has zero failures while
+the baseline has five—failures in this domain mainly involve missing build tools, compilers, and
+native libraries, where the toolchain fix patterns accumulated in the XPU knowledge base provide the
+most direct benefit. The remaining S ETUP X+XPU failures occur mainly in the AI/ML and DevOps
+domains, suggesting that retrieval can still be incomplete for repository-specific dependency stacks.
+We further attribute failures by their underlying mechanisms. Table 1 reports the percentage of each
+system’s failures involving C1–C4 categories. This taxonomy is derived from baseline failure-case
+analysis, and a single failure may involve multiple categories. C3 is the dominant failure type across
+all systems, at around 38%, followed by C4 at around 25%; together, the four categories cover the
+main failure modes of all systems.
+
+Table 1: Failure distribution across categories C1–C4 on the 100-repository benchmark. The C1–C4
+taxonomy is derived from baseline failure analysis; failures spanning multiple categories are counted
+in each applicable row, so columns may sum to more than 100%.
+
+ Category    Description                                        Claude Code          Repo2Run         S ETUP X+XPU
+ C1          Dependency / runtime version incompatibility                   22%               2%                       38%
+ C2          Native / build toolchain gaps                                  19%               7%                       13%
+ C3          Invalid or incomplete package installation                     37%              40%                       63%
+ C4          Verification strategy mismatch                                 26%              25%                       25%
+
+
+6.4   Ablation Study
+
+All pass-rate numbers in Section 6.3 are based on the S ETUP X prosecutor–judge adjudication protocol.
+Before analyzing the XPU retrieval pipeline, we first validate why this verdict standard is necessary.
+Figure 6(a) juxtaposes the self-claim signals of three specialized setup tools, dockerfile build success,
+install command exit 0, and runner status code, with the unified prosecutor–judge verdict. The results
+show a systematic 23–52 pp gap between traditional tools’ self-claims and our verdict. The root cause
+is that self-claim only checks that the pipeline did not crash: the dockerfile built, the install command
+returned 0, and the runner did not exit abnormally. None of these implies that the final setup is usable.
+EnvBench is the most representative example: 90% of repositories pass pyright static analysis, but
+only 38% pass when the prosecutor verifies dependency importability inside the container.
+
+
+                                                Setting                   XPU Rerank    KB       Backbone       Pass    Cost
+                                                No-XPU                     ✗      –       –    qwen3.5-plus      82 1.0×
+                                                Selector + Clean ⋆         ✓   Selector Clean qwen3.5-plus       92 1.0×
+                                                Direct + Clean             ✓    Direct Clean qwen3.5-plus        86 1.0×
+                                                Selector + Noisy           ✓   Selector Noisy qwen3.5-plus       88 1.0×
+                                                Direct + Noisy             ✓    Direct Noisy qwen3.5-plus        81 1.0×
+                                                Selector + Clean + Opus    ✓   Selector Clean Claude Opus 4.6    92 ∼10×
+
+ (a) Self-claim vs. prosecutor–judge verdict.                             (b) Ablation settings.
+                             Figure 6: Trustworthiness and ablation results.
+
+After fixing the verdict standard, we ablate the XPU retrieval pipeline along three dimensions. First,
+whether XPU is enabled; second, whether retrieval is followed by LLM reranking, where Selector
+chooses 3 entries from the top-10 vector candidates and Direct returns the top-3 vector results directly;
+third, whether synthetic noise is injected into the XPU knowledge base. In addition, we test the effect
+of scaling the backbone LLM by replacing qwen3.5-plus with Claude Opus 4.6 under the main
+Selector + Clean setting. Unless otherwise specified, all ablation settings use qwen3.5-plus, the
+
+
+                                                     8
+100-repository benchmark, and the prosecutor–judge adjudication protocol. See details in Appendix
+B. The ablation centers on the main setting Selector + Clean (S ETUP X+XPU, 92%). LLM reranking
+dominates the contributions: it brings a 6 pp gain on the Clean KB and a 7 pp gain on the Noisy
+KB. Substituting the Clean KB with its Noisy counterpart degrades all matched pairs, with Direct
+degrading the most because pure vector recall struggles to separate real advice from neighboring
+noise—reranking thus serves as a critical buffer for retrieval usability under noise. We further test
+whether a stronger backbone closes the residual gap: replacing qwen3.5-plus with Claude Opus
+4.6 leaves pass rate unchanged at 92%, while increasing LLM API cost by more than 10×.1 Pipeline
+design and retrieval quality, rather than raw backbone capability, dominate at this scale, and the
+default setting offers a better cost–effectiveness tradeoff.
+
+7     Related Work
+▶ LLM Agents for Software Engineering. (1) Code-level repair agents. SWE-bench [3] estab-
+lished a dominant paradigm for repository-level program repair, motivating agentic systems such
+as SWE-agent [2], AutoCodeRover [17], and OpenHands [6]. These systems differ in interface
+design, localization strategy, autonomy, and sandbox support, but generally assume that the target
+repository can be evaluated in a prepared execution environment with dependencies installed and
+a runnable test suite. They therefore focus on modifying source code rather than configuring the
+execution environment itself; (2) Repository Setup. Recent work has begun to study this setup phase
+across test-execution, Dockerized repository setup, and research-repository reproduction settings,
+including ExecutionAgent [8], Repo2Run [7], and SUPER [18]. However, existing setup methods
+and evaluations still treat each repository or task as an isolated episode, so a fix discovered for one
+project cannot directly inform future repositories.
+▶ Experience and Skill Reuse in LLM Agents. Prior work has explored several forms of reusable
+agent experience. Executable skill libraries, such as Voyager [12] and SkillCraft [13], store reusable
+programs or tool-use routines that can be retrieved and composed in later tasks. Natural-language
+memory systems, such as Reflexion [10] and ExpeL [11], instead distill prior trajectories into verbal
+feedback or general insights. More recent systems, including Agent-KB [19], EvolveR [20], and
+Memp [21], add richer organization, refinement, and memory-maintenance mechanisms. These
+approaches show the value of experience reuse, but they are typically organized around general task
+workflows rather than setup-specific diagnostic signals.
+▶ Verification and Quality Assurance. Existing setup verification commonly relies on either proxy-
+based or execution-based signals. EnvBench [9] uses missing-import analysis for Python repositories
+and compilation success for JVM repositories. ExecutionAgent [8] and Repo2Run [7] instead validate
+setup by running build or test commands in the configured environment. These signals provide useful
+executable evidence, but they often collapse heterogeneous causes (e.g., setup defects, optional
+dependencies, missing external service data) into a single pass/fail outcome. LLM-as-judge and
+multi-agent evaluation frameworks, such as CourtEval [22] and Agent-as-a-Judge [23], introduce
+role separation or agentic evaluation for assessing LLM outputs subjectively. S ETUP X adapts role
+separation to environment setup, where claims can be checked through targeted container commands,
+enabling responsibility-sensitive verification.
+
+8     Conclusion
+We introduced S ETUP X, an experiential learning agent for functionality-correct repository setup
+that combines three mechanisms: speculative execution for safe trial under non-invertible state;
+an XPU Database that turns past failures into self-curating knowledge; and an in-loop Verifier
+sub-agent that provides diagnostic feedback during setup. For unbiased outcome assessment, we
+further design a structurally independent Prosecutor–Judge protocol that decouples investigation
+from adjudication. Across 100 Python repositories, S ETUP X substantially outperforms both general-
+purpose and specialized baselines, turning environment setup from a brittle, one-shot bottleneck
+into an experience-accumulating, independently verifiable component of the LLM-agent stack.
+Nevertheless, current evaluation focuses on single-run containerized setup, and future work will
+extend S ETUP X to broader language ecosystems, enable cost-efficient repeated evaluation, and scale
+telemetry-driven experience evolution for long-term validation.
+    1 Based on per-million-token pricing as of May 2026: Claude Opus 4.6 at $5.00 / $25.00 (input / output) and qwen3.5-plus
+
+at $0.40 / $1.20.
+
+
+                                                             9
+References
+ [1] S. Hong, M. Zhuge, J. Chen, X. Zheng, Y. Cheng, C. Zhang, J. Wang, Z. Wang,
+     S. K. S. Yau, Z. Lin, L. Zhou, C. Ran, L. Xiao, C. Wu, and J. Schmidhuber, “Metagpt:
+     Meta programming for a multi-agent collaborative framework,” 2024. [Online]. Available:
+     https://arxiv.org/abs/2308.00352
+ [2] J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan, and O. Press,
+     “Swe-agent: Agent-computer interfaces enable automated software engineering,” in Advances
+     in Neural Information Processing Systems 37: Annual Conference on Neural Information
+     Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15,
+     2024, A. Globersons, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. M. Tomczak, and
+     C. Zhang, Eds., 2024. [Online]. Available: http://papers.nips.cc/paper_files/paper/2024/hash/
+     5a7c947568c1b1328ccc5230172e1e7c-Abstract-Conference.html
+ [3] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and K. R. Narasimhan, “Swe-bench:
+     Can language models resolve real-world github issues?” in The Twelfth International
+     Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024.
+     OpenReview.net, 2024. [Online]. Available: https://openreview.net/forum?id=VTF8yNQM66
+ [4] J. Li, G. Li, Y. Zhao, Y. Li, H. Liu, H. Zhu, L. Wang, K. Liu, Z. Fang, L. Wang, J. Ding,
+     X. Zhang, Y. Zhu, Y. Dong, Z. Jin, B. Li, F. Huang, and Y. Li, “Deveval: A manually-annotated
+     code generation benchmark aligned with real-world code repositories,” 2024. [Online].
+     Available: https://arxiv.org/abs/2405.19856
+ [5] Anthropic, “Claude code,” https://claude.com/product/claude-code, 2025, accessed: 2025-05-
+     22.
+ [6] X. Wang, B. Li, Y. Song, F. F. Xu, X. Tang, M. Zhuge, J. Pan, Y. Song, B. Li, J. Singh,
+     H. H. Tran, F. Li, R. Ma, M. Zheng, B. Qian, Y. Shao, N. Muennighoff, Y. Zhang,
+     B. Hui, J. Lin, and et al., “Openhands: An open platform for AI software developers as
+     generalist agents,” in The Thirteenth International Conference on Learning Representations,
+     ICLR 2025, Singapore, April 24-28, 2025. OpenReview.net, 2025. [Online]. Available:
+     https://openreview.net/forum?id=OJd3ayDDoF
+ [7] R. Hu, C. Peng, XinchenWang, J. Xu, and C. Gao, “Repo2run: Automated building
+     executable environment for code repository at scale,” in The Thirty-ninth Annual
+     Conference on Neural Information Processing Systems, 2025. [Online]. Available:
+     https://openreview.net/forum?id=fZsd3KLMje
+ [8] I. Bouzenia and M. Pradel, “You name it, I run it: An LLM agent to execute tests of arbitrary
+     projects,” Proc. ACM Softw. Eng., vol. 2, no. ISSTA, pp. 1054–1076, 2025. [Online]. Available:
+     https://doi.org/10.1145/3728922
+ [9] A. Eliseeva, A. Kovrigin, I. Kholkin, E. Bogomolov, and Y. Zharov, “Envbench: A benchmark
+     for automated environment setup,” CoRR, vol. abs/2503.14443, 2025. [Online]. Available:
+     https://doi.org/10.48550/arXiv.2503.14443
+[10] N. Shinn, F. Cassano, A. Gopinath, K. Narasimhan, and S. Yao, “Reflexion: language agents
+     with verbal reinforcement learning,” in Advances in Neural Information Processing Systems
+     36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New
+     Orleans, LA, USA, December 10 - 16, 2023, A. Oh, T. Naumann, A. Globerson, K. Saenko,
+     M. Hardt, and S. Levine, Eds., 2023. [Online]. Available: http://papers.nips.cc/paper_files/
+     paper/2023/hash/1b44b878bb782e6954cd888628510e90-Abstract-Conference.html
+[11] A. Zhao, D. Huang, Q. Xu, M. Lin, Y. Liu, and G. Huang, “Expel: LLM agents are experiential
+     learners,” in Thirty-Eighth AAAI Conference on Artificial Intelligence, AAAI 2024, Thirty-Sixth
+     Conference on Innovative Applications of Artificial Intelligence, IAAI 2024, Fourteenth
+     Symposium on Educational Advances in Artificial Intelligence, EAAI 2024, February 20-27,
+     2024, Vancouver, Canada, M. J. Wooldridge, J. G. Dy, and S. Natarajan, Eds. AAAI Press,
+     2024, pp. 19 632–19 642. [Online]. Available: https://doi.org/10.1609/aaai.v38i17.29936
+[12] G. Wang, Y. Xie, Y. Jiang, A. Mandlekar, C. Xiao, Y. Zhu, L. Fan, and A. Anandkumar,
+     “Voyager: An open-ended embodied agent with large language models,” Trans. Mach. Learn.
+     Res., vol. 2024, 2024. [Online]. Available: https://openreview.net/forum?id=ehfRiF0R3a
+
+
+                                                10
+[13] S. Chen, J. Gai, R. Zhou, J. Zhang, T. Zhu, J. Li, K. Wang, Z. Wang, Z. Chen, K. Kaleb,
+     N. Miao, S. Gao, C. Lu, M. Li, J. He, and Y. W. Teh, “Skillcraft: Can LLM agents
+     learn to use tools skillfully?” CoRR, vol. abs/2603.00718, 2026. [Online]. Available:
+     https://doi.org/10.48550/arXiv.2603.00718
+[14] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. R. Narasimhan, and Y. Cao, “React: Synergizing
+     reasoning and acting in language models,” in The Eleventh International Conference on
+     Learning Representations, ICLR 2023, Kigali, Rwanda, May 1-5, 2023. OpenReview.net,
+     2023. [Online]. Available: https://openreview.net/forum?id=WE_vluYUL-X
+[15] E. Bommarito and M. J. B. II, “An empirical analysis of the python package index (pypi),”
+     CoRR, vol. abs/1907.11073, 2019. [Online]. Available: http://arxiv.org/abs/1907.11073
+[16] Y. Wang, M. Wen, Y. Liu, Y. Wang, Z. Li, C. Wang, H. Yu, S. Cheung, C. Xu, and Z. Zhu,
+     “Watchman: monitoring dependency conflicts for python library ecosystem,” in ICSE ’20:
+     42nd International Conference on Software Engineering, Seoul, South Korea, 27 June - 19
+     July, 2020, G. Rothermel and D. Bae, Eds. ACM, 2020, pp. 125–135. [Online]. Available:
+     https://doi.org/10.1145/3377811.3380426
+[17] Y. Zhang, H. Ruan, Z. Fan, and A. Roychoudhury, “Autocoderover: Autonomous program
+     improvement,” in Proceedings of the 33rd ACM SIGSOFT International Symposium on
+     Software Testing and Analysis, ISSTA 2024, Vienna, Austria, September 16-20, 2024,
+     M. Christakis and M. Pradel, Eds. ACM, 2024, pp. 1592–1604. [Online]. Available:
+     https://doi.org/10.1145/3650212.3680384
+[18] B. Bogin, K. Yang, S. Gupta, K. Richardson, E. Bransom, P. Clark, A. Sabharwal, and T. Khot,
+     “SUPER: evaluating agents on setting up and executing tasks from research repositories,” in
+     Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing,
+     EMNLP 2024, Miami, FL, USA, November 12-16, 2024, Y. Al-Onaizan, M. Bansal, and
+     Y. Chen, Eds. Association for Computational Linguistics, 2024, pp. 12 622–12 645. [Online].
+     Available: https://doi.org/10.18653/v1/2024.emnlp-main.702
+[19] X. Tang, T. Qin, T. Peng, Z. Zhou, D. Shao, T. Du, X. Wei, P. Xia, F. Wu, H. Zhu, G. Zhang,
+     J. Liu, X. Wang, S. Hong, C. Wu, H. Cheng, C. Wang, and W. Zhou, “Agent KB: leveraging
+     cross-domain experience for agentic problem solving,” CoRR, vol. abs/2507.06229, 2025.
+     [Online]. Available: https://doi.org/10.48550/arXiv.2507.06229
+[20] R. Wu, X. Wang, J. Mei, P. Cai, D. Fu, C. Yang, L. Wen, X. Yang, Y. Shen, Y. Wang, and
+     B. Shi, “Evolver: Self-evolving LLM agents through an experience-driven lifecycle,” CoRR,
+     vol. abs/2510.16079, 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2510.16079
+[21] R. Fang, Y. Liang, X. Wang, J. Wu, S. Qiao, P. Xie, F. Huang, H. Chen, and N. Zhang, “Memp:
+     Exploring agent procedural memory,” CoRR, vol. abs/2508.06433, 2025. [Online]. Available:
+     https://doi.org/10.48550/arXiv.2508.06433
+[22] S. Kumar, A. A. Nargund, and V. Sridhar, “CourtEval: A courtroom-based multi-agent
+     evaluation framework,” in Findings of the Association for Computational Linguistics: ACL
+     2025, W. Che, J. Nabende, E. Shutova, and M. T. Pilehvar, Eds. Vienna, Austria:
+     Association for Computational Linguistics, Jul. 2025, pp. 25 875–25 887. [Online]. Available:
+     https://aclanthology.org/2025.findings-acl.1327/
+[23] R. You, H. Cai, C. Zhang, Q. Xu, M. Liu, T. Yu, Y. Li, and W. Li, “Agent-as-a-judge,” 2026.
+     [Online]. Available: https://arxiv.org/abs/2601.05111
+
+
+
+
+                                               11
+A     XPU and Retrieval Implementation
+A.1     Example XPU
+
+ Example XPU Entry
+ {
+     "id": "xpu_poetry_lock_conflict",
+     "signals": {
+        "keywords": ["poetry.lock", "pyproject.toml", "dependency conflict"],
+        "regex": ["Because .* depends on .*", "version solving failed"],
+        "situation_triggers": [
+          "Poetry-managed project where manual pip fallback risks losing the lock graph"
+        ]
+     },
+     "advice_nl": [
+        "Do not bypass Poetry with manual pip installation.",
+        "Preserve the locked dependency graph and resolve the conflict inside Poetry.",
+        "Run Poetry installation end-to-end after checking the lock file."
+     ],
+     "atoms": [
+        {"name": "inspect_file", "args": {"path": "pyproject.toml"}},
+        {"name": "inspect_file", "args": {"path": "poetry.lock"}},
+        {"name": "shell", "args": {"cmd": "poetry install --no-interaction"}}
+     ],
+     "telemetry": {
+        "hits": 63,
+        "successes": 37,
+        "failures": 15
+     }
+ }
+
+
+
+A.2     Anchor-Based Retrospective Evaluation Protocol
+
+Whenever the Retriever Agent is invoked, it first audits the outcome of the previous retrieval.
+For each previously recommended XPU, the Retriever Agent assigns a categorical verdict v ∈
+{success, failure, neutral} based on the subsequent setup trajectory.
+1. Anchor. At retrieval time, record the current trajectory length and the identifiers of the recom-
+   mended XPU entries, establishing a temporal reference point.
+2. Extract. On the next retrieval call, extract up to five subsequent steps from the main agent’s
+   trajectory after the anchor point.
+3. Judge. An LLM judge determines whether each recommended XPU contributed to resolving the
+   observed problem. The verdict is success if the advice was adopted and the problem was resolved
+   or improved; failure if the advice was adopted but the problem persisted or worsened; and neutral
+   if adoption or causal contribution cannot be determined.
+4. Update. The telemetry counters of each recommended XPU are updated atomically according to
+   the verdict:                                     
+                                                    (1, 0), if v = success,
+                           (successes, failures) += (0, 1), if v = failure,                       (4)
+                                                    
+                                                       (0, 0), if v = neutral.
+
+B     Agent Prompt Excerpts
+This appendix provides selected excerpts from the role-specific prompts used by SETUPX. We
+include only the parts that define each agent’s role, action boundary, and output contract. The
+complete prompts will be released with the code artifact.
+ Setup Agent Prompt Excerpt
+ You are an expert DevOps agent tailored for environment setup.
+ You have access to a Linux terminal and an external eXPerience Unit (XPU).
+
+ ## Action Types — Purpose and When to Use
+
+ ### SHELL_COMMAND
+ Execute any shell command directly in the container.
+
+
+
+
+                                                      12
+### TRY_XPU_SUGGESTION
+Apply a proven fix from the XPU knowledge base inside a snapshot sandbox.
+
+### SET_ENV
+Persist an environment variable across all subsequent commands.
+
+### ROLLBACK_ENV
+Pop any number of frames off the snapshot stack and return the container to
+any earlier known-good checkpoint, not only the latest one.
+
+### VERIFY
+Trigger the full pytest verification pipeline.
+
+### FINISH
+Signal that the task is complete. ONLY call after a successful VERIFY.
+
+You MUST respond in JSON format with this schema:
+{
+  "thought": "Analyze the current state and the cause of the error, then explain why you chose this
+  action...",
+  "action_type": "SHELL_COMMAND | TRY_XPU_SUGGESTION | SET_ENV | ROLLBACK_ENV | VERIFY | FINISH",
+  "content": {
+    // For SHELL_COMMAND:
+    "command": "pip install numpy",
+
+        // For TRY_XPU_SUGGESTION:
+        "xpu_suggestion_id": "suggestion_123",
+        "command": "pip install numpy==1.23.5",
+        "reasoning": "The XPU suggests downgrading numpy; this matches the error closely."
+
+        // For SET_ENV:
+        "env_key": "VAR_NAME",
+        "env_value": "value"
+
+        // For ROLLBACK_ENV:
+        // "n_frames": 1   // default 1; pass >=2 to go back to an earlier checkpoint.
+        //
+        // For VERIFY / FINISH:
+        // (VERIFY needs no extra fields)
+        // FINISH requires: "message": "environment setup complete"
+    }
+}
+
+
+
+
+Retriever Agent Prompt Excerpts
+You are an XPU experience-retrieval assistant. Given a list of candidate XPU experiences, your task is
+to pick the Top-K that best match the current deployment situation.
+
+## Selection rules
+1. Exact match first: XPUs whose advice_nl directly addresses the current problem rank highest.
+2. Telemetry as reference: pay attention to each XPU's historical hit / success / failure counts, but
+do not discard one merely because it has many failures — judge whether the previous failure scenarios
+are similar to the current one. If they are not, the XPU may still be effective.
+3. Drop the irrelevant: if an XPU's advice is completely unrelated to the current problem, do not pick
+it.
+4. Pick at most {k}.
+
+%## Selection rules
+%1. Exact match first: XPUs whose advice_nl directly solves the current problem rank first.
+%2. Telemetry as reference: pay attention to each XPU's historical hits / successes / failures, but do
+not exclude an XPU just because it has many failures.
+%3. Exclude irrelevant items outright: if an XPU's advice has nothing to do with the current problem,
+do not select it.
+%4. Select at most {k} items.
+
+You are an XPU experience-audit assistant. Your task: judge whether the XPU experiences recommended to
+the Agent last time helped the deployment.
+
+%## Decision rules
+%- success: the Agent adopted the XPU's idea, and subsequent steps show the problem was solved or
+clearly improved.
+%- failure: the Agent adopted the XPU's idea, but the problem was not solved or new problems were
+introduced.
+%- neutral: cannot tell whether the Agent adopted the suggestion, or the suggestion is unrelated to the
+subsequent steps.
+
+## Decision rules (judge each XPU separately)
+- success: the Agent adopted the XPU's idea (possibly with a different command but the same approach),
+and subsequent steps show the problem was solved or clearly improved.
+
+
+
+
+                                                      13
+- failure: the Agent adopted the XPU's idea, but the problem was not solved or new problems were
+introduced.
+- neutral: cannot tell whether the Agent adopted the suggestion, or the suggestion is unrelated to the
+subsequent steps.
+
+
+
+
+In-loop Verifier Agent Prompt Excerpt
+You are a verification Agent working inside a Docker container.
+Your task: examine whether the environment configured by the Setup Agent is acceptable, and report the
+result truthfully.
+
+You are not in charge of fixing anything; you only run tests, observe results, and pass judgment.
+
+## Verification procedure
+1. Structure reconnaissance: `ls` the project root, locate pyproject.toml / setup.cfg / pytest.ini /
+tox.ini, etc.
+2. Locate the test suite: confirm the test directory and framework. (pytest / unittest / tox, ...).
+3. Run the tests in the project's native way and collect results.
+4. Analyze failure causes and make a judgment.
+5. If the project has no tests at all, write a smoke test under /tmp/ to verify basic environment
+usability.
+
+## Hard constraints (violation invalidates the verdict)
+- Install no packages.
+- Modify no environment configuration.
+- Modify no file under /workspace/repo.
+- write_file may only write into /tmp/.
+
+
+
+Prosecutor and Judge Prompt Excerpts
+You are the prosecutor. Your stance is skeptical: both the Setup Agent and the Verifier may make
+mistakes, take shortcuts, or deceive themselves.
+You must verify independently using actual evidence inside the container, not trust their self-reports.
+
+## Mandatory investigation procedure (in order, no skipping)
+Step 0: identify the project language and build tool.
+Step 1: verify that core dependencies are available.
+Step 2: exercise the entry commands declared in README.
+Step 3: run the test suite yourself.
+Step 4: adjudicate each failure category.
+Step 5: cross-check the credibility of the Verifier's conclusion.
+
+You are the Judge. Your job is to verify the prosecutor's charges one by one and then issue a verdict.
+
+You are not the prosecutor — you do not conduct open-ended investigation. Your responsibility: for each
+charge raised by the prosecutor, execute 1–2 verification commands to confirm whether that charge
+holds.
+
+## Final verdict
+- >=1 charge upheld after your verification -> guilty
+- All charges dismissed -> not_guilty
+
+
+
+XPU Distiller Prompt Excerpt
+You are a senior expert in Python project environment configuration and dependency issues.
+You will be given a complete agent trajectory (executed commands and error logs) from an automated
+environment setup of a repository, and (when available) the Phase 2 Prosecutor-Judge adjudication
+signal phase2_context for that trajectory.
+
+Mandatory four-step distillation procedure:
+[Step 1: Verdict-Aware Ingestion] Eat the verdict first, then read the trajectory.
+Step 2: Forward Attribution] Trace each problem forward to the action that actually fixed it.
+[Step 3: Schema-Level Distillation] Map each problem-fix pair onto the XPU schema.
+
+%Your task:
+%1. Carefully analyze the entire trajectory and identify all independent environment problems.
+%2. For each independent problem, judge whether it is worth distilling into a reusable environment
+experience (XPU).
+%3. For each problem worth distilling, generate one structured XPU entry.
+
+Distillation principles:
+- prosecution_charges are the cleanest causal knowledge source — distill from them first.
+- Even when verdict=guilty, distill the generalizable patterns within.
+- One XPU = one root cause; never mix several unrelated problems.
+- Do not produce an id field; the system assigns a unique ID automatically.
+
+
+
+
+                                                  14
+C     Action Space
+
+The agent executes the selected action from the action space Aact = {a1 , . . . , a6 }:
+• SHELL_COMMAND: Execute an arbitrary shell command—the primary action for diagnosis and
+  repair.
+• TRY_XPU_SUGGESTION: Speculatively apply a retrieved XPU entry under the snapshot protection
+  described in Section 4.2.
+• SET_ENV: Persistently set an environment variable in the container.
+• ROLLBACK_ENV: Roll back the container to the most recent snapshot on the LIFO stack, or to a
+  specific earlier checkpoint.
+• VERIFY: Invoke an in-loop Verifier Agent (Section 4.3) to assess environment readiness.
+• FINISH: Declare setup complete and proceed to Phase 2 Prosecutor-Judge verification.
+
+C.1   TRY_XPU_SUGGESTION
+
+The speculative execution protocol proceeds as follows:
+1. Checkpoint: Snapshot the current container via docker commit, pushing the image onto the
+   LIFO stack S.
+2. Adapt: The agent reads the XPU’s advice_nl, leverages its full conversation context (recent
+   history, observed versions, repository structure), and generates concrete commands tailored to
+   the current repository. If the agent produces no command, the system falls back to rendering the
+   XPU’s atoms via a type-aware Atom Rendering Engine that maps 12 predefined atom types (e.g.,
+   pip_install, apt_install) to executable bash commands.
+3. Trial: Execute the adapted commands sequentially; halt on any non-zero exit code.
+4. Verify: Compare the error state before and after execution to determine the trial outcome.
+5. Decision: Retain changes on success trial; roll back to the snapshot otherwise.
+
+
+D     Multi-repository Track Evaluation Rubric
+
+D.1 Overview
+
+For the 22 non-atomic families, a verdict is assigned by direct in-container inspection rather than
+by the prosecutor–judge protocol used on the single-repository benchmark, because family-level
+usability spans multiple containers, services, and configuration consistency that no single adjudication
+protocol covers.
+Each family is independently rated by three evaluators using the rubric below. Disagreements are
+resolved through discussion until consensus is reached.
+
+D.2 Five-Check Rubric
+
+For each family’s host container, the following five checks are performed:
+
+C1. Clone integrity. The host repository is fully cloned and contains all expected source files.
+(Verified via ls /workspace/repo and git status.)
+
+C2. Editable install. The host package is installed in editable mode and resolves correctly. (Verified
+via pip list -e.)
+
+C3. Module / CLI availability. The primary module of the host package is importable, and
+the CLI entry point (if any) responds to –version or –help. (Verified via python -c "import
+<module>" and <cli> –version.)
+
+C4. Pytest collection. The host repository’s test suite can be collected by pytest –co without
+fatal errors. The number of collected tests is recorded.
+
+
+                                                   15
+C5. Dependency consistency.                  pip check reports no broken or inconsistent dependencies in the
+venv.
+For families involving cross-container protocol layers (sibling services, Kubernetes deployments,
+plugin entry-point registration), additional protocol checks are performed inside the relevant container,
+e.g., service connectivity via socket connection, kubectl get pods for Kubernetes families, or
+importlib.metadata.entry_points() for plugin-host families.
+
+D.3 Four-Tier Verdict
+
+Verdicts are assigned based on the worst-evidence + overall main-path usability principle:
+
+         Verdict       Criteria
+         Full          All five checks pass; protocol layer (if any) is fully realized: sibling services running,
+                       Kubernetes pods Up, plugin entry points registered.
+         Mostly        Host setup is complete and the main path is functional, but with one or two bounded
+                       minor gaps (e.g., a few collection errors, one sibling missing, an unfinished helm
+                       step).
+         Partial       Host installation is partial; some core dependencies missing or main module imports
+                       with errors. The intended workflow does not run end-to-end.
+         Shallow       Host repository is cloned but core dependencies are not installed; import fails
+                       immediately, or git clone itself failed.
+
+The Full–Mostly boundary is determined by whether one independently fixable minor gap exists.
+The Shallow tier qualitatively differs from the other three: it represents “did not actually install”
+rather than “installed with limitations.”
+Pytest collection serves as a key signal: successful collection of the majority of tests indicates that
+host setup is substantively complete.
+
+E     Per-family Verdicts of multi-repository
+This appendix reports per-family verdicts for the non-atomic ecosystems used in our multi-repository
+experiment. For each family we run two independent setup pipelines—S ETUP X and the Q WEN C ODE
+baseline—and rate the resulting container against the five checks of Appendix D (clone integrity,
+editable install, module/CLI availability, pytest –co, and pip check) plus protocol-layer checks
+where relevant (sibling-service ports, Kubernetes pods, plugin entry-point registration). Verdicts use
+the four tiers defined there: Full, Mostly, Partial, Shallow. The primary repo column gives the
+entry repository in the family’s selection record; the Pattern column summarises the cross-repository
+dependency type; the Notes column gives a one-line contrast of the two pipelines’ behaviour on that
+family.
+
+Table 2: Per-family verdicts on the 22 non-atomic ecosystems. S ETUP X reaches Full on 6/22 and
+Mostly on 11/22; Q WEN C ODE reaches Full on 1/22 and Mostly on 16/22. Both systems clear the
+≥Mostly bar on 17/22, but the internal composition of the verdicts differs (see Appendix F for a
+worked example).
+
+    # Family (primary repo)                 Pattern                S ETUP X                           Q WEN
+   1 terminusdb-client-python                client/server            Full                           Mostly
+  Notes: S ETUP X runs 122 integration tests inside setup (sibling :6363 server up); Q WEN reaches port connectivity but stops at test
+  collection.
+   2 ansible/awx-operator                    K8s deployment          Mostly                          Mostly
+  Notes: Both bring all AWX pods (web/task/postgres) Up on a KIND cluster; Q WEN ships no editable Python install for any package.
+   3 HumanSignal/label-studio                   full platform         Shallow                        Partial
+  Notes: S ETUP X hits a 5 min git clone timeout on the 1 GB monorepo, leaving an empty checkout; Q WEN clones 81 packages but the
+  host package is not editable and the CLI is absent.
+   4 scrapy/scrapy                              deploy + plugin host Mostly                          Mostly
+  Notes: S ETUP X covers the host only (4 siblings missing); Q WEN installs scrapyd/splash/redis/scrapy-redis, but pytest is absent
+  and the Scrapyd process is a zombie.
+                                                                                                              continued on next page
+
+
+
+                                                                  16
+  Table 2 – continued
+   # Family (primary repo)                   Pattern                S ETUP X                            Q WEN
+    5 saleor/saleor                            Django commerce          Mostly                              Mostly
+  Notes: Both collect 17,228 tests with no import errors; in both, the saleor host package itself is not truly editable and import saleor
+  fails.
+    6 odoo/odoo                                framework + OCA Mostly                                       Mostly
+                                               addons
+  Notes: S ETUP X runs 1,245 base tests but ships no OCA siblings; Q WEN clones the three OCA repos and keeps odoo-bin alive on :8069,
+  but no editable install.
+    7 intake/intake                            plugin host              Mostly                              Mostly
+  Notes: S ETUP X ships core editable + 9 driver registrations; Q WEN adds intake-xarray/sql/geopandas as editable siblings (794 tests
+  collectable across packages).
+    8 robotframework/robotframewor plugin host                          Mostly                                Full
+        k
+  Notes: Q WEN adds SeleniumLibrary/RequestsLibrary/Browser siblings + 2,318 utests OK; S ETUP X keeps the host alone, none of
+  the three siblings installed.
+    9 napari/napari                            Qt plugin host            Full                               Mostly
+  Notes: Both instantiate a headless Viewer under QT_QPA_PLATFORM=offscreen; Q WEN reports one dev-version warning and 3
+  collection errors.
+  10 apache/airflow                            client/server + de- Mostly                                   Shallow
+                                               ploy
+  Notes: S ETUP X ships core+client+cncf-kubernetes provider all editable, both Postgres/Redis sibling ports up; Q WEN has only
+  the client editable, import airflow fails.
+  11 matrix-org/synapse                        multi-service home- Mostly                                   Mostly
+                                               server
+  Notes: S ETUP X switches to a Poetry venv and rebuilds the Rust extension on aarch64; Q WEN runs the homeserver process plus
+  matrix-client/sydent sibling editables.
+  12 ckan/ckan                                 runtime + plugin host     Full                               Mostly
+  Notes: S ETUP X collects 3,358 tests and runs alembic Upgrade DB to completion; Q WEN keeps CKAN listening on :5000 but pytest is
+  missing and Solr :8983 is unreachable.
+  13 flyteorg/flyte                            Go backend + Py Partial                                      Mostly
+                                               SDK
+  Notes: S ETUP X picks the wrong language path (Python image vs. Go monorepo) and crashes on embedded-postgres root pollution; Q WEN
+  ships Flyte 2 SDK + flyteidl2 as editable.
+  14 MISP/MISP                                 PHP server + Py Partial                                       Partial
+                                               SDK
+  Notes: S ETUP X skips the PHP server entirely (Python base image), only PyMISP is in place; Q WEN finds :80 occupied by a Saleor
+  leftover and :443 refused; misp-modules cloned only.
+  15 bitcart/bitcart                           multi-repo workflow Partial                                  Mostly
+  Notes: S ETUP X hits the Python 3.10 vs. >=3.12 floor; :5432/:6379 both refuse. Q WEN uses uv + Python 3.14.4 and brings 4 sibling
+  containers + Backend :8000 up.
+  16 bottlecapdave/homeassistant- HA custom integra- Mostly                                                  Partial
+        octopusenergy                          tion
+  Notes: S ETUP X apt-installs python3.13-venv matching the manifest pin (759 tests, 0 error); Q WEN’s venv pins HA 2024.3.3 against
+  a 2025.11+ requirement, yielding 96 collection errors.
+  17 frappe/erpnext                            framework + app          Partial                             Shallow
+  Notes: S ETUP X pip-installs frappe + editable erpnext but ships no bench/MariaDB; Q WEN’s Python 3.11 is rejected by source-level
+  PEP 695 syntax (type ConfType = ...).
+  18 internetarchive/brozzler                  archiving workflow        Full                               Mostly
+  Notes: Both install brozzler+warcprox as editables and bring up a RethinkDB sibling on :28015; S ETUP X additionally installs
+  Chromium 147 with the full sandbox stack.
+  19 jazzband/wagtailmenus                     Wagtail plugin           Mostly                              Mostly
+  Notes: Both run runtests.py cleanly with all 175 tests OK; Q WEN additionally installs wagtail-localize, -localize-git, and
+ -grapple as editable siblings.
+  20 jupyterhub/jupyterhub                     Hub plugin host           Full                               Mostly
+  Notes: S ETUP X ships oauthenticator editable with 11 OAuth-provider entry points registered and a full pytest pass; Q WEN keeps
+  Hub running and adds kubespawner/dockerspawner/batchspawner.
+  21 mov-cli/mov-cli                           CLI plugin host          Mostly                              Mostly
+  Notes: Both load three plugins via the mov-cli-* module-naming convention; S ETUP X additionally executes a live YouTube search
+  returning 13 hits dated 2026-05.
+  22 qiboteam/qibolab                          quantum backend           Full                               Mostly
+                                               driver
+  Notes: S ETUP X instantiates create_platform("dummy") into a 5-qubit Platform with the qibolab backend entry point registered;
+  Q WEN ships no pytest, no CLI, with the host repo at /workspace not the expected /workspace/repo.
+
+
+
+Aggregate. S ETUP X’s distribution is Full = 6, Mostly = 11, Partial = 4, Shallow = 1, with
+≥Mostly on 17/22. Q WEN C ODE’s distribution is Full = 1, Mostly = 16, Partial = 3, Shallow = 2,
+also with ≥Mostly on 17/22. The two systems tie on the ≥Mostly bar but their verdict structure
+differs: S ETUP X’s six Full verdicts are concentrated on families where the protocol layer is end-to-
+end observable (real sibling containers, real protocol handshakes, real integration tests), while sixteen
+of Q WEN C ODE’s Mostly verdicts sit at “clone + install + collect” without ever crossing into the
+cross-container protocol layer (Appendix F develops the terminusdb-client-python family in
+detail as a worked example of this asymmetry).
+
+
+                                                                   17
+Failure modes. S ETUP X’s four Partial/Shallow cases concentrate on (i) the 5-minute git clone
+ceiling failing on ∼1 GB monorepos (label-studio); (ii) cross-language families colliding with
+the default Python base image (flyte vs. Go, MISP vs. PHP, frappe via the wrong strategy);
+and (iii) Python-version floors above the base image (bitcart 3.10 vs. 3.12+ requirement).
+Q WEN C ODE’s five Partial/Shallow cases come predominantly from (i) missing editable install
+of the host package leading to import failure (airflow, frappe); (ii) mis-pinned host versions
+(homeassistant-octopusenergy pinned to HA 2024.3 against a 2025.11+ requirement); and
+(iii) port hijacking by leftover containers from a previous family (MISP’s :80 occupied by a stale
+Saleor process). The two failure-mode groups are largely disjoint, indicating that the bottleneck of
+multi-repository setup is split between protocol adaptation (S ETUP X-side) and dependency-assembly
+semantics (Q WEN-side) at different layers.
+
+F   Representative Multi-repository Cases
+We zoom into two of the 22 family verdicts in Appendix E as worked examples. The two cases are
+chosen by structural criteria rather than by outcome: terminusdb-client-python is the only pure
+client/server family in the 22 (its cross-repository dependency is a single HTTP protocol against
+a sibling server, with no plugin-host or multi-service confounders), and frappe/erpnext is one of
+the families on which S ETUP X+XPU itself underperforms (Partial), chosen so that the case pairing
+covers both ends of the verdict scale rather than only families where SetupX wins.
+
+terminusdb-client-python (client/server, SetupX+XPU=Full / Qwen Code=Mostly)
+Run identifiers.     S ETUP X+XPU on container bfd7bd0e6b8f; Q WEN C ODE on container
+4462896bd3c7.
+terminusdb-client-python is the Python SDK for TerminusDB. Its integration tests (e.g.,
+Client.connect, db_create / db_delete) all require sending HTTP requests to a running Ter-
+minusDB server and parsing the response. A standalone pip install -e . only covers unit tests
+over the client’s internal data structures (schema / document / WOQL AST construction); the full
+integration suite requires a TerminusDB server running in parallel.
+
+SetupX+XPU trajectory (17 steps). The agent inspects pyproject.toml and conftest.py,
+identifies that integration_tests/ target localhost:6363, then runs apt install
+docker.io followed by docker pull/run terminusdb-server to bring up the sibling. curl
+/api/info confirms HTTP 200. After installing the client and test dependencies, pytest
+integration_tests/test_client.py reports 122 passed / 5 skipped, and the agent halts on
+its own assessment that setup is complete.
+
+Qwen Code trajectory (setup completed). Qwen Code likewise recognizes the client/server
+protocol, brings up terminusdb-server on port 6363, and performs an editable install of the client
+SDK in a venv. pytest –co collects 1499 tests and pip check reports clean. However, the setup
+terminates at the “tests can be collected” stage without invoking the integration suite. Separately,
+the container’s default PATH is not linked to /workspace/.venv/bin/, so bare python / pytest
+commands return executable not found and the full venv path must be used explicitly.
+
+Verdict justification. Evaluators independently apply the five-check rubric and the protocol-layer
+extensions (Appendix D) to both containers:
+
+     Check                                               SetupX+XPU             Qwen Code
+     Clone integrity                                        PASS                  PASS
+     Editable install (host package in pip list -e)         PASS                  PASS
+     pip check clean                                        PASS                  PASS
+     Protocol: sibling server up + HTTP handshake           PASS                  PASS
+     Protocol: integration tests invoked during setup     122 passed           not invoked
+     Module import (default PATH)                           PASS       FAIL (requires full venv path)
+
+Both runs satisfy the host-side five-check rubric and the basic protocol layer (sibling server running,
+port reachable). The decisive gap is the last protocol-layer check: Appendix D treats end-to-end
+
+
+                                                    18
+protocol-layer verification (here, executing the integration suite that exercises the client/server
+handshake) as a verdict criterion rather than an optional follow-up. S ETUP X+XPU runs the suite
+during setup and observes 122 passes; Q WEN C ODE stops at pytest –co without ever invoking
+the suite. A secondary, cosmetic demerit is that Qwen Code’s default PATH is not linked to its venv,
+requiring downstream callers to use the full venv path. Under the rubric, S ETUP X+XPU is rated
+Full (all five checks plus the protocol-layer end-to-end check pass) and Q WEN C ODE is rated Mostly
+(host setup complete and main path functional, with a bounded gap on the end-to-end check and the
+PATH cosmetic issue).
+
+frappe/erpnext (multi-service deployment, SetupX+XPU=Partial / Qwen Code=Shallow)
+Run identifiers.     S ETUP X+XPU on container 3bc8bfb590f8; Q WEN C ODE on container
+7b071e5b5237.
+frappe/erpnext is an ERP business application. Its standard deployment relies on the bench toolchain
+(bench init / bench install-app) to host multiple sibling apps, with parallel MariaDB (port
+3306) and Redis siblings providing persistence and cache. The latest source’s pyproject.toml
+requires Python >=3.14,<3.15 (the source already uses PEP 695 type aliases such as type
+ConfType = ...); the container’s default base image ships Python 3.11.
+
+SetupX+XPU trajectory (53 steps). The agent inspects the source and identifies the Python
+version constraint, then takes a sidestep strategy rather than satisfying the constraint directly: it runs
+apt install python3.13 and creates a Python 3.13 venv at /workspace/venv, then installs the
+released v15 tag via pip install git+https://github.com/frappe/frappe@version-15
+(non-editable, frappe 15.107.0; the v15 release has a lower Python floor than the latest dev source)
+and installs erpnext editable from /workspace/repo (15.106.0). Both import frappe and import
+erpnext succeed. pytest –co lists 260 tests but reports 171 collection errors (missing frappe site
+context). After creating a placeholder sites/test_site/site_config.json, the agent attempts
+apt install docker.io to start a MariaDB sibling; the MariaDB sibling does not come up, the
+bench CLI is never installed, and the bench toolchain pipeline is not invoked.
+
+Qwen Code trajectory. Qwen Code uses the container’s default Python 3.11.2 without upgrading.
+pip install -e /workspace immediately raises a SyntaxError on the source’s PEP 695 type
+alias, and the host package fails to install. import frappe then raises ModuleNotFoundError.
+The bench environment contains only pip and setuptools; bench –version prints a version,
+but bench –help / bench list-apps are blocked by environment protections. MariaDB on port
+3306 refuses connection (Redis on 6379 is reachable). Fourteen sibling app repositories have been
+git-cloned, but no bench install-app step is performed.
+
+Verdict justification.
+
+ Check                                            SetupX+XPU                  Qwen Code
+ Clone integrity                                  PASS                        PASS
+ Host install (Python compatibility)              PASS (Python 3.13 venv +    FAIL (Python 3.11 rejects
+                                                  v15 tag)                    PEP 695 syntax)
+ Module import (import frappe / erpnext)          PASS                        FAIL
+                                                                              (ModuleNotFoundError)
+ Protocol: bench CLI available                    not installed               installed but blocked
+ Protocol: MariaDB sibling running                not started                 not started
+ Protocol: bench install-app triggered            not triggered               not triggered
+
+
+
+
+Neither run completes the full bench toolchain pipeline (the three protocol-layer rows are tied at zero).
+The verdict difference is forced by the host-install row, which Appendix D defines as the boundary
+between Partial and Shallow: Shallow applies when “host repository is cloned but core dependencies
+are not installed; import fails immediately,” and Partial applies when “host installation is partial
+. . . intended workflow does not run end-to-end.” S ETUP X+XPU recognizes the source’s Python
+version constraint early in setup and sidesteps it by pinning to the v15 release tag on a Python 3.13
+
+
+                                                   19
+venv; the host package and erpnext install successfully, import succeeds, and partial pytest collection
+works, but the bench/MariaDB workflow does not run end-to-end — this matches Partial. Q WEN
+C ODE uses the default Python and fails at the syntax level during host install, leaving the host module
+unimportable; sibling app sources are cloned but never integrated — this matches Shallow. The core
+behavioral difference between the two paths lies at the runtime-constraint recognition step early in
+setup: whether the agent verifies the source’s required Python version before attempting to install,
+and whether it has a recovery strategy (here, pinning to an older release tag) when the constraint is
+not satisfied by the base image.
+
+G    Synthetic Noise Composition
+The clean XPU knowledge base contains 600 advice entries collected from the EnvBench Python
+repository pool, with all entries corresponding to the 100 repositories in our benchmark removed. To
+construct the noisy variant used in Section 6.4, we add 1,770 synthetic perturbation entries on top of
+the 600 real ones, yielding a noisy KB of 2,370 total entries (a roughly 3:1 noise-to-real ratio). All
+noise entries share embedding neighborhoods with real entries, making them difficult to filter via
+vector similarity alone, and carry zero telemetry counts.
+The 1,770 noise entries fall into four classes:
+
+Context perturbation (600 entries, 34%). Each real entry is duplicated with its context.python
+randomly rewritten to a Python version in 3.8–3.13, its os field expanded, and its tools field
+augmented with one of conda, poetry, pdm, hatch, uv, or mamba. The same advice is replicated
+under multiple plausible context configurations.
+
+Cross-grafting (450 entries, 25%). Three real entries A, B, C are sampled at random; the synthetic
+entry combines A’s context, B’s signals, C’s advice, and a random subset of atoms from one of
+the three. This produces entries that are internally consistent in form but inconsistent in provenance.
+
+Generalization blur (450 entries, 25%). Concrete advice is replaced with one of 12 generic
+templates such as “check the Python version” or “install project dependencies”; signals.keywords
+is replaced with one of 6 generic keyword groups; and atoms is cleared. This emulates advice
+extracted at excessive abstraction.
+
+H    Per-repository Matrix
+
+Table 4: Per-repository pass/fail outcomes for the eight systems on the 100-repository benchmark.
+A check mark indicates that the system passes the prosecutor–judge protocol; a cross (×) indicates
+failure, including timeout, adverse verdict, or missing evaluation data. CC, OC, QC, EA, R2R,
+and EB denote Claude Code, OpenCode, Qwen Code, ExecutionAgent, Repo2Run, and EnvBench,
+respectively.
+                                          S ETUP X S ETUP X
+      Repository                           +XPU –XPU          CC   OC   QC    EA      R2R       EB
+      cookiecutter                          ✓        ✓        ✓    ✓    ✓      ✓       ✓        ✓
+      datasets                              ✓        ✓        ×    ✓    ✓      ×       ×        ✓
+      kedro                                 ✓        ✓        ✓    ✓    ✓      ✓       ✓        ✓
+      luigi                                 ✓        ✓        ×    ✓    ✓      ×       ×        ✓
+      mopidy                                ✓        ×        ×    ×    ✓      ×       ×        ×
+      pip                                   ✓        ✓        ✓    ✓    ✓      ✓       ×        ✓
+      platformio-core                       ✓        ✓        ×    ×    ✓      ×       ×        ×
+      supervision                           ✓        ✓        ✓    ✓    ✓      ✓       ×        ×
+      guardrails                            ✓        ✓        ✓    ✓    ✓      ×       ×        ×
+      lark                                  ✓        ✓        ✓    ✓    ✓      ✓       ✓        ✓
+      nonebot2                              ✓        ×        ✓    ×    ✓      ✓       ×        ×
+      pip-tools                             ✓        ✓        ✓    ✓    ✓      ✓       ✓        ✓
+      tortoise-orm                          ✓        ✓        ✓    ✓    ✓      ✓       ×        ×
+      trax                                  ×        ✓        ✓    ✓    ✓      ×       ×        ×
+      umap                                  ✓        ✓        ✓    ✓    ✓      ✓       ✓        ✓
+      acme                                  ✓        ×        ✓    ✓    ✓      ✓       ×        ×
+      connexion                             ✓        ✓        ✓    ✓    ✓      ✓       ✓        ×
+      giskard                               ✓        ✓        ✓    ✓    ✓      ✓       ×        ×
+      neuralforecast                        ×        ✓        ✓    ×    ✓      ×       ×        ×
+                                                                               continued on next page
+
+
+
+                                                    20
+                                   Table 4 – continued
+                                 SetupX SetupX
+Repository                       +XPU –XPU          CC   OC   QC   EA   R2R   EB
+plotnine                           ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+tablib                             ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+tmuxp                              ✓       ✓        ✓    ✓    ✓    ✓    ×     ×
+great-tables                       ✓       ✓        ✓    ✓    ✓    ✓    ×     ×
+mteb                               ✓       ✓        ×    ×    ✓    ×    ✓     ×
+plugin.video.netflix               ✓       ✓        ✓    ✓    ✓    ✓    ×     ✓
+py-evm                             ✓       ×        ✓    ✓    ✓    ✓    ✓     ×
+python-control                     ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+smart_open                         ✓       ✓        ✓    ✓    ✓    ×    ✓     ✓
+androidviewclient                  ✓       ✓        ✓    ✓    ✓    ×    ✓     ✓
+dj-stripe                          ✓       ✓        ✓    ✓    ✓    ✓    ×     ×
+fastapi-pagination                 ✓       ✓        ✓    ✓    ✓    ×    ×     ×
+hacs_waste_collection_schedule     ✓       ×        ✓    ✓    ✓    ✓    ×     ✓
+memegen                            ✓       ✓        ✓    ✓    ✓    ×    ×     ✓
+piccolo                            ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+pyftpdlib                          ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+python-holidays                    ✓       ✓        ×    ✓    ×    ×    ✓     ×
+twine                              ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+automlbenchmark                    ✓       ✓        ✓    ✓    ✓    ×    ✓     ✓
+hydra                              ✓       ✓        ✓    ✓    ✓    ✓    ×     ✓
+scvelo                             ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+pypose                             ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+evox                               ✓       ✓        ×    ×    ✓    ×    ×     ×
+neurogym                           ✓       ✓        ✓    ✓    ✓    ✓    ×     ✓
+cellrank                           ✓       ✓        ✓    ×    ✓    ✓    ×     ×
+nevergrad                          ✓       ✓        ✓    ✓    ✓    ✓    ×     ✓
+datamol                            ✓       ✓        ✓    ✓    ✓    ×    ✓     ✓
+meerkat                            ✓       ✓        ×    ✓    ✓    ×    ✓     ×
+ajenti                             ×       ✓        ×    ✓    ×    ×    ×     ×
+cheroot                            ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+fabric                             ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+pretalx                            ✓       ✓        ✓    ✓    ✓    ✓    ×     ×
+adaptix                            ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+wagtailmenus                       ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+django-lfs                         ×       ×        ×    ×    ×    ✓    ×     ×
+netbox                             ✓       ✓        ×    ×    ✓    ×    ×     ✓
+armi                               ✓       ✓        ✓    ✓    ✓    ×    ×     ✓
+flavio                             ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+monty                              ✓       ✓        ✓    ✓    ✓    ×    ×     ✓
+unyt                               ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+kernel_tuner                       ✓       ✓        ✓    ✓    ✓    ×    ✓     ×
+openqasm                           ✓       ×        ✓    ✓    ✓    ✓    ×     ✓
+torchgeo                           ✓       ✓        ✓    ×    ✓    ×    ×     ×
+importlib_metadata                 ✓       ✓        ✓    ×    ✓    ✓    ✓     ✓
+pytest-xdist                       ✓       ✓        ×    ✓    ✓    ✓    ✓     ✓
+robotframework                     ✓       ✓        ✓    ✓    ✓    ×    ✓     ×
+yapf                               ✓       ×        ×    ✓    ✓    ✓    ✓     ×
+keyring                            ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+columnflow                         ✓       ×        ×    ✓    ×    ✓    ✓     ✓
+civet                              ×       ✓        ✓    ×    ✓    ✓    ✓     ×
+xknx                               ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+aiogram_dialog                     ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+recipe-scrapers                    ✓       ✓        ✓    ✓    ✓    ✓    ✓     ×
+sphinx-gallery                     ✓       ✓        ✓    ✓    ✓    ✓    ✓     ✓
+fhempy                             ✓       ×        ×    ×    ×    ×    ×     ×
+kh2randomizer                      ✓       ✓        ×    ×    ✓    ×    ✓     ×
+modalities                         ✓       ✓        ×    ×    ×    ×    ×     ×
+molecule                           ✓       ✓        ×    ✓    ×    ✓    ✓     ×
+staged-recipes                     ×       ×        ×    ×    ×    ×    ×     ×
+powderday                          ✓       ✓        ×    ×    ×    ×    ×     ×
+fixator10-cogs                     ✓       ×        ✓    ×    ×    ×    ×     ×
+flask-security                     ✓       ✓        ×    ×    ×    ×    ×     ×
+miv-os                             ✓       ×        ×    ✓    ×    ×    ×     ×
+django-registration                ✓       ✓        ×    ×    ×    ✓    ×     ✓
+iree-llvm-sandbox                  ×       ×        ✓    ×    ×    ×    ×     ×
+lobsterpy                          ✓       ✓        ✓    ×    ×    ×    ×     ×
+python-libjuju                     ✓       ✓        ✓    ✓    ×    ✓    ✓     ✓
+langgraph                          ✓       ✓        ✓    ✓    ×    ✓    ×     ×
+heltour                            ✓       ✓        ✓    ✓    ×    ×    ×     ×
+llm-random                         ✓       ✓        ✓    ×    ×    ×    ×     ×
+custodian                          ✓       ✓        ✓    ✓    ×    ✓    ✓     ×
+naomi                              ✓       ✓        ✓    ×    ×    ✓    ×     ×
+river                              ✓       ✓        ✓    ✓    ×    ✓    ×     ×
+oadoi                              ✓       ×        ×    ×    ×    ✓    ×     ×
+qmlcore                            ✓       ✓        ✓    ✓    ×    ✓    ×     ×
+poetry                             ✓       ✓        ×    ✓    ×    ✓    ✓     ×
+qiita                              ×       ×        ✓    ×    ×    ×    ×     ×
+sublimelinter                      ✓       ×        ×    ×    ×    ×    ×     ×
+pyuploadcare                       ✓       ✓        ✓    ✓    ×    ×    ×     ×
+django-autocomplete-light          ✓       ×        ✓    ✓    ×    ×    ×     ×
+yubikey-manager                    ✓       ✓        ×    ×    ×    ×    ×     ×
+
+
+
+
+                                          21
+

@@ -1,0 +1,423 @@
+                                                                              SemJoin: Semantic Join Optimization
+                                                  Christopher Gou                             Aditya Banerjee                       Jiaxuan Wang                         Chunwei Liu
+                                                   Purdue University                          Purdue University                   Purdue University                    Purdue University
+                                                   cgou@purdue.edu                          banerj59@purdue.edu                 wang5433@purdue.edu                  chunwei@purdue.edu
+
+                                         ABSTRACT                                                                               perform semantic joins, in which tables are joined using a predicate
+                                         Integrating unstructured data into relational database systems is in-                  expressed in natural language [11]. A naive way to do so is to
+                                         creasingly important as demand grows for natural language query-                       simply iterate over all pairs of items (“tuples”), where one item
+                                         ing and analysis. A semantic join, joining two tables under a natural-                 belongs to each table. However, this approach is inefficient and
+                                         language predicate, can be evaluated with a large language model                       expensive. For two tables of size 𝑀 and 𝑁 , this results in O (𝑀 × 𝑁 )
+                                         (LLM), but comparing every pair of tuples requires O (𝑀 × 𝑁 ) LLM                      LLM invocations. At scale, this naive approach quickly becomes
+
+
+
+
+arXiv:2606.29532v1 [cs.DB] 28 Jun 2026
+                                         invocations and is cost-prohibitive at scale. Existing systems reduce                  impractical due to the cost, both in terms of LLM token usage and
+                                         this cost but typically commit to a single fixed strategy (e.g., embed-                time.
+                                         ding similarity or one batched scheme) regardless of the data or the                      This paper explores optimization strategies that make semantic
+                                         join predicate. We propose an LLM-agent-based decision pipeline                        joins computationally feasible without sacrificing accuracy. Rather
+                                         that optimizes semantic joins by matching the execution strategy to                    than committing to a single fixed algorithm, we introduce an LLM-
+                                         the characteristics of the underlying tables. An LLM advisor routes                    driven advisor that inspects the join predicate and a small sample
+                                         each join to one of two strategies: a Cluster Join, which prunes                       of each table and routes the join to the strategy best suited to the
+                                         candidates via unsupervised embedding clustering and sample-                           data: a Cluster Join, which uses unsupervised embedding-based
+                                         based filtering, or a Classifier strategy for predicates that reduce                   clustering and sample-based filtering to prune the candidate space,
+                                         to a shared discrete label set. Across three diverse datasets (IMDb                    or a Classifier strategy for predicates that reduce to a shared dis-
+                                         reviews, email contradictions, and Stack Overflow tags), the advi-                     crete label set. Every decision has a deterministic fallback, so the
+                                         sor consistently identifies the optimal execution strategy for each                    pipeline always reaches a valid configuration. We evaluate the re-
+                                         workload. This dynamic routing proves decisive: it outperforms                         sulting system on three datasets against two recent baselines. The
+                                         adaptive block join (ABJ) by 20–33 F1 points across all datasets                       first is Adaptive Block Join (ABJ) [9], a block-nested-loop scheme
+                                         while consuming fewer tokens on two of the three, and achieves                         that packs batches of tuples from both tables into a single prompt
+                                         higher F1 scores than featurized-decomposition join (FDJ) at one                       and adaptively sizes those batches without knowing the predi-
+                                         to two orders of magnitude lower token cost.                                           cate’s selectivity in advance; it is the approach our Cluster Join
+                                                                                                                                is most directly designed against, and the strongest prior method
+                                         VLDB Workshop Reference Format:                                                        we are aware of for the batched-prompting regime. The second is
+                                         Christopher Gou, Aditya Banerjee, Jiaxuan Wang, and Chunwei Liu.                       Featurized-Decomposition Join (FDJ) [10], a recent method that
+                                         SemJoin: Semantic Join Optimization. VLDB 2026 Workshop: NOVAS.                        uses an LLM to extract features into a conjunctive-normal-form
+                                                                                                                                decomposition and prunes pairs with cheap distance functions,
+                                                                                                                                providing statistical guarantees on the precision and recall of its
+                                         VLDB Workshop Artifact Availability:
+                                                                                                                                output.
+                                         The source code, data, and/or other artifacts have been made available at
+                                         https://github.com/Kronk12/CS-541-Semantic-Join-Exploration.
+                                                                                                                                In summary, this paper makes the following contributions: (1) We
+                                         1    INTRODUCTION                                                                      propose SemJoin, an LLM-agent pipeline that treats strategy selec-
+                                         Relational database systems are foundational to modern computing.                      tion as the core problem: an LLM advisor inspects the join predicate
+                                         Standard JOIN operations use predicates that rely on strict logical                    and a small sample of each table and routes the join to the execution
+                                         relationships, such as exact string matches or simple numerical                        strategy best matched to the data, with deterministic fallbacks that
+                                         comparisons [6]. While very effective for highly structured data,                      guarantee a valid configuration at every decision. (2) We instantiate
+                                         this architecture struggles with unstructured data, which typically                    the pipeline with two complementary execution backends—a Clus-
+                                         requires semantic queries to be expressed in terms of natural lan-                     ter Join that prunes candidate pairs via embedding clustering and
+                                         guage [2, 4, 5]. For example, a traditional database cannot execute                    sample-based cluster-pair filtering, and a Classifier for predicates
+                                         a query to join a table of shirts with a table of pants based on the                   that reduce to a shared discrete label set—and give the advisor con-
+                                         natural language predicate: “the items match as an outfit.”                            crete, sample-driven criteria for choosing between them, with the
+                                            The advancement of Large Language Models (LLMs) in recent                           Cluster Join serving as the universal fallback. We further provide
+                                         years presents a solution to this limitation. Using LLMs, we can                       an optional projection step for cross-table embedding alignment.
+                                                                                                                                (3) We evaluate the pipeline on three datasets against ABJ and
+                                         This work is licensed under the Creative Commons BY-NC-ND 4.0 International
+                                         License. Visit https://creativecommons.org/licenses/by-nc-nd/4.0/ to view a copy of
+                                                                                                                                FDJ, a recent guarantee-based method. The routed strategy exceeds
+                                         this license. For any use beyond those covered by this license, obtain permission by   ABJ’s F1 score on every dataset while reducing token cost on two
+                                         emailing info@vldb.org. Copyright is held by the owner/author(s). Publication rights   of three, exceeds FDJ’s F1 on all three at far lower token cost, and
+                                         licensed to the VLDB Endowment.
+                                         Proceedings of the VLDB Endowment. ISSN 2150-8097.                                     the advisor selects each workload’s optimal strategy at negligible
+                                                                                                                                overhead.
+                                                                                       Christopher Gou, Aditya Banerjee, Jiaxuan Wang, and Chunwei Liu
+
+
+2     RELATED WORK                                                           Adaptive Block Join. ABJ explores the optimization strategy of
+In this section, we review prior work in two areas on semantic joins:     packing batches of tuples into each LLM prompt to take advantage
+AI database systems, which embed semantic operations within full          of the context window in modern LLMs [9]. ABJ packs batches of
+engines, and standalone join-optimization techniques, which focus         tuples from both tables into a single prompt, a block nested-loop
+on semantic joins.                                                        evaluation, and instructs the LLM to output all matching pairs in the
+                                                                          batch. The effective batch size depends on the predicate’s selectivity,
+                                                                          as a more selective predicate produces more output tokens, meaning
+2.1    AI Database Systems                                                that fewer tuples can be packed into the prompt before it overflows
+A growing number of AI database systems (AIDBs) extend the                the token limit. ABJ begins with an optimistic (low) selectivity
+relational model with “semantic operators” parameterized by a             estimate and iteratively lowers the batch size when an overflow
+natural-language expression and evaluated through the use of LLMs.        occurs, attaining near-optimal batch sizes without knowing the
+Beyond a single operator, each of these is a system: it exposes a         selectivity of the join predicate in advance.
+suite of semantic operators (e.g., filter, join, map, aggregate, top-k,
+                                                                             Featurized-Decomposition Join. FDJ observes that existing model-
+group-by) through a declarative interface, and ships an optimizer
+                                                                          cascade solutions, which rely purely on embedding-based semantic
+that selects physical implementations. LOTUS, DocETL, Palimpzest,
+                                                                          similarity, often yield limited gains in practice [10]. This is because
+iPDB, and Cortex AISQL are all examples of such systems, each
+                                                                          text records are often lengthy and contain both relevant and irrele-
+supporting semantic joins among several other operations [2–4,
+                                                                          vant information, causing standard embeddings to poorly encode
+7, 8]. DocETL uses an LLM agent as a query optimizer, rewriting
+                                                                          the specific, logical join criteria. To address this, FDJ uses LLMs to
+LLM-powered operator pipelines for complex document processing
+                                                                          automatically extract reliable features from the unstructured text
+[8]. Palimpzest casts AI workloads as relational views computed via
+                                                                          and combines them into a logical expression in conjunctive normal
+a convert operator and uses a cost optimizer to trade off runtime,
+                                                                          form (CNF). This “featurized decomposition” evaluates the join
+financial cost, and output quality [4].
+                                                                          condition using inexpensive distance functions (lexical, arithmetic,
+    LOTUS exposes its operators through a DataFrame-based API
+                                                                          or embedding-based) on the extracted features, drastically reducing
+and pairs each with an optimization framework that provides statis-
+                                                                          the need for LLM calls on every tuple pair. FDJ further provides
+tical accuracy guarantees relative to a high-quality “gold” algorithm
+                                                                          tight statistical guarantees on the precision and recall of the output
+[7]. For semantic joins, its gold algorithm is a tuple nested-loop
+                                                                          by carefully setting threshold parameters for these predicates using
+evaluation, which LOTUS optimizes by dynamically selecting be-
+                                                                          labeled samples.
+tween two cheaper proxy algorithms. The first, sim-filter, directly
+                                                                             Our Cluster Join methodology shares FDJ’s underlying philos-
+evaluates the embedding similarity between join keys. The sec-
+                                                                          ophy of intelligently pruning the search space to minimize ex-
+ond, project-sim-filter, invokes an LLM over each tuple in the left
+                                                                          pensive pairwise LLM comparisons. However, while FDJ achieves
+table to predict the expected value of the right join key, and then
+                                                                          this through explicit feature extraction and logical predicate for-
+evaluates embedding similarity. By sampling a small fraction of
+                                                                          mulation, our approach relies on unsupervised embedding-based
+the dataset, LOTUS calculates thresholds for each proxy, allowing
+                                                                          K-Means clustering.
+it to send ambiguous matches to the expensive LLM while rely-
+ing on inexpensive embedding similarity for obvious matches and           3     METHODOLOGY
+rejections.
+    Snowflake’s Cortex AISQL integrates LLM-based semantic oper-          In this section, we present our approach to optimizing the semantic
+ators into SQL and makes the core insight that many semantic joins        join operator. Our system is structured as an LLM-agent-based
+are functionally equivalent to multi-label classification problems [3].   decision pipeline: rather than following a single fixed algorithm,
+Instead of executing a naive semantic join, it takes a tuple from one     our system uses an LLM-driven advisor to analyze the join predicate
+table and classifies it against the values of the other table, treating   and the data tables and dynamically make decisions about the
+those values as a set of candidate labels. By evaluating all potential    strategy for performing the join and the embedding model(s) used.
+matches for a tuple in a single prompt, the system reduces the num-       At runtime, the advisor chooses one of two strategies to perform
+ber of required LLM calls from quadratic to linear complexity. An         the join: a classifier strategy for predicates that reduce to equi-joins
+AI oracle is given the natural-language prompt, schema metadata,          on a discrete set of labels, and a cluster join strategy for all other
+table sizes, and sample values from both tables to determine when         semantic predicates. Every decision has a deterministic fallback
+such an application is possible. The approach is most useful for          (e.g., ambiguous strategy defaults to cluster join, unrecognized
+asymmetric tables where the ‘label’ table is small, because a large       embedding model defaults to all-mpnet-base-v2), ensuring that
+label set must be batched across prompts, reintroducing quadratic         the pipeline always reaches a valid configuration. Additionally,
+complexity.                                                               optional parameters allow users to override any advisor decision.
+                                                                          An overview of our approach can be seen in Figure 1.
+
+2.2    Optimizing Semantic Joins                                          3.1    Strategy Selection
+In contrast to the systems above, two recent works are standalone         In every semantic join invocation, the first step is strategy selection.
+techniques for optimizing the semantic join operator itself, rather       The join predicate, the schemas of both tables, and a small sample
+than full query engines. These are most directly related to our           of tuples from both tables are sent to the LLM, which is then asked
+approach.                                                                 to choose one of the two semantic join strategies:
+SemJoin: Semantic Join Optimization
+
+
+
+
+                                                          (a) Strategy Selection Pipeline
+
+
+
+
+                                                             (b) Cluster Join Pipeline
+
+              Figure 1: Overview of our approach: (a) the strategy selection pipeline and (b) the cluster join pipeline.
+
+
+      (1) Classifier: The predicate is a “same-label” join over a small     3.3     Cluster Join Strategy
+          set of discrete classes/labels (e.g., same sentiment, same        For predicates that require direct comparisons of tuple pairs, the
+          genre). In this case, each tuple can be independently as-         cluster join strategy executes the following stages: embedding
+          signed a label, and matching reduces to an equi-join on           model selection, optional projection, embedding and clustering,
+          these labels.                                                     cluster-pair filtering, and LLM-based matching.
+      (2) Cluster Join: The predicate is not well-suited to the above
+          classifier strategy and requires directly comparing each pair     3.3.1 Embedding Model Selection. First, the LLM advisor selects
+          of tuples.                                                        the most appropriate sentence-transformer model from the given
+                                                                            options (e.g., all-mpnet-base-v2, all-MiniLM-L6-v2). To make
+If the LLM advisor returns an ambiguous result, our system defaults         this decision, the LLM is again given the join predicate, both table
+to the cluster join strategy, which serves as the universal fallback        schemas, and a sample of tuples from both tables.
+for any predicate that the advisor cannot confidently categorize.           3.3.2 Optional Projection. Before generating embeddings, the LLM
+However, users can bypass the advisor and specify the strategy via          advisor decides whether a projection step is needed. Projection is
+the force_strategy parameter.                                               warranted when independent clusterings of Tables 𝐴 and 𝐵 may
+                                                                            not correspond well to each other, e.g., when semantic similarity
+                                                                            between tuples in 𝐴 does not indicate that they will be matched
+3.2      Classifier Strategy                                                to semantically similar tuples in 𝐵 under the join predicate. This
+For predicates that reduce to “same-label” joins, the semantic join is      step was added due to the concern of using semantic similarity as
+performed using the classifier strategy as follows: First, the LLM is       part of our filter step in the Cluster Join pipeline and is inspired by
+given a sample of Table 𝐵 and generates the list of canonical labels        LOTUS’ project-sim-filter.
+(e.g., ["positive", "negative", "neutral"]). Next, both tables                 When projection is enabled, tuples of Table 𝐴 are batched and
+are partitioned into batches and sent to the LLM, which assigns             sent to the LLM along with a sample of Table 𝐵 and the join predi-
+exactly one of the canonical labels to each tuple. Finally, a simple        cate. The LLM is asked to predict what the matching Table 𝐵 tuple
+equi-join is performed between 𝐴 and 𝐵 on these labels.                     would look like for each Table 𝐴 tuple, producing projected text
+    This strategy can be seen as a generalization of AISQL’s classifi-      strings. These projections are then used in lieu of the original Table
+cation optimization as if the semantic join can be converted into           𝐴 for the embedding step.
+a multi-label classification problem then the join is treated as a             As a concrete example, consider the Stack Overflow dataset de-
+“same-label” join where the ‘label’ table can be used to generate the       scribed in Section 4.2.3. Table 𝐴 contains verbose questions (e.g.,
+list of canonical labels.                                                   "I am trying to figure out oAuth2 ... ValueError at
+    Note that an "unknown" label is always included, and is assigned        /api/customer/...") while Table 𝐵 contains single-word con-
+to tuples that the LLM cannot confidently classify. During the equi-        cept labels (e.g., "javascript"). Without projection, the two tables
+join, tuples labeled "unknown" in either table are excluded from            cluster independently over very different kinds of text, produc-
+matching.                                                                   ing clusterings with potentially very little correspondence. With
+                                                                                       Christopher Gou, Aditya Banerjee, Jiaxuan Wang, and Chunwei Liu
+
+
+projection, Table 𝐴’s tuples are first transformed into single-word       4.2    Datasets
+concept label predictions. As a result, both tables are clustered over    4.2.1 IMDb Movie Reviews. For our initial dataset, we decided to
+the same kind of text, allowing for much closer correspondence            mimic the “Reviews” experiment from ABJ’s paper [9]. To para-
+between clusters across the two tables. This allows the later filter      phrase from the paper, “The second scenario (‘Reviews’) is based
+stage to find and filter out unrelated cluster pairs before the final     on the IMDB movie reviews, available for instance on Kaggle [1].
+matching stage.                                                           The goal is to match reviews with similar underlying sentiment
+                                                                          (the data set comes with ground truth labels, labeling reviews as
+3.3.3 Embedding and Clustering. Each tuple of both tables is se-          either positive or negative).”
+rialized into a single text string by concatenating its attributes
+and separating them by a delimiter character (|), with each field         4.2.2 Email Contradictions. For our next dataset, we wanted to
+truncated to a maximum number of characters (400 by default).             evaluate our pipeline across a broader variety of datasets and specif-
+The selected sentence-transformer model generates embeddings              ically test its performance on a scenario with a more complicated,
+for each of these strings.                                                logical join predicate. To achieve this, we adapted the “Emails” sce-
+   Next, the two tables’ embeddings are clustered independently,          nario introduced by ABJ [9]. Loosely based on the Enron scandal
+with the advisor choosing the appropriate clustering algorithm            investigation, this dataset requires the LLM to identify inconsisten-
+from the given options (e.g., 𝑘-means, HDBSCAN). After clustering         cies between executive statements and employee emails using the
+both tables, we enumerate all pairs (𝑐 𝐴 , 𝑐 𝐵 ) of an 𝐴 cluster and a    natural language condition “the two texts contradict each other."
+𝐵 cluster. Each cluster pair represents a block of tuples from each       The statements are structured as "[Name]: I first heard about the
+table that will be evaluated together in the final LLM join step.         losses in February 2022," while the emails are formatted as "I first
+                                                                          told [Name] about the losses [TimeFrame]". Our goal was to use
+3.3.4 Cluster Pair Filtering. The next step then filters out incom-       this dataset to evaluate our cluster join methodology on a join pred-
+patible cluster pairs before the expensive LLM join. For each cluster     icate that required complex deductive reasoning rather than simple
+pair, a random sample of tuples is drawn from each table and a            semantic similarity.
+small LLM join is performed on this sample, producing a set of            4.2.3 Stack Overflow Questions and Tags. For our final dataset, we
+matches. The match rate is computed as follows:                           wanted to test our Cluster Join pipeline on a semantic join where
+                                                                          semantic similarity is a poor heuristic for filtering out tuples. This
+                                number of matches                         is because our filtering step was inspired by LOTUS’ methodology
+      match rate =
+                     (size of sample 𝐴) × (size of sample 𝐵)              which struggles when semantic similarity is not a reliable indicator
+                                                                          to filter out tuples [7]. Thus, we decided to create a dataset where
+If the match rate is lower than the configured filter_threshold,          one table had large amounts of text and another table had little to
+the cluster pair is discarded. Note that if either cluster has fewer      no text. This inspired the creation of the Stack Overflow dataset
+tuples than the configured min_profile_size, the cluster pair is          which contains a table of Stack Overflow questions and another
+immediately retained and does not go through the filtering stage,         table of tags (e.g., java, html, c++, etc).
+since the cost of the small LLM join would approach the cost of
+simply performing the join between the entire clusters.                      Table 1 summarizes the key statistics for each dataset. Selectivity
+                                                                          is defined as the fraction of all |𝐴| × |𝐵| candidate pairs that satisfy
+3.3.5 LLM-Based Matching. For each surviving cluster pair, the            the join predicate.
+LLM is used to perform the actual semantic join. The LLM is in-
+                                                                                              Table 1: Dataset Statistics
+structed to compare every tuple in Table 𝐴 against every tuple in
+Table 𝐵 and output all of the matches. Similarly to ABJ [9], we
+partition both clusters into batches and include an entire batch of              Dataset     |𝐴|    |𝐵|    True Matches         Selectivity
+each cluster’s tuples in each LLM prompt in order to leverage more
+                                                                                 IMDb         50     50          1,220             48.80%
+of the LLM’s available context window.
+                                                                                 Emails      100    100           577               5.77%
+                                                                                 Stack       250     10           275              11.00%
+4     EVALUATION
+In this section, we evaluate SemJoin on three datasets against the
+ABJ and FDJ baselines. We additionally present parameter studies
+                                                                          4.3    Results
+on individual components.
+                                                                          Table 2 reports the recall, precision, F1, and token cost for each
+                                                                          strategy on all three datasets, average over three trials, alongside
+4.1    Baseline                                                           the ABJ and FDJ baselines. A notable result was that the advisor-
+Our primary baseline is ABJ [9], one of the strongest prior ap-           chosen strategy exceeded ABJ’s F1-score on every dataset while
+proaches we are aware of. Because our Cluster Join is designed as a       reducing token usage on two of the three. The Cluster Join figures
+cost-efficient alternative to this method, replicating its behavior was   reflect the best per-dataset configuration from our parameter search
+one of our goals. Additionally, we also benchmark against FDJ [10],       (Section 4.4.1) and thus represent a tuned upper bound; the Classifier
+a recent state-of-the-art approach to semantic join optimization.         and advisor results involve no such per-dataset tuning.
+SemJoin: Semantic Join Optimization
+
+
+Table 2: Performance and token expenditure across join                         Classifier outperformed all other strategies in both F1-score and to-
+strategies, average over three trials. The shaded row is the                   ken expenditure, achieving an F1 of 78.08% while only using 22,362
+LLM advisor’s choice; ABJ and FDJ are the baselines. Best                      tokens. Compared to the ABJ on IMDb (70,446 tokens, F1-score
+value per column per dataset is bold. Cluster Join rows (‡ ) re-               49.92%), it reduces token expenditure by 68.3% while simultane-
+port the per-dataset configuration selected by the grid search                 ously improving F1-score by 28.16 percentage points. Furthermore,
+of Section 4.4.1 and should be read as a tuned upper bound;                    when compared to the next most token-efficient method for this
+the Classifier and advisor results involve no such per-dataset                 dataset, Cluster Join (38,624 tokens), the Classifier Join not only
+tuning. † On Emails, contradiction is not a same-label pred-                   reduces token cost by an additional 42% but also yields a substantial
+icate; the only available taxonomy (person name) yields a                      22.52 percentage point increase in F1-score. On Stack Overflow,
+vacuous name-identity equi-join, so the Classifier’s quality                   using the 10 programming concepts as the labels, the Classifier
+scores are artifacts and are omitted.                                          achieved an F1 of 74.95% with 30,216 tokens, the highest F1 among
+                                                                               the strategies again. This demonstrates that when a join reduces
+Dataset    Strategy          Recall (%)   Precision (%)   F1 (%)   Tokens      to a discrete label set, a dedicated classifier approach significantly
+                                                                               optimizes both accuracy and cost.
+           Cluster Join‡       41.39         84.45        55.56     38,624
+           Classifier          75.84         80.46        78.08     22,362         Featurized-Decomposition Join. FDJ’s efficiency comes from a
+IMDb
+           ABJ                 39.35         69.69        49.92     70,446     CNF filter over feature distance which prunes most pairs before
+           FDJ                 26.87         98.40        42.20    5,296,336   LLM verification. When this filter extracts strong features, FDJ
+                                                                               is extremely efficient. However, if the filter cannot form a useful
+           Cluster Join‡       73.48          76.81       75.11     26,963
+                                                                               discriminator, FDJ has very few pairs to prune and must verify
+           Classifier†          —              —            —        7,432
+Emails                                                                         every remaining candidate pair directly with the LLM, reverting
+           ABJ                 32.29          60.10       42.00     43,340     to O (𝑀 × 𝑁 ) cost. We observed this across all of our datasets, the
+           FDJ                100.00          10.03       18.27    1,554,914   extracted feature distances were not a reliable signal for the join
+           Cluster Join‡       63.27          77.68       69.74     76,942     predicate, so the signal pruned little and fell back to verifying almost
+           Classifier          66.91          85.19       74.95     30,216     all pairs with the LLM.
+Stack
+           ABJ                 46.18          67.55       54.86     26,895
+                                                                                   Advisor Routing. The advisor routes each join to either the Clas-
+           FDJ                 30.67          70.87       42.77    3,607,262
+                                                                               sifier or Cluster Join strategy based on the predicate and a sample
+                                                                               of each table, and identified all three datasets correctly on its first
+   Cluster Join vs. baseline. Against ABJ, the Cluster Join improves           pass (Table 3). It recognized the sentiment join on IMDb and the tag
+F1 on all three datasets while also reducing token expenditure on              taxonomy on Stack Overflow as a same-label classification, and the
+Emails and IMDb. On Emails it reaches an F1 of 75.11% versus ABJ’s             Emails contradiction, which requires reading both rows together, as
+42.00% at 26,963 tokens versus 43,340, and on IMDb 55.56% versus               a Cluster Join. These choices match the empirically optimal strate-
+49.92% at 38,624 tokens versus 70,446. The one exception to this               gies in Table 2. The advisor’s overhead is also negligible at 13,084
+efficiency trend is Stack Overflow, where the Cluster Join used more           tokens across all three datasets combined relative to the tens of
+tokens than ABJ—76,942 versus 26,895—while achieving a higher                  thousands of tokens for even the cheapest join configuration.
+F1 of 69.74% versus 54.86%. We attribute this token inefficiency to
+the highly asymmetric structure of the dataset (250 tuples by 10                           Table 3: LLM Advisor Routing Decisions
+tuples). Because Table B contains only 10 concepts, ABJ covers the
+entire 2,500-pair search space in as few as 13 LLM calls, making it             Dataset    Strategy       Labels               Projection   Advisor Tokens
+exceptionally token-efficient. Under these conditions, the overhead
+                                                                                IMDb       Classifier     Positive, Negative      —             9,418
+of the Cluster Join pipeline—embedding generation, k-means parti-
+                                                                                Emails     Cluster Join   —                       No            2,230
+tioning, and the sample-based cluster filter step—consumes more                 Stack      Classifier     10 concept tags         —             1,436
+tokens than the brute-force alternative. Notably, the tuned config-
+uration used a filtering threshold of 0.0, meaning no cluster pairs                                                                 Total       13,084
+were pruned by the sample-based filter. This is consistent with the
+dataset’s design intent: since semantic similarity is a poor indicator
+of join relevance for Stack Overflow questions and programming                 4.4       Parameter Studies
+concepts, the cluster filter’s scoring mechanism provides no reli-
+                                                                               4.4.1 Cluster Join Configuration. To comprehensively evaluate the
+able signal for pruning, further compounding the pipeline overhead.
+                                                                               performance of our cluster join methodology, we benchmarked
+This suggests that the clustering approach is better suited to larger,
+                                                                               our cluster join pipeline across all three datasets (Emails, Stack
+more symmetric datasets where pruning savings outweigh pipeline
+                                                                               Overflow, and IMDb) using a rigorous grid search. We tested four
+overhead, and whether a sufficiently large asymmetric table would
+                                                                               distinct cluster ratios (0.025, 0.05, 0.075, and 0.1), which govern the
+shift this balance remains an open question.
+                                                                               cluster density within the tables. Specifically, the number of clusters
+   Classifier. The Classifier strategy is most effective when a join           generated for a given table was determined by scaling the dataset
+reduces to a discrete label set. Thus, on the IMDb dataset where               cardinality by the cluster ratio, bounded by a minimum of 2 clusters
+movie reviews carry either positive or negative sentiments, the                (calculated as max{2, 𝑐𝑎𝑟𝑑𝑖𝑛𝑎𝑙𝑖𝑡𝑦 × 𝑟𝑎𝑡𝑖𝑜}). For each generated
+                                                                                        Christopher Gou, Aditya Banerjee, Jiaxuan Wang, and Chunwei Liu
+
+
+cluster configuration, we further evaluated the join performance             Table 4: Block Size Exploration (averaged across 3 trials)
+across 100 distinct similarity thresholds, sweeping from 0.0 to 1.0
+in increments of 0.01.                                                    Dataset      Block      Recall (%)       Precision (%)          F1 (%)      Tokens
+    Given this large search space, establishing the single “Tuned
+Cluster Join” configuration reported in Table 2 required a systematic                  10x10          54.56               71.66           61.95       56,888
+trade-off analysis between accuracy and computational cost. Our           IMDb         15x15          45.11               78.90           57.32       44,951
+selection methodology proceeded as follows: first, we executed a                       20x20          32.40               79.16           45.94       33,310
+complete search to identify the baseline configuration that yielded
+                                                                                       10x10          90.18               75.38           82.11       63,186
+the absolute highest F1-score. Next, we isolated a candidate pool
+                                                                          Emails       15x15          83.94               74.47           78.92       42,219
+of alternative configurations that achieved an F1-score within 2.5
+percentage points of this maximum.                                                     20x20          83.19               78.40           80.72       29,513
+    From this subset, we conducted a subjective trade-off analysis. If                 10x10          61.21               77.46           68.38       33,891
+an alternative configuration maintained an F1-score highly compet-        Stack        15x10          55.15               79.00           64.95       31,866
+itive with the maximum but offered substantial token cost savings,
+                                                                                       20x10          55.52               78.02           64.87       30,941
+operationally defined as approximately a 10% or greater reduction
+in token expenditure, it was selected as the tuned configuration.
+Conversely, if the candidate configurations only offered negligible
+                                                                         Table 5: Effect of projection on Cluster Join (averaged over
+token savings (e.g., 1% reduction) at the cost of accuracy, we re-
+                                                                         three trials)
+jected the alternatives and defaulted to the configuration with the
+highest absolute F1-score. This approach ensures that the tuned
+cluster joins presented in our results represent the most practical       Dataset   Configuration               Recall (%)   Precision (%)   F1 (%)    Tokens
+balance of high semantic matching accuracy and LLM operational                      Cluster Join                  41.39           84.45      55.56     38,624
+                                                                          IMDb
+efficiency.                                                                         Cluster Join + Projection     47.62           81.37      60.08     58,360
+                                                                                    Cluster Join                  73.48           76.81      75.11     26,963
+                                                                          Emails
+                                                                                    Cluster Join + Projection     77.47           77.87      77.67     33,071
+4.4.2 Block Size Sensitivity. Our Cluster Join’s matching stage                     Cluster Join                  63.27           77.68      69.74     76,942
+                                                                          Stack
+batches tuples within each cluster pair and therefore requires a                    Cluster Join + Projection     68.36           72.03      70.15     128,617
+batch size. To choose a good value, we ran a simple fixed-block-size
+block join—a stripped-down block nested-loop evaluation with a
+single, manually set batch size—over the full tables and swept the
+block size, measuring the resulting accuracy and token cost. This        5     CONCLUSION
+is a tuning procedure, not part of our evaluation: the simple block      Traditional relational databases struggle with unstructured data,
+join is used only to select a batch size and is not a baseline. Our      and naive LLM-based semantic joins are computationally prohib-
+baseline is ABJ, which sizes its batches automatically. Because our      itive. We presented SemJoin, an LLM-agent pipeline that treats
+largest table is 250 rows, we tested block sizes of 5, 10, 15, 20, and   strategy selection itself as the problem: rather than committing to
+25 (Table 4).                                                            a single fixed algorithm, an advisor routes each join to the execu-
+   Across all three datasets, block size 10 achieved the highest F1-     tion strategy best suited to the data, falling back deterministically
+score, while block size 5 maximized recall at substantially higher       whenever its decision is uncertain. The central empirical finding is
+token cost. Beyond block size 15, F1-scores declined more steeply        that this routing pays off. Across three datasets the routed strategy
+without proportional token savings. We use block size 15 for the         exceeded ABJ’s F1-score on every workload while reducing token
+Cluster Join matching stage; relative to block size 10 it reduces        cost on two of the three, and it exceeded FDJ’s F1 across all three at
+token expenditure by 21–33% on Emails and IMDb and changes F1            far lower token cost. Crucially, no single strategy won everywhere:
+by 3–5 percentage points.                                                the Classifier was best when a join reduces to a shared discrete
+                                                                         label set (on IMDb cutting token cost by 68% and raising F1 by 28
+                                                                         percentage points over ABJ), while the Cluster Join was the better
+4.4.3 Projection. The advisor enables projection on a per-join basis.    general-purpose choice for predicates that do not, and the advisor
+To characterize its effects independently, we forced it on across all    selected the empirically optimal strategy on all three workloads at
+three datasets (Table 5). Projection increased Cluster Join F1 on all    negligible overhead—evidence that the routing decision can itself be
+three datasets: by 4.52 points on IMDb (55.56% to 60.08%), 2.56 points   delegated to the LLM cheaply. The optional projection step traded
+on Emails (75.11% to 77.67%), and 0.41 points on Stack Overflow          a consistent token-cost increase for a small, consistent F1 gain on
+(69.74% to 70.15%). It also increased token expenditure, by 51.1% on     all three datasets.
+IMDb (38,624 to 58,360 tokens), 22.6% on Emails (26,963 to 33,071            Having validated this approach on workloads of modest scale,
+tokens), and 67.2% on Stack Overflow (76,942 to 128,617 tokens).         including two custom-adapted datasets, the next step is to investi-
+Projection thus yields a consistent F1 gain at a consistent token        gate whether these efficiencies hold under the pressures of larger,
+cost for our tests; whether that exchange is worthwhile depends on       highly varied production workloads. Future research will build
+the value a given deployment places on accuracy relative to token        upon this foundation by scaling the evaluation, refining the advisor
+expenditure.                                                             mechanism, and integrating additional latest LLMs.
+SemJoin: Semantic Join Optimization
+
+
+REFERENCES                                                                                  2024. A declarative system for optimizing ai workloads. arXiv preprint
+ [1] Atul Anand Jha. 2020. IMDB 50k Movie Reviews (Test your BERT). https://www.            arXiv:2405.14696 (2024).
+     kaggle.com/datasets/atulanandjha/imdb-50k-movie-reviews-test-your-bert. Ac-        [6] Priti Mishra and Margaret H Eich. 1992. Join processing in relational databases.
+     cessed: 2026-06-21.                                                                    ACM Computing Surveys (CSUR) 24, 1 (1992), 63–113.
+ [2] Udesh Kumarasinghe, Tyler Liu, Chunwei Liu, and Walid G Aref. 2026. iPDB–          [7] Liana Patel, Siddharth Jha, Melissa Pan, Harshit Gupta, Parth Asawa, Carlos
+     Optimizing SQL Queries with ML and LLM Predicates. arXiv preprint                      Guestrin, and Matei Zaharia. 2025. Semantic Operators: A Declarative Model for
+     arXiv:2601.16432 (2026).                                                               Rich, AI-based Data Processing. arXiv:2407.11418 [cs.DB] https://arxiv.org/abs/
+ [3] Paweł Liskowski, Bowei Chen, Zihan Li, Jay Tayade, Benjamin Han, Boxin Jiang,          2407.11418
+     Aaron Lin, Weicheng Zhao, Nathan Wiegand, Paritosh Aggarwal, Nitish Jindal,        [8] Shreya Shankar, Tristan Chambers, Tarak Shah, Aditya G. Parameswaran, and
+     Kyle Schmaus, Anupam Datta, and Dimitris Tsirogiannis. 2025. Cortex AISQL:             Eugene Wu. 2025. DocETL: Agentic Query Rewriting and Evaluation for Complex
+     A Production SQL Engine for Unstructured Data. arXiv:2511.07663 [cs.DB]                Document Processing. arXiv:2410.12189 [cs.DB] https://arxiv.org/abs/2410.12189
+     https://arxiv.org/abs/2511.07663                                                   [9] Immanuel Trummer. 2025. Implementing Semantic Join Operators Efficiently.
+ [4] Chunwei Liu, Matthew Russo, Michael Cafarella, Lei Cao, Peter Baile Chen,              arXiv:2510.08489 [cs.DB] https://arxiv.org/abs/2510.08489
+     Zui Chen, Michael Franklin, Tim Kraska, Samuel Madden, Rana Shahout, and          [10] Sepanta Zeighami, Shreya Shankar, and Aditya Parameswaran. 2025.
+     Gerardo Vitagliano. 2025. Palimpzest: Optimizing AI-Powered Analytics with             Featurized-Decomposition Join: Low-Cost Semantic Joins with Guarantees.
+     Declarative Query Processing. In Conference on Innovative Data Systems Research        arXiv:2512.05399 [cs.DB] https://arxiv.org/abs/2512.05399
+     (CIDR).                                                                           [11] Yuxuan Zhu, Tengjun Jin, Chenghao Mo, and Daniel Kang. 2026. Accelerating
+ [5] Chunwei Liu, Matthew Russo, Michael Cafarella, Lei Cao, Peter Baille Chen, Zui         Approximate Analytical Join Queries over Unstructured Data with Statistical
+     Chen, Michael Franklin, Tim Kraska, Samuel Madden, and Gerardo Vitagliano.             Guarantees. Proceedings of the ACM on Management of Data 4, 3 (SIGMOD)
+                                                                                            (2026), 1–28.
+

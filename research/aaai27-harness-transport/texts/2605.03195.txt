@@ -1,0 +1,914 @@
+                                        Terminus-4B: Can a Smaller Model Replace Frontier LLMs at
+                                                        Agentic Execution Tasks?
+                                                         Spandan Garg                                             Vikram Nitin                              Yufan Huang
+                                                     spgarg@microsoft.com                                vikramnitin@microsoft.com                   yufanhuang@microsoft.com
+                                                           Microsoft                                             Microsoft                                   Microsoft
+                                                             USA                                                    USA                                        USA
+                                        ABSTRACT                                                                             tests to resolving complex repo-level GitHub issues. A crucial
+                                        Modern coding agents increasingly delegate specialized sub-                          component to all these workflows is terminal execution i.e. the
+                                        tasks to subagents, which are smaller, focused agentic loops                         process of running builds, installing dependencies and running
+
+
+
+
+arXiv:2605.03195v1 [cs.AI] 4 May 2026
+                                        that handle narrow responsibilities like search, debugging or                        diagnostic tests to reproduce issues and validate fixes. While
+                                        terminal execution. This architectural pattern keeps the main                        essential, these tasks flood the agent’s context window with
+                                        agent’s context window clean by isolating verbose outputs                            terminal outputs. A single verbose test can easily produce tens
+                                        (e.g. build logs, test results, etc.) within the subagent context.                   of thousands of tokens displacing the code context, editing
+                                        Typically when agents employ subagents for such tasks, they                          and planning the agent needs to do for downstream decisions.
+                                        use frontier models as these subagents. In this paper, we inves-                     As the trajectory grows, this creates a compounding problem:
+                                        tigate whether a finetuned small language model (SLM) can                            each new command output further crowds the context window,
+                                        achieve comparable performance to frontier models in the task                        limiting how many actual problem solving steps the agent can
+                                        of agentic terminal execution. We present Terminus-4B, which                         take before it hits the token window limit. In practice, terminal
+                                        is a post-trained Qwen3-4B model via Supervised Finetuning                           output is often the single largest consumer of context in coding
+                                        (SFT) and Reinforcement Learning (RL) using rubric-based                             agent trajectories. We argue that this direct execution pattern,
+                                        LLM-as-judge reward, specifically for this task. In our exten-                       where the agent runs commands in its own context and absorbs
+                                        sive evaluation spanning various frontier models, training abla-                     the full output, is primitive and represents a major inefficiency
+                                        tions and main agent configurations, we find that Terminus-4B                        in agent design of today’s coding agents. The information
+                                        is able to reduce the main agent’s token usage by up to                              the main agent needs from these terminal execution is often
+                                        ∼30% compared to the No Subagent baseline with no impact                             just a concise summary of what took place such as a line
+                                        to agent performance on benchmarks like SWE-Bench Pro                                representing the error or a table at the end, and not the full
+                                        and our internal SWE-Bench C# benchmark, which tends to                              raw output from the shell command.
+                                        be heavy in verbose execution tasks. Furthermore, Terminus-                             Popular coding agents have increasingly adopted a sub-
+                                        4B improves key metrics showing the main agent relying on                            agent architecture as a way to address context limitation of
+                                        the outputs of the subagent and doing fewer terminal execu-                          LLMs. Rather than performing expensive tasks in the main
+                                        tion tasks by itself. We see that our model not only closes the                      agent loop, the agent delegates them to a specialized subagent.
+                                        gap between the Vanilla Qwen model and frontier models like                          The subagent executes the task independently based on the
+                                        Claude Sonnet / Opus / GPT-5.3-Codex, but often even exceeds                         inputs provided and returns output in a format expected by the
+                                        their performance.                                                                   main agent, absorbing the context hit from the intermediate
+                                                                                                                             steps. This pattern has been successfully adapted to tasks like
+                                        ACM Reference Format:
+                                                                                                                             search [3], debugging [5], etc. We believe terminal execution
+                                        Spandan Garg, Vikram Nitin, and Yufan Huang. 2026. Terminus-4B:
+                                        Can a Smaller Model Replace Frontier LLMs at Agentic Execution                       is a natural candidate for this pattern.Despite the clear fit, ap-
+                                        Tasks?. In Proceedings of ACM Conference (Conference’17). ACM, New                   plying the subagent pattern to terminal execution has its own
+                                        York, NY, USA, 13 pages. https://doi.org/10.1145/nnnnnnn.nnnnnnn                     challenges. The subagent must be able to handle diverse repos-
+                                                                                                                             itories spanning various languages. It must be able to interpret
+                                        1     INTRODUCTION                                                                   errors correctly and decide what to do in response, handle
+                                        In recent times, coding agents [1–4] have made strides in                            timeouts gracefully, etc. Even more importantly, it should pro-
+                                        software engineering tasks, ranging all the way from writing                         duce effective summaries as its final response, as that is the
+                                                                                                                             only window the main agent has into what the subagent did. A
+                                        Permission to make digital or hard copies of all or part of this work for personal   subagent producing vague summaries (e.g. "The build failed." )
+                                        or classroom use is granted without fee provided that copies are not made
+                                        or distributed for profit or commercial advantage and that copies bear this          or hallucinated outputs is worse than no subagent at all. This
+                                        notice and the full citation on the first page. Copyrights for components of this    is because the main agent would not only need to repeat the
+                                        work owned by others than ACM must be honored. Abstracting with credit is            work, but could be misled by a faulty subagent. Typically, sub-
+                                        permitted. To copy otherwise, or republish, to post on servers or to redistribute
+                                        to lists, requires prior specific permission and/or a fee. Request permissions       agents rely on frontier models because of their adaptability
+                                        from permissions@acm.org.                                                            to different tasks. Given the narrow nature of this task, we
+                                        Conference’17, July 2017, Washington, DC, USA
+                                                                                                                             believe that using an expensive frontier LLM is overkill and a
+                                        © 2026 Association for Computing Machinery.
+                                        ACM ISBN 978-x-xxxx-xxxx-x/YY/MM. . . $15.00                                         much smaller model should be capable of performing the task.
+                                        https://doi.org/10.1145/nnnnnnn.nnnnnnn
+   In this work, we apply the subagent pattern to terminal              2     BACKGROUND AND RELATED WORK
+execution, by adding an Execution Subagent to an existing               Our work intersects and extends several research threads in
+agent. The subagent is given a single Terminal tool, bounded            coding agent space, such as multi-agent / subagent architec-
+by a turn limit and a targeted system prompt instructing the            tures, small language models for agentic workloads, RL for
+agent to return structured summaries. The main agent can                multi-turn LLM-based agents and LLM-judge / rubric-based
+delegate tasks to this subagent with a simple query. To avoid           reward design. We discuss each below.
+using an expensive frontier LLM, we introduce Terminus-4B,
+which is a Qwen3-4B [6] model post-trained specifically for             2.1    Multi-Agent and Subagent Architectures
+agentic terminal execution. We conduct a two-stage training
+                                                                        Decomposing complex tasks across multiple agents has been
+pipeline with supervised finetuning (SFT) on trajectories col-
+                                                                        studied extensively. AutoGen [11] provides a flexible frame-
+lected from our internal usage telemetry data, followed by
+                                                                        work for agent to agent conversation. Works like MetaGPT [12],
+Reinforcement Learning (RL) with Group Relative Policy Op-
+                                                                        ChatDev [13], explore role-based collaboration between mul-
+timization (GRPO) [7] with a novel subagent training pipeline
+                                                                        tiple agents. He et al. [14] systematically reviewed the land-
+and rubric-based LLM-as-judge reward [8, 9]. The subagent
+                                                                        scape of LLM-based multi-agent systems for software engi-
+pipeline is able to isolate the subagent task from the main agent
+                                                                        neering highlighting the current capabilities and limitations
+to ensure each rollout begins with the same problem, while
+                                                                        of these approaches. Anthropic’s multi-agent research [15]
+keeping the main agent’s role in the rollout minimal, resulting
+                                                                        system adopts the orchestrator-worker pattern, where a lead
+in cost-effective training. The reward scores candidate rollouts
+                                                                        agent delegates tasks to specialized subagents that operate in
+against reference trajectories across various quality dimen-
+                                                                        isolated contexts. Claude Code [3] further formalizes this pat-
+sions and failure modes, providing a rich multi-dimensional
+                                                                        tern as subagents, with built in general purpose and plan sub-
+training signal suited for this task. Our contributions are as
+                                                                        agents and the ability to author custom ones. Our Execution
+follows:
+                                                                        Subagent follows the same orchestrator-worker pattern, but
+                                                                        specializes in the domain of terminal execution tasks within
+                                                                        coding agents, a task where verbose tool outputs are especially
+                                                                        prevalent.
+     • Execution Subagent & Terminus-4B. We design
+       and integrate Execution Subagent into a production               2.2    Small Language Models for Agentic
+       coding agent framework. By using our own custom
+       finetuned Terminus-4B model with Execution Sub-
+                                                                               Tasks
+       agent, we can reduce token usage by up to ∼30% while             A growing body of work argues that small language models
+       preserving the agent performance on challenging cod-             are essential for the future of Agentic AI [16]. They argue that
+       ing benchmarks like SWE-Bench Pro and our internal,              a bulk of agent invocations involve repetitive tasks for which
+       SWE-Bench C#.                                                    SLMs are not only sufficient, but also 10-30 times cheaper
+     • Subagent Training Framework We present a novel                   than frontier LLMs. The Qwen3 family [6] represents a strong
+       post-training framework for subagent model training              open-weight SLM family that has native tool-calling capabili-
+       that decouples the subagent from the main agent loop.            ties and growing body of research showing that appropriate
+       This enables fast and cost-effective rollouts with min-          post-training [17, 18] can allow them to achieve competitive
+       imal reliance on frontier LLMs. We are able to use               results on focused tasks. Terminal-4B applies these learnings
+       a vanilla Qwen3-4B itself as the main agent during               and principles to the targeted yet impactful task of terminal
+       rollouts.                                                        execution.
+     • Task Formulation & Reward Design We introduce
+       a novel rubric-based multi-dimensional LLM-as-judge              2.3    Terminal Tasks and Execution Agents
+       reward that compares the rollouts against reference              Probably the closest to our domain, TerminalBench [? ] pro-
+       trajectories along suality and failure dimensions, pro-          vides a benchmark of realistic command-line tasks executed in
+       viding a rich training signal for a task where traditional       sandboxed Docker environments, finding that Frontier LLMs
+       outcome-based rewards [10] aren’t readily available.             still resolve fewer than 65% of tasks while smaller models score
+     • Comprehensive Evaluation We conduct an exten-                    only around 15%. Recent coding-agent training works [19, 20]
+       sive ablation on the subagent design and model train-            explicitly evaluate on Terminal-Bench as an out of domain
+       ing using SWE-Bench Pro and our internal benchmark,              task to see if the LLM generalizes to such tasks. More closely
+       SWE-Bench C#, measuring impact on resolve rate, to-              related to our work, Gandhi et al. [21] procedurally generate
+       ken efficiency and behavior signals. We complement               terminal tasks and use vanilla PPO to train small models for
+       this analysis with a 5-dimension LLM judge evalua-               terminal use. Our work differs from this because we train via a
+       tion of the subagent response from the main agent’s              novel rubric-based reward design on tasks mined from GitHub
+       perspective. In our evaluation, we demonstrate that              issues and treat terminal execution as a delegated subagent
+       Terminus-4B matches or exceeds frontier model per-               as our goal is to reduce main agent’s token usage. To the best
+       formance as an Execution Subagent.                               of our knowledge, prior work has treated terminal execution
+                                                                    2
+as a capability of the main agent rather than something that                                        In the subagent configuration, the main agent delegates the
+can be delegated to specialized subagent running a finetuned                                     same task to the Execution Subagent (using Terminus-4B, our
+smaller model. Our work fills this gap.                                                          RL-trained model) with a single query: “Run the build, then
+                                                                                                 the unit and approval tests, and report pass/fail
+2.4        Context Management for Long-Horizon                                                   counts with error details”. The subagent executes a total
+           Tasks                                                                                 of 9 commands internally in the subagent context and returns
+                                                                                                 a final answers that look like this:
+As LLMs and agents grow in capabilities, so do their trajecto-
+                                                                                                 < final_answer >
+ries in length and context management becomes an important                                       Command : dotnet build / testbed / Serilog . sln
+                                                                                                 Summary : Build succeeded . 9 warnings , 0 errors .
+concern when it comes to agent design. Long context inflates
+cost and degrades reasoning capabilities by diluting attention                                   Command : dotnet test .../ Serilog . Tests . csproj
+                                                                                                 Summary : All 769 tests passed , 0 failed , 0 skipped .
+away from task-relevant tokens in the trajectory. Focus [22]
+                                                                                                 Command : dotnet test .../ Serilog . ApprovalTests . csproj
+introduces an agent that autonomously decides when to con-                                       Summary : Test Run Failed - 1 failed .
+                                                                                                    Error : Serilog . received . txt does not match Serilog . approved . txt .
+solidate key learnings into a persistent blocks and actively                                        The diff shows new API surface in LoggerAuditSinkConfiguration .
+                                                                                                    To fix : update the approved snapshot file .
+prunes the agent interaction history. Sun et al. introduce Con-                                  </ final_answer >
+text folding [23], which is a framework that allows agents
+to branch sub-trajectories to handle subtasks and then fold                                         Instead of the full raw terminal output, the main agent only
+them into the main trajectory. Memex(RL) [24] introduces a                                       receives a ∼200-token summary at a time, which immediately
+compact representation of context with concise structured                                        identifies the underlying issue causing the test failure. Overall
+summaries and stable indices, SWE-ContextBench [25] explic-                                      the trajectory costs only 740k main agent tokens across 32
+itly evaluates how summarized and raw context affects coding                                     turns, which is significantly less compared to the baseline
+agents capabilities. Our subagent approach is complementary                                      agent. Furthermore, since the subagent uses a Terminus-4B,
+to these past approaches. Rather than compressing context,                                       the tokens consumed cost a fraction of the cost of main agent
+the Execution Subagent has an independent agentic loop to                                        tokens. This contrast highlights the need for such a subagent.
+run verbose terminal commands and prevents their output
+from ever entering the main agent context, absorbing it in the                                   4     METHODOLOGY
+subagent context and returning only a structured summary.                                        In this section, we describe the design of the Execution Sub-
+                                                                                                 agent and how it integrates into an existing coding agent, fol-
+3     MOTIVATING EXAMPLE                                                                         lowed by our post-training pipeline used to produce Terminus-
+                                                                                                 4B. Figure 2 shows a high-level overview of our approach. We
+In this section, we illustrate the benefits of our approach
+                                                                                                 begin by defining what a subagent is:
+through a real world example. Figure 1 shows two agent
+                                                                                                    Subagent: A secondary LLM-based agentic loop that is
+trajectories solving the same task from the Serilog C# repo
+                                                                                                 invoked by the parent (or the “main”) agent to handle a spe-
+(serilog/serilog #2053). The issue requires the agent to
+                                                                                                 cialized sub-task. Unlike the main agent, which solves a broad
+add a new batching API surface. Since this a brand new feature,
+                                                                                                 set of tasks, the subagent addresses a narrower, often simpler,
+the agent must build the solution, run unit tests, identify fail-
+                                                                                                 set of tasks. Similar to the main agent, the subagent has its
+ures and apply necessary fixes to make the build / test errors
+                                                                                                 own system prompt, context window, and tool set that it uses
+go away.
+                                                                                                 to achieve the goal delegated to it by the main agent.
+   When we compare the trajectories output by the agent with
+and without the subagent, we see very different outcomes. In
+                                                                                                 4.1      The Execution Subagent
+the baseline agent, each terminal command returns its full raw
+output into the agent’s context window itself. Over the course                                   Execution Subagent is one such subagent, which is specialized
+of the trajectory, the main agent makes 18 direct terminal calls,                                to sequentially generate and execute Terminal commands and
+many of which are repeated with slight variations as the agent                                   return structured summaries of the results to the main agent.
+tries different combinations of grep and tail filters on the                                     It is exposed to the main agent as a simple tool, which takes
+output to extract the relevant information from the verbose                                      only the following two parameters:
+build and test logs. Example:                                                                           • Query (Required): A natural language description of
+                                                                                                          the execution task i.e. what commands to run and
+$ dotnet   test   ...   2 >&1   |   tail   -40
+$ dotnet   test   ...   2 >&1   |   grep   -E " passed | failed | error "                                 what information to report back. For example: “Run
+$ dotnet   test   ...   2 >&1   |   grep   -A 10 " Error Message "
+$ dotnet   test   ...   2 >&1   |   grep   -E " passed | failed | Error Message | Assert "
+                                                                                                          the test suite and report which tests fail with their error
+$ dotnet
+...
+           test   ...   2 >&1   |   tail   -20                                                            messages.”
+                                                                                                        • Description (Required): A short summary shown to
+   Each call adds new raw output to the context, which gets                                               the user in the UI while the subagent is executing.
+sent as input context to the LLM for every subsequent turn.                                          The subagent returns a structured response containing a
+By the end of trajectory, the agent has consumed 2.46M main                                      summary of each command that was run, its outcome and
+agent tokens across 40 turns, with terminal output accounting                                    any relevant outputs (error messages, test counts, build status)
+for the majority of context.                                                                     delimited in XML-style (<final_answer>) tags. This simple
+                                                                                             3
+Figure 1: Contrasting agent trajectories for a real issue in the Serilog repository, with and without the Execution
+Subagent. Without the subagent (top), the main agent must directly invoke terminal commands, process verbose build
+and test output, and spend additional turns interpreting results, consuming significantly more tokens and turns. With
+our subagent (bottom), terminal execution tasks are delegated to the subagent, which absorbs the raw output and
+returns only the key findings in a concise final answer with a predefined format. The main agent never has to process
+the verbose terminal output, thereby preserving its context window.
+
+
+query-answer interface shields the main agent from the ver-               tasks, adapting the commands as necessary, 2) follow specific
+bosity of the raw terminal output. The main agent can flexibly            rules for Terminal tool usage i.e. using sync mode, set explicit
+describe what it wants to be run and returned to it and the               timeouts, no parallel calls, and 3) return a <final_answer>
+subagent handles how to get there.                                        containing a per-command summary with the command run
+                                                                          and a concise description of the result. The prompt also in-
+4.1.1 Tools & Turn Limit. The Execution Subagent has access               cludes an example showing a 2-step interaction (a failed make
+to a single tool: Terminal. This tool takes a shell command, an           command followed by a successful cmake && make) and the
+execution mode (sync or async) and a timeout in milliseconds,             corresponding <final_answer> formatted out. This example
+and returns the shell command’s output truncated to 60KB.                 anchors the model’s understanding of the expected behavior
+This is the exact same tool that is given to the main agent               and output structure.
+for running terminal commands. Further, we also restrict the
+subagent to call this tool only once per turn i.e. no parallel
+tool calling, use sync mode with a time and be bounded by                 4.1.3 Main Agent Integration. The Execution Subagent is reg-
+a configurable turn limit, which defaults to 10. If we reach              istered as one of the tools available to the main agent, along
+the turn limit without the subagent exiting on its own, we                with tools like ReadFile, Grep, Edit, etc. We also augment
+inject a user message ( “OK, your allotted iterations are finished.       the main agent’s system prompt (Figure 4) to describe when /
+Show the <final_answer>.” ) coaxing a final answer from the               how to invoke the Execution Subagent.
+subagent.                                                                    We also add the ability to independently configure the
+   These constraints serve to simplify the design and keep the            model powering the subagent. The default configuration uses
+subagent focused and predictable. The subagent isn’t given                the same frontier model as the main agent (e.g., Claude Sonnet
+tools to read files, edit code or any other tools and can only            4.6, GPT-5.3-Codex, etc.). While this produces high-quality
+run Terminal commands. The narrow scope is what makes                     trajectories and final responses, it is incredibly wasteful. The
+this task amenable to a smaller finetuned model.                          subagent’s task of running commands and summarizing out-
+                                                                          puts is verbose and token-heavy. However, it is narrow well-
+4.1.2 System Prompt. Figure 3 shows the system prompt used                structured compared to the main agent’s open-ended planning
+for the Execution Subagent. The prompt instructs the model                and code editing. Using a frontier model for this is overkill.
+to: 1) run Terminal commands to accomplish the delegated                  In the next section, we describe how we train Terminus-4B, a
+                                                                      4
+                                                                                 You are a highly sophisticated automated coding agent with expert-level
+                                                                                 knowledge across many programming languages and frameworks...
+                                                                                 The custom tools (Grep, FileSearch, ReadFile, ListDir) have been
+                                                                                 optimized for the agent surface. Default to these over terminal
+                                                                                 commands...
+
+                                                                                  == Using ExecutionSubagent ==
+                                                                                  For   most   execution    tasks  and   terminal   commands,   use
+                                                                                  ExecutionSubagent to run commands and get relevant portions
+                                                                                  of the output instead of using Terminal. Use Terminal in rare
+                                                                                  cases when you want the entire output of a single command without
+                                                                                  truncation.
+                                                                                  Don’t call ExecutionSubagent multiple times in parallel. Instead,
+                                                                                  invoke one subagent and wait for its response before running the
+                                                                                  next command.
+
+                                                                                 When invoking a tool that takes a file path, always use the absolute
+                                                                                 file path...
+
+
+
+                                                                               Figure 4: Instructions added to the main agent system
+                                                                               prompt shown in green. We instruct the main agent to
+                                                                               delegate terminal execution to the Execution Subagent.
+
+
+                                                                               Table 1: Breakdown of collected tasks based on Lan-
+Figure 2: Terminus-4B training pipeline. ❶ We first in-                        guage.
+tegrate the Execution Subagent as a tool into the main
+agent framework. ❷ Then we do SFT where the base
+Qwen3-4B model is fine-tuned on expert trajectories                                                  Language               Value
+from telemetry. ❸ We do further RL training with GRPO                                                TypeScript      1,011 (36.5%)
+on examples from GitHub, where rrollouts are graded by                                               C#                770 (27.8%)
+a rubric-based LLM-as-judge reward against reference                                                 Java              725 (26.2%)
+trajectories generated by Frontier LLM.                                                              JavaScript         196 (7.1%)
+                                                                                                     Python              65 (2.3%)
+
+  You are an AI coding research assistant that runs terminal commands
+  to perform a small execution-focused task.
+  You will be given a task description and potentially some commands to
+  run, but you can adapt them as necessary.                                    (SFT) on internal telemetry data consisting of expert trajec-
+  Rules for run_in_terminal:                                                   tories, followed by reinforcement learning (RL) with Group
+  - Always use mode="sync".                                                    Relative Policy Optimization (GRPO) on a curated dataset of
+  - Include "timeout" in ms (30000 short, 120000 builds).
+  - Only call run_in_terminal once per turn.                                   GitHub issues and reward comparing rollouts to expert trajec-
+  - Auto-confirm prompts with –yes, -y, or yes.
+                                                                               tories generated with a frontier LLM.
+  Output Format (REQUIRED)
+  Once finished, return ONLY a <final_answer> tag with a compact summary
+  of each command:                                                             4.2.1 Data Collection. We construct a training dataset of
+   <final_answer>                                                              ∼3200 execution tasks spanning multiple programming and
+   Command: cmake . && make
+   Summary: Build unsuccessful. Excerpt: ...                                   projects on GitHub. We start with a pool of ∼10k instances
+   </final_answer>                                                             across 2,144 repositories and 5 languages (TypeScript, C#, Java,
+  Tools Available                                                              JavaScript, Python), each of which we confirmed to be a build-
+  - run_in_terminal: Execute a shell command
+                                                                               able repo. For each instance, the repository is checked out at
+                                                                               the commit prior to the developer fix inside inside a Docker
+Figure 3: System prompt for the Execution Subagent. The
+                                                                               container with the project’s dependencies pre-installed.
+subagent is constrained to a single tool (Terminal), can
+                                                                                  We then run our agent with a frontier LLM as the main
+only run sync commands and must return a structured
+                                                                               agent on a subset of these instances ( 2k) with the Execu-
+<final_answer> summary.
+                                                                               tion Subagent enabled. During each run, the main agent is
+                                                                               prompted to use the Execution Subagent and organically de-
+                                                                               cides to invoke the subagent at various points in the trajectory.
+Qwen3-4B model post-trained specifically for this task, to re-                 We extract each subagent invocation from the resulting trajec-
+place the frontier model in the subagent while preserving, and                 tories, capturing 1) the query issued by the main agent, 2) the
+in some cases even improving the overall agent performance.                    complete subagent trajectory with all the Terminal calls, com-
+                                                                               mand outputs, and exit codes, the <final_answer> returned
+4.2    Post-Training Pipeline                                                  to the main agent and 3) the state of the repository right before
+To train Terminus-4B, we conduct a two-stage post-training                     the subagent was called. The need for each of these fields will
+pipeline shown in Figure 2. We first do supervised finetuning                  become clear as we further discuss the training pipeline.
+                                                                           5
+Table 2: Task Types represented in the collected set of                 qualities of an execution subagent such as accurate final an-
+execution tasks.                                                        swer with sufficient detail. RL with carefully designed reward
+                                                                        allows us to directly shape such behaviors. However, we must
+           Task Type (non-exclusive)                 Value              first discuss how we do rollouts at scale.
+           Test Execution                     2,692 (97.3%)
+                                                                           Subagent Rollout Framework. One key challenge in training
+           Build / Compile                      969 (35.0%)
+           Error Diagnosis                    2,166 (78.3%)
+                                                                        agents with RL is that each rollout requires end to end exe-
+           Dependency                            106 (3.8%)             cution and must begin at the same starting point (i.e. same
+                                                                        initial prompt, problem, repo state, etc.). While this is simpler
+                                                                        to do if we were training the main agent, it’s slightly trickier
+                                                                        to achieve this kind of consistency between subagent rollouts.
+   We found the resulting trajectories to contain 3,009 unique
+                                                                           We address this by decoupling the main agent from the
+Execution Subagent invocations across 730 repositories. We
+                                                                        subagent during training. Each training instance comes with
+take these trajectories as our gold-standard reference trajecto-
+                                                                        a pre-generated query (i.e. the input the Execution Subagent)
+ries. These trajectories will later be used to grade our rollouts
+                                                                        and repo state collected during the data collection step (Sec-
+during RL. Table 1 shows the breakdown of the collected prob-
+                                                                        tion 4.2.1). During rollouts, we use a lightweight pass-through
+lems in terms of languages. We can see that the dataset is
+                                                                        model (Qwen3-4B Instruct-2507) as the main agent, which
+dominated by TypeScript and C# due to our dataset’s com-
+                                                                        has been configured to just have a single tool (Execution
+position, but spans 720 repositories across 5 languages with
+                                                                        Subagent) and a 1-turn limit. This ensures the main agent
+diverse build systems using (npm, dotnet, mvn, gradle, pip),
+                                                                        deterministically forwards the pre-generated query to the sub-
+etc. Table 2 shows the kinds of tasks (classified using a simple
+                                                                        agent on its first and only turn. We wrap each query into a
+prompt) represented in the data. We can see that the majority
+                                                                        simple instruction as follows:
+of tasks are test execution, error diagnosis or build tasks. This
+makes sense because usually running test requires building the                 Call Execution Subagent with this query. You MUST
+                                                                               use Execution Subagent ONLY with this EXACT query.
+project. Furthermore, compilation errors or failures to build
+                                                                              <query>
+the project typically requires error diagnosis.                               Run `dotnet build PdfSharpCore.sln` in /testbed to check
+                                                                              for compilation errors, then run `dotnet test
+4.2.2 Phase I: Supervised Finetuning. Before we do RL, we                     PdfSharpCore.Test.csproj` and report any test failures.
+                                                                              </query>
+bootstrap the base Qwen3-4B model with supervised finetun-
+ing on expert trajectories collected from our internal usage               It should be noted that while we ensure deterministic behav-
+telemetry. When the Execution Subagent is run with frontier             ior of the main agent, the subagent’s behavior is then entirely
+model in production, each invocation produces a complete                determined by the policy model being trained and is able to
+multi-turn trajectory with a system prompt, user query, tool            run for a full trajectory, after which the main agent trajectory
+calls with terminal outputs and the final (<final_answer>). We          concludes. A key advantage of decoupling the main agent from
+extract these trajectories to use as SFT data. To prevent data          subagent like this is that it allows us to eliminate the cost of
+leakage, we also ensure the SFT and RL datasets are drawn               using a Frontier LLM as the main agent, helping us achieve
+from disjoint repo sets.                                                fast and inexpensive rollouts.
+   We apply standard language modeling loss with loss mask-                Each of these rollouts executes inside a Docker container
+ing i.e. gradients are only computed for assistant tokens, which        that contains our agent with the necessary modifications, the
+equates to tool calls and the final answer and not on the system        target repo checked out with the correct commit and the de-
+prompt, user messages and tool outputs:                                 pendencies needed to build the project and run the agent.
+                             ∑︁                                         Before rollout, we also apply a code patch to ensure the repo
+                LSFT = −           log 𝑝𝜃 (𝑥𝑡 | 𝑥 <𝑡 )        (1)       state matches the state before Execution Subagent was called
+                             𝑡∈A                                        in reference trajectory. Depending on when the Execution
+where A denotes the set of positions in the token sequence              Subagent was called in the reference trajectory, the patch may
+with assistant responses that get through masking. We do                or may not be empty. Finally, we use Azure Container Apps
+lightweight training for only two epochs. This stage teaches            (ACA) to orchestrate parallel rollouts.
+the model the mechanics of the task, including how to use
+the Terminal tool, interpreting outputs, and writing a useful              Reward Design. Designing an effective reward is critical
+final response. This provides a strong initialization for our RL        for RL to improve on top of SFT. Grading the quality of ex-
+training.                                                               ecution subagent rollouts is a difficult task as many things
+                                                                        can go wrong. For instance, the subagent may execute correct
+4.2.3 Phase II: Reinforcement Learning. Starting with the SFT           commands, but produce a vague summary or write a detailed
+checkpoint, we performr on-policy RL with Group Relative                summary that has hallucinated information. Further, it’s hard
+Policy Optimization (GRPO) [7] on the 2.7k execution tasks              to compare raw trajectories directly as two valid runs may
+collected in Section 4.2.1. While SFT teaches the model the             have completely differnt commands that produce different
+overall task shape, it doesn’t necessarily optimize for the key         outputs.
+                                                                    6
+  System: You are a helpful assistant that creates execution plans                   • Execution Quality: We ask the grader to evaluate the
+  summarizing what an AI agent did when running terminal commands. Your
+  plans should follow this template:                                                    candidate plan along 7 dimensions: command correct-
+  EXECUTION PLAN                                                                        ness, error handling, outcome accuracy, key informa-
+  Task Outcome: [success / failure / partial. One sentence.]                            tion extraction, completeness, efficiency and action-
+  Commands Executed: [For each command: what was run, why, and what
+  happened. Include exit codes.]                                                        ability. We average out these scores to get 𝑠¯pos .
+  Key Findings: [Error messages, version numbers, test counts, build                 • Failure Modes: We score 4 failure mode dimensions:
+  artifacts, etc.]
+                                                                                        hallucinated results, missed errors, wrong diagnosis
+  Error Recovery: [How were failures handled? What adaptations were
+  made?]                                                                                and unnecessary commands. Averaging these gives us
+  Final State: [What was accomplished?]                                                𝑠¯pit .
+  User:                                                                              • Final Answer Quality: We score 3 dimensions as-
+  ## Task Query                                                                         sessing the quality of the final answer returned to the
+  {query}
+  ## Trajectory Data                                                                    main agent: detail level, factual accuracy, and infor-
+  ### Command 1: `cmake . && make`                                                      mativeness. This group targets the <final_answer>
+  Exit Code: 0
+  Output: (truncated head + tail)                                                       specifically, since it is the only output the main agent
+  ### Command 2: `make test`                                                            sees. Averaging the scores gives us 𝑠¯fa .
+  Exit Code: 1
+  Output: (truncated head + tail)                                               The final reward blends the scores for execution quality
+  ## Final Answer Returned to Parent Agent
+  {final_answer}                                                              with final answer quality:
+  Create a detailed execution plan following the template.
+                                                                                                     𝑟 = (1 − 𝛼)(¯𝑠 pos − 𝑠¯pit ) + 𝛼 · 𝑠¯fa                     (2)
+Figure 5: Prompt used with a frontier LLM to generate
+                                                                              where 𝑠¯pos , 𝑠¯pit , and 𝑠¯fa are the means of the positive, pitfall,
+Execution Plans from raw trajectories. Command out-
+                                                                              and final answer dimension scores respectively. We use an
+puts are truncated to the first and last 500 characters to
+                                                                              𝛼 = 0.5.
+keep the prompt concise while preserving key informa-
+                                                                                 Before rubric gading, we also apply some hard penalties
+tion (errors typically appear at the end, setup info at the
+                                                                              for degenerate rollouts. Trajectories exceeding 30K tokens
+start). We use this to convert both the reference and roll-
+                                                                              receive 𝑟 = −100. The ones missing <final_answer> tags
+out trajectories to their corresponding Execution Plans.
+                                                                              receive 𝑟 = −100, and rollouts with no commands receive
+                                                                              𝑟 = −50. We also discard prompt groups where the reward
+                                                                              standard deviation 𝜎𝐺 < 0.01, as near-identical scores across
+                                                                              all 𝐺 rollouts would produce negligible gradient signal for
+                                                                              GRPO to learn.
+
+                                                                              5 EXPERIMENTAL SETUP
+   We design a rubric-based LLM-as-judge reward that breaks
+our reward into two subcomponents based on our two main                       5.1 Training Setup
+concerns: did the subagent execute the right commands? and                    Across all our training runs, we used a single node equipped
+how useful was the final answer to the main agent’s workflow?.                with 8 NVIDIA A100/H100 GPUs for training. For inference
+The second component is especially important because the                      we deploy the model on Fireworks platform [26].
+final summary is the onlt window the main agent has into
+what the subagent did.                                                        5.1.1 SFT Details. We first perfom full SFT on the Qwen3-4B-
+   To compare what the subagent did with the reference, one                   Instruct-2507 base model with Slime [27] using our telemetry
+could pass the entire trajectories (rollout and ref) to the LLM,              data. We train for 2 epochs with the Adam optimizer (𝛽 1 =0.9,
+but that would be very expensive. We would need to process                    𝛽 2 =0.95), a peak learning rate of 2 × 10−5 with cosine decay to
+the reference trajectory once for every rollout’s reward com-                 2×10−6 and 5% linear warmup. We use a global batch size of 32,
+putation i.e. N times the cost. Rather than comparing verbose                 weight decay of 0.01, and dynamic batching with a maximum
+raw trajectories, we first condense each rollout’s trajectory                 of 8,192 tokens per GPU. Loss is computed only on assistant
+into a structured summary we call an Execution Plan using the                 tokens.
+prompt shown in Figure 5. We give a frontier LLM a condensed
+version of the trajectory where we include all the commands                   5.1.2 RL Details. Starting from the SFT checkpoint, we apply
+The same extraction was applied to the reference trajectories                 on-policy RL using GRPO with asymmetric clipping [28] to
+during data collection, producing reference execution plans                   reduce premature collapse. For each prompt 𝑥, we sample
+as ground truth. This intermediate representation normalizes                  𝐺 = 8 rollouts {𝑎𝑖 }𝐺
+                                                                                                  𝑖=1 ∼ 𝜋𝜃 old (· | 𝑥). We optimize the following
+trajectories into a comparable format regardless of the specific              objective:
+commands used. We then use a powerful frontier LLM for
+grading the candidate plan against the reference plan across                                 𝐺
+                                                                                          1 ∑︁                                             
+                                                                                                min 𝑟𝑖 (𝜃 ) 𝐴ˆ𝑖 , clip 𝑟𝑖 (𝜃 ), 1−𝜖𝑙 , 1+𝜖ℎ 𝐴ˆ𝑖 − 𝛽 𝐷 KL 𝜋𝜃 ∥𝜋SFT (3)
+                                                                                                                                                                
+                                                                               𝐽 (𝜃 ) =
+14 rubric dimensions across three groups:                                                 𝐺 𝑖=1
+                                                                          7
+                                                  Reward                                                                        KL Divergence
+                      60
+                                                                                                                     GRPO (no SFT)
+                                                                                                         0.25        GRPO (after SFT)
+                      50                                         Terminus-4B
+
+                                                                                                         0.20
+
+
+
+
+        Mean Reward                                                                      KL Divergence
+                      40
+                                                                                                         0.15
+
+                      30
+                                                                                                         0.10
+
+
+                      20                                                                                 0.05
+                                                                      GRPO (no SFT)
+                                                                      GRPO (after SFT)
+                                                                                                         0.00
+                      10
+                           0           10   20        30         40        50       60                          0      10       20        30         40   50   60
+                                                 Training Step                                                                       Training Step
+
+
+Figure 6: Training plots for GRPO with and without SFT initialization. SFT starts RL training off with a strong prior
+that enables higher reward and learning. Looking at the KL plot, we can see that the run stays close to reference (SFT
+checkpoint). We can clearly see the gain from starting from the SFT checkpoint.
+
+                 𝜋 (𝑎 |𝑥 )
+where 𝑟𝑖 (𝜃 ) = 𝜋 𝜃 (𝑎𝑖 𝑖 |𝑥 ) is the importance ratio, 𝐴ˆ𝑖 is the                                       negatively impact token consumption, etc. 2) subagent output
+                               𝜃 old
+group normalized advantage and we use asymmetric clip                                                    quality, i.e. does the main agent actually find the subagent
+thresholds of 𝜖low = 0.20, 𝜖high = 0.28 to allow the policy more                                         output useful?
+room to increase high reward probabilities. The KL penalty                                                  For our experiments, we use the following subagent con-
+we use is 𝛽 = 0.02, which is computed using hte SFT check-                                               figurations ranging from no subagent to various models we
+point as the reference model. This is to prevent catastrophic                                            want to measure performance of:
+drift from the reference and base model behavior. We train
+                                                                                                                • Opus / Sonnet: We use Frontier LLMs Opus / Sonnet
+with a constant learning rate of 10−6 and gradient clipping
+                                                                                                                  as subagents. These are meant to represent the upper
+at 1.0. We use a rollout batch size of 16 prompts (each with
+                                                                                                                  bound in terms of capability.
+𝐺=8 samples) i.e. yielding 128 rollouts per step with a global
+                                                                                                                • Vanilla-4B: We use the base Qwen3-4B-Instruct-2507
+training batch size of 64. For reward computation, execution
+                                                                                                                  model as the subagent.
+plans are generated and graded with a frontier LLM.
+                                                                                                                • SFT-4B: We use the checkpoint following SFT as the
+                                                                                                                  subagent.
+5.2    Evaluation Setup                                                                                         • Terminus-4B: We use the peak checkpoint after RL
+In this section, we lay out the offline evaluations we conducted                                                  as the model behind the subagent.
+on our technique, the benchmarks used and metrics we mea-
+sured.                                                                                                      We combine these subagent configurations with 3 fron-
+                                                                                                         tier LLMs as main agents: GPT-5.3-Codex, Claude Sonnet 4.6,
+5.2.1 Benchmarks. We use evaluate our approach on two                                                    Claude Opus 4.6, in order of increasing capability.
+benchmarks:
+      • SWE-Bench Pro: This is a benchmark [29] contain-                                                 5.2.3 Tool Configurations. We ablate over different tool con-
+        ing problems from a diverse set of examples and is                                               figurations to isolate the impact of the subagent on the agent’s
+        explicitly designed to solve some of the problems SWE-                                           performance:
+        Bench [30] faced. These span multiple languages and
+        domains. We run ∼731 examples from the full set.                                                        • Terminal Tool Only (No Subagent): This is our base-
+      • SWE-Bench C#: This is our internal benchmark of                                                           line where the Execution Subagent is disabled entirely.
+        150 GitHub issues collected from C# repositories in                                                       We also leave the system prompt of the main agent
+        SWE-Bench style of collection. Since solving the prob-                                                    unmodified.
+        lems in this benchmark requires lots of project build-                                                  • Subagent + Terminal Tool: The Execution Subagent
+        ing / running tests, this is a natural candidate for eval-                                                is enabled along with the Terminal tool. The main
+        uating our approach.                                                                                      agent has the choice to delegate terminal work to the
+                                                                                                                  subagent or can run directly using Terminal.
+5.2.2 Ablations. Given these benchmarks, we conduct a set                                                       • Subagent Only (No Terminal): The Execution Sub-
+of ablation experiments designed to test two things: 1) end-to-                                                   agent is the only terminal execution tool available to
+end agent performance with our approach, i.e. our approach                                                        the main agent.
+doesn’t compromise the agent’s ability to solve problems or
+                                                                                         8
+  System: You are a strict evaluator assessing the quality of an execution
+  subagent’s response. The main agent only sees the subagent’s final
+                                                                                 6 RESULTS
+  response — it has no access to intermediate commands or raw output.
+                                                                                 6.1 RL Training
+  Judge the response on these dimensions (0.0–1.0):
+  task_completion: Did the subagent fully accomplish what was asked?             Figure 6 shows how the reward and KL divergence tends over
+  factual_accuracy: Is the response factually grounded and verifiable?
+  (exit codes, paths, exact errors)
+                                                                                 the course of our training for two configurations: GRPO ap-
+  informativeness: Enough detail to proceed without re-running commands?         plied directly to the base Qwen3-4B-Instruct-2507 model (i.e.
+  relevance: Focused on the query with no extraneous content?
+  actionability: Can the main agent determine clear next steps?                  no SFT) and GRPO starting from the SFT checkpoint.
+  User:                                                                             Comparing the reward plots, we can see that the reward for
+  ## Main Agent Context                                                          the ‘No SFT’ run plateaus at ∼20 and fails to improve compared
+  System prompt (excerpt): {system_prompt}
+  Problem statement: {problem_statement}                                         to the baseline scores, seen initially in the run. However, the
+  Trajectory so far: {trajectory}                                                KL divergence rises rapidly to over 0.2, indicating the policy
+  ## Subagent Query
+  {subagent_query}                                                               drifted significantly from reference without any meaningful
+  ## Subagent Response                                                           learning. We believe this is because the base model lacks a
+  {subagent_response}
+                                                                                 fundamental understanding of this task and things like output
+  ## Subsequent Trajectory ({N} turns after)
+  {trajectory_after}                                                             format and doesn’t manage to stumble on those behaviors
+  Judge the response using the subsequent trajectory to assess whether           during training to provide GRPO the gradient signal needed
+  the main agent effectively used it.
+                                                                                 to enforce such behaviors.
+                                                                                    In stark contrast, we can see that the RL run starting with
+Figure 7: A condensed version of the LLM-judge Score                             the SFT checkpoint starts at a much higher reward of ∼37 and
+Prompt. The judge receives the main agent’s full con-                            steadily climbs 50+ reward, while the KL remains close to the
+text before and after the subagent call, and scores the                          SFT checkpoint (within 0.05). Intuitively, this is because SFT is
+response along 5 dimensions. The subsequent N=5 turns                            able to provide the model with a good starting knowledge of
+in the trajectory after the subagent call reveals whether                        the mechanics of the task i.e. what’s the desired output format,
+the response was useful in practice.                                             the Terminal tool usage, etc. These results confirm that SFT
+                                                                                 is not merely helpful, but essential to the training. We call
+                                                                                 the resulting model from our RL training the Terminus-4B
+                                                                                 model. We show the utility of the RL training itself via our
+                                                                                 ablations.
+5.2.4 Metrics. For all our configurations, we compute the
+following metrics using the evaluation harness outcome and                       6.2    Benchmark Ablations
+agent trajectories:                                                              In this subsection, we talk about the different ablations we
+                                                                                 conduct on the benchmarks in our evaluation setup.
+     • Resolution Rate (%): The fraction of instances that
+       pass the benchmark’s evaluation.                                          6.2.1 Cross-Language Generalization (via SWE-Bench Pro). To
+     • Token Usage: This is the average input and output                         test whether the Execution Subagent architecture and Terminus-
+       main agent / subagent tokens consumed by the agent                        4B generalize to different languages, we evaluate on SWE-
+       configuration.                                                            Bench Pro [29], which is a multilingual benchmark spanning
+     • Main Agent Terminal Calls: This is the average                            Python, JavaScript, TypeScript, Java, Go, etc. We use Claude
+       direct calls to Terminal tool made by the main agent.                     Opus 4.6 as the main agent model across all subagent configu-
+     • Subagent followed by Terminal Calls: This the                             rations. Table 3 shows the results.
+       average number of cases per instance where the Ter-                           We see that in terms of token usage, all subagent configu-
+       minal tool was called right after Execution Subagent.                     rations improve over the No Subagent configuration. We also
+       We expect a bulk of these cases to be the main agent                      see no impact to the agent’s performance on the benchmark as
+       having to redo the work done by the subagent due to                       all the Resolve % numbers stay close to the baseline resolution
+       the output not being very useful.                                         rate of 30%. This confirms that delegating terminal execution
+     • Final Answer Rate (%): We measure the fraction of                         to a subagent is beneficial in complex coding tasks.
+       subagent calls that return a well-formed final answer                         Looking at the Frontier token usage, we see savings for both
+       delimited with (<final_answer>) tags.                                     the SFT-4B and Terminus-4B models (∼13% or ∼110k tokens
+     • LLM-Judge Score: To get a measure of the utility of                       per instance for both), which is higher than the Frontier LLM
+       the final answer from subagent, we compute an LLM                         token usage of Sonnet or Opus as the subagent. We can see a
+       score where the LLM is given the trajectory leading up                    clear improvement over Vanilla Qwen3-4B model where the to-
+       to the subagent call, the final response and N=5 steps                    ken usage actually increases (by ∼0.5%) over the baseline as the
+       coming after the subagent call to see if the results were                 main agent likely has to compensate for unhelpful responses
+       actually used. The LLM is prompted to score the final                     from the subagent by having to run Terminal commands on its
+       response along various dimensions. The prompt used                        own, which we can see from the high Subagent→Terminal of
+       is shown in Figure 7.                                                     0.27, which means that over a quarter of Execution Subagent
+                                                                             9
+Table 3: Results of running various models as the Execution Subagent over SWE-Bench Pro, using Claude Opus 4.6 as
+the main agent model. We show the tokens consumed by frontier LLMs for each run, as well as SLM tokens consumed.
+We can see that with both SFT-4B and Terminus-4B, expensive frontier token usage drops while overall performance
+is maintained.
+
+  Subagent Config.      Resolve %       Main Agent Tokens        Subagent Tokens     Frontier LLM Tokens   Main Agent Terminal   Subagent→Terminal   Final Answer %
+  No Subagent           30.0            836k                     -                   836k                  3.8                   -                   -
+  Opus                  32.0            729k (-12.8%)            19k                 748k (-10.5%)         0.5 (-86.8%)          0.04                100.0
+  Sonnet                32.6            756k (-9.6%)             19k                 774k (-7.4%)          0.6 (-84.2%)          0.06                100.0
+  Vanilla-4B            30.4            840k (+0.5%)             6k                  840k (+0.5%)          1.9 (-50.0%)          0.27                99.0
+  SFT-4B                32.4            727k (-13.0%)            17k                 727k (-13.0%)         1.1 (-71.1%)          0.17                98.5
+  Terminus-4B           31.5            730k (-12.7%)            18k                 730k (-12.7%)         1.0 (-73.7%)          0.14                97.9
+
+
+
+Table 4: Resolution rates (%) and subagent call rates of                                       how often different models choose to call the subagent. We
+different subagent and main agent model combinations                                           see that Opus is more likely to call the Execution Subagent
+over SWE-Bench C#.                                                                             (>90% of instances) with Sonnet being somewhat lower (∼72 -
+                                                                                               75%).
+                     Claude Opus 4.6       Claude Sonnet 4.5      GPT-5.3-Codex                   In terms of token efficiency metrics in Table 5, we can see
+    Subagent         Resolve   Call %      Resolve      Call %    Resolve   Call %
+                                                                                               that Terminus-4B achieves the largest Main agent and Frontier
+    No Subagent       46.7      -            47.3        -         38.0      -
+    Opus              46.0     94.6          46.7       75.3       40.3     89.3               LLM token reduction for Claude Opus 4.6 and GPT-5.3-Codex
+    Sonnet            46.0     93.3          44.7       72.0       40.7     90.7               where the subagent usage remains high. We can clearly see
+    Vanilla-4B        44.0     91.0          44.0       74.3       36.9     87.1
+    SFT-4B            47.0     95.3          44.0       73.2       42.0     89.9               that these reductions in token usages are higher than Frontier
+    Terminus-4B       46.7     89.3          46.7       74.7       38.0     85.3               LLMs. For Sonnet as the main agent, the custom trained mod-
+                                                                                               els perform comparably to Opus and Sonnet as subagents. The
+                                                                                               Vanilla Qwen3-4B model shows the weakest savings through-
+calls using the Vanilla model are followed by a Terminal call by                               out, showing the importance of our post-training for this task.
+the main agent. This clearly shows that our training improves                                     Finally, the behavioral metrics also show a consistent pat-
+on the Vanilla model.                                                                          tern across all three main agents. Terminus-4B reduces the
+    Looking more closely at the behavioral metrics, we see that                                main agent’s Terminal calls by 62-79% compared to the No Sub-
+the Main Agent’s Terminal usage drops from an average call                                     agent baseline. We also see the Subagent→Terminal distrust
+rate of 3.8 per instance to 1 for our RL-trained model, which                                  signal drop due to our post-training. Terminus-4B achieves a
+is a ∼74% reduction. This is an improvement over the Vanilla                                   substantial improvement over both Vanilla and SFT in terms
+and SFT models (1.9 and 1.1 calls per instance, respectively).                                 of the distrust signal across all main agent models. This shows
+We also see a similar reduction in the Subagent→Terminal for                                   the robustness of the quality improvements from RL and that
+Terminus-4B, where only 14% of subagent calls are followed by                                  they transfer across different main agent models.
+terminal usage from the main agent. While this is still far from
+Opus and Sonnet’s performance (4% and 6%) on this metric,
+                                                                                               6.2.3 Removing Terminal Tool. To isolate the quality of the
+it’s a big improvement from the Vanilla and SFT models. These
+                                                                                               subagent from the main agent’s ability to compensate for poor
+results demonstrate that the execution behaviors learned dur-
+                                                                                               responses by running Terminal tool on its own, we run an
+ing our post-training i.e. Terminal tool usage patterns, final
+                                                                                               ablation where the Terminal tool is removed entirely from the
+answer generation with effective summarization of subagent
+                                                                                               main agent. In this configuration, all terminal execution must
+context, transfer effectively across programming languages.
+                                                                                               flow through the Execution Subagent. This provides a clean
+6.2.2 Generalization Across Main Agent Models (via SWE-                                        comparison of the subagent quality and stress test across dif-
+Bench C#). To test whether the subagent and Terminus-4B                                        ferent subagent models. We use Claude Opus 4.6 as the main
+work regardless of the Frontier LLM used as the main agent,                                    agent. Further, rather than showing Subagent→Terminal met-
+we evaluate our approach on SWE-Bench C# with three main                                       ric in our previous evaluations, we show Subagent→Subagent
+agent models: Claude Opus 4.6, Sonnet 4.6 and GPT-5.3-Codex.                                   as a way to measure how often the main agent needs to repeat
+Table 4 shows the resolution rates and relative call rates of the                              subagent calls. Table 6 shows the results of this ablation.
+subagent between different main agent models. Table 5 shows                                       Once again the resolution rates remain comparable across
+the token usage and behavioral metrics across the different                                    all configurations (44-48% range), confirming that even with-
+configurations.                                                                                out Terminal tool access, the Execution Subagent is sufficient
+   Looking at the Table 4, we can see that the resolution rates                                to allow the main agent to complete tasks meaningfully. We
+remain quite stable across all subagent configurations, with                                   also see that Terminus-4B is able to perform this role as effec-
+Terminus-4B matching or being close to the No Subagent                                         tively as Frontier models at a fraction of the cost.
+baseline for all main agent models. This confirms that the                                        Without the main agent’s ability to call Terminal tool, the
+Subagent does not degrade the end-to-end performance of the                                    impact of subagent quality becomes starkly visible. The Vanilla-
+agent regardless of the main agent model. The call rate shows                                  4B model actually drives the token usage above the Opus
+                                                                                          10
+Table 5: Results of running various models as Execution Subagent with different main agent models for SWE-Bench
+C#. We show the breakdown of token usage as well as behavioral metrics. We show percentage changes relative to the
+No Subagent baseline. For Frontier tokens, we include main agent tokens plus subagent tokens when the Execution
+Subagent is a frontier model. SLM tokens are consumed by only the 4B subagents.
+
+                  Subagent                     Claude Opus 4.6                                Claude Sonnet 4.5                                                     GPT-5.3 Codex
+                                                                                         Avg. Tokens
+                                  Main                   Sub   Frontier     SLM   Main                   Sub                   Frontier       SLM     Main                     Sub       Frontier      SLM
+                  No Subagent     1,010k                 -     1,010k       -     1,496k                 -                     1,496k         -       1,036k                   -         1,036k        -
+                  Opus            710k (-29.7%)          25k   734k         -     1,125k (-24.8%)        26k                   1,151k         -       764k (-26.3%)            25k       789k          -
+                  Sonnet          757k (-25.0%)          27k   784k         -     1,074k (-28.2%)        28k                   1,102k         -       758k (-26.8%)            30k       789k          -
+                  Vanilla-4B      802k (-20.6%)          11k   802k         11k   1,460k (-2.4%)         9k                    1,460k         9k      902k (-12.9%)            12k       902k          12k
+                  SFT-4B          833k (-17.5%)          23k   833k         23k   1,109k (-25.9%)        24k                   1,109k         24k     726k (-29.9%)            36k       726k          36k
+                  Terminus-4B     693k (-31.4%)          25k   693k         25k   1,177k (-21.3%)        27k                   1,177k         27k     704k (-32.0%)            42k       704k          42k
+                                                                 Main Agent Terminal Usage & Subagent→Terminal
+                                         Main Terminal          Sub→Terminal             Main Terminal                             Sub→Terminal              Main Terminal                Sub→Terminal
+                  No Subagent                 6.2                      -                      6.3                                        -                        4.2                             -
+                  Opus                   0.7 (-88.7%)                0.09                1.0 (-84.1%)                                  0.06                  0.0 (-100%)                        0.00
+                  Sonnet                 0.9 (-85.5%)                0.13                1.1 (-82.5%)                                  0.11                  0.1 (-97.6%)                       0.02
+                  Vanilla-4B             2.5 (-59.7%)                0.39                3.6 (-42.9%)                                  0.36                  1.4 (-66.7%)                       0.43
+                  SFT-4B                 2.1 (-66.1%)                0.31                2.1 (-66.7%)                                  0.23                  0.8 (-81.0%)                       0.25
+                  Terminus-4B            1.7 (-72.6%)                0.23                2.4 (-61.9%)                                  0.17                  0.9 (-78.6%)                       0.19
+
+
+
+Table 6: Results on SWE-Bench C# results after Terminal tool is removed from the main agent, using Claude Opus
+4.6 as the main agent model. All terminal work must flow through the Execution Subagent, providing a cleanest
+comparison of subagent quality. We show percentage changes relative to the Opus subagent baseline.
+
+       Subagent       Resolve %     Main Agent Tokens             Subagent Tokens          Frontier LLM Tokens                            SLM Tokens           Sub Calls             Sub→Sub               Final Ans. %
+       Opus              45.3                   704k                        35k            740k                                                 -                  2.4               0.89                         100.0
+       Sonnet            48.0                   632k                        33k            664k (-10.3%)                                        -                  2.3               0.76 (-14.6%)                 99.4
+       Vanilla-4B        44.7                   810k                        18k            810k (+9.5%)                                        18k                 3.1               1.51 (+69.7%)                 99.4
+       SFT-4B            45.3                   590k                        32k            590k (-20.3%)                                       32k                 2.5               1.07 (+20.2%)                 98.7
+       Terminus-4B       45.9                   605k                        34k            605k (-18.2%)                                       34k                 2.4               0.89 (0.0%)                   98.9
+
+
+
+baseline (+9.5%) and exhibits a Sub→Sub rate of 1.51, meaning                                                        Overall LLM-as-a-Judge (Opus-4.6) Score Distribution
+the main agent re-invokes the subagent over 1.5 times per                                                                    1.0
+
+instance on average, which is a ∼70% increase over Opus.
+Another thing we see is that the subagent trajectories are too
+                                                                                                                             0.8
+short (only 18k tokens) indicating they may lack detail needed
+
+
+
+                                                                                                          Avg. Judge Score
+for the main agent to proceed confidently. In contrast, we see
+that both SFT and Terminus-4B models improve significantly                                                                   0.6
+
+over the Vanilla model and Opus baseline in terms of Frontier
+LLM token consumption (∼20%). We also see that the token                                                                     0.4
+consumption of the Subagent trajectory is also higher, evident
+from the SLM token usage per instance for both SFT and
+Terminus models.                                                                                                             0.2
+
+   Comparing the SFT and RL models, we see that the distrust
+metric of Sub→Sub rate improves from SFT to Terminus-4B                                                                      0.0
+model, from over 1.0 to 0.89 per instance, matching Opus itself.                                                                     Opu
+                                                                                                                                        s
+                                                                                                                                                    Sonn
+                                                                                                                                                        et            la -4B            SFT-4
+                                                                                                                                                                                              B
+                                                                                                                                                                                                           inus
+                                                                                                                                                                                                               -4B
+                                                                                                                                                                Vanil                               Term
+This shows that the RL stage is crucial in teaching the model
+to produce responses that satisfy the main agent on the first
+attempt.                                                                                             Figure 8: LLM judge scores for subagent response quality
+                                                                                                     from the main agent’s perspective in the No Terminal
+6.2.4 Assessing Response Quality via an LLM-Judge. To mea-                                           ablation. We show the overall score distributions across
+sure the utility of the subagent response from the main agent’s                                      the different subagent models.
+perspective, we also employ an LLM-as-a-Judge evaluation.
+We use Claude Opus-4.6 as the Judge model and prompt it to
+score the subagent response given the trajectoy leading up to
+the subagent invocation and N steps following it in the main                                         to use the response. We prompt the Judge LLM to score the
+agent trajectory. We set N to 5 for our evaluation as we believe                                     subagent response along 5 dimensions (each scored from 0 to
+that should be sufficient turns to observe main agent’s ability                                      1):
+                                                                                               11
+     • Task Completion: Did the subagent fully accomplish                 agents, which may be more convoluted and messy. It may fea-
+       the task it was asked to complete?                                 ture a myriad of tasks ranging from debugging the application
+     • Factual Accuracy: Are the claims made by the sub-                  to deployment or infrastructure-level tasks.
+       agent grounded in fact or does it hallucinate?                        Base Model Choice. We train exclusively on Qwen3-4B
+     • Informativeness: Does the response contain suffi-                  model, which represents a reasonable size and family of models
+       cient detail for the main agent to proceed without                 for this task. Our results demonstrates that a 4B-parameter
+       re-running commands?                                               model with sufficient training can prove competent for this
+     • Relevance: Is the response focused on the task or is               task, but our study leaves out larger models (8B, 30B, etc.)
+       it doing unnecessary work outside of it?                           as well as alternative model families. It remains to be seen
+     • Actionability: Can the main agnet figure out what                  whether the same post-training recipe transfers effectively to
+       to do next based on the response? Is the output of the             other families / model sizes.
+       subagnet actionable?
+   The overall score is the mean across all five dimensions. We           8   CONCLUSION
+run this evaluation on the No Terminal tool ablation runs. As             In this work, we presented the Execution Subagent and Terminus-
+input the Judge prompt includes the following information: 1)             4B, a 4B-parameter language model fine-tuned to serve as the
+the main agent’s system prompt and original problem state-                execution subagent within coding agents. Through a two-stage
+ment, 2) the trajectory leading up to the subagent call (prior            post-training pipeline, we showed that even a small language
+tool calls and results), 3) the subagent query and response and           model can match or exceed Frontier LLM performance at a
+4) the subsequent 5 turns of the main agent’s trajectory after            small contained task of terminal execution, while reducing
+receiving the subagent response. The subseqeunt trajectory is             the frontier LLM token usage by up to ∼30%. Our ex-
+key here because it provides the judge the ability to understand          tensive evaluation on benchmarks like SWE-Bench Pro and
+how the main agent responds to the subagent response and                  SWE-Bench C#, demonstrates that Terminus-4B generalizes
+whether it’s able to use it readily for does it have to re-invoke         across programming languages and choices of main agent mod-
+the subagent with a different query.                                      els spanning two popular model families (Claude and GPT).
+   Looking at the results, we can see that Terminus-4B achieves           The behavioral metrics across our evaluation confirm that
+scores comparable to frontier LLMs. Interestingly, we see that            the post-training significantly improves on the Vanilla model
+Sonnet actually performs the best in this evaluation. Terminus-           (Qwen3-4B) and the main agent learns to rely on Terminus-4B
+4B results seem to be approaching those of Sonnet and are                 responses at the same level as Frontier LLM, rarely needing
+slightly better than Opus. This corroborates the distrust metric          to redo work. Broadly, our work also demonstrates a practical
+of Sub→Sub being equal between Opus and Terminus-4B in                    paradigm of training smaller LMs as subagents and using them
+this configuration (as seen in Table 6).                                  to reduce the cost of running coding agents, by diverting token
+   Comparing the scores between the smaller models specifi-               usage to the subagent. The subagent architecture provides a
+cally, we can clearly see that the median score for Terminus-4B           natural way to decompose complex tasks in smaller sub-tasks
+is higher than that of SFT-4B. Both SFT and Terminus-4B are               which can be shared across models of differing capabilities.
+better than the Vanilla model, showing the importance of both             We believe that our results are directly applicable to other
+stages of our post-training.                                              subagent types and provide a scalable path towards coding
+                                                                          agents that are more capable, cost-effective and accessible to
+7   LIMITATIONS                                                           everyone.
+
+While our results demonstrate that finetuned small language
+                                                                          REFERENCES
+model can effectively replace Frontier LLMs at the task of
+                                                                          [1] Microsoft, “VSCode Agent Mode,” https://code.visualstudio.com/blogs/
+terminal execution in coding agents, there remain several                     2025/04/07/agentMode, 2025, accessed: 2025-09-28.
+limitations:                                                              [2] X. Wang, B. Li, Y. Song, F. F. Xu, X. Tang, M. Zhuge, J. Pan,
+                                                                              Y. Song, B. Li, J. Singh, H. H. Tran, F. Li, R. Ma, M. Zheng, B. Qian,
+   Platform / Shell Coverage. Both our training and evalu-                    Y. Shao, N. Muennighoff, Y. Zhang, B. Hui, J. Lin, R. Brennan,
+ation are skewed towards Unix / Bash-based terminal tasks.                    H. Peng, H. Ji, and G. Neubig, “Opendevin: An open platform for ai
+We do not include tasks from other shells like Powershell or                  software developers as generalist agents,” 2024. [Online]. Available:
+                                                                              https://arxiv.org/abs/2407.16741
+Command Prompt for Windows or Zsh for Mac-based usage,                    [3] Anthropic, “Claude for Coding,” https://www.anthropic.com/claude-code,
+despite these being common in real-world development. Ex-                     2024, accessed: 2025-07-14.
+tending Terminus-4B to handle these other shells is a natural             [4] J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan,
+                                                                              and O. Press, “Swe-agent: Agent-computer interfaces enable automated
+future direction for this work.                                               software engineering,” 2024. [Online]. Available: https://arxiv.org/abs/
+   Evaluation Scope. Our evaluation is almost exclusively                     2405.15793
+                                                                          [5] S. Garg and Y. Huang, “Debug2fix: Can interactive debugging help
+conducted on SWE-Bench style benchmarks, which are drawn                      coding agents fix more bugs?” 2026. [Online]. Available: https:
+from GitHub issues and are solved by running the agent in                     //arxiv.org/abs/2602.18571
+Docker containers already containing the dependencies needed              [6] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao,
+                                                                              C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge,
+for the project. While this is consistent with prior coding agent             H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou,
+evaluation in literature, this may not reflect real world usage of            J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue,
+                                                                     12
+     M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo,                               Z. Zhang, W. Zhao, and F. Zhou, “Qwen3-coder-next technical report,”
+     T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan,                              2026. [Online]. Available: https://arxiv.org/abs/2603.00729
+     Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang,                      [20] S. Cao, D. Li, F. Zhao, S. Yuan, S. R. Hegde, C. Chen, C. Ruan, T. Griggs,
+     Z. Zhou, and Z. Qiu, “Qwen3 technical report,” 2025. [Online]. Available:                       S. Liu, E. Tang, R. Liaw, P. Moritz, M. Zaharia, J. E. Gonzalez, and I. Stoica,
+     https://arxiv.org/abs/2505.09388                                                                “Skyrl-agent: Efficient rl training for multi-turn llm agent,” 2025. [Online].
+ [7] Z. Shao, P. Wang, Q. Zhu, R. Xu, J. Song, X. Bi, H. Zhang, M. Zhang,                            Available: https://arxiv.org/abs/2511.16108
+     Y. K. Li, Y. Wu, and D. Guo, “Deepseekmath: Pushing the limits                             [21] K. Gandhi, S. Garg, N. D. Goodman, and D. Papailiopoulos, “Endless
+     of mathematical reasoning in open language models,” 2024. [Online].                             terminals: Scaling rl environments for terminal agents,” 2026. [Online].
+     Available: https://arxiv.org/abs/2402.03300                                                     Available: https://arxiv.org/abs/2601.16443
+ [8] L. Zheng, W.-L. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang,                             [22] N. Verma, “Active context compression: Autonomous memory
+     Z. Lin, Z. Li, D. Li, E. P. Xing, H. Zhang, J. E. Gonzalez, and I. Stoica,                      management in llm agents,” 2026. [Online]. Available: https:
+     “Judging llm-as-a-judge with mt-bench and chatbot arena,” 2023. [Online].                       //arxiv.org/abs/2601.07190
+     Available: https://arxiv.org/abs/2306.05685                                                [23] W. Sun, M. Lu, Z. Ling, K. Liu, X. Yao, Y. Yang, and J. Chen, “Scaling
+ [9] H. Hashemi, J. Eisner, C. Rosset, B. Van Durme, and C. Kedzie, “Llm-rubric:                     long-horizon llm agent via context-folding,” 2025. [Online]. Available:
+     A multidimensional, calibrated approach to automated evaluation of                              https://arxiv.org/abs/2510.11967
+     natural language texts,” in Proceedings of the 62nd Annual Meeting of                      [24] Z. Wang, H. Chen, J. Wang, and W. Wei, “Memex(rl): Scaling long-horizon
+     the Association for Computational Linguistics (Volume 1: Long Papers).                          llm agents via indexed experience memory,” 2026. [Online]. Available:
+     Association for Computational Linguistics, 2024, p. 13806–13834. [Online].                      https://arxiv.org/abs/2603.04257
+     Available: http://dx.doi.org/10.18653/v1/2024.acl-long.745                                 [25] J. Zhu, M. Hu, and J. Wu, “Swe context bench: A benchmark
+[10] L. Ouyang, J. Wu, X. Jiang, D. Almeida, C. L. Wainwright, P. Mishkin,                           for context learning in coding,” 2026. [Online]. Available: https:
+     C. Zhang, S. Agarwal, K. Slama, A. Ray, J. Schulman, J. Hilton, F. Kelton,                      //arxiv.org/abs/2602.08316
+     L. Miller, M. Simens, A. Askell, P. Welinder, P. Christiano, J. Leike, and                 [26] Fireworks AI, “Fireworks AI: Fast inference platform,” https://fireworks.ai,
+     R. Lowe, “Training language models to follow instructions with human                            2025.
+     feedback,” 2022. [Online]. Available: https://arxiv.org/abs/2203.02155                     [27] THUDM, “Slime: Distributed training framework,” https://github.com/
+[11] Q. Wu, G. Bansal, J. Zhang, Y. Wu, B. Li, E. Zhu, L. Jiang, X. Zhang,                           THUDM/slime, 2025.
+     S. Zhang, J. Liu, A. H. Awadallah, R. W. White, D. Burger, and                             [28] Q. Yu, Z. Zhang, R. Zhu, Y. Yuan, X. Zuo, Y. Yue, W. Dai, T. Fan, G. Liu,
+     C. Wang, “Autogen: Enabling next-gen llm applications via multi-agent                           L. Liu, X. Liu, H. Lin, Z. Lin, B. Ma, G. Sheng, Y. Tong, C. Zhang, M. Zhang,
+     conversation,” 2023. [Online]. Available: https://arxiv.org/abs/2308.08155                      W. Zhang, H. Zhu, J. Zhu, J. Chen, J. Chen, C. Wang, H. Yu, Y. Song,
+[12] S. Hong, M. Zhuge, J. Chen, X. Zheng, Y. Cheng, C. Zhang,                                       X. Wei, H. Zhou, J. Liu, W.-Y. Ma, Y.-Q. Zhang, L. Yan, M. Qiao, Y. Wu, and
+     J. Wang, Z. Wang, S. K. S. Yau, Z. Lin, L. Zhou, C. Ran, L. Xiao,                               M. Wang, “Dapo: An open-source llm reinforcement learning system at
+     C. Wu, and J. Schmidhuber, “Metagpt: Meta programming for a                                     scale,” 2025. [Online]. Available: https://arxiv.org/abs/2503.14476
+     multi-agent collaborative framework,” 2024. [Online]. Available: https:                    [29] X. Deng, J. Da, E. Pan, Y. Y. He, C. Ide, K. Garg, N. Lauffer,
+     //arxiv.org/abs/2308.00352                                                                      A. Park, N. Pasari, C. Rane, K. Sampath, M. Krishnan, S. Kundurthy,
+[13] C. Qian, W. Liu, H. Liu, N. Chen, Y. Dang, J. Li, C. Yang, W. Chen,                             S. Hendryx, Z. Wang, V. Bharadwaj, J. Holm, R. Aluri, C. B. C. Zhang,
+     Y. Su, X. Cong, J. Xu, D. Li, Z. Liu, and M. Sun, “Chatdev:                                     N. Jacobson, B. Liu, and B. Kenstler, “Swe-bench pro: Can ai agents
+     Communicative agents for software development,” 2024. [Online].                                 solve long-horizon software engineering tasks?” 2025. [Online]. Available:
+     Available: https://arxiv.org/abs/2307.07924                                                     https://arxiv.org/abs/2509.16941
+[14] J. He, C. Treude, and D. Lo, “Llm-based multi-agent systems for software                   [30] OpenAI, “Introducing swe-bench verified,” https://openai.com/index/
+     engineering: Literature review, vision and the road ahead,” 2025. [Online].                     introducing-swe-bench-verified/, 2024, published August 13, 2024;
+     Available: https://arxiv.org/abs/2404.04834                                                     updated February 24, 2025. [Online]. Available: https://openai.com/index/
+[15] Anthropic. (2025) How we built our multi-agent research system.                                 introducing-swe-bench-verified/
+     Published June 13, 2025. [Online]. Available: https://www.anthropic.com/
+     engineering/built-multi-agent-research-system
+[16] P. Belcak, G. Heinrich, S. Diao, Y. Fu, X. Dong, S. Muralidharan, Y. C. Lin,
+     and P. Molchanov, “Small language models are the future of agentic ai,”
+     2025. [Online]. Available: https://arxiv.org/abs/2506.02153
+[17] D. Guo, D. Yang, H. Zhang, J. Song, P. Wang, Q. Zhu, R. Xu, R. Zhang,
+     S. Ma, X. Bi, X. Zhang, X. Yu, Y. Wu, Z. F. Wu, Z. Gou, Z. Shao, Z. Li,
+     Z. Gao, A. Liu, B. Xue, B. Wang, B. Wu, B. Feng, C. Lu, C. Zhao, C. Deng,
+     C. Ruan, D. Dai, D. Chen, D. Ji, E. Li, F. Lin, F. Dai, F. Luo, G. Hao, G. Chen,
+     G. Li, H. Zhang, H. Xu, H. Ding, H. Gao, H. Qu, H. Li, J. Guo, J. Li, J. Chen,
+     J. Yuan, J. Tu, J. Qiu, J. Li, J. L. Cai, J. Ni, J. Liang, J. Chen, K. Dong, K. Hu,
+     K. You, K. Gao, K. Guan, K. Huang, K. Yu, L. Wang, L. Zhang, L. Zhao,
+     L. Wang, L. Zhang, L. Xu, L. Xia, M. Zhang, M. Zhang, M. Tang, M. Zhou,
+     M. Li, M. Wang, M. Li, N. Tian, P. Huang, P. Zhang, Q. Wang, Q. Chen,
+     Q. Du, R. Ge, R. Zhang, R. Pan, R. Wang, R. J. Chen, R. L. Jin, R. Chen,
+     S. Lu, S. Zhou, S. Chen, S. Ye, S. Wang, S. Yu, S. Zhou, S. Pan, S. S. Li,
+     S. Zhou, S. Wu, T. Yun, T. Pei, T. Sun, T. Wang, W. Zeng, W. Liu, W. Liang,
+     W. Gao, W. Yu, W. Zhang, W. L. Xiao, W. An, X. Liu, X. Wang, X. Chen,
+     X. Nie, X. Cheng, X. Liu, X. Xie, X. Liu, X. Yang, X. Li, X. Su, X. Lin,
+     X. Q. Li, X. Jin, X. Shen, X. Chen, X. Sun, X. Wang, X. Song, X. Zhou,
+     X. Wang, X. Shan, Y. K. Li, Y. Q. Wang, Y. X. Wei, Y. Zhang, Y. Xu, Y. Li,
+     Y. Zhao, Y. Sun, Y. Wang, Y. Yu, Y. Zhang, Y. Shi, Y. Xiong, Y. He, Y. Piao,
+     Y. Wang, Y. Tan, Y. Ma, Y. Liu, Y. Guo, Y. Ou, Y. Wang, Y. Gong, Y. Zou,
+     Y. He, Y. Xiong, Y. Luo, Y. You, Y. Liu, Y. Zhou, Y. X. Zhu, Y. Huang,
+     Y. Li, Y. Zheng, Y. Zhu, Y. Ma, Y. Tang, Y. Zha, Y. Yan, Z. Z. Ren, Z. Ren,
+     Z. Sha, Z. Fu, Z. Xu, Z. Xie, Z. Zhang, Z. Hao, Z. Ma, Z. Yan, Z. Wu,
+     Z. Gu, Z. Zhu, Z. Liu, Z. Li, Z. Xie, Z. Song, Z. Pan, Z. Huang, Z. Xu,
+     Z. Zhang, and Z. Zhang, “Deepseek-r1 incentivizes reasoning in llms
+     through reinforcement learning,” Nature, vol. 645, no. 8081, p. 633–638,
+     2025. [Online]. Available: http://dx.doi.org/10.1038/s41586-025-09422-z
+[18] Q.-A. Dang and C. Ngo, “Reinforcement learning for reasoning in
+     small llms: What works and what doesn’t,” 2026. [Online]. Available:
+     https://arxiv.org/abs/2503.16219
+[19] R. Cao, M. Chen, J. Chen, Z. Cui, Y. Feng, B. Hui, Y. Jing, K. Li, M. Li,
+     J. Lin, Z. Ma, K. Shum, X. Wang, J. Wei, J. Yang, J. Zhang, L. Zhang,
+
+                                                                                           13
+

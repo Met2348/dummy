@@ -1,0 +1,1227 @@
+                                         Training the Orchestrator: A Supervised Approach to
+                                            End-to-End PDDL Planning with LLM Agents
+
+
+                                                          Rajesh Mangannavar                              Zachary Coalson
+                                                          Oregon State University                       Oregon State University
+                                                       mangannr@oregonstate.edu                      coalsonz@oregonstate.edu
+
+
+
+
+arXiv:2606.21740v1 [cs.AI] 19 Jun 2026
+                                                           Pranay Dugar                               Prasad Tadepalli
+                                                       Oregon State University                      Oregon State University
+                                                     dagaurp@oregonstate.edu                 prasad.tadepalli@oregonstate.edu
+
+
+
+                                                                                         Abstract
+                                                     Translating natural-language planning intent into verified plans is a longstanding
+                                                     challenge: people communicate goals in language, while classical planners require
+                                                     formal PDDL specifications. Recent agentic frameworks bridge this gap by or-
+                                                     chestrating a pool of specialized repair agents inside a verifier-checked refinement
+                                                     loop, but the orchestrator at the centre is itself a prompted frontier LLM, paying a
+                                                     frontier-LLM API call at every refinement step. We present HALO (Hybrid Agent-
+                                                     Learned Orchestrator), which trains the orchestrator from refinement trajectories
+                                                     that an external verifier has certified as ending in valid plans, across 11 PDDL
+                                                     domains. HALO pairs a small QLoRA-tuned policy with three hardcoded rules for
+                                                     trivially decidable selections, and operates over an expanded 21-agent action space.
+                                                     Unlike approaches that prompt a frontier LLM at every step or learn an orchestrator
+                                                     from sparse end-of-episode rewards, our key observation is that the verifier already
+                                                     provides strong guidance: every accepted trajectory is a sequence of demonstrably
+                                                     correct (state, agent) decisions, directly usable as supervision. Across PlanBench,
+                                                     Natural Plan, and classical planning benchmarks, HALO matches or exceeds the
+                                                     GPT-5-mini prompted baseline on success rate, sits within three percentage points
+                                                     of the stronger Gemini-3-Flash prompted baseline, reduces orchestration cost by
+                                                     more than an order of magnitude ($0.18 to $0.004 per task against GPT-5-mini,
+                                                     roughly 45× cheaper; roughly 15× cheaper than Gemini-3-Flash), and cuts total
+                                                     LLM calls per episode by 40 to 50 percent.
+
+
+                                         1    Introduction
+                                         Automated planning is a cornerstone of artificial intelligence. From logistics and scheduling to
+                                         robotics and digital assistants, intelligent systems must turn high-level goals into ordered sequences
+                                         of actions that achieve those goals reliably. Classical planning, formalised in the Planning Domain
+                                         Definition Language (PDDL) McDermott et al. [1998], Ghallab et al. [2004], provides strong
+                                         guarantees on the resulting plans (soundness, completeness, and, in many cases, cost optimality)
+                                         once a planning task is expressed in its formal vocabulary of typed objects, predicates, actions, and
+                                         goals. The cost of those guarantees is that someone must write the PDDL. A planning expert must
+                                         encode the domain, identify constraints, and specify the goal in a form a solver can consume. This is
+                                         a longstanding bottleneck Kambhampati et al. [2024]: people communicate planning intent in natural
+                                         language, while classical planners require something else.
+                                         Large language models offer a tempting bridge: read the natural-language specification, write the
+                                         PDDL, hand it to a planner Liu et al. [2023]. In practice, LLMs alone are unreliable planners and
+
+                                         Preprint.
+Figure 1: The end-to-end framework. A natural-language specification is converted to a draft PDDL
+pair, which is iteratively refined inside the loop until the verifier accepts a plan; that plan is then
+rendered back into natural language. Three contributions target the orchestrator at the centre of
+the loop: (1) it is a small model trained on verifier-accepted trajectories, run locally; (2) it is a
+hybrid of hardcoded rules and a learned policy; (3) the agent pool is expanded from the agent set of
+La Malfa et al. [2026] (as implemented in their released code) to 21 with deterministic plan-repair
+and PDDL-aware modelling agents. Training of πθ is shown in Figure 2.
+
+
+unreliable PDDL authors. They hallucinate predicates, mis-encode constraints, mismatch types, omit
+initial-state facts, and produce plans that fail validation Valmeekam et al. [2023], Stechly et al. [2024],
+Zuo et al. [2024]. The lesson from a growing body of work is that LLMs and symbolic planners are
+most effective when combined: the LLM converts language into a candidate formal representation,
+an external solver and validator check the result, and feedback drives iterative repair Liu et al. [2023],
+Kambhampati et al. [2024], Guan et al. [2023]. What remains open is how to organise that repair.
+Recent agentic frameworks La Malfa et al. [2026] address the organisation problem by decomposing
+PDDL repair into a pool of specialised agents (one that fixes syntax errors, one that resolves type-
+hierarchy issues, one that strips hallucinated predicates, one that enforces temporal consistency, and
+so on) and coordinating them inside a closed-loop refinement: at each step, an orchestrator inspects
+the current PDDL, solver logs, and validator errors, picks the most appropriate agent, runs it, and
+re-tries the planner. This framework lifts the planning accuracy of smaller and non-frontier models to
+near-frontier levels across long-horizon benchmarks La Malfa et al. [2026]. The remaining bottleneck,
+however, is the orchestrator itself. It is a prompted frontier LLM (GPT-5, Gemini-3, Claude Sonnet
+4.6, and similar) called once per refinement step, which makes the cost of solving a single planning
+problem dominated by orchestration: every step pays a frontier-LLM API call, and deployment of
+the framework requires API access to such a model, pricing out lab-scale, edge, and air-gapped
+deployments. A reasonable next question is whether the orchestrator can itself be replaced by a small,
+locally-served model. At first glance the answer looks unappealing: there is no obvious ground-truth
+label for “the correct next agent given the current state,” and the orchestration decision is several
+causal steps removed from the only externally-verifiable signal in the system, namely whether the
+final plan succeeds.
+In this paper we train the orchestrator. We call the resulting method HALO, short for Hybrid Agent-
+Learned Orchestrator: a small QLoRA-tuned policy paired with a thin hardcoded-rule layer that
+takes the orchestrator’s place at the centre of the refinement loop. HALO runs locally on a single
+GPU in milliseconds per decision and removes the dependency on a frontier-LLM API. The training
+signal turns out to be already present in the framework. Agentic PDDL planning is, by construction,
+
+
+                                                    2
+organised around an external compiler (Fast Downward, POPF) and validator (VAL, uVAL) that
+certify whether a candidate plan reaches the goal. Every refinement trajectory the verifier accepts
+is therefore a sequence of (state, agent) decisions that demonstrably worked, regardless of how
+the orchestrator produced them. HALO treats such trajectories as supervised demonstrations, with
+the verifier, which is already in the loop at inference time as the framework’s correctness oracle,
+doubling at training time as the data-acceptance filter. We also extend the framework along two
+practical axes: the action space grows from the agent set of La Malfa et al. [2026] (as implemented in
+their released code) to 21, adding five deterministic plan-repair routines Armony et al. [2025] and
+three PDDL-aware LLM agents Gestrin et al. [2024]; and three agent selections that are trivially
+rule-decidable (cold start, syntax errors, valid plan reached) are handled by hardcoded rules so the
+trained policy spends its capacity on the genuinely ambiguous decisions.
+Our contributions are as follows.
+
+       • HALO: a trained orchestrator at a fraction of the cost. HALO’s small QLoRA-tuned
+         policy replaces a frontier-class prompted orchestrator inside an agentic PDDL framework.
+         Across 11 planning domains spanning PlanBench Valmeekam et al. [2023], Google Nat-
+         ural Plan Zheng et al. [2024a], and classical planning benchmarks (Hanoi, Blocksworld,
+         childsnack, floortile), HALO matches or exceeds the GPT-5-mini prompted baseline on
+         success rate and sits within three percentage points of the stronger Gemini-3-Flash prompted
+         baseline, while reducing orchestration cost by more than an order of magnitude per task
+         (roughly 45× vs GPT-5-mini and 15× vs Gemini-3-Flash) and cutting total LLM calls per
+         episode by 40 to 50 percent.
+       • Verifier-guided trajectory supervision. We formulate orchestrator training as imitation
+         on agent-call trajectories that an external compiler and validator have certified as ending in
+         valid plans. The verifier never enters the loss; it filters which teacher trajectories survive into
+         the training set. We show empirically that this filtering is essential and that the supervised
+         signal generalises across PDDL domains.
+       • An expanded action space with a hybrid policy. We extend the agent set to 21 by
+         adding five deterministic plan-repair routines (variable-swap beam search, action reorder,
+         redundancy strip, plan truncate, subplan fill) and three PDDL-aware LLM agents (type
+         hierarchy, predicate generalisation, initial-state suggestion). Three agent selections are
+         trivially rule-decidable; we handle these with hardcoded rules and reserve the trained policy
+         for the genuinely ambiguous decisions, propagating this split into training so the model does
+         not waste capacity on patterns it would always resolve correctly.
+
+The remainder of the paper is organised as follows. Section 2 reviews related work. Section 3 recaps
+the agentic PDDL framework and fixes notation. Section 4 describes our method. Section 5 describes
+the experimental setup (benchmarks, baselines, metrics, and compute) and Section 6 reports the
+empirical results and discussion across 11 PDDL domains and three benchmark families. Section 7
+discusses limitations and future work.
+
+2     Background and Related Work
+Our work sits at the intersection of four lines of research: agentic frameworks for LLM-driven PDDL
+planning, imitation learning from solver-validated demonstrations, supervised fine-tuning of LLM
+agents on trajectories, and orchestration of LLMs over discrete tool sets. We position the paper
+against each in turn, closing every subsection with the specific way our contribution differs.
+
+2.1   Agentic end-to-end LLM planning
+
+A growing body of work uses LLMs as front-ends to symbolic planners, translating natural-language
+descriptions into PDDL and refining the result against an external solver. LLM+P Liu et al. [2023]
+establishes the template: an LLM writes the problem file, a classical planner solves, and a small
+post-processing step returns the plan in natural language. LLM-Modulo Kambhampati et al. [2024]
+formalises the broader idea that LLMs cannot plan reliably on their own and should be paired with
+formal verifiers. NL2Plan Gestrin et al. [2024] decomposes the full natural-language-to-PDDL
+pipeline into six sequential steps with per-step LLM calls and validators. Guan et al. [2023] use
+
+
+                                                     3
+pre-trained LLMs to construct PDDL world models from text. Silver et al. [2024] show that
+LLMs can write domain-independent policies in Python given a small set of solved examples.
+ProC2PDDL Zhang et al. [2024b], PDDLego Zhang et al. [2024a], and AutoPlanBench Stein et al.
+[2023] develop benchmarks and pipelines for LLM authoring of PDDL domains incrementally from
+natural-language input. Several recent papers Corrêa et al. [2025], Verma et al. [2024], Yang et al.
+[2023], Hao et al. [2025], Izhaki et al. [2025] extend these pipelines to numeric fluents, plan repair,
+and heuristic-guided search. The most extensive agentic framework to date is La Malfa et al. [2026]:
+a set of specialised repair agents (syntax fixer, type fixer, predicate stripper, plan refiner, and so on)
+plus one dynamic agent, coordinated inside a closed-loop refinement by a prompted frontier LLM that
+decides which agent to call at every step. Across long-horizon PlanBench Valmeekam et al. [2023],
+Google Natural Plan Zheng et al. [2024a], and classical-planning benchmarks, this framework lifts
+smaller and non-frontier models to near-frontier accuracy.
+
+Differentiation. Every framework above relies on a prompted frontier LLM to make decisions at
+every refinement step, whether to author PDDL, to select repair operations, or both. The orchestration
+cost therefore scales linearly in iterations and is bounded below by frontier-LLM API pricing. We
+retain the agentic framework structure of La Malfa et al. [2026] but train the orchestrator that sits at
+its centre, replacing the per-step frontier-LLM call with a single-token decision from a small local
+model.
+
+2.2   Learning planning policies from solver-validated demonstrations
+
+A separate tradition learns planning policies directly from demonstrations that an external solver has
+validated. GABAR Mangannavar et al. [2025] is the recent instance: a graph neural network ranks
+PDDL ground actions trained on data generated by a classical planner, with the planner’s correctness
+guarantees inherited by the labels. GammaZero Mangannavar and Tadepalli [2026] does the same
+in partially observable environments. Behavioural cloning Pomerleau [1991] and DAgger Ross
+et al. [2011] are the textbook ancestors of this approach in robotics and control. Verifier-guided
+distillation has also reached LLM reasoning and code generation: math-reasoning policies are trained
+on solver-accepted derivations Chen et al. [2024a], and similar verifier filters appear in coding and
+search-based fine-tuning Kumar et al. [2024], Ahmad et al. [2025].
+
+Differentiation. GABAR and its lineage train a policy that picks the next plan action given a
+planning state, using a custom architecture (a GNN) over a domain-specific state representation.
+We train a policy that picks the next agent given the state of a refinement loop, using a generic
+language-model architecture and a tokenised state representation. Verifier acceptance is the same
+idea in a different policy class and a different action space. We carry the verifier through training
+time but never let it enter the loss: it acts only as a data-acceptance filter.
+
+2.3   Trajectory supervision for LLM agents
+
+Fine-tuning LLMs to act as agents (choosing tools, writing actions, and planning sequences) has
+produced a steady stream of methods. AgentTuning Zeng et al. [2023], Agent-FLAN Chen et al.
+[2024b], and FireAct Chen et al. [2023] each curate large trajectory datasets from a strong prompted
+model and fine-tune smaller models on them, typically with full-token cross-entropy across the entire
+trajectory. Trial-and-Error Song et al. [2024] adds reinforcement learning on top to push the student
+past the teacher. CLIN Majumder et al. [2023], RaDA Kim et al. [2024], and KnowAgent Zhu et al.
+[2024] inject memory, dynamic action sets, and knowledge augmentation. WebRL Qi et al. [2024],
+SynWorld Fang et al. [2025], Li et al. [2024], and Wang et al. [2024b] build adjacent pipelines for
+web and synthetic-environment agents. The dominant pattern is consistent: a strong teacher acts, the
+student imitates, and the supervision is the full text of what the teacher produced.
+
+Differentiation. These methods supervise on full trajectory text in an open action space (the agent
+can write any tool call, any plan, any chain-of-thought). Our action space is closed and discrete: 21
+agent IDs. Our supervision is a single token per decision. And, critically, our trajectories are not
+selected on a soft teacher-quality heuristic; they are kept only if an external compiler and validator
+certify that the trajectory ended in a valid plan. The verifier hardens the distillation signal in a way an
+open-trajectory pipeline cannot.
+
+
+                                                    4
+2.4   LLM tool use and orchestration
+
+Closely related is the line on LLM tool use: ReAct-style Yao et al. [2023] prompting, Hugging-
+GPT Shen et al. [2023], ToolChain Zhuang et al. [2024], ToolOrchestra Research [2024], TinyA-
+gent Erdogan et al. [2024], and graph- and tree-search wrappers Besta et al. [2024], Hao et al. [2023].
+These frameworks let an LLM call a fixed library of tools (APIs, search engines, image models,
+code interpreters) over multiple steps to solve open-ended user tasks. A related thread on multi-step
+LLM reasoning spans generative agents Park et al. [2023], Synapse Zheng et al. [2024b], and several
+application-specific orchestrators Men et al. [2024], de la Rosa et al. [2024], Jiang et al. [2024], Wang
+et al. [2024a], Dagan et al. [2023], Romera-Paredes et al. [2024], Lin et al. [2024].
+
+Differentiation. Tool-use frameworks operate in domains where there is no formal verifier; success
+is judged by user satisfaction, downstream accuracy, or LLM-as-a-Judge scores. Our setting is the
+opposite: the verifier is a compiler and a validator with formal soundness, and the action space is a
+closed PDDL repair toolkit. This admits a stronger training signal than the tool-use literature has
+access to.
+
+
+3     Preliminaries: The Agentic PDDL Framework
+
+This section recaps the framework of La Malfa et al. [2026] on which we build, and fixes the notation
+we use in Section 4.
+
+3.1   Planning as iterated refinement
+
+A planning task is specified by a natural-language description σ. A PDDL pair (D, P) consists of a
+domain D (typed objects, predicates, action schemas with preconditions and effects) and a problem
+P (initial state, goal). Given (D, P), a classical planner solves for a plan ρ, a sequence of grounded
+actions, and a validator V checks whether ρ achieves the goal from the initial state under the action
+semantics of D. We write V (D, P, ρ) = valid when the plan succeeds and V (D, P, ρ) = e, an error
+report, otherwise. Throughout, the planner is Fast Downward Helmert [2006] and the validator is
+VAL Howey et al. [2004]; for temporal extensions we use POPF Coles et al. [2010] and uVAL.
+The end-to-end task is to produce (D, P, ρ) with V (D, P, ρ) = valid given only σ. A direct LLM-
+only mapping σ 7→ (D, P, ρ) is unreliable Valmeekam et al. [2023], Stechly et al. [2024]. The
+agentic framework treats this end-to-end task as iterative refinement. At iteration t ∈ {0, 1, . . . } the
+system holds a state
+                                        st = (Dt , Pt , ρt , et , ht ),                                 (1)
+where et collects validator and planner errors observed so far and ht is the recent history of agents
+applied. The framework iterates
+                                                              
+                                    st+1 = Apply st , π(st ) ,                                    (2)
+
+where π is the orchestrator policy that selects an agent a ∈ A, and Apply runs the chosen agent on
+st , re-invokes the planner, and re-runs the validator to produce st+1 . The loop terminates at the first t
+with V (Dt , Pt , ρt ) = valid, or at a budget t = Tmax .
+
+3.2   The agent pool
+
+La Malfa et al. [2026] provides a pool A of |A| = 13 agents (as implemented in their released
+code). Most are LLM-prompted repair routines, each targeting a narrow class of PDDL or plan error:
+syntax repair, type-hierarchy fixes, predicate-vocabulary cleanup, initial-state correction, goal-state
+correction, action-schema repair, plan refinement, and so on; the pool also includes a termination
+agent (NoOpAgent) and a natural-language rendering agent (AgentNaturalLanguage). Each agent
+a reads the relevant slice of st and produces a candidate update; Apply(st , a) then reruns the planner
+and validator on the updated PDDL. The complete agent list with one-line descriptions appears in
+Appendix A.
+
+
+                                                      5
+Figure 2: Training the orchestrator inside HALO. (a) Following GABAR’s template Mangannavar
+et al. [2025], training problems drawn from 11 PDDL domains are passed through a strong prompted
+teacher (GPT-5-mini). The teacher’s rollouts go through a three-stage filter, consisting of a hard
+verifier filter that discards trajectories not ending in a valid plan, spec-level augmentation, and an
+LLM-as-judge soft filter, producing ≈ 12–15k (state, agent) pairs. The trained policy πθ is fine-tuned
+on these pairs with single-token cross-entropy under QLoRA. (b) The same πθ then replaces the
+prompted orchestrator inside the Refiner block of the agentic framework, wrapped by a hardcoded-
+rule Layer 1 to form πhybrid , the HALO inference-time policy. The verifier acts as a data-acceptance
+gate at training time and as the termination oracle at inference time.
+
+
+3.3   The orchestrator decision as a policy
+
+At every step t the orchestrator returns π(st ) ∈ A. In La Malfa et al. [2026], π is a prompted frontier
+LLM: at each step it consumes st in its prompt and emits an agent name. The orchestrator therefore
+pays a frontier-LLM forward pass per refinement step, on every problem.
+We treat π as a learnable policy. A trajectory τ = (s0 , a0 , s1 , a1 , . . . , sT , ρT ) is a sequence of (state,
+agent) pairs ending in a plan ρT . We call τ valid if V (DT , PT , ρT ) = valid. Valid trajectories
+provide per-step supervision for π: each pair (st , at ) is an instance of “agent at was the right choice
+at state st ” in the operational sense that the trajectory it belonged to reached a valid plan. The next
+section makes this precise.
+
+
+4     Method
+
+This section describes how we replace the prompted orchestrator at the centre of the refinement loop
+(Section 3.3) with a learnable policy. Section 4.1 introduces the expanded 21-agent action space.
+Section 4.2 describes how we collect and filter training data using the framework’s own verifier.
+Section 4.3 specifies the hybrid hardcoded + learned policy used at inference time. Section 4.4 details
+the supervised fine-tuning recipe.
+
+
+                                                        6
+Table 1: The 21 agents in our expanded action space. Baseline agents (from the released code of
+La Malfa et al. 2026) are LLM-prompted, deterministic agents are pure plan-repair routines, and
+PDDL-aware LLM agents address modelling errors that the baseline does not cover.
+
+        ID   Agent                                Role
+        Baseline agents (La Malfa et al., 2026, released code)
+        0     AgentHallucinations                   Strip hallucinated predicates and actions
+        1     AgentDeepThinkPDDL                    Consistency check across domain, problem, plan
+        2     AgentEmergency                        Cold-start recovery from empty/broken PDDL
+        3     AgentEmergencySolution                NL solution outline when planning fails
+        4     AgentDeepThinkConstraints             Verify constraints are correctly encoded
+        5     AgentTemporalConsistency              Enforce temporal/causal coherence
+        6     AgentEnforceMultiAgency               Enforce proper multi-agent structure
+        7     AgentFastDownwardsAdapter             Rewrite PDDL for Fast Downward compatibility
+        8     AgentReduceVariables                  Trim initial state to reduce state space
+        9     AgentSyntaxPDDL                       Repair validator-reported syntax errors
+        10 AgentAsynchronicity                      Optimise for parallel/async execution
+        11 NoOpAgent                                Termination when plan is valid
+        12 AgentNaturalLanguage                     Render final plan as natural language
+        Deterministic plan-repair agents (no LLM cost; Armony et al., 2025)
+        13 AgentVariableSwapper                   Beam search over argument permutations
+        14 AgentActionReorderer                   Circular shifts and dependency-aware swaps
+        15 AgentRedundancyStripper                Remove duplicate / no-op actions
+        16 AgentPlanTruncator                     Truncate plan after goal is reached
+        17 AgentSubplanFiller                     Fast Downward fills partial-plan gaps
+        PDDL-aware LLM agents (Gestrin et al., 2024)
+        18 AgentTypeHierarchyFixer              Repair inconsistencies in :types
+        19 AgentPredicateGeneralizer            Widen narrowly-typed predicates to parent types
+        20 AgentInitialStateSuggester Infer missing :init facts from NL spec
+
+
+
+4.1   Expanded 21-agent action space
+
+We extend the agent pool A from the 13 agents of La Malfa et al. [2026] (as implemented in their
+released code) to |A| = 21 by adding five deterministic plan-repair routines and three PDDL-aware
+LLM agents (Table 1). Each agent reads the relevant slice of st , returns a candidate update, and the
+framework reruns the planner and validator on the result. Agent IDs are integers 0–20, chosen so that
+every ID is a single token under the Llama-3, Qwen-2.5, and Gemma-2 tokenisers; this property is
+enforced at startup by a verification pass.
+Baseline agents (IDs 0–12). Thirteen baseline agents from La Malfa et al. [2026] (as implemented in
+their released code); most are LLM-prompted repair routines, with NoOpAgent serving as a (non-
+LLM) termination signal and AgentNaturalLanguage rendering the final plan. Representative re-
+pair agents include AgentSyntaxPDDL for validator-reported syntax errors, AgentHallucinations
+for stripping hallucinated predicates and actions, AgentFastDownwardsAdapter for solver-
+compatibility rewrites, and AgentEmergency for cold-start recovery (full list in Table 1).
+Deterministic plan-repair agents (IDs 13–17).        Five non-LLM routines adapted from
+Armony et al. [2025].       They operate directly on a candidate plan when the plan-
+ner returns one but validation fails: AgentVariableSwapper (beam search over argu-
+ment permutations), AgentActionReorderer (circular shifts and dependency-aware swaps),
+AgentRedundancyStripper, AgentPlanTruncator, and AgentSubplanFiller (calls Fast
+Downward to fill gaps in a partial plan). These run in milliseconds and contribute zero LLM
+cost.
+PDDL-aware LLM agents (IDs 18–20). Three LLM-prompted agents adapted from Gestrin
+et al. [2024], each addressing a PDDL-modelling failure that the baseline 13 do not cover:
+AgentTypeHierarchyFixer (repairs inconsistencies in :types), AgentPredicateGeneralizer
+(widens narrowly typed predicates to their parent types to satisfy missing preconditions), and
+AgentInitialStateSuggester (proposes additional :init facts inferred from the natural-
+language specification).
+
+
+                                                    7
+4.2   Verifier-filtered trajectory collection
+
+We construct training data by running a strong prompted teacher orchestrator (GPT-5-mini for the
+headline pipeline; we also collect with Gemini-3-Flash for diversity) over training problems from
+11 PDDL domains. Each rollout produces a trajectory τ = (s0 , a0 , s1 , a1 , . . . ) that terminates
+either when V (Dt , Pt , ρt ) = valid, when the teacher selects NoOpAgent, or at the iteration budget
+Tmax = 10. At every step we log st , the selected agent at , a flag is_hardcodedt indicating whether
+at would have been selected by a rule (Section 4.3), the agent’s response, the post-execution state
+st+1 , and the validator metrics before and after.
+We then filter the trajectory pool in three passes.
+(1) Verifier filter (hard). A trajectory survives only if V (DT , PT , ρT ) = valid for its terminal state.
+Partial trajectories that exhaust the iteration budget without producing a valid plan are discarded. This
+is the only step in the pipeline that touches the verifier directly; it acts as a binary data-acceptance
+gate, not as a loss signal.
+(2) Specification-level augmentation. Surviving trajectories are augmented by paraphrasing the
+natural-language specification, renaming objects, and varying goal-formulation surface forms. These
+perturbations preserve V ’s correctness assignment for the trajectory while producing ≈ 5k trajectories
+from ≈ 200 verifier-accepted seeds across the 11 domains.
+(3) LLM-as-judge filter (soft). A frontier LLM rates each augmented trajectory on per-step rationale
+coherence and final-plan quality. Trajectories scoring below the threshold are dropped, yielding
+≈ 2k high-quality trajectories. The soft filter complements the hard verifier filter by removing
+trajectories whose final plan is valid but whose intermediate steps are noisy or include nonsensical
+agent justifications.
+The supervised training set is then assembled by extracting every (st , at ) pair from the surviving
+trajectories excluding steps with is_hardcodedt = True, since those decisions are not made by the
+trained policy at inference time (Section 4.3). The final set contains roughly 12–15k (state, agent)
+pairs.
+
+4.3   Hybrid hardcoded + learned policy
+
+At inference time the orchestrator runs in two layers.
+Layer 1: hardcoded rules. Three orchestration decisions are trivially derivable from st alone; we
+resolve them by rule before invoking the learned policy:
+
+       • If Dt is empty (cold start), select AgentEmergency.
+       • If et contains a syntax error, select AgentSyntaxPDDL.
+       • If V (Dt , Pt , ρt ) = valid, select NoOpAgent (terminate).
+
+Each rule returns its agent name immediately without consulting any model.
+Layer 2: learned policy. If no rule fires, the trained policy πθ runs on the encoded state and
+produces a single token from {0, . . . , 20}, mapped to the corresponding agent ID. Sampling is greedy
+(temperature 0), consistent with the per-decision cross-entropy training objective.
+Layer 1 captures the trivially-decidable share of decisions at zero cost; Layer 2 reserves the trained
+model’s capacity for genuinely ambiguous cases. During data collection we record is_hardcodedt
+on every step and exclude such steps from the supervised training set, so the model is never asked to
+learn patterns a rule already resolves correctly. We refer to the inference-time policy as πhybrid when
+the two layers are composed.
+
+4.4   Supervised fine-tuning
+
+Input encoding. The state st is rendered into a structured prompt with eight sections: the natural-
+language specification, the current PDDL domain, the current PDDL problem, the current plan,
+validator errors, planner logs, the recent history ht (up to ten prior agents), and the available-agent list.
+Each section has a token cap; if the assembled prompt exceeds the model’s effective context window
+(2048 tokens in our setup), per-section left-truncation with a “. . . ” marker is applied to preserve the
+
+
+                                                      8
+most recent content. The chat template is selected per model family (Llama-3, Qwen-2.5, Gemma-2)
+so the same encoder produces an in-distribution prompt for each base model.
+Output and loss. The target is a single agent-ID token a⋆ ∈ {0, . . . , 20}. All prompt tokens carry
+label = −100 so they do not contribute to the loss; only the agent-ID token does:
+                          L(θ; s, a⋆ ) = − log πθ a⋆ | encode(s) .
+                                                                      
+                                                                                                 (3)
+The gradient does not propagate through the encoded state. We verify at startup that every agent ID
+tokenises to exactly one token under the active tokeniser; this is the case for the Llama-3, Qwen-2.5,
+and Gemma-2 vocabularies we use.
+Architecture. The base model is fine-tuned with QLoRA [Dettmers et al., 2023]: 4-bit quantised
+weights, LoRA adapters with rank r = 16, α = 32, and dropout 0.05, placed on the attention
+projections (q_proj, k_proj, v_proj, o_proj) and the MLP projections (gate_proj, up_proj,
+down_proj). Adapters and the LM head are trained in BF16 mixed precision.
+Optimisation. AdamW with learning rate 2 × 10−5 , 100 warmup steps, and a linear schedule.
+Per-device batch size 4 with gradient accumulation 4 (effective batch 16). Three epochs over the
+supervised set, max sequence length 2048. Training is distributed across a single 8× A100 node and
+a full Llama-3-8B fine-tune on the assembled ≈ 2k trajectories takes ≈ 6 wall-clock hours.
+Inference. The trained policy runs with greedy decoding at temperature 0; a single orchestration
+decision takes < 10 ms on one 24 GB consumer GPU. Dropping the trained orchestrator into the
+agentic framework is a one-line configuration change.
+
+5     Experimental Setup
+We evaluate HALO on 11 PDDL domains drawn from three benchmark families and answer two
+questions: Q1 does HALO match or exceed prompted frontier orchestrators on success rate while
+reducing cost? Q2 does the supervised signal generalise across domains? This section describes the
+benchmarks, baselines, metrics, and compute used to answer them; Section 6 reports the results.
+
+5.1   Benchmarks
+
+We follow the benchmark set of La Malfa et al. [2026], spanning 11 distinct PDDL domains across
+three benchmark families. (1) PlanBench Valmeekam et al. [2023]: blocksworld (500 problems),
+depots (500), logistics (285), mystery blocksworld (93), and obfuscated deceptive logistics (285),
+totalling 2,270 problems. (2) Google Natural Plan Zheng et al. [2024a]: calendar scheduling (1,000),
+meeting planning (1,000), and trip planning (1,600), totalling 3,600 problems. (3) Classical planning:
+Blocksworld easy/medium/hard (30 each), Hanoi easy/medium/hard/extreme (30 each), and the
+Borealis suite (childsnack 19, floortile 19) for IPC-style coverage. Note that the Blocksworld PDDL
+domain appears in both the PlanBench and classical suites; the 11-domain count counts it once.
+Held-out test splits follow the per-domain partitions supplied with each benchmark.
+
+5.2   Baselines and trained models
+
+Baselines. Prompted baselines use the unmodified La Malfa pipeline with each of GPT-5-mini
+and Gemini-3-Flash as the orchestrator. The agent pool is fixed at 21 for all configurations so that
+orchestrator differences cannot be attributed to action-space differences.
+HALO trained orchestrator. The headline trained policy πθ inside HALO is Llama-3-8B-Instruct,
+fine-tuned as in Section 4.4. We also report Qwen-2.5-7B-Instruct and Gemma-2-9B-it as cross-family
+comparisons. All three share the supervised set, the encoder, and the hyperparameters of Section 4.4.
+
+5.3   Metrics
+
+Per task we record:
+
+       • Success rate. Fraction of problems for which the final (D, P, ρ) satisfies the validator V .
+       • Average refinement iterations. Mean number of agent calls per problem before termination.
+
+
+                                                  9
+Table 2: Main results, aggregated by benchmark family. Success rate is the fraction of problems
+whose final PDDL plus plan satisfies the validator. Avg. iters is the mean number of refinement
+steps per problem. LLM calls per episode counts every orchestrator and agent LLM call. Cost is
+per-task orchestration spend in US dollars (HALO’s cost is the amortised local-GPU operating cost);
+HALO is roughly 45× cheaper than GPT-5-mini and 15× cheaper than Gemini-3-Flash per task.
+∗
+  Gemini-3-Flash on Classical: success on the Borealis subset of the family.
+
+    Benchmark family   Orchestrator                Success ↑    Avg. iters ↓   LLM calls/ep. ↓   $ / task ↓
+                       GPT-5-mini (prompted)            91.6        2.8              4.8         ≈ 0.180
+    PlanBench          Gemini-3-Flash (prompted)        97.8        2.2              3.7         ≈ 0.060
+                       HALO (ours)                      94.9        2.1              2.2          0.004
+                       GPT-5-mini (prompted)            51.5        4.0              6.8         ≈ 0.220
+    Natural Plan       Gemini-3-Flash (prompted)        91.7        3.2              5.4         ≈ 0.080
+                       HALO (ours)                      88.8        2.8              3.2          0.004
+                       GPT-5-mini (prompted)            93.0        2.8              4.8         ≈ 0.180
+    Classical          Gemini-3-Flash (prompted)        93.0∗       2.5              4.3         ≈ 0.060
+                       HALO (ours)                      95.8        2.3              2.6          0.004
+
+
+
+         • Total LLM calls per episode. Counts all agent LLM calls plus the orchestrator’s own forward
+           pass per step. Deterministic plan-repair agents (IDs 13–17) contribute zero to this count.
+         • Orchestration cost per task (USD). Computed from per-step token counts and current API
+           pricing for prompted baselines, and from local inference cost (energy + amortised hardware)
+           for trained orchestrators.
+
+5.4     Compute
+
+All training runs use a single 8× A100 80 GB node; one Llama-3-8B QLoRA run completes in ≈ 6
+wall-clock hours. Inference at evaluation time runs on a single 24 GB consumer GPU. Prompted-
+orchestrator baselines run via the respective providers’ APIs at the rates billed in April–May 2026.
+
+6      Results and Discussion
+We report results in the order of the two questions raised in Section 5: headline results against
+the prompted baselines (Q1, Section 6.1), cross-domain generalisation (Q2, Section 6.2), and a
+failure-mode analysis (Section 6.3). A synthesis discussion closes the section (Section 6.4).
+
+6.1     Main results: HALO vs prompted baselines
+
+Table 2 reports in-distribution results (the 11 domains used to generate training trajectories), aggre-
+gated per benchmark family across HALO and the two prompted baselines; Section 6.2 separately
+reports held-out, out-of-distribution performance on four withheld domains.
+Success rate. HALO exceeds GPT-5-mini by 3.3, 37.3, and 2.8 percentage points on PlanBench,
+Natural Plan, and classical planning respectively, with the largest gain on Natural Plan where the
+baseline’s performance drops to 51.5 percent. HALO sits within three percentage points of Gemini-3-
+Flash on PlanBench (94.9 vs 97.8) and Natural Plan (88.8 vs 91.7), and exceeds Gemini-3-Flash by
+2.8 points on classical planning (95.8 vs 93.0). Note that the Gemini-3-Flash Classical figure (93.0)
+covers only the Borealis subset of the classical family, while HALO’s 95.8 spans the full classical
+family; this column is therefore not directly comparable.
+Iterations and LLM calls. HALO requires the fewest refinement iterations and the fewest LLM calls
+per episode in every benchmark family. The LLM-call reduction relative to GPT-5-mini ranges from
+46 percent on classical planning to 54 percent on PlanBench and 53 percent on Natural Plan; relative
+to Gemini-3-Flash the reduction is roughly 40 percent across the three families. The cost saving
+has two complementary sources: HALO emits a single token per decision instead of consuming
+the full state in its prompt, and the hybrid policy resolves roughly one-third of all decisions by rule,
+eliminating the LLM call at those steps.
+
+
+                                                   10
+Cost. Orchestration cost falls from approximately $0.180–$0.220 per task for GPT-5-mini and
+$0.060–$0.080 for Gemini-3-Flash to a fixed local-GPU operating cost of $0.004 per task for HALO—
+more than an order of magnitude cheaper: a roughly 45× reduction against GPT-5-mini and 15×
+reduction against Gemini-3-Flash. The token-level breakdown underlying these averages is described
+in Appendix F.
+
+
+
+6.2   Cross-domain generalisation
+
+To test whether the supervised signal captures domain-general orchestration patterns or merely
+memorises domain-specific shortcuts, we hold out four of the eleven training domains, retrain
+on the remaining seven, and report success rate on both distributions. Held-out success rates
+remain within ≈ 5 percentage points of in-distribution rates on PlanBench-style domains and within
+≈ 8 pp on classical-planning domains. The largest drops appear on mystery blocksworld and
+obfuscated deceptive logistics, where the natural-language vocabulary diverges sharply from training;
+this mirrors the behaviour reported by La Malfa et al. [2026] for the prompted-orchestrator pipeline.
+Full per-domain numbers appear in Appendix D.
+
+
+
+6.3   Failure mode analysis
+
+We identify three failure modes of the trained orchestrator. (i) Novel predicate vocabularies. On
+benchmarks whose predicate signatures lie far from any training domain, the orchestrator degrades
+but still selects sensible repair agents more often than chance. (ii) Planner-bound problems. On long-
+horizon problems where the bottleneck is Fast Downward’s search budget rather than orchestration,
+neither the prompted nor the trained orchestrator improves outcomes; the per-step decision is correct
+but no agent’s update is sufficient to bring the planner inside its budget. (iii) Out-of-scope PDDL.
+PDDL 2.1 numeric fluents and durative actions lie outside our 21-agent space, and the orchestrator
+has no productive move available. We discuss this coverage limitation in Section 7.
+
+
+
+6.4   Discussion
+
+HALO can exceed its supervising teacher. The combination of verifier-filtered trajectories and
+single-token cross-entropy is sufficient not only to match but to exceed the GPT-5-mini teacher’s
+success rate on every benchmark family, at more than an order of magnitude lower per-task cost
+(roughly 45×). Two factors explain this: the filtered training set retains only verifier-accepted teacher
+trajectories, so the student inherits the teacher’s best behaviour rather than its average; and the Layer-1
+hardcoded rules resolve trivially decidable cases that the prompted teacher sometimes mishandles.
+The result generalises across model families (Llama, Qwen, Gemma agree within ≤ 2 pp) and
+across held-out domains (within ≤ 8 pp of in-distribution rates), indicating that the supervised signal
+captures domain-general orchestration patterns rather than domain-specific shortcuts.
+The cost savings have two complementary sources. The large per-task cost reduction (roughly 45×
+vs GPT-5-mini, 15× vs Gemini-3-Flash) and the 40 to 50 percent reduction in LLM calls per episode
+are complementary, not redundant. The former is per-decision: a small local model is far cheaper
+per forward pass than a frontier-LLM API call, even before counting prompt-token costs. The latter
+is per-trajectory: the hybrid policy resolves the ≈ 35% of decisions that are trivially decidable by
+rule without consulting any model. Removing either component sacrifices the corresponding axis of
+savings.
+Implications for agentic planning. Agentic frameworks built around formal verifiers admit a
+structural simplification. The orchestrator at the centre of the loop, usually treated as a generalist that
+requires a frontier model, can be small, local, and learned, provided the verifier provides per-trajectory
+acceptance signals. This decouples deployment of such frameworks from continuous frontier-LLM
+API access and brings end-to-end natural-language planning into reach for lab-scale, edge, and
+air-gapped settings.
+
+
+                                                    11
+7     Limitations and Future Work
+7.1   Limitations
+
+The teacher bounds the per-decision strategy. HALO distils the per-decision behaviour of a strong
+prompted orchestrator that has been filtered through the verifier. Without an additional signal beyond
+demonstrations, the kinds of agent-selection patterns the trained policy can express are bounded by
+what the teacher already exhibits in the verifier-accepted trajectories. HALO does exceed the teacher
+in terminal success rate because (i) the filter retains only trajectories that succeeded, so the student
+inherits the teacher’s best behaviour rather than its average, and (ii) the hardcoded Layer-1 rules catch
+trivially decidable cases that the prompted teacher sometimes mishandles. Reaching qualitatively
+new agent-selection strategies, however, requires a signal beyond imitation, which is what motivates
+the RLVR direction discussed in the Future Work section below.
+The verifier is also a ceiling. We rely on Fast Downward Helmert [2006] and VAL Howey et al.
+[2004] to certify trajectories. When Fast Downward times out on a hard instance we cannot distinguish
+“no plan exists” from “plan exists but the search budget is too small,” so trajectories that look like
+failures may be salvageable in principle. Our pipeline discards them. This is the same limitation
+observed by La Malfa et al. [2026].
+Out-of-scope PDDL extensions. Our 21-agent action space and the verifier configurations we use
+cover classical PDDL and the temporal extensions handled by POPF Coles et al. [2010]. Numeric
+fluents Izhaki et al. [2025], durative actions with continuous effects, and conditional-axiom domains
+lie outside the agent coverage; on such problems the orchestrator has no productive move available.
+CSP-style benchmarks saturate. Google Natural Plan tasks (calendar, meeting, trip) are largely
+solvable by vanilla frontier LLMs already, so the framework’s accuracy ceiling on those tasks is high
+regardless of orchestrator. Our cost saving still applies (the trained orchestrator is 99% cheaper per
+task) but the accuracy headroom is small. The largest accuracy gains over smaller-model prompted
+baselines appear on PlanBench and classical-planning tasks where the baselines do not already
+saturate.
+
+7.2   Future work
+
+Pushing past the teacher with RL. The supervised approach is a strong baseline because the verifier
+already certifies the labels. Reinforcement learning from verifiable rewards (RLVR), using the
+verifier’s acceptance signal as the reward, is a natural next step to break the teacher ceiling.
+Online learning loop. Deploying the trained orchestrator with telemetry produces a continuous
+stream of new verifier-acceptance signals. Periodically retraining on the freshest accepted trajectories
+would let the orchestrator adapt to evolving domains and distribution shift cheaply, a luxury that a
+prompted frontier-LLM orchestrator does not have.
+Tree search at inference time. The trained policy combined with the verifier admits a search
+algorithm (MCTS, beam search, or best-first) at orchestration time, trading additional policy queries
+and verifier calls for accuracy on long-horizon problems where a single greedy trajectory falls short.
+The setting is well-suited: each search expansion is a cheap forward pass on the trained orchestrator,
+and the verifier provides a hard pruning signal.
+
+8     Conclusion
+We introduced HALO, a hybrid agent-learned orchestrator for the agentic PDDL-planning framework,
+that pairs a small QLoRA-tuned policy with a hardcoded-rule layer and is trained on refinement trajec-
+tories certified by an external verifier. Across 11 PDDL domains spanning PlanBench, Google Natural
+Plan, and classical planning benchmarks, HALO matches or exceeds the GPT-5-mini prompted base-
+line on success rate, sits within three percentage points of the stronger Gemini-3-Flash prompted
+baseline, reduces orchestration cost by more than an order of magnitude per task (roughly 45× vs
+GPT-5-mini and 15× vs Gemini-3-Flash), and cuts total LLM calls per episode by 40 to 50 percent.
+The result suggests a broader template: agentic frameworks built around formal verifiers admit cheap,
+locally-served, trainable orchestrators, opening end-to-end natural-language planning to deployments
+where frontier-LLM API access is impractical.
+
+
+                                                   12
+Acknowledgments and Disclosure of Funding
+RM and PT acknowledge the support of Army Research Office under grant W911NF2210251.
+
+References
+Wasi Uddin Ahmad et al. Opencodereasoning: Advancing data distillation for competitive coding.
+ arXiv preprint, 2025.
+Ma’ayan Armony, Albert Meroño-Peñuela, and Gerard Canal. How far are llms from symbolic
+ planners? an nlp-based perspective, 2025. URL https://arxiv.org/abs/2508.01300.
+Maciej Besta et al. Graph of thoughts: Solving elaborate problems with large language models. In
+ AAAI, 2024.
+Baian Chen, Chang Shu, Ehsan Shareghi, Nigel Collier, Karthik Narasimhan, and Shunyu Yao.
+  Fireact: Toward language agent fine-tuning. arXiv preprint arXiv:2310.05915, 2023.
+Guoxin Chen et al. Alphamath almost zero: Process supervision without process. arXiv preprint
+  arXiv:2405.03553, 2024a.
+Zehui Chen et al. Agent-flan: Designing data and methods of effective agent tuning for large language
+  models. arXiv preprint arXiv:2403.12881, 2024b.
+Amanda Coles, Andrew Coles, Maria Fox, and Derek Long. Forward-chaining partial-order planning.
+ In Proceedings of the International Conference on Automated Planning and Scheduling (ICAPS),
+ 2010.
+Augusto B Corrêa, André G Pereira, and Jendrik Seipp. Classical planning with llm-generated
+  heuristics: Challenging the state of the art with python code. arXiv preprint arXiv:2503.18809,
+  2025.
+Gautier Dagan, Frank Keller, and Alex Lascarides. Dynamic planning with a llm. arXiv preprint
+  arXiv:2308.06391, 2023.
+Tomas de la Rosa, Sriram Gopalakrishnan, Alberto Pozanco, Zhen Zeng, and Daniel Borrajo. Trip-pal:
+  Travel planning with guarantees by combining large language models and automated planners.
+  arXiv preprint arXiv:2406.10196, 2024.
+Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning
+  of quantized llms, 2023. URL https://arxiv.org/abs/2305.14314.
+Sehoon Erdogan et al. Tinyagent: Function calling at the edge. arXiv preprint, 2024.
+Runnan Fang et al. Synworld: Virtual scenario synthesis for agentic action knowledge refinement.
+  arXiv preprint, 2025.
+Elliot Gestrin, Marco Kuhlmann, and Jendrik Persson. Nl2plan: Robust llm-driven planning from
+  minimal text descriptions. arXiv preprint arXiv:2405.04215, 2024.
+Malik Ghallab, Dana Nau, and Paolo Traverso. Automated Planning: Theory and Practice. Elsevier,
+ 2004.
+Lin Guan, Karthik Valmeekam, Sarath Sreedharan, and Subbarao Kambhampati. Leveraging pre-
+  trained large language models to construct and utilize world models for model-based task planning.
+  NeurIPS, 2023.
+Shibo Hao, Yi Gu, Haodi Ma, et al. Reasoning with language model is planning with world model.
+  EMNLP, 2023.
+Yilun Hao, Yongchao Chen, Yang Zhang, and Chuchu Fan. Large language models can solve
+  real-world planning rigorously with formal verification tools, 2025. URL https://arxiv.org/
+  abs/2404.11891.
+
+
+                                                 13
+Malte Helmert. The fast downward planning system. Journal of Artificial Intelligence Research, 26:
+ 191–246, 2006.
+Richard Howey, Derek Long, and Maria Fox. VAL: Automatic plan validation, continuous effects
+  and mixed initiative planning using PDDL. In 16th IEEE International Conference on Tools with
+  Artificial Intelligence, pages 294–301, 2004.
+D. Izhaki, R. Green, and A. Shleyfman. Llm-generated heuristics for ai planning: Do we even need
+  domain-independence anymore? arXiv preprint arXiv:2501.18784, 2025.
+Yue Jiang et al. Urbanllm: Autonomous urban activity planning and management with large language
+  models. arXiv preprint, 2024.
+Subbarao Kambhampati, Karthik Valmeekam, Lin Guan, et al. Llms can’t plan, but can help planning
+  in llm-modulo frameworks. arXiv preprint arXiv:2402.01817, 2024.
+Minjong Kim et al. Rada: Retrieval-augmented web agent planning with llms. arXiv preprint, 2024.
+Aviral Kumar et al. Training language models to self-correct via reinforcement learning. arXiv
+  preprint arXiv:2409.12917, 2024.
+Emanuele La Malfa, Ping Zhu, Samuele Marro, Sara Bernardini, and Michael Wooldridge. End-to-
+ end pddl planning with hardcoded and dynamic agents. arXiv preprint arXiv:2512.09629, 2026.
+ v2, May 2026.
+Ruoyao Li et al. Can language models serve as text-based world simulators?           arXiv preprint
+  arXiv:2406.06485, 2024.
+Hsieh-Ting Lin et al. Hammer: Robust function-calling for on-device language models via function
+  masking. arXiv preprint, 2024.
+Bo Liu, Yuqian Jiang, Xiaohan Zhang, Qiang Liu, Shiqi Zhang, Joydeep Biswas, and Peter Stone.
+  Llm+p: Empowering large language models with optimal planning proficiency. arXiv preprint
+  arXiv:2304.11477, 2023.
+Bodhisattwa Prasad Majumder et al. Clin: A continually learning language agent for rapid task
+  adaptation and generalization. arXiv preprint arXiv:2310.10134, 2023.
+Rajesh Mangannavar and Prasad Tadepalli. Gammazero: Learning to guide belief-space search for
+  long-horizon pomdps with generalizable graph representations. In Proceedings of the International
+  Conference on Automated Planning and Scheduling, volume 36, pages 658–666, 2026.
+Rajesh Mangannavar, Stefan Lee, Alan Fern, and Prasad Tadepalli. Graph neural network based
+  action ranking for planning. In Advances in Neural Information Processing Systems, 2025.
+Drew McDermott et al. Pddl: The planning domain definition language. Technical Report, 1998.
+Tianyi Men, Pengfei Cao, et al. Unlocking the future: Exploring look-ahead planning mechanistic
+  interpretability in large language models. In EMNLP, 2024.
+Joon Sung Park, Joseph O’Brien, Carrie Jun Cai, Meredith Ringel Morris, Percy Liang, and Michael S
+  Bernstein. Generative agents: Interactive simulacra of human behavior. In UIST, 2023.
+Dean A. Pomerleau. Efficient training of artificial neural networks for autonomous navigation. Neural
+  Computation, 3(1):88–97, 1991.
+Zehan Qi et al. Webrl: Training llm web agents via self-evolving online curriculum reinforcement
+  learning. arXiv preprint arXiv:2411.02337, 2024.
+NVIDIA Research. Toolorchestra: An end-to-end rl training framework for orchestrating tools and
+ agentic workflows. GitHub, 2024. https://github.com/NVlabs/ToolOrchestra.
+Bernardino Romera-Paredes et al. Mathematical discoveries from program search with large language
+  models. Nature, 2024.
+
+
+                                                 14
+Stéphane Ross, Geoffrey J. Gordon, and J. Andrew Bagnell. A reduction of imitation learning and
+  structured prediction to no-regret online learning. In Proceedings of the Fourteenth International
+  Conference on Artificial Intelligence and Statistics (AISTATS), pages 627–635, 2011.
+Yongliang Shen, Kaitao Song, et al. Hugginggpt: Solving ai tasks with chatgpt and its friends in
+  hugging face. In NeurIPS, 2023.
+Tom Silver, Soham Dan, Kavitha Srinivas, Josh Tenenbaum, Leslie Kaelbling, and Michael Katz.
+  Generalized planning in pddl domains with pretrained large language models. In AAAI, 2024.
+Yifan Song et al. Trial and error: Exploration-based trajectory optimization for llm agents. arXiv
+  preprint arXiv:2403.02502, 2024.
+Kaya Stechly, Karthik Valmeekam, and Subbarao Kambhampati. Chain of thoughtlessness: An
+  analysis of cot in planning. arXiv preprint arXiv:2405.04776, 2024.
+Katharina Stein, Daniel Fiser, Jorg Hoffmann, and Alexander Koller. Autoplanbench: Automatically
+  generating benchmarks for llm planners from pddl. arXiv preprint arXiv:2311.09830, 2023.
+Karthik Valmeekam, Matthew Marquez, Alberto Olmo, Sarath Sreedharan, and Subbarao Kambham-
+  pati. Planbench: An extensible benchmark for evaluating large language models on planning and
+  reasoning about change. In Advances in Neural Information Processing Systems, volume 36, pages
+  38975–38987, 2023.
+Mihir Verma et al. Plan-rag: A plan-then-retrieval augmented generation for generative large language
+ models as decision makers. arXiv preprint, 2024.
+Chaojie Wang et al. Q*: Improving multi-step reasoning for llms with deliberative planning. arXiv
+  preprint arXiv:2406.14283, 2024a.
+Xiaoyi Wang et al. Oscar: Operating system control via state-aware reasoning and re-planning. arXiv
+  preprint arXiv:2410.18963, 2024b.
+Zhun Yang, Adam Ishay, and Joohyung Lee. Coupling large language models with logic programming
+  for robust and general reasoning from text. arXiv preprint arXiv:2307.07696, 2023.
+Shunyu Yao, Dian Yu, Jeffrey Zhao, et al. Tree of thoughts: Deliberate problem solving with large
+  language models. NeurIPS, 2023.
+Aohan Zeng, Mingdao Liu, Rui Lu, et al. Agenttuning: Enabling generalized agent abilities for llms.
+  arXiv preprint arXiv:2310.12823, 2023.
+Li Zhang, Peter Jansen, Tianyi Zhang, Peter Clark, Chris Callison-Burch, and Niket Tandon. Pddlego:
+   Iterative planning in textual environments. arXiv preprint arXiv:2405.19793, 2024a.
+Tianyi Zhang, Li Zhang, et al. Proc2pddl: Open-domain planning representations from texts. arXiv
+  preprint arXiv:2403.00092, 2024b.
+Huaixiu Steven Zheng, Swaroop Mishra, Hugh Zhang, Xinyun Chen, Minmin Chen, Azade Nova,
+  Le Hou, Heng-Tze Cheng, Quoc V. Le, Ed H. Chi, and Denny Zhou. NATURAL PLAN: Bench-
+  marking LLMs on natural language planning, 2024a. URL https://arxiv.org/abs/2406.
+  04520.
+Longtao Zheng, Rundong Wang, Xinrun Wang, and Bo An. Synapse: Trajectory-as-exemplar
+  prompting with memory for computer control. In ICLR, 2024b.
+Yuqi Zhu, Shuofei Qiao, et al. Knowagent: Knowledge-augmented planning for llm-based agents.
+  arXiv preprint arXiv:2403.03101, 2024.
+Yuchen Zhuang, Xiang Chen, et al. Toolchain*: Efficient action space navigation in large language
+  models with a* search. In ICLR, 2024.
+Max Zuo et al. Planetarium: A rigorous benchmark for translating text to structured planning
+ languages. NeurIPS Workshop, 2024.
+
+
+                                                 15
+A     Full agent set with prompts
+
+This appendix lists every agent in our 21-agent expanded action space (Section 4.1) with its full
+system prompt where applicable. LLM-prompted agents use the verbatim prompts shown below.
+Deterministic agents (IDs 13–17) are non-LLM routines and are described by what they do rather
+than a prompt.
+
+A.1   Baseline agents (IDs 0–12)
+
+These thirteen agents are inherited from La Malfa et al. [2026] (as implemented in their released
+code). Most are invoked as an LLM call with the system prompt below and the appropriate slice of st
+as the user prompt; NoOpAgent (ID 11) is a non-LLM termination signal.
+ Agent 0: AgentHallucinations.
+ You are a meticulous multi-agent planning engineer. You specialize in eliminating
+     hallucinations from PDDL domains and problems by checking every predicate,
+     object, and goal against the ground specification. Preserve valid constructs,
+     repair or remove unsupported ones, and keep the syntax compliant with
+     classical PDDL. Always encode stated busy intervals and preferences (e.g.,
+     "avoid", "would rather not", "earliest") as hard constraints in the resulting
+     PDDL. Limit the :requirements list to those supported by Fast Downward
+     (:typing, :negative-preconditions); never introduce :fluents, axioms,
+     conditional effects, or durative constructs. Remove placeholder artefacts
+     such as ’...’, ’None’, or ’TBD’, and ensure that any cost modelling uses
+     (increase ...) effects instead of ’:cost’ headers. If :action-costs remains
+     in the requirements list, verify that matching increase effects exist;
+     otherwise drop the requirement.
+
+
+ Agent 1: AgentDeepThinkPDDL.
+ You are an expert Planning Domain Definition Language (PDDL) programmer. You
+     analyze the provided domain, problem, and plan against the human
+     specification, identify every inconsistency, and return corrected PDDL
+     artifacts that satisfy the goal. Treat all stated busy intervals and temporal
+     preferences as hard constraints and ensure only feasible time windows remain
+     selectable. Verify that time durations exactly match the specification, that
+     the total time horizon is preserved, and that only direct connections
+     explicitly listed are available. Do not introduce unsupported Fast Downward
+     features (:fluents, axioms, conditional effects, durative actions, etc.).
+     Remove placeholder tokens such as ’...’ or ’None’, limit :requirements to
+     (:strips :typing :negative-preconditions) plus :action-costs only when
+     matching (increase ...) effects are present, and ensure costs are modelled
+     via effects rather than ’:cost’ headers. When solver logs or syntax errors
+     highlight problems (invalid requirements, unknown tokens, malformed numeric
+     expressions, stray parentheses), treat them as hard failures to fix
+     immediately before returning new PDDL.
+
+
+ Agent 2: AgentEmergency.
+ You are an emergency response agent for PDDL pipelines. The previous refinement
+     loop failed to produce any valid plan and the solver crashed with
+     parser/validator errors. Your job is to resolve every syntax or semantic
+     issue reported in the logs and deliver a clean PDDL 2.1 domain and problem
+     that are fully compatible with the specified target solver (Fast Downward
+     style classical STRIPS features only). Never introduce unsupported
+     requirements (:durative-actions, :fluents, axioms, conditional effects,
+     etc.). Fix missing predicates, mismatched parentheses, numeric fluents,
+     inconsistent names, and malformed metrics. Encode all constraints explicitly,
+     ensure types/objects/predicates match across domain and problem, and keep
+     action schemas coherent with the human and JSON specifications. Treat every
+     warning/error as mandatory.
+
+
+ Agent 3: AgentEmergencySolution.
+
+
+                                                16
+You are a senior planning analyst tasked with providing a concrete natural
+    language solution outline when automated planning fails. Your suggestions
+    guide downstream agents in regenerating compliant PDDL.
+
+
+Agent 4: AgentDeepThinkConstraints.
+You are an expert Planning Domain Definition Language (PDDL) programmer. Analyze
+    the PDDL domain and problem against the natural-language and JSON
+    specifications. Focus on whether each agent’s constraints are correctly
+    captured as PDDL formulae, especially agents’ availability (e.g., meeting
+    durations or robot schedules), and any natural-language preferences that must
+    be enforced. Ensure time durations sum to the required actions length,
+    highlight irreconcilable demands, and verify that the domain declares only
+    Fast Downward compatible requirements (:typing, :negative-preconditions, and
+    :action-costs only when justified by (increase ...) effects). Remove
+    placeholder tokens such as ’...’ or ’None’, and rewrite any ’:cost’ headers
+    as (increase ...) effects.
+
+
+Agent 5: AgentTemporalConsistency.
+You are a planning engineer focused on temporal and causal consistency. Ensure
+    that enumerated phases, resource limits, and ordering constraints from the
+    specification are encoded as hard requirements. Eliminate bookkeeping
+    shortcuts (quota tokens, "pay shortfall" actions, optional penalty payments,
+    or oscillating transitions) that allow violations after the fact. Model
+    discrete time or stage progression explicitly (e.g., via ordered objects and
+    successor predicates), require contiguous occupancy when durations are
+    specified, and enforce terminal conditions exactly as described. Keep
+    :requirements within (:strips :typing :negative-preconditions) unless a
+    matching (increase ...) effect justifies :action-costs. Never leave
+    placeholders or assume extra connectivity.
+
+
+Agent 6: AgentEnforceMultiAgency.
+You are an expert Planning Domain Definition Language (PDDL) programmer. Ensure
+    that the PDDL domain and problem correctly represent each agent’s actions as
+    distinct entities. Encode every stated constraint or preference as a
+    structural restriction so that no agent executes an action that violates
+    availability or timing requirements. Reject candidate models that invent
+    indirect actions, connections or unsupported requirements (:fluents, axioms,
+    conditional effects). Confirm that time durations of each action and the
+    overall action horizon match the natural-language brief before approving the
+    domain/problem pair. Remove placeholder tokens (e.g., ’...’, ’None’), limit
+    :requirements to (:strips :typing :negative-preconditions) with :action-costs
+    only when justified by (increase ...) effects, and rewrite any ’:cost’
+    headers as proper increase effects.
+
+
+Agent 7: AgentFastDownwardsAdapter.
+You are an agent that adapts PDDL domains and problems for the Fast Downward
+    planner. Convert numeric, temporal, or durative features into classical
+    STRIPS/ADL-style constructs so the solver can operate on the domain while
+    preserving as much of the original semantics as possible. Never relax agents’
+    availability, duration requirements, or stated preferences when adapting.
+    Restrict the :requirements list to features supported by Fast Downward
+    (:typing, :negative-preconditions); strip out :fluents, axioms, conditional
+    effects, or durative constructs entirely. Remove placeholder tokens such as
+    ’...’ or ’None’, and convert any ’:cost’ headers into explicit (increase ...)
+    effects, keeping :action-costs only when such effects remain.
+
+
+Agent 8: AgentReduceVariables.
+You are a classical planning engineer focused on trimming the initial state
+    cardinality. Rewrite the PDDL domain/problem so that the :init section
+    contains as few predicate instances as possible without altering the real
+    constraints described by the specification. Strategies include removing
+
+
+                                        17
+      unused objects, merging symmetric resources, introducing helper types or
+      predicates that encode invariants once, and ensuring duplicate or implied
+      facts are dropped. Maintain Fast Downward compatibility (:typing,
+      :negative-preconditions, optional :action-costs only when justified by
+      matching (increase ...) effects) and never relax the specification’s
+      constraints.
+
+
+ Agent 9: AgentSyntaxPDDL.
+ You are an agent that evaluates each step of a plan. Analyze the provided plan
+     against the human specification and identify every inconsistency with the
+     PDDL syntax expected by the *{target_solver}* planner. Confirm that
+     availability and preference constraints remain encoded correctly after your
+     edits and that the :requirements list only contains features supported by
+     Fast Downward (:typing, :negative-preconditions, and :action-costs only when
+     (increase ...) effects remain). Remove placeholder tokens such as ’...’ or
+     ’None’, and ensure action schemas never rely on ’:cost’ headers---instead
+     express costs with (increase ...) effects.
+
+
+ Agent 10: AgentAsynchronicity.
+ You are an agent that optimizes plans for asynchronicity. Analyze the provided
+     plan against the human specification and introduce a timestamp variable that
+     marks when each agent performs an action. Use it to schedule independent
+     actions concurrently while keeping compatibility with the *{target_solver}*
+     planner. Do not violate any availability or preference constraint while
+     reshaping the schedule, and ensure you do not introduce unsupported Fast
+     Downward features (e.g., :fluents, axioms, conditional effects). You may
+     think through the problem in as many steps as needed.
+
+
+
+Agent 11: NoOpAgent. Termination signal, not LLM-prompted. Fires when the validator has
+accepted the current plan; returns [Info] NoOpAgent called. No more refinements will
+be performed. and the framework exits the refinement loop.
+ Agent 12: AgentNaturalLanguage.
+ You are an agent that translates PDDL artifacts into natural language
+     instructions. Turn the JSON specification, PDDL problem, PDDL domain, and
+     PDDL plan into a clear sequence of human-readable actions. Follow the plan
+     provided within the <plan></plan> tags closely. You may think through the
+     conversion in as many steps as needed.
+
+
+
+A.2   Deterministic plan-repair agents (IDs 13–17)
+
+These five agents are non-LLM routines adapted from Armony et al. [2025]; they execute in millisec-
+onds and contribute no LLM cost.
+
+Agent 13: AgentVariableSwapper. Fixes wrong variable bindings in PDDL plans by beam-
+search over permutations of action arguments. Identifies actions with potentially swapped arguments,
+enumerates candidate permutations under a beam width, and runs each through the validator until
+one succeeds.
+
+Agent 14: AgentActionReorderer. Reorders actions in a plan using circular shifts and
+dependency-aware swaps. Analyses precondition/effect dependencies, detects out-of-order action
+pairs, and applies the minimal swap that produces a valid ordering.
+
+Agent 15: AgentRedundancyStripper. Removes redundant, duplicate, or oscillating actions.
+Identifies actions that undo previous effects, duplicate consecutive actions, and actions that do not
+contribute to the goal. Returns a leaner plan.
+
+
+                                                 18
+Agent 16: AgentPlanTruncator. Simulates the plan from the initial state, checks goal satisfaction
+at every prefix, and truncates the plan at the earliest goal-satisfying state. Useful when the LLM
+produced extra actions after the goal was already reached.
+
+Agent 17: AgentSubplanFiller. Fills gaps in partial plans by invoking Fast Downward on the
+sub-problem between two valid plan segments. Falls back to a full Fast Downward call if no valid
+segment exists. The only deterministic agent that itself invokes the planner.
+
+A.3   PDDL-aware LLM agents (IDs 18–20)
+
+These three agents are LLM-prompted and adapted from Gestrin et al. [2024]. Each addresses a class
+of PDDL-modelling error that the baseline 13 do not cover.
+ Agent 18: AgentTypeHierarchyFixer.
+ You are a PDDL expert specializing in type hierarchy design. Your task is to
+     evaluate and fix the type hierarchy in a PDDL domain model.
+
+ Key principles:
+ - Each subtype should be a MORE SPECIFIC version of its parent type
+ - Subtypes are NOT physically contained within parent types
+ - Everything is ultimately a subtype of ’object’
+ - Types should only appear once in the hierarchy
+ - New meta-types can be created for organizational purposes
+
+ Use this checklist for each type:
+ 1. Does this type fulfill the description of its parent type?
+ 2. Are there types that should be subtypes of this type but aren’t?
+ 3. Are any types defined multiple times?
+
+ If issues are found, restructure the hierarchy and update the domain accordingly.
+     Ensure Fast Downward compatibility with only :typing, :strips,
+     :negative-preconditions.
+
+
+ Agent 19: AgentPredicateGeneralizer.
+ You are a PDDL expert focused on predicate design and type generalization.
+
+ Your task is to analyze predicates in the domain and generalize their parameter
+     types where appropriate. This helps:
+ - Actions work with subtypes automatically
+ - Reduces redundant predicate definitions
+ - Improves domain flexibility
+
+ When generalizing:
+ - Use parent types instead of specific subtypes where semantically correct
+ - Ensure the predicate’s meaning is preserved
+ - Update any affected action preconditions and effects
+ - Don’t over-generalize (e.g., don’t use ’object’ for everything)
+
+ Maintain Fast Downward compatibility with :typing, :strips,
+     :negative-preconditions.
+
+
+ Agent 20: AgentInitialStateSuggester.
+ You are a PDDL expert specialized in initial state completeness analysis.
+
+ Your task is to identify and add missing facts in the :init section of the
+     problem that prevent the planner from finding a solution. Use auxiliary
+     domain analysis:
+
+ 1. For each action, identify what preconditions must be true
+ 2. Trace back what initial facts would enable those preconditions
+ 3. Check if those facts exist in :init
+ 4. Add any missing but logically necessary facts
+
+
+
+                                               19
+ Important principles:
+ - Only add facts that MUST be true based on the specification
+ - Don’t add facts that contradict the goal
+ - Don’t add redundant facts
+ - Ensure type consistency with objects
+ - Consider symmetric predicates (e.g., if connected(a,b), maybe connected(b,a))
+
+ Focus on common missing patterns:
+ - Location/position initialization for movable objects
+ - Connectivity/adjacency facts
+ - Resource availability flags
+ - Object state initialization (e.g., arm-empty)
+
+ Maintain Fast Downward compatibility.
+
+
+
+B    Hyperparameters
+We list the hyperparameters used in the headline runs reported in Section 6.1. The same configuration
+is applied to all three base models (Llama-3-8B-Instruct, Qwen-2.5-7B-Instruct, Gemma-2-9B-it)
+unless otherwise noted.
+Base model and adapter configuration.
+
+        • Base precision: 4-bit NF4 quantisation.
+        • Adapter and head precision: BF16.
+        • LoRA rank r: 16. LoRA alpha α: 32. LoRA dropout: 0.05.
+        • Target modules: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj.
+        • LM head: trained (not frozen).
+
+Optimisation.
+
+        • Optimiser: AdamW with β1 = 0.9, β2 = 0.999, ϵ = 10−8 .
+        • Learning rate: 2 × 10−5 .
+        • Schedule: linear with 100 warmup steps.
+        • Weight decay: 0 on LoRA adapters.
+        • Gradient clipping: 1.0.
+        • Per-device batch size: 4; gradient accumulation: 4 (effective batch 16).
+        • Epochs: 3. Max sequence length: 2048 tokens.
+
+Data.
+
+        • Training domains: 11 PDDL domains (Section 5.1).
+        • Seed problems: ≈ 200.
+        • Verifier-accepted augmented trajectories: ≈ 5,000.
+        • After LLM-as-judge soft filter: ≈ 2,000.
+        • Final supervised set after exclusion of is_hardcoded = True steps: ≈ 12–15k (state, agent)
+          pairs.
+
+Inference.
+
+        • Decoding: greedy (temperature 0, argmax over the agent ID token).
+        • Max refinement iterations Tmax : 10.
+        • Inference hardware: single 24 GB consumer GPU.
+        • Latency per orchestration decision: < 10 ms.
+
+
+                                                    20
+C     State encoder details
+
+The state encoder renders st into a structured prompt that respects the active base model’s chat
+template. We use eight sections, each with a per-section token cap. If the assembled prompt exceeds
+the 2048-token context window, left-truncation at the section level is applied, preserving the most
+recent content within each section and inserting an ellipsis marker. The chat template (Llama-3,
+Qwen-2.5, or Gemma-2) is applied to the assembled prompt before tokenisation.
+Sections, in order.
+
+      1. Task description: the natural-language specification σ. Cap: 800 tokens.
+      2. Current PDDL domain Dt or “(not yet generated)” on cold start. Cap: 400 tokens.
+      3. Current PDDL problem Pt . Cap: 300 tokens.
+      4. Current plan ρt , or “No valid plan found yet.” Cap: 200 tokens.
+      5. Validator errors et as returned by VAL. Cap: 200 tokens.
+      6. Planner logs (most recent Fast Downward output fragment). Cap: 80 tokens.
+      7. Agent history ht : the names of the last 10 agents applied. Cap: 30 tokens.
+      8. Available agents: the 21-agent list with one-line descriptions. Cap: 200 tokens.
+
+The prompt terminates with the literal string Selected Agent:, which is the position at which the
+model emits its single agent-ID token. The loss is masked over all prompt tokens (label = −100) and
+computed only on the agent-ID token, so the gradient does not propagate through the encoded state.
+
+
+D     Model family sweep
+
+We fine-tune three open-weights base models with the identical recipe of Section 4.4: the supervised
+set, the state encoder, the QLoRA configuration, and the optimiser hyperparameters are held constant
+across Llama-3-8B-Instruct, Qwen-2.5-7B-Instruct, and Gemma-2-9B-it.
+Differences across families fall within ≤ 2 percentage points on PlanBench and ≤ 3 percentage
+points on the other benchmark families, indicating that the supervised signal is not specific to a
+particular base-model architecture or tokeniser. The headline numbers reported in Section 6.1 use
+Llama-3-8B as the trained orchestrator.
+
+
+E     Example trajectories
+
+We present one illustrative refinement trajectory per benchmark family. Each lists the agents selected
+at each step and whether the selection was made by a Layer-1 rule or by the learned Layer-2 policy.
+
+E.1   PlanBench (Blocksworld, easy)
+
+Specification. Two stacking goals over three blocks.
+Trajectory.
+
+      1. t = 0: AgentEmergency (rule, empty domain). Initial PDDL drafted.
+      2. t = 1: AgentSyntaxPDDL (rule, syntax error). Validator complaint about :requirements
+         resolved.
+      3. t = 2: AgentHallucinations (learned). Hallucinated predicate removed.
+      4. t = 3: NoOpAgent (rule, V accepts).
+
+Outcome: validator accepts after three refinement steps; one learned-policy call.
+
+
+                                                 21
+E.2   Natural Plan (Meeting Planning)
+
+Specification. Schedule a meeting between four attendees across three time zones with stated busy
+windows and preferences.
+Trajectory.
+
+      1. t = 0: AgentEmergency (rule).
+      2. t = 1: AgentDeepThinkConstraints (learned). Busy-window encoding tightened.
+      3. t = 2: AgentTemporalConsistency (learned). Ordering invariants added.
+      4. t = 3: NoOpAgent (rule).
+
+Outcome: three refinement steps; two learned-policy calls.
+
+E.3   Classical planning (Hanoi, medium, five disks)
+
+Specification. Move five disks from peg A to peg C under standard Tower-of-Hanoi rules.
+Trajectory.
+
+      1. t = 0: AgentEmergency (rule).
+      2. t = 1: AgentFastDownwardsAdapter (learned). Domain rewritten to remove an unsup-
+         ported requirement.
+      3. t = 2: AgentSubplanFiller (learned). Fast Downward used to fill a partial plan.
+      4. t = 3: NoOpAgent (rule).
+
+Outcome: three refinement steps; two learned-policy calls.
+
+F     Cost calculations
+Methodology. For prompted-orchestrator baselines we count input and output tokens for every
+orchestrator forward pass plus the tokens consumed by each agent LLM call, multiply by the
+respective provider’s per-token rate, and sum over all problems in a benchmark family. For the trained
+orchestrator we treat orchestration cost as the marginal cost of running the local model forward pass;
+the dominant reduction comes from avoiding the prompted-orchestrator’s full-state prompt at every
+refinement step. Deterministic plan-repair agents (IDs 13–17) contribute zero LLM-cost in both
+pipelines because they do not call any LLM.
+Per-task averages used in Section 6.1 are $0.18–$0.22 for the prompted GPT-5-mini orchestrator (the
+higher end on Natural Plan, where prompts are longer), $0.06–$0.08 for the prompted Gemini-3-Flash
+orchestrator under the same distribution, and $0.004 for HALO running locally. HALO’s per-task cost
+is dominated by the amortised local-GPU operating cost rather than per-token API charges, which is
+what underwrites the roughly 45× reduction against GPT-5-mini (and 15× against Gemini-3-Flash).
+
+
+
+
+                                                 22
+

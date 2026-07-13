@@ -1,0 +1,732 @@
+                                                       Self-GC: Self-Governing Context for Long-Horizon LLM Agents
+
+                                                                  Xubin Hao, Hongjin Meng, Xin Yin, Jiawei Zhu, Chenpeng Cao
+                                                                                                Xiaohongshu
+                                                                 {haoxubin, menghongjin, yinxin1, zhujiawei1, caochenpeng}@xiaohongshu.com
+
+
+
+
+                                                                     Abstract
+
+
+
+
+arXiv:2607.00692v1 [cs.AI] 1 Jul 2026
+                                          Long-horizon LLM agents accumulate tool results, files,
+                                          plans, and user constraints that are too structured to be treated
+                                          as a disposable text suffix. Current systems mostly rely on
+                                          in-run heuristics such as chronological pruning and tool-
+                                          output masking, or on final self-summary near a context limit.
+                                          Heuristics are cheap but blind to future dependencies; sum-
+                                          maries preserve narrative state but often hide exact evidence,
+                                          locators, and editable artifacts. We present Self-GC, where
+                                          GC denotes self-governing context while deliberately echo-
+                                          ing garbage collection: the system does not merely reclaim
+                                          unused tokens, but governs the lifecycle of agent context ob-
+                                          jects. Self-GC turns user turns, tool spans, and skill state
+                                          into indexed objects; asks a side-channel planner to propose
+                                          fold, mask, and prune actions; and lets the harness enforce re-
+                                          coverable sidecars, safe commit boundaries, and cache-aware
+                                          commit. On a 33-session Hard Set, Self-GC prunes 43.95%
+                                          of prefix tokens while leaving 84.85% of future continua-
+                                          tions unaffected, compared with no-impact rates of 54.55% to
+                                          69.70% for heuristic baselines. On a 332-session production-
+                                          derived suite, three planner backbones reach no-impact rates
+                                          of 91.27% to 94.58%, while baselines remain at 77.71% to
+                                          87.46%. In production, an online account-level split reduces
+                                          daytime average input tokens by 10% to 15%, with peak re-
+                                          ductions near 20%. These results point to context management
+                                          as runtime lifecycle control over indexed, recoverable objects
+                                          rather than post hoc text cleanup.
+
+
+                                                                Introduction
+                                        Large language models (LLMs) have rapidly evolved from                Figure 1: Object-level context management on a shared agent
+                                        single-turn assistants into interactive agents that browse the        trace. Token-buffer methods drop future-critical anchors;
+                                        web, invoke tools, edit files, and coordinate multi-step work-        Self-GC preserves them through fold, mask, and prune with
+                                        flows (Liu et al. 2023a; Zhou et al. 2024; Guo et al. 2026).          sidecar recovery.
+                                        These agents show strong promise across information seek-
+                                        ing, coding, document production, and data analysis. Unlike
+                                        single-turn prompting, however, a long-horizon agent must             agent history as a linear token buffer. One family of methods
+                                        carry forward far more than natural-language dialogue. Its            prunes spans during the run with simple rules over message
+                                        active context also accumulates execution traces such as user         age, length, and type. Another family waits until the context
+                                        requests, shell outputs, browser evidence, intermediate arti-         nears a hard limit and then asks a model to summarize the
+                                        facts, skill state, and local plans. As the interaction horizon       prior interaction (Cassano and Rush 2026; Xu, Zhang, and
+                                        grows, this active context turns into a central runtime re-           Arunachalam 2026). Both strategies are useful, yet they ex-
+                                        source that directly shapes overall cost, latency, and down-          pose a sharp trade-off. Position-based heuristics cannot tell
+                                        stream task quality.                                                  whether an old tool output holds the only URL, table value,
+                                           However, a critical systems challenge persists, because            file path, or editable body that a later step still needs. Final
+                                        most deployed context-management mechanisms still treat               summaries preserve narrative state, but they often compress
+exact evidence into prose that can no longer be addressed,                            Related Work
+audited, or restored.                                            Agent Memory and Context Management
+   This work addresses the trade-off by challenging the token-   Long-horizon agents are commonly extended with external
+buffer view itself. Our key observation is that long-horizon     memory or retrieval. Retrieval-augmented generation adds
+agent context is better understood as a collection of runtime    selected evidence to the prompt (Lewis et al. 2020), while
+objects with different lifecycle requirements. Some objects      later work organizes interaction history into explicit memory
+are obsolete and can be removed, some are repetitive but         units, user profiles, episodic records, or task-intent-aligned
+should still leave structural hints, and others are bulky yet    memories (Zhong et al. 2024; Du et al. 2026; Tan, Subagdja,
+must remain exactly recoverable. Whether an edit is safe or      and Tan 2026; Dai et al. 2026; Zhao et al. 2024). Systems
+harmful is therefore not decided by chronological position       such as MemGPT, LongMem, Mem0, A-MEM, HippoRAG,
+alone, but by whether an object will serve as a future depen-    REMem, and TiMem further study hierarchical memory, per-
+dency. As Figure 1 illustrates, the failure mode of current      sistent stores, graph-structured memory, and temporal con-
+systems is not simply excessive context length. The deeper       solidation (Packer et al. 2024; Wang et al. 2023; Chhikara
+issue is a mismatch between token-buffer operations and          et al. 2025; Xu et al. 2025; Gutiérrez et al. 2024; Shu et al.
+object-level future dependencies.                                2026; Li et al. 2026).
+   Building upon this insight, we introduce Self-GC, a              Runtime context compression addresses a related but dis-
+harness-portable framework for self-governing context in         tinct problem: how to govern the active prompt view during
+long-horizon LLM agents. The name deliberately echoes            an ongoing agent run. Native or trained self-summary is
+garbage collection: rather than merely reclaiming unused to-     becoming a platform capability (Cassano and Rush 2026;
+kens, Self-GC governs the lifecycle of agent context objects.    Xu, Zhang, and Arunachalam 2026), and recent task-aware
+It first maps user turns, tool spans, and skill state into in-   methods make reduction more semantic, including SWE-
+dexed context objects with stable identifiers. A side-channel    Pruner for coding-agent context, ContextBudget for budgeted
+planner then reflects over their future value and proposes       search-agent decisions, ACON for compression-guideline
+fold, mask, or prune actions over those identifiers. Before      optimization, and Chroma Context-1 for agentic pruning over
+any edit reaches the live conversation, the harness rehearses    retrieved chunks (Wang et al. 2026; Wu et al. 2026; Kang
+the proposed plan locally, enforces valid targets and safe       et al. 2025; Chroma 2026). Self-GC is complementary to
+turn boundaries, stores folded payloads in recoverable side-     memory-store methods and differs from message or chunk
+cars, repairs broken lineage, normalizes provider messages,      pruning: it governs the active context as indexed runtime
+and delays each commit when prefix-cache disruption would        objects with explicit fold, mask, and prune lifecycles.
+outweigh the expected savings. In this division of labor, the
+model supplies semantic judgment about future value, while       Efficient Agent Inference and Evaluation
+the harness preserves runtime invariants such as recoverabil-    Several recent systems are closer to Self-GC because they
+ity and protocol validity.                                       directly reduce agent trajectories or long contexts. AgentDiet
+   To validate Self-GC, we combine offline counterfactual        reduces LLM-agent cost through trajectory reduction (Xiao
+judgment with online deployment evidence. On a 33-session        et al. 2025), AgentFold performs proactive context folding for
+Hard Set, Self-GC reaches 84.85% no-impact at 43.95%             long-horizon web agents (Ye et al. 2026), and LongCodeZip
+pruning, while heuristic baselines achieve no-impact rates       compresses long code context for code language models (Shi
+of only 54.55% to 69.70% despite higher pruning. On a 332-       et al. 2025). These methods motivate stronger baselines for
+session Production Suite, three planner backbones reach no-      Self-GC, but they shorten history without harness-enforced
+impact rates of 91.27% to 94.58%. In a production account-       recoverability over indexed objects.
+level split, Self-GC further reduces daytime average input          Another line of work reduces inference or agent-loop cost
+tokens by 10% to 15% on aggregate covered traffic.               without changing task semantics. AutoTool reduces repeated
+                                                                 tool-selection overhead (Jia and Li 2026), while model-
+   The primary contributions of this work are summarized as
+                                                                 internal long-context systems compress or evict KV cache
+follows:
+                                                                 through heavy-hitter selection, attention sinks, query-aware
+                                                                 selection, pyramidal information funneling, or recoverable
+ • We formulate long-horizon agent context management as         channel pruning (Zhang et al. 2023; Xiao et al. 2023; Li
+   lifecycle control over indexed runtime objects rather than    et al. 2024; Cai et al. 2024; Liao et al. 2026). Prompt-
+   linear message pruning.                                       cache economics further shows that semantic compaction
+                                                                 must account for cache disruption (Lumer et al. 2026). Self-
+ • We present Self-GC, a reflective plan, rehearse, and com-     GC operates above the KV layer: it edits the semantic active
+   mit framework with fold, mask, and prune actions, sidecar     view and commits only when expected savings justify prefix-
+   recovery, and a cache-aware commit policy.                    cache disruption. Orthogonally, interactive benchmarks such
+                                                                 as AgentBench, WebArena, and MCP-AgentBench measure
+ • We evaluate Self-GC on production-derived traces and          tool-using agents (Liu et al. 2023a; Zhou et al. 2024; Guo
+   show that it improves the trade-off between token reduc-      et al. 2026), and LLM-as-a-judge protocols such as G-Eval
+   tion and future-dependency preservation in both offline       and JudgeLM support auditable rubric-based evaluation (Liu
+   and online settings.                                          et al. 2023b; Zhu, Wang, and Wang 2023); we adopt such a
+judge to isolate a question these benchmarks do not, namely        report body may need to be folded so a future turn can quote
+whether the retained context still contains the unique anchors     or revise it exactly.
+needed by the real future continuation.
+                                                                   Reflective Planning, Rehearsal, and Commit
+               The Self-GC Framework                               When token pressure, a turn boundary, or policy triggers a
+Self-GC is a governance layer between an agent harness and         governance round, Self-GC forks the current context pre-
+model input construction, as shown in Figure 2. It assumes         fix and appends planner-only instructions. The planner sees
+only that the harness can identify context boundaries, main-       indexed objects and emits a structured plan over existing
+tain object indices, and project an active view before each        identifiers. It does not rewrite the conversation or produce
+model call. The full transcript always remains available out-      the final active view.
+side the active view for later audit and recovery.                    The planner prompt is therefore written as an object-action
+Harness interface. Porting Self-GC requires a small context-       contract rather than a summary prompt. It asks the model
+engine hook rather than a provider-specific agent rewrite. The     to decide exclusions, future dependencies, granularity, and
+harness must expose turn and tool-span boundaries, assign          action semantics in order, with examples calibrated around
+stable object identifiers, let a side-channel planner read a       exact anchors, editable artifacts, live handles, and source-
+forked prefix, replay candidate edits into a local projection,     backed evidence. This makes the planner behave like a con-
+persist folded payloads to sidecar storage, and commit an          servative object filter before the harness applies deterministic
+accepted projection only at a safe turn boundary. Provider-        validation.
+specific message normalization remains inside the harness;            The harness then rehearses the plan locally. It resolves tar-
+the planner only emits object actions over existing identifiers.   gets, drops invalid or cut-turn edits, normalizes overlapping
+                                                                   actions, materializes the projected active view, and estimates
+Indexed Context Objects                                            token savings. Accepted plans remain pending until a safe
+                                                                   turn boundary, where the harness merges them with the cur-
+Self-GC maps the transcript into addressable objects rather        rent view, repairs parent lineage to the nearest surviving
+than editing raw message text. The current implementa-             ancestors, persists folded sidecars, and normalizes provider
+tion uses conversation:user:k for a user request                   messages. Rejected plans never affect the main agent loop.
+and its following execution span, and function:tool:n                 This separation is the safety mechanism: the model sup-
+for tool-level spans that can be edited independently.             plies semantic judgment about future value, while the harness
+Lightweight tags make these objects visible to the planner         enforces protocol validity, recoverability, and commit disci-
+without requiring model-native memory primitives. Assis-           pline. The appendix provides the planner contract, output
+tant turns are not first-class GC targets because they often       schema, and sequence diagram.
+contain connective text and tool-call envelopes; instead they
+are preserved or normalized by the harness whenever their          Recoverability and Cache-Aware Commit
+adjacent objects change.
+   Object identifiers are assigned by a session-local mono-        Fold metadata is inserted as a control-plane reminder at-
+tonic allocator. Each visible user input receives a stable         tached to the relevant user message, not as assistant-authored
+conversation:user:k id in its header metadata, and                 prose. This keeps recovery pointers visible to the model while
+each tool result receives a stable function:<tool>:n               reducing the risk that later assistant turns imitate internal fold
+id as a lightweight XML boundary tag. These ids are control        tags. The active view can therefore be small without losing
+metadata rather than assistant prose, so the planner can tar-      the route back to large artifacts or evidence-bearing spans.
+get exact objects while the harness can replay, validate, and         Because committing a GC plan changes the active view,
+recover edits without fuzzy text matching.                         it may invalidate part of a provider prefix cache. Self-GC
+   The index serves three roles. It gives the planner stable       therefore commits incrementally and only when expected
+targets, lets the harness track lifecycle state, and separates     future savings justify the cache disruption:
+recovery paths from summary prose. A compressed active             CommitBenefit ≈ Nfuture (C − C ′ ) − Lcache_break − LGC .
+view can therefore still point to byte-exact folded payloads
+in sidecar storage. This is the central difference from final      Here C and C ′ are average input costs before and after com-
+summary: Self-GC reduces prompt surface while preserving           mit, Nfuture is expected reuse, and the last two terms estimate
+object identity.                                                   cache-break and GC overhead, including the side-channel
+                                                                   planner call. A deployment regression over observed trig-
+Actions: Fold, Mask, and Prune                                     ger points indicates that immediate commit is positive-value
+Each object can receive one lifecycle action, as summarized        once expected active-view pruning exceeds 0.3; below that,
+in Figure 3. Fold moves the exact payload to a sidecar and         Self-GC can keep the plan pending until cache expiry or the
+leaves a compact recovery pointer. Mask keeps structural           next task boundary. This threshold is an operating policy
+boundary hints while eliding repetitive or low-signal middle       rather than a universal constant.
+content. Prune removes obsolete content from the active
+view without a recovery guarantee. These distinctions matter                              Experiments
+in agent traces: a failed command log may be pruned, a             This section presents a comprehensive evaluation of Self-
+repeated browser snapshot may be masked, and a generated           GC across three dimensions: context reduction, future-
+Figure 2: Overview of the Self-GC runtime framework. The context-engine hook exposes indexed context objects to a side-
+channel planner; the harness then rehearses the proposed edit locally and commits it only at safe turn boundaries.
+
+
+dependency preservation, and online cost impact. Our evalu-       Table 1: Offline dataset construction pipeline for the Produc-
+ation specifically tests whether object-level lifecycle control   tion Suite and Hard Set.
+can improve the trade-off between token pruning and down-
+stream task continuity in long-horizon LLM agents.                            Filtering stage               Count
+                                                                              Raw trace rows                15,141
+Benchmarks                                                                    Compaction-triggered traces    9,075
+We evaluate Self-GC on production-derived long-horizon                        Production Suite sessions        332
+agent traces. Table 1 summarizes the offline filtering pipeline               Hard Set sessions                 33
+that yields the 332-session Production Suite and the 33-
+session Hard Set. The Hard Set is distilled from the highest
+sustained tool-pressure cases and is intentionally skewed to-     ically at or after o enter the Self-GC group, while earlier
+ward browser, shell, and web-fetch workflows rather than          accounts form control. The split covers both context-gc
+mirroring the full production mix. These sessions emphasize       for interactive chat cleanup and skill-gc for long-lived
+settings where exact URLs, paths, command outputs, and            skill-state pruning. This operational split is used as produc-
+extracted values often become future dependencies.                tion monitoring evidence rather than as a fully randomized
+   To make the workload concrete without exposing private         quality experiment; offline replay provides the controlled
+content, representative user requests after anonymization in-     future-dependency comparison.
+clude: “collect the latest public information about a vendor
+and turn it into a comparison table,” “fix this report spread-    Metrics
+sheet without changing the existing header and formulas,”         Pruning Rate measures the mean fraction of prefix tokens
+and “trace why the scheduled task failed, rerun it, and send      removed from the active view:
+me the final link.” Such requests are short at the user layer,                                   |C ′ |
+but their tool traces contain browser snapshots, table rows,                         Prune = 1 −        ,
+                                                                                                  |C|
+generated artifacts, execution handles, and correction con-
+straints that may be needed several turns later.                  where C and C ′ denote the active context before and after a
+Online Split measures deployed behavior under production          candidate GC action.
+traffic. Table 2 summarizes the account-level assignment          No-impact Rate measures whether the retained context still
+rule. Accounts whose email first character is lexicograph-        supports the real future continuation. Given the retained
+                                                                 Table 3: No-impact and pruning rate of Self-GC and base-
+                                                                 lines on the Hard Set. No-impact is GPT-5.5 validation with
+                                                                 Wilson 95% confidence intervals; higher no-impact is better.
+
+                                                                       Method            Prune No-impact       95% CI
+                                                                       Oldest-turn       63.45     66.67    [49.61, 80.25]
+                                                                       Tool-prune        67.93     69.70    [52.66, 82.62]
+                                                                       Tool-mask+prune   61.90     54.55    [37.99, 70.16]
+                                                                       Hybrid            69.87     57.58    [40.81, 72.76]
+                                                                       Self-GC           43.95     84.85    [69.08, 93.35]
+
+
+
+                                                                   We first compare against four heuristic context policies:
+                                                                 Oldest-turn chronologically folds the oldest conversational
+                                                                 spans while preserving the latest user turn; Tool-prune
+                                                                 greedily removes tool outputs under token pressure; Tool-
+                                                                 mask+prune first masks low-signal tool spans and then
+                                                                 prunes remaining tool outputs when additional budget is
+                                                                 needed; and Hybrid combines chronological turn folding
+                                                                 with tool-output pruning. Together, these baselines approx-
+                                                                 imate position-based cleanup, tool-span deletion, two-stage
+Figure 3: Lifecycle actions over indexed objects. Fold moves     tool policies, and layered hand-written policies without se-
+an exact payload to a sidecar and leaves a compact recovery      mantic object modeling.
+pointer, mask preserves object boundaries while eliding low-
+signal middle content, and prune removes obsolete spans          Base Models
+without a recovery guarantee.                                    Because Self-GC is harness-controlled but model-in-the-
+                                                                 loop, the relevant base models are planner backbones. Un-
+Table 2: Online account-level split used for deployed input-     less otherwise stated, Self-GC uses Qwen3.6-Plus as the
+token monitoring.                                                side-channel planner. We further evaluate Qwen3.7-Max and
+                                                                 GLM-5.1 to test whether the framework depends on a single
+  Split                 Assignment rule                          planner model. GPT-5.5 is used only as an offline judge, not
+                                                                 as the planner under test.
+  Self-GC group         Account email first character lexico-
+                        graphically ≥ o
+  Control group         Account email first character lexico-
+                                                                 Implementation Details
+                        graphically < o                          For all offline experiments, Self-GC uses a 30% compression
+  Coverage              context-gc for interactive chat          threshold and mandatory last-turn retention. The planner sees
+                        cleanup; skill-gc for long-lived         indexed context objects and emits fold, mask, or prune ac-
+                        skill-state pruning                      tions over existing identifiers. Before any edit reaches the
+                                                                 active view, the harness rehearses the plan, removes invalid
+                                                                 or cut-turn actions, normalizes overlapping actions, material-
+prefix, candidate plan, compact before/after patches, and        izes the projected context, and estimates token savings. The
+ground-truth future turns, a GPT-5.5 judge checks whether        evaluator is diff-grounded: it receives the retained prefix,
+exact URLs, paths, row values, task identifiers, editable bod-   structured plan, impacted-turn context_prune_diff
+ies, and source-backed evidence remain available. We report      blocks, and the real future turns. The tested agent view con-
+Wilson 95% confidence intervals for this binary judgment.        tains only the retained context; the removed-content diff is
+Online Input Tokens reports the average main-agent model         judge-only counterfactual evidence. Prompt contracts and
+input tokens for covered production traffic. The side-channel    output schemas are provided in the appendix.
+planner overhead is controlled by the commit policy above
+but is not a substitute for a matched billed-cost audit. This    Main Results
+metric captures deployed prompt-surface impact, but it does      The results in Table 3 demonstrate that Self-GC selects a con-
+not replace the offline future-dependency judgment.              servative but substantially safer operating point under stress.
+                                                                 Heuristic baselines remove 61.90% to 69.87% of tokens, but
+Baselines                                                        their no-impact rates remain between 54.55% and 69.70%.
+To evaluate Self-GC under the available production-derived       Self-GC prunes 43.95% and improves no-impact to 84.85%,
+traces, we compare it against heuristic context policies that    a gain of at least 15.15 percentage points over the strongest
+can be replayed at the same cut points with the same token       completed heuristic.
+accounting, mandatory last-turn retention, and GPT-5.5 no-          Table 4 shows the same pattern at larger scale. The com-
+impact judge.                                                    pleted heuristic baselines prune 40.19% to 47.76% but re-
+Table 4: No-impact and pruning rate on the Production Suite.         Our failure audit further shows why these cases hurt fixed
+Calibrated rows use A/B judge adjustment on disagreement          baselines more than Self-GC. The recurring loss modes are
+cases; higher no-impact is better.                                not generic “bad summaries,” but specific missing depen-
+                                                                  dencies: evidence details, locators and handles, behavioral
+     Method              Prune No-impact      95% CI              contracts, verbatim source text, and live execution state. For
+     Oldest-turn         40.19    87.46    [83.46, 90.60]         instance, a later turn may ask to restore the exact report word-
+     Tool-prune          47.76    77.71    [72.93, 81.86]         ing, continue from the latest callback URL, preserve a user’s
+     Tool-mask+prune     47.75    80.12    [75.49, 84.06]         “do not replace the table header” correction, or explain which
+     Hybrid              46.28    83.73    [79.38, 87.31]         rerun finally succeeded. A chronological or type-based pol-
+     Self-GC Qwen3.6 31.51        92.77    [89.47, 95.09]
+                                                                  icy has no representation for these distinctions. It can remove
+     Self-GC Qwen3.7 33.98        94.58    [91.59, 96.54]         many tokens, but it cannot tell whether the removed span was
+     Self-GC GLM-5.1 31.04        91.27    [87.74, 93.85]         low-signal trace or the only bridge to the next action. The ap-
+                                                                  pendix section “Failure Categories and Case Studies” gives
+                                                                  the full taxonomy.
+main below 90% no-impact. In contrast, Self-GC reaches               Self-GC addresses the same error classes at the prompt-
+91.27% to 94.58% no-impact across three planner backbones         contract level. The planner prompt does not ask for a free-
+while pruning 31.04% to 33.98%.                                   form summary; it asks for object actions under ordered ex-
+   Figure 4 visualizes the trade-off between compression and      clusion, dependency, granularity, action, and sanity-check
+preservation. The result reinforces that aggressive pruning       rules. Its few-shot examples explicitly prefer tool-level fold
+is not sufficient for agent context management, and that the      over whole-turn fold when a turn contains an editable body,
+relevant objective is instead to remove low-value context         source-backed evidence, or a use-site bridge; they prefer
+while retaining the future anchors.                               pruning only obsolete searches or failed attempts after de-
+   We further calibrate oldest-turn-fold against Self-            pendency is cleared; and they require fold rather than mask
+GC Qwen3.6-Plus with an A/B judge. Single-prompt judg-            for large stable bodies that may need idempotent recovery.
+ments give raw no-impact rates of 89.76% and 92.47%, re-          This explains the conservative operating point in Tables 3
+spectively. On 20 disagreement cases, the A/B judge prefers       and 4: Self-GC gives up some pruning because the prompt
+Self-GC in 11 cases, ties in seven, and prefers the baseline in   has learned, through examples and hard rules, that exact an-
+two, yielding calibrated estimates of 92.77% versus 87.46%.       chors, recoverable artifacts, and current state are load-bearing
+   Finally, Figure 5 reports deployed aggregate prompt-           objects rather than compressible prose.
+surface impact. Across the observed daytime window, the
+Self-GC group consistently uses fewer average main-agent          Relation to Industrial and Method Baselines
+input tokens than control. This live result does not by itself
+prove user-quality preservation or net billed-cost reduction,     DeepSeek-V3.2 reports Search Agent context-management
+but it confirms that Self-GC produces measurable production       strategies including Summary, Discard-75%, and Discard-
+input-token reductions after deployment.                          all when rollout token usage exceeds a large fraction of the
+                                                                  context window (DeepSeek-AI 2025). We treat these strate-
+               Analysis and Discussion                            gies as industrial policy references rather than direct ex-
+Failure Modes of Fixed Heuristics                                 perimental baselines because they require a matched agent
+                                                                  harness and rollout policy. Recent methods such as Agent-
+The strongest heuristics fail in different ways.
+                                                                  Diet, AgentFold, and LongCodeZip likewise motivate fu-
+oldest-turn-fold preserves high-level narrative but
+                                                                  ture public comparisons, but their native settings differ from
+hides concrete grounding such as document identifiers, ports,
+                                                                  our production-derived office, browser, shell, and web-fetch
+row values, and failure causes. tool-prune-greedy
+                                                                  traces. The completed comparison in this paper therefore
+keeps the conversational narrative but deletes tool artifacts
+                                                                  focuses on reproducible heuristic policies under a shared
+that later become live handles or exact evidence. This
+                                                                  cut-point replay protocol.
+explains the workload reversal observed in our results:
+tool pruning is competitive on BI-heavy Hard Set sessions,
+where many dumps can be re-queried, while chronological           Planner Robustness
+turn folding is stronger on DOC/CODE-heavy Production
+Suite sessions, where short tool outputs often contain unique     Planner-backbone differences are modest: Qwen3.6-Plus,
+artifact identifiers or row-level values.                         Qwen3.7-Max, and GLM-5.1 all exceed 90% no-impact on
+   This asymmetry is practical as well as statistical. Coding     the Production Suite. This supports using a mid-tier planner
+tasks often have Git history, build logs, tests, and rerunnable   in deployment, provided that the harness enforces determin-
+commands as external memory. Office-style workflows often         istic safety checks. We also audit whether planners would
+lack an agent-accessible version substrate, so a short tool       compress the latest visible user turn before the production
+output may contain the only recoverable business evidence.        safety filter removes such edits: Qwen3.6-Plus touches the
+Self-GC is designed for this regime: it prunes low-signal         cut turn in 25/330 parsed plans, Qwen3.7-Max in 15/330,
+process trace while keeping exact anchors, final artifacts,       and GLM-5.1 in 12/328. The prompt usually works, but the
+and recovery routes visible.                                      residual risk justifies mandatory last-turn protection.
+Figure 4: Compression and preservation trade-off on the Hard Set and Production Suite. Each point reports mean pruning rate
+and no-impact rate for one method; Self-GC consistently shifts toward higher future-dependency preservation at a lower but
+safer pruning level.
+
+
+
+
+Figure 5: Online average input tokens for the Self-GC group and control group during daytime production traffic, May 25 to 30,
+08:00 to 22:00. The curve aggregates covered traffic and shows average reductions of 10% to 15% for Self-GC, with peaks near
+20%; the final window includes volatile month-end batch API traffic.
+
+
+                       Limitations                                online replay success, and the A/B calibration set is small.
+                                                                  Online logs show aggregate main-agent input-token reduc-
+The evaluation is production-derived but not fully open be-       tions under an operational account split, but not a fully ran-
+cause raw traces contain private user data; reproducibility re-   domized quality experiment or matched billed-cost audit in-
+quires sanitized fixtures, prompt templates, per-sample judge     cluding all planner overhead. Future releases should add san-
+outputs, and scripts for recomputing aggregate statistics. The    itized artifacts, recovery-success measurements, vision and
+main offline metric is judge-based no-impact rather than full
+binary-payload recoverability tests, judge-sensitivity analy-     Kang, M.; Chen, W.-N.; Han, D.; Inan, H. A.; Wutschitz,
+sis, and richer online quality metrics.                           L.; Chen, Y.; Sim, R.; and Rajmohan, S. 2025. ACON:
+                                                                  Optimizing Context Compression for Long-horizon LLM
+                       Conclusion                                 Agents. arXiv:2510.00615.
+In this paper, we introduce Self-GC, a harness-portable           Lewis, P.; Perez, E.; Piktus, A.; Petroni, F.; Karpukhin,
+framework for self-governing context in long-horizon LLM          V.; Goyal, N.; Küttler, H.; Lewis, M.; tau Yih, W.; Rock-
+agents. Self-GC is predicated on the observation that agent       täschel, T.; Riedel, S.; and Kiela, D. 2020. Retrieval-
+histories are not passive token buffers, but collections of       Augmented Generation for Knowledge-Intensive NLP Tasks.
+runtime objects with distinct lifecycle requirements. It oper-    arXiv:2005.11401.
+ationalizes this insight through indexed user-turn and tool-
+                                                                  Li, K.; Yu, X.; Ni, Z.; Zeng, Y.; Xu, Y.; Zhang, Z.; Li, X.;
+span objects, a side-channel planner for fold, mask, and prune
+                                                                  Sang, J.; Duan, X.; Wang, X.; Liu, C.; and Tan, J. 2026.
+decisions, and a harness-controlled rehearsal and commit
+                                                                  TiMem: Temporal-Hierarchical Memory Consolidation for
+path that preserves recoverability, protocol validity, lineage,
+                                                                  Long-Horizon Conversational Agents. arXiv:2601.02845.
+and cache locality. Through experiments on production-
+derived traces and an online account-level split, we show         Li, Y.; Huang, Y.; Yang, B.; Venkitesh, B.; Locatelli, A.;
+that Self-GC improves future-dependency preservation while        Ye, H.; Cai, T.; Lewis, P.; and Chen, D. 2024. SnapKV:
+reducing active-context cost. These results suggest a new         LLM Knows What You are Looking for Before Generation.
+paradigm for agent context management: runtime lifecycle          arXiv:2404.14469.
+control over recoverable objects rather than heuristic text       Liao, H.; Xu, Y.; He, S.; Li, G.; Yin, X.; Li, D.; Barsoum,
+cleanup or final summary alone.                                   E.; Zhao, J.; and Liu, K. 2026. SparK: Query-Aware Un-
+                                                                  structured Sparsity with Recoverable KV Cache Channel
+                        References                                Pruning. Proceedings of the AAAI Conference on Artificial
+Cai, Z.; Zhang, Y.; Gao, B.; Liu, Y.; Li, Y.; Liu, T.; Lu, K.;    Intelligence, 40(38): 31961–31969.
+Xiong, W.; Dong, Y.; Hu, J.; and Xiao, W. 2024. PyramidKV:        Liu, X.; Yu, H.; Zhang, H.; Xu, Y.; Lei, X.; Lai, H.; Gu, Y.;
+Dynamic KV Cache Compression based on Pyramidal Infor-            Ding, H.; Men, K.; Yang, K.; Zhang, S.; Deng, X.; Zeng,
+mation Funneling. arXiv:2406.02069.                               A.; Du, Z.; Zhang, C.; Shen, S.; Zhang, T.; Su, Y.; Sun,
+Cassano, F.; and Rush, S. 2026. Training Composer for             H.; Huang, M.; Dong, Y.; and Tang, J. 2023a. AgentBench:
+Longer Horizons. Cursor research blog, accessed 2026-06-          Evaluating LLMs as Agents. arXiv:2308.03688.
+04.
+                                                                  Liu, Y.; Iter, D.; Xu, Y.; Wang, S.; Xu, R.; and Zhu, C.
+Chhikara, P.; Khant, D.; Aryan, S.; Singh, T.; and Yadav, D.
+                                                                  2023b. G-Eval: NLG Evaluation using GPT-4 with Better
+2025. Mem0: Building Production-Ready AI Agents with
+                                                                  Human Alignment. arXiv:2303.16634.
+Scalable Long-Term Memory. arXiv:2504.19413.
+Chroma. 2026. Chroma Context-1: Training a Self-Editing           Lumer, E.; Nizar, F.; Jangiti, A.; Frank, K.; Gulati, A.; Pha-
+Search Agent. Research blog, accessed 2026-06-04.                 date, M.; and Subbiah, V. K. 2026. Don’t Break the Cache:
+                                                                  An Evaluation of Prompt Caching for Long-Horizon Agentic
+Dai, R.; Hu, H.; Zhang, J.; Kang, Y.; and Tan, A.-H. 2026.
+                                                                  Tasks. arXiv:2601.06007.
+MemoryART: Enhancing LLMs via Multi-Memory Mod-
+els with Adaptive Resonance Theory for Healthcare Agents.         Packer, C.; Wooders, S.; Lin, K.; Fang, V.; Patil, S. G.; Stoica,
+Proceedings of the AAAI Conference on Artificial Intelli-         I.; and Gonzalez, J. E. 2024. MemGPT: Towards LLMs as
+gence, 40(25): 20676–20683.                                       Operating Systems. arXiv:2310.08560.
+DeepSeek-AI. 2025. DeepSeek-V3.2: Pushing the Frontier            Shi, Y.; Qian, Y.; Zhang, H.; Shen, B.; and Gu, X. 2025.
+of Open Large Language Models. arXiv:2512.02556.                  LongCodeZip: Compress Long Context for Code Language
+Du, Y.; Wang, B.; He, Y.; Liang, B.; Wang, B.; Li, Z.; Gui,       Models. ASE 2025 Research Paper, arXiv:2510.00446.
+L.; Pan, J. Z.; Xu, R.; and Wong, K.-F. 2026. MemGuide:           Shu, Y.; Jonnalagedda, S. P.; Gao, X.; Gutiérrez, B. J.; Qi, W.;
+Intent-Driven Memory Selection for Goal-Oriented Multi-           Das, K.; Sun, H.; and Su, Y. 2026. REMem: Reasoning with
+Session LLM Agents. Proceedings of the AAAI Conference            Episodic Memory in Language Agent. arXiv:2602.13530.
+on Artificial Intelligence, 40(36): 30584–30592.
+Guo, Z.; Xu, B.; Zhu, C.; Hong, W.; Wang, X.; and Mao, Z.         Tan, C. H.-M.; Subagdja, B.; and Tan, A.-H. 2026. ARTEM:
+2026. MCP-AgentBench: Evaluating Real-World Language              Enhancing Large Language Model Agents with Spatial-
+Agent Performance with MCP-Mediated Tools. Proceedings            Temporal Episodic Memory. Proceedings of the AAAI Con-
+of the AAAI Conference on Artificial Intelligence, 40(37):        ference on Artificial Intelligence, 40(30): 25753–25760.
+30888–30896.                                                      Wang, W.; Dong, L.; Cheng, H.; Liu, X.; Yan, X.; Gao, J.;
+Gutiérrez, B. J.; Shu, Y.; Gu, Y.; Yasunaga, M.; and Su, Y.       and Wei, F. 2023. Augmenting Language Models with Long-
+2024. HippoRAG: Neurobiologically Inspired Long-Term              Term Memory. arXiv:2306.07174.
+Memory for Large Language Models. arXiv:2405.14831.               Wang, Y.; Shi, Y.; Yang, M.; Zhang, R.; He, S.; Lian,
+Jia, J.; and Li, Q. 2026. AutoTool: Efficient Tool Selection      H.; Chen, Y.; Ye, S.; Cai, K.; and Gu, X. 2026. SWE-
+for Large Language Model Agents. Proceedings of the AAAI          Pruner: Self-Adaptive Context Pruning for Coding Agents.
+Conference on Artificial Intelligence, 40(37): 31265–31273.       arXiv:2601.16746.
+Wu, Y.; Zheng, Y.; Xu, T.; Zhang, Z.; Yu, Y.; Zhu, J.; Ma, C.;
+Lin, B.; Dong, B.; Zhu, H.; Huang, R.; and Yu, G. 2026. Con-
+textBudget: Budget-Aware Context Management for Long-
+Horizon Search Agents. arXiv:2604.01664.
+Xiao, G.; Tian, Y.; Chen, B.; Han, S.; and Lewis, M. 2023.
+Efficient Streaming Language Models with Attention Sinks.
+arXiv:2309.17453.
+Xiao, Y.-A.; Gao, P.; Peng, C.; and Xiong, Y. 2025. Reducing
+Cost of LLM Agents with Trajectory Reduction. FSE 2026
+Research Paper, arXiv:2509.23586.
+Xu, B.; Zhang, D.; and Arunachalam, R. 2026. From Model
+to Agent: Equipping the Responses API with a Computer
+Environment. Engineering blog, accessed 2026-06-04.
+Xu, W.; Liang, Z.; Mei, K.; Gao, H.; Tan, J.; and Zhang,
+Y. 2025. A-MEM: Agentic Memory for LLM Agents.
+arXiv:2502.12110.
+Ye, R.; Zhang, Z.; Li, K.; Yin, H.; Tao, Z.; Zhao, Y.; Su, L.;
+Zhang, L.; Qiao, Z.; Wang, X.; Xie, P.; Huang, F.; Zhou, J.;
+Chen, S.; and Jiang, Y. 2026. AgentFold: Long-Horizon Web
+Agents with Proactive Context Folding. ICLR 2026 Poster.
+Zhang, Z.; Sheng, Y.; Zhou, T.; Chen, T.; Zheng, L.; Cai, R.;
+Song, Z.; Tian, Y.; Ré, C.; Barrett, C.; Wang, Z.; and Chen,
+B. 2023. H2 O: Heavy-Hitter Oracle for Efficient Generative
+Inference of Large Language Models. arXiv:2306.14048.
+Zhao, A.; Huang, D.; Xu, Q.; Lin, M.; Liu, Y.-J.; and Huang,
+G. 2024. ExpeL: LLM Agents Are Experiential Learners.
+Proceedings of the AAAI Conference on Artificial Intelli-
+gence, 38(17): 19632–19642.
+Zhong, W.; Guo, L.; Gao, Q.; Ye, H.; and Wang, Y. 2024.
+MemoryBank: Enhancing Large Language Models with
+Long-Term Memory. Proceedings of the AAAI Conference
+on Artificial Intelligence, 38(17): 19724–19731.
+Zhou, S.; Xu, F. F.; Zhu, H.; Zhou, X.; Lo, R.; Sridhar,
+A.; Cheng, X.; Ou, T.; Bisk, Y.; Fried, D.; Alon, U.; and
+Neubig, G. 2024. WebArena: A Realistic Web Environment
+for Building Autonomous Agents. arXiv:2307.13854.
+Zhu, L.; Wang, X.; and Wang, X. 2023. JudgeLM:
+Fine-tuned Large Language Models are Scalable Judges.
+arXiv:2310.17631.
+                         Appendix                                 Planner contract. The production planner prompt encodes
+                                                                  operational safety rules rather than a generic “summarize old
+Dataset Details
+                                                                  context” instruction:
+The offline suites and online split are defined in Table 1 and
+Table 2 of the main paper. Raw production traces contain          1. Exclude the latest visible turn, active instruction files, live
+private user data and cannot be released directly; a public re-      handles, editable artifact bodies, and exact evidence that
+production package should instead provide sanitized fixtures,        future turns may need verbatim.
+planner outputs, candidate patches, token estimates, prompt       2. Prefer tool-level actions when they preserve the same
+templates, judge outputs, and scripts for recomputing aggre-         future support more precisely than whole-turn folding.
+gate statistics.
+                                                                  3. Use prune only for obsolete low-signal trace, mask for
+                                                                     repetitive log-like middle content, and fold for large
+Evaluation Artifacts                                                 bodies that may require idempotent recovery.
+The evaluation harness is organized around four artifacts:        4. Emit XML with a short conversation summary and
+ • Object identifiers. Transcript spans are addressed as             grouped fold/mask/prune targets over existing object
+   conversation:user:n for user-turn spans and                       identifiers only.
+   function:tool:n for tool-level spans.
+ • Planner       output.    The     planner    emits    one                  Listing 2    Planner output schema (XML).
+   above_conversation_summary                 block     fol-
+   lowed by one gc_plan block containing fold, mask,                <above_conversation_summary>
+   and prune targets.                                               One short sentence describing the
+                                                                        session type, likely future
+ • Projection replay. Candidate plans are replayed through              dependencies,
+   target resolution, last-turn filtering, redundant-target         and a light compression bias.
+   normalization, sidecar persistence, lineage repair, and          </above_conversation_summary>
+   provider-message normalization.                                  <gc_plan>
+ • Semantic validation. The judge receives the retained pre-          <fold kind="conversation"
+   fix, structured plan, impacted-turn patches, and the real            reason="resolved_turn">
+                                                                        user:5
+   future turns after the cut point. A separate A/B judge             </fold>
+   prompt compares two candidate projections on disagree-             <fold kind="function"
+   ment cases.                                                          reason="stable_artifact">
+   The diff-grounded evaluator converts pruning edits into              read:12
+turn-level patches: the retained prefix shows the context after       </fold>
+                                                                      <prune kind="function"
+pruning, inline context_prune_diff blocks show re-                      reason="obsolete_trace">
+moved or folded content for impacted turns, and ground-truth            exec:9
+future turns show the real continuation. The diff is provided         </prune>
+only to the evaluator for counterfactual inspection; it is not      </gc_plan>
+part of the evaluated agent’s active view.
+                                                                  Judge contract. The judge evaluates whether the retained
+          Listing 1   Session-local object id injection.          prefix still supports the actual future conversation. It first
+  [User]                                                          identifies concrete dependencies in future turns, then checks
+  Header metadata:                                                whether those dependencies remain visible or recoverable
+  {                                                               after projection. Narrative coherence alone is insufficient:
+    "label": "webchat",                                           exact identifiers, source-backed explanations, row-level val-
+    "turn_id": "conversation:user:1"                              ues, and editable bodies dominate high-level summaries.
+  }
+  What does this file do?                                                     Listing 3   Judge output schema (JSON).
+  [Tool result: read(src/main.py)]                                  {
+  def main():                                                           "valid": boolean,
+      print("Self-GC System Running...")                                "uncertain": boolean,
+                                                                        "overall_score": number,
+  <turn id="function:read:1" />                                         "summary": string,
+                                                                        "dimension_scores": {
+                                                                          "goal_retention": {"score": 0-5,
+Prompt Contracts                                                          "verdict": "pass|warn|fail"},
+                                                                          "evidence_retention": {"score": 0-5,
+This section specifies the planner and judge contracts refer-             "verdict": "pass|warn|fail"},
+enced in the main paper. The implementation diagrams are                  "continuation_readiness": {"score":
+given in Figure 6 and Figure 7.                                           0-5, "verdict": "pass|warn|fail"},
+          "compression_safety": {"score": 0-5,                   Architectural Details
+         "verdict": "pass|warn|fail"}                            Figure 6 and Figure 7 show the implementation views used
+       },
+                                                                 during audit.
+       "failure_culprit": {"target_id":
+         string} | null
+  }                                                              Failure Categories and Case Studies
+                                                                 Table 7 gives the dependency-centered taxonomy used to
+A/B judge contract. The A/B calibration prompt compares          inspect invalid or risky plans: each category asks what future
+two pruning candidates for the same cut point and future         action becomes unsupported, not merely which message type
+continuation. It identifies concrete future dependencies and     was removed.
+chooses the candidate that better preserves them in the re-      Repair-loop safety. In one document-repair session, the
+tained prefix and impacted-turn patches.                         user repeatedly warned the agent not to replace a table header
+                                                                 wholesale after previous tool calls corrupted the layout. A
+           Listing 4   A/B judge output schema (JSON).           chronological turn-fold baseline hid the explicit warning be-
+                                                                 hind a summary. Self-GC pruned obsolete failed tool outputs
+  {                                                              but retained a visible warning bridge, preserving the behav-
+       "verdict": "A_better" | "B_better" |                      ioral contract needed for later localized edits.
+         "tie",
+       "summary": string,                                        Workflow-contract seeding. In a multi-record data-entry
+       "rationale": string,                                      pipeline, early turns created a task-specific contract file
+       "stronger_aspects": string[],                             and reference database. The strongest chronological baseline
+       "risks": string[],                                        folded the seeding phase because it was old. Self-GC instead
+       "confidence": number
+                                                                 folded only bulky file bodies with structured recovery point-
+  }
+                                                                 ers and kept contract locators visible, reducing format drift
+                                                                 risk across later records.
+Prompt safety mapping. Table 5 summarizes how the plan-
+ner prompt maps future-dependency risks to explicit con-         Future Work
+straints and few-shot calibration examples before determin-      Future work includes porting Self-GC to additional agent
+istic rehearsal.                                                 harnesses, replacing some planner calls with lighter task-
+                                                                 conditioned policies, and combining runtime GC with hi-
+Implementation Details                                           erarchical memory or retrieval stores so durable knowledge
+                                                                 migrates out of the active prompt.
+All offline methods use the same cut points, token accounting,
+mandatory last-turn retention, and GPT-5.5 no-impact judge.
+Table 6 lists the planner backbones, judge model, and core
+runtime settings.
+
+      Listing 5   Planning, rehearsal, and commit pseudocode.
+
+  State: active view V, pending plan P
+
+  On trigger:
+    snapshot <- fork main-agent prefix
+    plan <- side-channel planner(snapshot)
+    plan <- normalize targets and remove
+      cut-turn edits
+    projection <- apply V union plan
+      locally
+    if projection saves enough tokens and
+      is object-valid:
+      P <- plan
+
+  On safe turn boundary:
+    if P is not empty:
+      merge P with current V
+      repair object lineage to nearest
+      surviving ancestors
+      persist folded payloads to sidecar
+      storage
+      commit the new active view
+                        Table 5: Prompt-level safeguards used to reduce common future-dependency failures.
+
+  Risk                        Prompt rule                               Few-shot calibration                    Baseline vulnerability
+  Exact evidence loss         Preserve exact ids, paths, URLs, row val- Prefer tool-level fold for a large Chronological fold hides
+                              ues, query fields, artifact bodies, and SQL/script body that later turns may middle evidence; tool
+                              source-backed evidence whenever later edit; do not rely on assistant summary pruning deletes the only
+                              turns may inspect, cite, revise, or rerun alone.                                   observed values.
+                              them.
+  Locator and handle loss     Treat latest live handles, job ids, queue Keep a concrete use-site or handoff Type-based pruning re-
+                              ids, callback URLs, file paths, and hand- bridge visible when a whole-turn fold moves short tool outputs
+                              off locators as required-retention anchors. would obscure it.                      because they look cheap,
+                                                                                                                 even when they contain
+                                                                                                                 the active handle.
+  Behavioral-contract loss    Never GC instruction, policy, schema, or Use function-level actions when a turn Age-based fold treats old
+                              task-contract reads that may still govern mixes obsolete execution trace with setup and warnings as re-
+                              later behavior. Preserve user corrections a still-active contract or verification solved narrative.
+                              that constrain future edits.                 span.
+  Verbatim-source loss        Preserve exact sentences, quotes, tran- Fold only bulky middle trace of re- Summary baselines pre-
+                              script spans, wording fragments, and field solved turns; do not fold a turn when serve topic but not recov-
+                              labels when future continuation may need retained text loses the source body.      erable wording.
+                              original wording.
+  Live-state loss             Preserve active blockers, corrected re- Prune obsolete searches or failed Greedy deletion removes
+                              sults, latest successful handoff, rerun sta- attempts only after dependency is failed/success         states
+                              tus, and enough bridge evidence to ex- cleared; preserve corrected rerun re- without knowing which
+                              plain what changed or why.                   sults rather than the correction note one is current.
+                                                                           alone.
+
+
+
+
+      Role                       Model / setting
+      Default planner            Qwen3.6-Plus
+      Alternate planners         Qwen3.7-Max, GLM-5.1
+      Offline judge              GPT-5.5
+      Compression threshold      30%
+      Last-turn retention        Mandatory
+
+Table 6: Planner backbones, judge model, and core runtime
+settings for offline evaluation.
+Figure 6: Planning, rehearsal, and commit sequence used by Self-GC. Planning runs in a side channel, while accepted plans are
+validated locally and committed only after the harness reaches a safe turn boundary.
+
+
+
+
+Figure 7: Context-object data model used by Self-GC. User-turn and tool-span objects carry stable identifiers, lifecycle state,
+optional recovery pointers, and active-view projection semantics.
+                           Table 7: Failure taxonomy for future-dependency loss in context pruning.
+
+Category                     Missing dependency                             Typical symptom                       Self-GC mitigation
+Evidence-detail loss         Exact rows, table values, metric definitions, The future turn can continue the Keep or fold evidence-
+                             SQL filters, chart selectors, stack frames, or story but cannot reproduce, audit, bearing tool spans;
+                             sparse middle evidence.                        or revise the concrete result.        avoid mask for sparse
+                                                                                                                  tables, stack traces,
+                                                                                                                  and diff hunks.
+Locator / handle loss        File paths, document ids, task ids, session The agent knows an artifact exists Required-retention
+                             ids, wait handles, callback URLs, recovery but cannot reopen, rerun, wait for, anchors and sidecar
+                             paths, or final handoff links.                 or deliver it.                        pointers; latest live
+                                                                                                                  handles are excluded
+                                                                                                                  from GC.
+Behavioral-contract loss     User corrections, schema rules, instruction Later edits drift from the requested Instruction-file exclu-
+                             files, policy constraints, task-specific con- rule, even though the high-level task sion, contract preser-
+                             ventions, or workflow setup.                   remains visible.                      vation, and preference
+                                                                                                                  for tool-level actions
+                                                                                                                  over whole-turn fold.
+Verbatim-source loss         Original wording, transcript spans, quotes, A summary is semantically plau- Preserve exact source
+                             field labels, generated bodies, or source text sible but cannot answer a restore, spans or fold them re-
+                             requested later verbatim.                      quote, or exact-copy request.         coverably rather than
+                                                                                                                  replacing them with
+                                                                                                                  prose.
+Live-state loss              Current blocker, corrected rerun result, ac- The retained prefix looks com- Plan-level sanity check
+                             tive failure state, latest successful handoff, plete or stale while the real task is preserves current valid
+                             or completion status.                          blocked, rerunning, or recently cor- route, corrected state,
+                                                                            rected.                               and active completion
+                                                                                                                  evidence.
+Recovery-routing loss        Folded content exists in sidecar storage, but Recovery is technically possible but Fold reminders are at-
+                             the active view lacks enough semantic route practically undiscoverable in a later tached to the rele-
+                             information to know when or what to re- turn.                                        vant user turn and in-
+                             cover.                                                                               clude compact seman-
+                                                                                                                  tic routing plus sidecar
+                                                                                                                  location.
+              Reproducibility Checklist                            • This paper states the number and range of values tried
+Unless specified otherwise, please answer “yes” to each ques-        per (hyper-) parameter during development of the paper,
+tion if the relevant information is described either in the pa-      along with the criterion used for selecting the final param-
+per itself or in a technical appendix with an explicit reference     eter setting. (no; the paper reports final runtime settings
+from the main paper. If you wish to explain an answer further,       such as the 30% compression threshold and planner back-
+please do so in a section titled “Reproducibility Checklist”         bones, but not the full development sweep.)
+at the end of the technical appendix.                              • Any code required for pre-processing data is included in
+   This paper:                                                       the appendix. (no)
+                                                                   • All source code required for conducting and analyzing
+ • Includes a conceptual outline and/or pseudocode descrip-
+                                                                     the experiments is included in a code appendix. (no)
+   tion of AI methods introduced (yes)
+                                                                   • All source code required for conducting and analyzing the
+ • Clearly delineates statements that are opinions, hypothe-         experiments will be made publicly available upon publi-
+   sis, and speculation from objective facts and results (yes)       cation of the paper with a license that allows free usage
+ • Provides well marked pedagogical references for less-             for research purposes. (no; a sanitized artifact package is
+   familiar readers to gain background necessary to replicate        not yet released.)
+   the paper (yes)                                                 • All source code implementing new methods have com-
+                                                                     ments detailing the implementation, with references to
+Theoretical Contributions                                            the paper where each step comes from (no)
+Does this paper make theoretical contributions? (no)               • If an algorithm depends on randomness, then the method
+  This paper is a systems and empirical methods contri-              used for setting seeds is described in a way sufficient to
+bution. It introduces a runtime framework and evaluation             allow replication of results. (no)
+protocol rather than formal theorems or proofs.                    • This paper specifies the computing infrastructure used for
+                                                                     running experiments (hardware and software), including
+Datasets                                                             GPU/CPU models; amount of memory; operating sys-
+Does this paper rely on one or more datasets? (yes)                  tem; names and versions of relevant software libraries
+  If yes, please complete the list below.                            and frameworks. (no)
+                                                                   • This paper formally describes evaluation metrics used and
+ • A motivation is given for why the experiments are con-
+                                                                     explains the motivation for choosing these metrics. (yes)
+   ducted on the selected datasets (yes)
+                                                                   • This paper states the number of algorithm runs used to
+ • All novel datasets introduced in this paper are included          compute each reported result. (no)
+   in a data appendix. (yes; Tables 1 and 2 in the main paper
+   describe the offline pipeline and online split, but not raw     • Analysis of experiments goes beyond single-dimensional
+   traces.)                                                          summaries of performance (e.g., average; median) to in-
+                                                                     clude measures of variation, confidence, or other distribu-
+ • All novel datasets introduced in this paper will be made          tional information. (yes; Wilson 95% confidence intervals
+   publicly available upon publication of the paper with a           are reported for no-impact rates.)
+   license that allows free usage for research purposes. (no;
+   raw production traces contain private user data. A san-         • The significance of any improvement or decrease in per-
+   itized reproduction package is planned but not yet re-            formance is judged using appropriate statistical tests (e.g.,
+   leased.)                                                          Wilcoxon signed-rank). (no; we report confidence inter-
+                                                                     vals and a small A/B judge calibration set, but not formal
+ • All datasets drawn from the existing literature (potentially      significance tests such as Wilcoxon signed-rank.)
+   including authors’ own previously published work) are           • This paper lists all final (hyper-)parameters used for each
+   accompanied by appropriate citations. (not applicable;            model/algorithm in the paper’s experiments. (yes; see the
+   the reported experiments use production-derived traces            appendix section “Implementation Details” for planner
+   rather than literature datasets.)                                 backbones, judge model, compression threshold, and last-
+ • All datasets drawn from the existing literature (potentially      turn retention.)
+   including authors’ own previously published work) are
+   publicly available. (no; the primary offline and online
+   evaluations use private production-derived traces.)
+ • All datasets that are not publicly available are described
+   in detail, with explanation why publicly available alterna-
+   tives are not scientifically satisficing. (yes; see the Limi-
+   tations section and Tables 1 and 2.)
+
+Computational Experiments
+Does this paper include computational experiments? (yes)
+  If yes, please complete the list below.
+

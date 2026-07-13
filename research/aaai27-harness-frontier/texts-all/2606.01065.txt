@@ -1,0 +1,2076 @@
+                                                      Leyline: KV Cache Directives for Agentic Inference
+
+                                                            Bole Ma, Jan Eitzinger, and Harald Köstler
+                                                        Erlangen National High Performance Computing Center
+                                                                         Erlangen, Germany
+                                                   {bole.ma, jan.eitzinger, harald.koestler}@fau.de
+
+
+
+
+                                                           Abstract                                  on debug-gym, because shorter contexts let the
+                                                                                                     model attend to the few turns that actually mat-
+
+
+
+
+arXiv:2606.01065v1 [cs.DC] 31 May 2026
+                                         Modern KV cache management assumes the                      ter. The mechanism is open; the policy space it
+                                         chatbot workload: prompts arrive once and the               enables is the agenda.
+                                         cache grows append-only, so prefix caching and
+                                         forward-only eviction are correct by construc-          1   Introduction
+                                         tion. Agentic LLMs (Yao et al., 2023; Yang
+                                         et al., 2024) break this assumption. Their con-         Agentic LLMs create two distinct cache problems:
+                                         versations evolve through policy-driven edit-           reuse across natural position shifts, and policy-
+                                         ing: failed tool calls are retried, stale outputs       driven mutation. Prior work addresses the first;
+                                         dropped, trajectories pivoted. Two distinct             this paper addresses the second.
+                                         cache problems result. First, identical content            KV cache management research has been orga-
+                                         moves to new positions between turns, invali-
+                                                                                                 nized around one workload assumption: prompts
+                                         dating exact-prefix caches even though the un-
+                                         derlying KV would still be valid; recent work           arrive once and the cache grows monotonically.
+                                         on position-independent caching for MLA ad-             The major optimizations in this lineage (prefix
+                                         dresses this reuse problem (Ma et al., 2026).           caching (Kwon et al., 2023; Zheng et al., 2024),
+                                         Second, and this paper’s focus, a policy may            streaming attention (Xiao et al., 2024), attention-
+                                         need to direct the serving system to actively           based eviction (Zhang et al., 2023; Li et al., 2024;
+                                         remove or replace a span of cached content              Liu et al., 2023; Ge et al., 2024)) are correct be-
+                                         and continue without re-prefilling everything           cause the conversation only moves forward: once
+                                         that came after. No existing primitive offers
+                                                                                                 a token has been prefilled, neither its content nor
+                                         this. Production agentic harnesses fall back to
+                                         re-prefill on every edit (Anthropic, 2025), pay-        its position will ever change. The agentic era (Yao
+                                         ing full prefix-recomputation cost; kernel-level        et al., 2023; Yang et al., 2024) breaks this mono-
+                                         eviction methods (Zhang et al., 2023; Li et al.,        tonicity assumption in two distinct ways, each pro-
+                                         2024; Xiao et al., 2024) make their own deci-           ducing a different cache-management problem.
+                                         sions and cannot accept directives from a policy
+                                         outside the kernel.                                     Problem 1: position-invariant reuse. A multi-
+                                                                                                 turn coding or web-research agent re-renders its
+                                         We introduce Leyline, a serving-side primitive
+                                         that closes this gap. The key insight is that a         conversation history every turn. As new tool out-
+                                         declarative (span, replacement) 4-tuple can             puts and retrieved documents land, previously-seen
+                                         separate what to edit from how to preserve              content shifts to new absolute positions. Exact-
+                                         position correctness. The policy declares the           prefix matching cannot recover these shifted-but-
+                                         edit and its mode (in-place splice or prefix-           identical chunks, even though their KV would be
+                                         trimmed re-prefill for semantic forgetting); an         reusable if the cache were addressed by content
+                                         architecture-agnostic interface routes to a per-
+                                                                                                 rather than position. Recent MLA-native work (Ma
+                                         architecture kernel that restores attention math
+                                         via a closed-form RoPE-rotation correction.             et al., 2026) attempted to solve this reuse problem.
+                                         We validate on two legs. On the mechanism               Problem 2: policy-driven mutation. Distinct
+                                         side, the splice kernel lifts replay cache-hit by
+                                                                                                 from reuse, an agent or policy may need to direct
+                                         +11.2 pp and cuts latency by up to 241 ms by
+                                         reusing prefix work the prompt edit would oth-          the serving system to actively remove or replace
+                                         erwise have destroyed. On the policy side, a            cached content: clear a failed tool call’s output,
+                                         ten-line truncation rule routed through the same        summarize a stale investigation block to a stub,
+                                         interface lifts agentic solve rate by +14.3 pp          truncate aged tool outputs to free working memory.
+
+                                                                                             1
+                                                   KV Cache Directives: let the agent prune its own context
+
+                           agent · debug-gym step 5/ 50                            1. KV Cache before directive
+
+    $ investigating thread-race in counter.py                                                       Tool   Output    Tool                         Output                    Tool   Output   Tool
+                                                                                    System   User
+    → turn 1      ls -al                                                                             ls      ls     pytest                        pytest                    view    view    pdb
+
+
+
+
+                                                                                                                             ↓
+    → turn 2      pytest test.py                    4.8 KB output · outdated
+
+    → turn 3      view counter.py                                                                                                   evict target · outdated per policy
+
+    → turn 4      pdb session                                        running ...
+                                                                                                                                Directive applied · splice in place
+                                                                                                                                    δ-rotation on every downstream chunks
+
+
+                                                                                                                             ↓
+    Policy
+    Turn 2's shell-output dump is stale                                                                                         chunk replaced in place
+    The recent debugger session is what matters now for the thread-race fix.       2. KV Cache after directive
+
+     Directive emitted to SGLang-based Leyline KV Cache Extension                                   Tool   Output    Tool             Tool        Output        Tool
+                                                                                    System   User                            Stub
+                                                                                                     ls      ls     pytest           view*        view*         pdb*
+     span =            turn_2_output
+
+
+
+                                                                                                                                       ↓ ↓ ↓
+     replacement = stub("output omitted")
+                                                                                                             stub · spliced in place
+
+
+                                                                                                                               downstream chunks re-anchored
+
+
+
+
+Figure 1: Teaser. A coding agent emits an explicit directive over its KV cache, expressed as a (span, replacement)
+pair. The serving stack splices the cache in place: the old chunk is replaced by a short stub, downstream cached slots
+are re-anchored via a closed-form δ-rotation, and the radix prefix is preserved across the edit. The agent supplies
+what to evict; Leyline supplies how to splice it without re-prefill.
+
+
+These are deliberate edits, not natural shifts. To-                                                        API level (Section 3.1), and (d) the radix-cache
+day, agentic harnesses handle them by editing the                                                          integration that preserves the unchanged prefix sub-
+message list and re-prefilling, because no primitive                                                       tree across the edit. The kernel is the recycled
+exists for policy-issued cache editing. The cost is                                                        engineering substrate; the directive layer is the new
+the full prefix-recomputation that prefix caching                                                          interface boundary the paper argues post-agentic
+was meant to amortize, and even small per-request                                                          serving stacks need.
+invariant breaks can collapse throughput in produc-
+tion (Cole, 2026).                                                                                         Contributions. (1) A precise distinction between
+                                                                                                           the reuse and mutation problems in agentic KV
+Our solution. We introduce Leyline, a serving-                                                             cache management, locating prior work and identi-
+side primitive for policy-driven cache editing. The                                                        fying mutation as the open sub-problem.
+interface is a declarative (span, replacement) di-                                                            (2) The directive abstraction: a 4-tuple
+rective in which the policy describes what to edit,                                                        (span, replacement) interface with declared se-
+while the kernel applies the edit in place via a                                                           mantic mode and a pluggable policy layer that de-
+closed-form δ-rotation. The intuition is one line:                                                         couples what to edit (policy) from how to splice it
+when a splice changes downstream absolute posi-                                                            (kernel), composed over the borrowed δ-rotation
+tions by ∆, every cached Kpe value at those posi-                                                          correctness mechanism without recomputing the
+tions can be rotated by ∆ to restore attention-math                                                        unchanged prefix.
+correctness, without re-prefilling anything that did                                                          (3) A semantic-edit channel as a new serving-
+not actually change.                                                                                       stack interface: the directive sits above block-level
+   What is borrowed, what is new. The nu-                                                                  KV storage as a span-level edit layer, decomposing
+merical kernel (δ-rotation under RoPE closure                                                              each agent-emitted edit into block-level operations
+R(a)R(b)=R(a+b) on the MLA Kpe band) is                                                                    the storage layer schedules, and identifies the cache-
+from Ma et al. (2026), where it was triggered reac-                                                        edit channel as the missing post-agentic interface
+tively by a content-hash match on naturally shifted                                                        boundary (Section 7).
+but content-identical chunks (the reuse problem).                                                             (4) Two-leg validation. The directive abstrac-
+Leyline’s contribution is the layer that surrounds                                                         tion earns its keep only if it both runs at production
+the kernel: (a) the framing that identifies muta-                                                          scale and produces a policy-layer signal a deployer
+tion as a distinct sub-problem from reuse, (b) the                                                         would care about. We test each leg separately, then
+declarative directive abstraction that lets a policy                                                       read them together.
+invoke the same correction actively as an explicit                                                            (i) Mechanism. A three-arm message-edit
+edit, (c) a 4-tuple contract with declared semantic                                                        microbenchmark on the live SGLang scheduler
+mode that lets a policy choose between in-place                                                            (cache-off / standard radix / Leyline splice) at
+amortization and forgetting-mode re-prefill at the                                                         ≈ 17 K-token prompts shows the splice arm lifting
+
+                                                                                                      2
+replay cache-hit rate by +11.2 pp over the stan-             vated by the attention-sink effect at chunk bound-
+dard radix baseline, uniformly across concurrencies          aries (Hu et al., 2025). The sixth trades correctness
+C ∈ {1, 4, 8, 16} and reproducing on DeepSeek-               for speed. The seventh (Irminsul) handles the MLA
+V2-Lite and JoyAI-LLM Flash. The end-to-end la-              reuse half; the eighth (Leyline) contributes the mu-
+tency win peaks at −241 ms at C=8, where prefill             tation half, with CacheBlend/EPIC-style boundary
+contention is high enough that the saved re-prefill          recomputation as the natural mechanism-layer ex-
+is on the critical path (Section B). The point is not        tension we envision for GQA (Section 6).
+the raw number; it is that an explicit edit no longer
+has to throw away the prefix that the edit did not
+touch.                                                       Layered relationship to LMCache. LMCache
+                                                             and Leyline operate at different layers and com-
+   (ii) Policy. A ten-line truncation policy routed
+                                                             pose. LMCache’s verbs (Pin, Clear, Move, Com-
+through the directive interface lifts agentic solve
+                                                             press, Lookup) act on KV blocks in physical stor-
+rate by +14.3 pp over a no-truncation base-
+                                                             age tiers (Liu et al., 2025); Leyline’s directive acts
+line across 8 debug-gym (Yuan et al., 2025)
+                                                             on semantic spans of the prompt. The two meet
+mini_nightmare tasks × 4 seeds × 2 policies on
+                                                             in the middle of one pipeline: a directive “replace
+JoyAI-LLM Flash (Section 5). The gain comes
+                                                             this stale tool-output span with a stub” decomposes
+from a familiar effect: when stale tool turns are
+                                                             into block-level operations (free, allocate, Kpe ro-
+dropped, the model attends to the few turns that ac-
+                                                             tate, re-index) that LMCache schedules across tiers.
+tually matter. The interface is what makes the gain
+                                                             Read end-to-end, this is agent intent → semantic di-
+cheap to obtain; without it, exercising the same pol-
+                                                             rective (Leyline) → block operations (LMCache)
+icy would force a full re-prefill on every truncation.
+                                                             → physical tier movement. Leyline supplies what
+   Read together: the mechanism enables the
+                                                             LMCache does not: position-encoding correctness
+policy class without prefill recompute cost, and
+                                                             across a semantic edit, and a span-level interface
+the policy class delivers the deployment-cell win.
+                                                             for the policy to address. Adjacent work on tensor-
+Kernel correctness is separately established on a
+                                                             encoded KV transfer (Liu et al., 2024a) and 2-bit
+constructed single-prompt microbenchmark and a
+                                                             KV quantization (Liu et al., 2024b) is orthogonal
+cross-architecture MLA replay across four mod-
+                                                             to position correctness.
+els, with Moonlight as the row where the two
+references diverge non-trivially (Section 4). Ex-
+tending the kernel to GQA appears feasible via a             2.1   Concurrent work on agentic context
+boundary-recomputation pass (Hu et al., 2025) and                  management
+is sketched in Section 6.
+                                                             Two recent systems offer signal-side contributions
+2   Background: where existing systems fit                   complementary to Leyline’s mechanism: Side-
+                                                             Quest (Kariyappa and Suh, 2026) fine-tunes a de-
+Table 1 positions representative systems against the
+                                                             tector that emits del_cursors commands evict-
+two sub-problems plus three properties any agentic-
+                                                             ing stale tool-call/response pairs; LoopGuard (Xu
+era cache primitive needs: correctness after edit,
+                                                             et al., 2026) detects decoder-side degeneration
+cache-reuse after edit, and turn-granular operation.
+                                                             symptoms (action repetition, top-1 streak, gzip
+   The first row trades cache reuse to get correct-          compressibility) and intervenes by resampling. Ei-
+ness on mutation. The second row addresses                   ther signal can drive Leyline directives without re-
+neither sub-problem. The third (LMCache) is                  training the kernel or the detector. A full taxonomy
+the production storage and movement layer for                of useful agentic-era eviction signals is follow-up
+vLLM and SGLang (Liu et al., 2025) but oper-                 work.
+ates below the semantic-edit level. The fourth
+and fifth (CacheBlend, EPIC) are the MHA-side
+analogs to Irminsul’s MLA-side δ-rotation: both              Framework-engineering signals. Four open
+address non-prefix reuse on MHA/GQA via selec-               vLLM RFCs each request a slice of cache con-
+tive recomputation rather than positional correction.        trol at the layer above the storage backend, with
+CacheBlend dynamically picks high-deviation to-              no maintainer-accepted abstraction; Leyline’s di-
+kens layer-by-layer (Yao et al., 2024); EPIC stat-           rective is the missing layer (full thread analysis:
+ically picks each chunk’s first k tokens, moti-              App. L).
+
+                                                         3
+    System                               Targets                Correct?                   Reuse?             Granularity
+    Vendor APIs (read / boundary controls; no in-place edits)
+    Anthropic prompt caching†           read-side reuse         n/a                        5-min / 1-h TTL    breakpoint
+    Anthropic clear_tool_uses† mutation                         re-prefill                 no (radix gone)    turn
+    OpenAI prompt caching∗              read-side reuse         n/a                        prefix only        token-prefix
+    Google context caching‡             read-side reuse         n/a                        cached-object      object
+    Research systems and open-source serving libraries
+    H2O / SnapKV / StreamingLLM§       neither                  forward-only               n/a                token
+    LMCache (Liu et al., 2025)         storage                  n/a                        prefix             256-tok block
+    CacheBlend (Yao et al., 2024)      reuse (MHA)              dynamic 15% recompute      yes                chunk
+    EPIC / LegoLink (Hu et al., 2025) reuse (MHA/GQA)           static k-first recompute   yes                chunk
+    In-place K/V splice (naïve)        mutation                 no (stale RoPE)            yes                arbitrary
+    Irminsul (Ma et al., 2026)         reuse (MLA)              hash + δ-rotation          yes                CDC
+    Leyline (this paper)               mutation (MLA)           directive + δ-rotation     yes (radix kept)   turn
+
+Table 1: Agentic-era cache design space split by sub-problem. Targets: which sub-problem the system addresses.
+Correct? and Reuse?: correctness after edit and cache reuse after edit; method named in lieu of bare “yes,”
+n/a where the question does not apply. The top group is vendor APIs surfaced by major LLM providers: these
+expose either read-side reuse hints (Anthropic / OpenAI / Google) or the equivalent of a turn-granular mutation that
+incurs re-prefill (Anthropic clear_tool_uses); none expose an in-place semantic-edit primitive. The bottom
+group is research and open-source systems. Irminsul addresses the reuse half via content-addressed matching plus
+a δ-rotation correction for MLA; Leyline addresses the mutation half via a directive abstraction over the same
+δ-rotation foundation. Both are needed; both compose; this paper contributes the mutation half. † Anthropic (2024,
+2025). ∗ OpenAI (2024). ‡ Google (2024). § Zhang et al. (2023); Li et al. (2024); Xiao et al. (2024).
+
+
+3      Leyline: a directive abstraction for                         vives the edit.
+       policy-driven cache editing
+                                                                    3.1      The directive: (span, replacement)
+Leyline is a serving-side abstraction layer between                 A directive is a 4-tuple D = (sstart , send , R, m),
+the agent’s policy and the KV cache. The con-                       where [sstart , send ) is the token-index range in the
+tributions of this section are three: a declarative                 original rendered prompt being replaced, R is the
+directive interface (Section 3.1) that decouples pol-               replacement token sequence (often a short stub, e.g.
+icy signal from kernel mechanism, a serving-stack                   [evicted: 3 older tool turns]),
+integration that preserves the radix prefix across                  and m ∈ {AMORTIZE, FORGET} selects the
+edits (Section 3.3), and a thin Python policy inter-                semantic mode (we write (span, replacement) in
+face that any span-emitting policy can drive (Sec-                  running text when m is the default AMORTIZE).
+tion 3.4). The kernel-level correctness mechanism,                  Multiple non-overlapping directives may be
+the δ-rotation rule that re-anchors cached Kpe val-                 applied per turn. The AMORTIZE-mode contract
+ues after a position shift, is recapped in Section 3.2.             is positional, not informational: after applying
+Leyline is what turns that rule into a usable primi-                D, the cache produces outputs equivalent to one
+tive for explicit policy-driven editing.                            built from the original prompt with downstream
+   Three properties from Section 2 fix the suc-                     positions reindexed by ∆ = |R| − (send − sstart ).
+cess criteria, and no existing system meets all                     Concretely, Kpe is rotated to the new positions,
+three at once. First, signal-agnosticism: the prim-                 while Knope and V are preserved (they were
+itive must accept anything expressible as a set                     computed under attention to the original chunk
+of spans, without privileging where the signal                      during prefill, and that attention is exactly what we
+came from (Kariyappa and Suh, 2026; Xu et al.,                      want to keep). Downstream behavior thus reflects
+2026), so today’s detector does not constrain to-                   the cache’s persistent attention to the original
+morrow’s. Second, positional replay-equivalent                      chunk, not the stub. This is deliberately weaker
+correctness: after the edit, downstream attention                   than “equivalent to re-prefill of the substituted
+math must be well-formed at the new positions                       prompt”, because re-prefill is precisely the cost the
+(Section 3.1 makes the contract precise). Third,                    directive amortizes. Section 4 reports empirical
+cache-friendliness: the edit must localize to the                   agreement against both the full-context baseline
+spliced span without invalidating the radix prefix,                 (the contract) and the re-prefill path (the stricter
+so that the work the prompt edit did not touch sur-                 contract AMORTIZE does not promise), so the
+
+                                                                4
+                                                                                  Leyline serving-stack pipeline: policy-driven cache mutation
+reader can see what each path actually predicts.                                 with δ-rotation reanchoring (radix prefix preserved across edit)
+
+                                                                          Agent / Policy                       Directive D = (sstart , send , R)
+The FORGET mode. Some policies need true                        (turn-counter, content, learned, ...) emits
+
+content forgetting: redaction of sensitive content,                                  MLA serving kernel (sglang + Leyline patch)
+
+retention-mandated deletion, or correction of an up-               (1) Radix match
+                                                                   unchanged prefix
+                                                                                                        (2) Prefill
+                                                                                                     replacement R
+                                                                                                                                   (3) Rotate cached
+                                                                                                                                     Kpe at i ≥ send
+                                                                                                                                                       ∆ = |R| − (send − sstart )
+                                                                                                                                                       δ-rotation rule:
+                                                                       [0, sstart )                    fresh slots                 by ∆ (δ-rotation)   Ma et al. 2026
+stream tool error whose continued influence would
+mislead the agent. These declare m = FORGET,
+and the serving stack routes the edit to a standard                                               Updated cache state
+                                                                               prefix preserved | R prefilled | downstream slots rotated
+                                                                             (replay-equivalent to honest re-prefill; radix reuse preserved)
+prefix-trimmed re-prefill, the regime production
+stacks already implement. The directive layer’s ad-
+dition is the declared intent: the policy says which         Figure 2: Leyline serving-stack pipeline. A policy emits
+guarantee it needs, much as a database client de-            directives; the kernel matches the unchanged prefix,
+clares isolation level rather than relying on serving-       prefills the replacement tokens, and rotates cached Kpe
+side defaults. The empirical validation in this paper        for downstream slots via the δ-rotation (Section 3.2).
+is for the AMORTIZE path, which carries the engi-            The radix prefix’s unchanged subtree is preserved across
+neering novelty; FORGET adds no new kernel work              the edit.
+and is included in the contract specifically to head
+off the “hidden cache influence” failure mode the            i ≥ send shifts by ∆ = |R| − (send − sstart ). The
+abstraction would otherwise enable. Governance               δ-rotation rule of Ma et al. (2026) corrects this in
+patterns built on the mode distinction are detailed          closed form:
+in App. O.
+                                                                                       new
+                                                                                      Kpe  [i] = R(∆) · Kpe [i],                                                              (1)
+Which tensors are modified. The kernel frees
+Kpe /Knope /V at the evicted span, freshly prefills K        which equals the Kpe that an honest prefill at posi-
+and V for the replacement R, and rotates only Kpe            tion i+∆ would have produced, by RoPE’s unitary-
+of downstream slots by ∆ (Equation (1)); Knope               rotation closure R(a)R(b) = R(a+b). The closure
+and V of those slots are untouched. Decode-time              is what does the work: applying R(∆) on top of
+Q is recomputed each step, so no Q reindexing                R(i) is algebraically indistinguishable from having
+is needed. Attention-sink prefixes are unaffected            computed R(i + ∆) in the first place. The correc-
+provided sstart sits past them. The full step-by-step        tion is one matmul per slot, and Knope is untouched.
+specification and the confounder-rule-out argument           The single-rotation bf16 drift bound (4.7×10−3
+are in Appendix C.                                           rel-L2) is from Ma et al. (2026); chained rotations
+   The directive interface is signal-agnostic. Any-          accumulate sub-linearly under composition (Sec-
+thing producing (sstart , send , R) tuples drives the        tion 8, App. F).
+cache; the kernel does not inspect the rationale.
+This is property (i)’s policy/mechanism decoupling           3.3       Serving-stack integration
+in concrete form, distinct from Irminsul’s content-          Each directive triggers three steps inside the serv-
+hash-triggered reuse: a policy that says “drop this          ing stack (Figure 2), each handling a distinct region
+aged tool output” is an explicit edit, not a hash hit,       of the prompt. (1) For tokens before sstart , the radix
+and needs an agent-facing invocation path portable           cache matches the prompt as usual; the unedited
+across serving stacks. One policy family is instan-          prefix survives the edit, and this is the source of
+tiated in Section 5.                                         Leyline’s cache-reuse property. (2) For the replace-
+                                                             ment itself, tokens R are prefilled fresh into newly
+3.2   The δ-rotation foundation (recap)                      allocated slots at positions [sstart , sstart + |R|). (3)
+The reason the kernel can correct a splice so                For tokens after the edit, cached Kpe for slots orig-
+cheaply is structural. Under MLA, cached K splits            inally at i ≥ send is rotated by ∆ (Equation (1))
+into Knope (no position) and Kpe (rotated by RoPE            and reindexed to i + ∆. Only the third step touches
+by absolute position) (DeepSeek-AI et al., 2024a;            cached state, and it does so with a single matmul
+                                     raw [i]. Position
+Su et al., 2024): Kpe [i] = R(i) · Kpe                       per slot.
+lives in a single rotated slice; everything else in             The mechanism is implemented in two paths that
+the cache is position-free already. After a direc-           share one rotation kernel. The rotation kernel itself
+tive splices a replacement of length |R| in place of         is a single in-place operation on the Kpe band of a
+[sstart , send ), every downstream token at position         transformers DynamicCache; we verify against
+
+                                                         5
+DSv2-Lite’s native rotary_emb that the kernel                index inside the live engine and routes matched di-
+is bit-exact for a single rotation, and this same            rectives through the same rotation kernel at the KV-
+kernel is the source of truth for all empirical claims       pool allocator level; this is the path exercised by the
+below.                                                       three-arm microbenchmark of App. B. The direc-
+                                                             tive abstraction itself is architecture-agnostic; only
+RoPE pairing convention. RoPE admits two
+                                                             the rotation kernel is MLA-specific (Section 6).
+pairing conventions in active use: interleaved
+(GPT-J style, mixing dims 2i and 2i+1) and                   Multiple directives. A turn may carry several
+half-split (NEOX style, mixing dims i and                    non-overlapping directives; the kernel processes
+i+d/2). DSv2-Lite’s MLA uses interleaved;                    them left-to-right and the rotation algebra closes
+Llama- and Qwen2-style models use half-split.                under composition (R(∆1 )R(∆2 )=R(∆1 +∆2 )),
+The kernel reads rotary_is_neox_style                        with ∆ of either sign. Full composition and alloca-
+per layer and applies the matching pairing; mis-             tor rules are in App. C.
+matched pairing leaves Kpe · cos correct but cor-
+rupts the sin-rotated half, hiding at ∆≈0 (where             3.4    The policy interface
+sin(∆f )→0) and growing with |∆|. We vali-                   The directive abstraction admits any policy that
+dated the post-fix kernel bit-exact against full pre-        maps conversation state to a directive list. We
+fill across ∆ ∈ {1, 21, 48, 76, 512, 2000}, and              expose a thin Python abstraction with a single
+end-to-end across |∆| up to ≈ 4531 (target                   Policy.transform(messages, turn_
+positions past original_max_position_                        idx) → messages method; Leyline computes
+embeddings=4096 into the YaRN-interpolated                   the diff against the previous turn and applies it
+regime), on DSv2-Lite. For NEOX-style models                 through the kernel mechanism of Section 3.3.
+the new convention-aware path is arithmetically              A policy can be a turn-counter, a hand rule, a
+identical to the prior code.                                 content-pattern matcher, or any function over
+                                                             conversation state.
+Role B: edits via radix-trie insertion. Two
+integration paths share the rotation kernel                  4     Demonstrating correctness for the
+of the previous paragraph.         Role A returns
+                                                                   mutation operation
+a patched MatchResult from a wrapped
+match_prefix, injecting borrowed slots                       Prior work establishes the δ-rotation as correct
+that the request frees at completion.          Role          by construction for position shifts in the reuse
+B (implemented in the SGLang patch) goes                     case (Ma et al., 2026); the directive-driven splice
+one layer further: after a successful splice,                must produce the same guarantee under arbitrary
+the patch calls tree_cache.insert(                           edit patterns. The load-bearing test is the con-
+InsertParams(key=token_ids[:cur_                             structed single-prompt microbenchmark of Sec-
+end], value=concat(orig_indices,                             tion 4.1. Its design is the point: the elided content
+dst_slots))) and re-runs the un-wrapped                      is chosen so that the full-context and re-prefill refer-
+match_prefix so the returned match is a                      ences must disagree on the next token, making the
+native, longer trie hit. Slot lifetime then moves            contract’s distinguishing prediction (Leyline tracks
+to the radix trie’s lock_ref and eviction policy,            full-context, not re-prefill) directly observable on
+retiring the borrowed-slot orphan-detection. The             the first decoded token. The remaining empirical
+mechanism is gated by AKASHA_PIC_ROLE_B_                     material adds workload coverage: a 12-step policy-
+L2=1; it is correctness-clean on our validation and          derived trajectory replayed across four MLA ar-
+is the path that makes spliced KV discoverable               chitectures, a randomized synthetic edit-suite over
+to future requests via vanilla match_prefix,                 arbitrary span positions and signed ∆, kernel-level
+without a PIC hook at lookup time. The complete              chained-rotation drift, and 50-step long-horizon
+spec is in App. R.                                           trajectories. These tests live in the appendix; Sec-
+   (i) The offline replay kernel (used in Section 4)         tion 4.2 summarizes the headline numbers.
+loads the model via HuggingFace transformers
+and applies the rotation in process; it is the path          4.1    Single-prompt replay equivalence
+against which we report replay-equivalence and               This subsection carries the central correctness
+randomized-edit stress. (ii) A ∼200-LOC SGLang               claim. The setup is a constructed microbench-
+RadixCache patch populates a content-hash side               mark where the references are guaranteed to dis-
+
+                                                         6
+agree, so the contract’s distinguishing prediction           matches a full-prefill reference on 48/50 first-token
+(Section 3.1: Leyline tracks full, not re-prefill) is        outputs. The mismatches occur on prompts whose
+testable by construction. The appendix coverage              top-1/top-2 logit gap is below the bf16 floor; the
+adds architectural and workload breadth but inher-           failure direction is not biased (the same workload’s
+its its interpretive weight from here.                       no-splice path occasionally lands on a different
+    Setup. A prompt asks the model to recall a calcu-        argmax for the same reason). We default AKASHA_
+lation buried mid-prompt. The chunk is the literal           PIC_ROTATION_FP32=1 so the rotation com-
+calculation 25 + 9 = 34 (57 tokens), wrapped by              putation runs in fp32 (matching the model’s own
+5 pre-tokens and 9 post-tokens, with the answer              attention-forward precision policy) even when the
+requested at the post-decode position. A directive           KV pool stores bf16; this removes the rotation’s
+replaces the calculation chunk with the 11-token             contribution to the floor but does not eliminate the
+stub [truncated] (∆= − 46). Three paths are                  storage’s contribution. The honest claim is bit-
+compared: full-context (original prompt prefilled            faithfulness within bf16 precision: outputs are byte-
+honestly), re-prefill (stub-substituted prompt pre-          identical to a full prefill only on prompts with logit-
+filled honestly), and Leyline (original prompt pre-          margin above the noise floor. The full per-position
+filled, then directive applied via δ-rotation).              error table and the fp32-mitigation decomposition
+    Result. The full-context path predicts ’34’ (the         are in App. Q.
+correct answer); re-prefill predicts ’0’ (the model
+                                                             4.2   Coverage summary
+lost the calculation when the stub replaced it); Ley-
+line predicts ’34’ (it tracks the full-context cache).       Four additional tests add architectural and work-
+This is the positional contract from Section 3.1 in          load breadth.
+action. Leyline preserves the downstream slots’                 (i) A 12-step counter-trajectory replay across
+Knope and V , which were computed under atten-               four MLA models (DSv2-Lite, JoyAI-LLM
+tion to the original chunk, so the cache continues to        Flash, GLM-4.7-Flash, Moonlight-16B-A3B), with
+drive the model toward the chunk-informed output.            greedy 128-token decodes at each step. The ker-
+Re-prefill instead rebuilds those slots’ Knope and           nel never changes tool selection (15/15 tool-name
+V against the stub, losing the calculation’s effect          agreement on both-parseable edit steps), and on
+on downstream attention. The fact that Leyline               the one step where the two references diverge
+tracks full-context, not re-prefill, is therefore the        (Moonlight) Leyline tracks full-context as pre-
+contract, not a bug. A kernel that tracked re-prefill        dicted (App. D, Table 4). Beyond first-token agree-
+would have to recompute all downstream K/V; that             ment, the mean common-prefix length of the 128-
+is exactly the prefill cost the directive is designed        token decode tells a more graded story: 128/128
+to avoid.                                                    on DSv2-Lite (paths bit-equivalent), 42/128 on
+    A 4×3×2 ablation (stub modes × trajectories              JoyAI, 6/128 on GLM (low because a first-token
+× models) confirms the rotation, not stub text, is           disagreement diverges the suffix early), and 75/128
+load-bearing (Appendix M). All decodes here are              on Moonlight against full-context versus 50/128
+greedy (argmax, no sampling); model weights are              against re-prefill. That last comparison is the inter-
+bf16 under stock HuggingFace forward passes; the             esting one: on the model where the two references
+three paths share identical model and tokenizer              actually separate, Leyline sits closer to full-context
+state, so observed differences arise only from the           than to re-prefill, exactly the ordering the contract
+cache state at the prefill-to-decode boundary.               predicts.
+                                                                (ii) A randomized stress suite over signed ∆ and
+bf16 K-storage precision floor. Independent of               1–2 edits per turn confirms the prediction on Moon-
+rotation precision, the bf16 KV pool itself imposes          light: 14/17 random-stub and 11/13 semantic-stub
+a structural floor on per-K-entry accuracy. Sweep-           diverging trials track full-context, while 0 track re-
+ing the rotation kernel at source positions up to            prefill. DSv2-Lite is invariant under the suite (the
+8836 and |∆| up to 6794 on DSv2-Lite, we mea-                two references rarely diverge in the first place), and
+sure a uniform ∼1–3% per-entry error from bf16               JoyAI and GLM exhibit a position-axis sensitivity
+storage, independent of ∆, vs fp32 where the same            to mid-template splices that policy-derived edits
+kernel returns < 10−3 error at every tested (p, ∆).          do not trigger (App. E, Table 5). Positive-∆ in-
+This floor causes occasional argmax flips: on a 50-          sertions appear at uniform sampling (each replace-
+step long-context agentic replay (App. B), Leyline           ment length is drawn from [0, 2|span|], so ∆>0 on
+
+                                                         7
+roughly half the trials), and the qualitative pattern       with substantial trajectory length, shopping_cart
+is the same on both signs: references diverge non-          (0% → 75%) and sum_tree (25% → 50%), do
+trivially on Moonlight, are invariant on DSv2, and          all the work. On tasks that are either too short to
+react to mid-template position on JoyAI/GLM.                trigger truncation or hard enough that neither pol-
+   (iii) Chained rotations on the same logical slot         icy solves them under the 50-step cap, the curves
+grow sub-linearly in bf16 (6.1× rel-L2 growth               overlap.
+across a 50× rotation-count increase up to N =100;             These are properties of the truncation policy
+App. F); a 50-step long-horizon trajectory pre-             routed through standard message-edit semantics;
+serves first-token agreement at 100% on DSv2-Lite,          they do not isolate any contribution from Leyline’s
+≥ 80% on GLM, ∼56% on Moonlight, with JoyAI                 splice kernel, whose correctness is established in-
+degrading on tokens but preserving tool-name at             dependently by Section 4. This is the policy leg of
+67–72% (App. G, Table 7).                                   the two-leg validation.
+   (iv) Per-step logit-level distances are consistent       Mechanism leg, at production scale. App. B
+with the argmax picture: where argmax matches,              reports the mechanism leg under controlled
+KL is below 0.5 nats (App. I). The model-side               prompts: a three-arm SGLang microbenchmark
+sensitivities we observe are documented as model            on DeepSeek-V2-Lite at ∼17 K-token prompts,
+behavior, not kernel correctness gaps, and are ad-          batch-scaled across C ∈ {1, 4, 8, 16}. The splice
+dressable via the boundary-token recomputation              arm produces a uniform +11.2 pp replay cache-
+discussed in Section 6.                                     hit gain over standard radix at every concurrency,
+                                                            with the e2e p50 latency win peaking at −241 ms
+5   Deployment-cell evidence at the policy                  (−4.4%) at C=8, where prefill contention is high
+    layer                                                   relative to the decode tail; at C=1 the saved
+                                                            prefill runs in serial with decode (smaller ab-
+The directive interface’s value depends on a mea-
+                                                            solute win), and at C=16 it is absorbed into
+surable policy-layer signal: a ∼10-line truncation
+                                                            the now decode-dominated tail. Cross-arm first-
+policy routed through the interface should improve
+                                                            token argmax agreement against radix holds at
+agentic task behavior over a no-truncation baseline.
+                                                            100%/97.7%/98.4%/94.5% across the four cells,
+The mechanism we expect is straightforward. As
+                                                            matching the cache-off-vs-radix reference floor
+a debugging trajectory grows, most of the older
+                                                            (two paths sharing no directive code), so the splice
+tool output is stale; dropping it frees the model’s
+                                                            path tracks the warm-prefix path at the noise floor
+attention to focus on the small slice that still mat-
+                                                            of batched bf16 scheduling, not at a directive-layer
+ters. Across 8 debug-gym (Yuan et al., 2025)
+                                                            correctness gap. Together, the mechanism enables
+mini_nightmare tasks × 4 seeds on JoyAI-LLM
+                                                            the policy class at lower prefill recompute cost; the
+Flash under the standard re-prefill arm (32 base-
+                                                            policy class delivers the deployment-cell win. Per-
+line + 33 treatment trials), the truncation treatment
+                                                            task discussion and the policy-loaded provenance
+lifts solve rate from 10/32 = 31.2% (baseline) to
+                                                            check are in App. A.
+15/33 = 45.5% (treatment), a +14.3 pp absolute
+gain (Table 2). The asymmetry in N reflects one             Real-trace e2e (long-context agentic replay).
+extra counter trial in the treatment arm; the paired        The synthetic microbenchmark above isolates the
+analysis below restricts to the symmetric subset.           mechanism leg under fixed prompts. We addition-
+A ninth task, pandas_dataframe, was excluded be-            ally replay a 50-step debug-gym agentic trajectory
+cause it requires fetching an external dataset over         (07be28b9/shopping_cart, prompts grow-
+the network and our compute nodes have no out-              ing from 334 to ∼28K tokens, C=1) through the
+bound internet access; both policies failed equally         same three-arm setup. Vanilla SGLang Radix-
+on every pandas_dataframe trial we ran, so the ex-          Cache reaches sum-e2e 52.65 s with 27.6% cache-
+clusion is environmental rather than policy-related.        hit; Leyline (Role B Level 2 + fp32 rotation)
+Across the 31 paired (task, seed) cells where both          reaches 49.85 s with 27.8% cache-hit and 48/50
+arms ran with reliable provenance, both policies            first-token argmax agreement against the radix
+agree on 17 outcomes; of the 14 cells where they            arm. The 5.3% e2e improvement is the splice’s
+disagree, the treatment wins 9 and the baseline wins        contribution on top of the prefix-extension hits
+5 (1.8× asymmetry). Where the gain concentrates             RadixCache already absorbs. Decomposing the
+is consistent with the hypothesis: the two tasks            new code shows ∼95% of the timing win is at-
+
+                                                        8
+tributable to the fp32 rotation mitigation (Section 4,       empties when the warmup-time inserts share the
+App. Q); Role B Level 2 is timing-neutral on the             population window with the live workload’s ob-
+single-trajectory scale, since L2’s compound bene-           serve path. Working past this is concrete follow-up
+fit appears only once future-request match coverage          engineering, not a contract issue with the directive
+compounds across many requests. On a second tra-             abstraction.
+jectory (0f724375/shopping_cart, 91.6%
+                                                             KV bytes attributable to splice. Per-token KV
+RadixCache hit-rate) the splice is 0.6% slower than
+                                                             in the DSv2-Lite MLA pool is (kv_lora_rank +
+radix and 20/20 bit-identical; when RadixCache
+                                                             qk_rope_head_dim) × nlayers × 2 bytes =(512 +
+already covers the workload, there is no headroom
+                                                             64) × 27 × 2 = 31,104 bytes (≈30 KB). On the
+for the splice to use. The takeaway is that the wins
+                                                             long-context agentic replay above, the splice arm
+are workload-conditional. Substantial divergent
+                                                             carries +1,750 tokens of cached content over the
+tails are the regime where splice helps, because they
+                                                             radix arm, which corresponds to 52.5 MB of KV
+are exactly the cases where vanilla prefix matching
+                                                             reused rather than recomputed. On the cross-tenant
+is doing the least; RadixCache-friendly traces, by
+                                                             C=4 workload with warm-start, 16 chunks of 56
+definition, leave nothing on the table.
+                                                             tokens average give 27.9 MB of KV reused across
+                                                             64 requests, vs 3.98 MB without warm-start. The
+Cross-tenant at production concurrency. At
+                                                             right way to read these figures is as the splice’s
+C=4 on a cross-tenant Zipf workload (two ten-
+                                                             incremental contribution to cache content above
+ants, 8 articles, 1500-character bodies, 32 re-
+                                                             vanilla RadixCache: they are savings in re-prefill
+quests/tenant), the splice’s discovery rate is bot-
+                                                             compute and pool writes, not a reduction in peak
+tlenecked by a within-batch race: peer requests
+                                                             memory occupancy.
+in the same batch all run match_prefix be-
+fore any of them has finished, so the popular                Peak KV pool occupancy and tenant scal-
+registry entries are not yet visible to the rest of          ing. We instrumented the SGLang TokenTo
+the batch. Without warm-start, cand_total=6                  KVPoolAllocator to sample available_
+and chunks_spliced=2 across 122 splice                       size() on every cache_finished_req/
+calls. We address this with a manifest warm-                 cache_unfinished_req hook (App. U) and
+start: a JSONL of {content_hash, chunk_                      swept tenant counts {2, 3, 4, 8} at concurrency
+tokens, count} serialized from the prior run’s               C=4, 8 articles per tenant, on the cross-tenant
+registry, replayed at startup as /generate re-               Zipf workload. The splice-OFF peak occupan-
+quests against the live server before the bench-             cies are: 2-tenant 53.6 MB, 3-tenant 74.3 MB
+mark begins. The same workload then reaches                  (1.39× vs 2-tenant), 4-tenant 97.5 MB (1.82×),
+cand_total=96 and chunks_spliced=16                          8-tenant 182.0 MB (3.40×). All four numbers
+(16× and 8× improvements respectively), with                 fall under the linear projections of 1.5×, 2.0×,
+tenant-1 e2e p50 dropping from 1.016 s to 0.953 s            4.0×, because vanilla RadixCache’s prefix-overlap
+(−6.2%). The manifest is small (15 unique chunks,            detection is already catching ∼ 8 pp of cross-
+∼4 KB) and the warm-up phase completes in                    tenant overlap at 3 tenants and growing to ∼
+∼1.2 s. The implementation is gated by AKASHA_               15 pp at 8 tenants without any splice contribu-
+PIC_MANIFEST_OUT (producer) and AKASHA_                      tion. Splice ON does not reduce peak pool oc-
+PIC_MANIFEST_IN (consumer); see App. S.                      cupancy: at 4-tenant the splice-ON and splice-
+Scope of the warm-start result: we have demon-               OFF peaks are identical to the slot (3,135 slots of
+strated discovery activation in this 2-tenant C=4            1,698,846); at 8-tenant similarly identical (5,850
+configuration. Extending to higher tenant counts or          slots). The reason is structural: Role B inserts
+higher concurrencies hits an unresolved candidate-           spliced chunks into the radix trie by reference
+filter degenerate: the same warmup-then-workload             rather than freeing pool slots, so the splice’s KV-
+pattern at 4-tenant C=4, 3-tenant C=4 (with or               content advantage shows up as re-prefill compute
+without warmup), 8-tenant C=4, and 2-tenant                  saved (the 27.9 MB cited above), not as con-
+C=8 all reach cand_total=0 even when the                     current allocator memory dropped. Warm-start,
+registry shows 15–35 unique observed hashes (jobs            where it activates, adds a small fixed cost: 2-
+473946–473952, App. U). The proximate cause is               tenant ON + warmup is 65.7 MB (+12.0 MB above
+a candidate filter (src_kv_indices is not                    splice-OFF, from the warm-up-preloaded articles
+None and request_id ̸= rid_now) that                         staying trie-pinned), and 4-tenant ON + warmup
+
+                                                         9
+         Task              Baseline    Treatment                   Extension to GQA and MHA. RoPE’s unitary-
+         counter              4/4         4/4                      rotation algebra transfers to GQA and MHA (Su
+         grader               1/4         1/4                      et al., 2024); the complication is that they fuse
+         patcher              0/4         0/4
+         purr                 2/4         2/4
+                                                                   position throughout the full K tensor rather than
+         sci_calculator       2/4         2/4                      isolating it to a slice, so the rotation must act across
+         shopping_cart        0/4         3/4                      all dK dimensions per token. Algebra-level and
+         sum_tree             1/4         2/4
+         tomorrow_date        0/4         0/4                      live-model validation are in App. H: the kernel
+                                                                   runs end-to-end on Llama-3.1-Minitron-4B and
+         Overall            31.2%       45.5%
+                                                                   Qwen3-4B without numeric issues, but the model-
+Table 2: Deployment-cell solve rates by task                       side ill-formed-cache sensitivity we documented
+on JoyAI-LLM Flash via SGLang. Baseline is                         on MLA manifests more strongly because rotation
+keep_all (32 trials, 8 tasks × 4 seeds); treatment                 acts on dimensions that also carry content. The
+is truncate_older_than(n=2) (33 trials, with                       boundary-recomputation pass of concurrent reuse-
+one additional counter trial folded into the 31-cell paired        side work (Yao et al., 2024; Hu et al., 2025) is a
+analysis in Section 5). Both arms use the standard re-
+                                                                   candidate kernel-layer addition without changing
+prefill path; the only varying axis is what messages
+the agent emits. Bold rows are the discriminating
+                                                                   the directive; non-rotary encodings (ALiBi, NoPE,
+tasks; the headline +14.3 pp overall delta is driven               learned absolute) are future work.
+by shopping_cart (+75 pp) and sum_tree (+25 pp).
+pandas_dataframe excluded (requires internet-fetched               Forward compatibility. The directive abstrac-
+dataset; both arms tied at 0%; see Section 5).                     tion is mechanism-agnostic; the rotation ker-
+                                                                   nel is not. Within-MLA architecture evolution
+                                                                   (e.g. trained sparsity) inherits splice + δ-rotation
+is 112.4 MB (+14.9 MB above splice-OFF) even                       directly; out-of-MLA evolution (e.g. sequence-
+though the 4-tenant arm itself yields zero spliced                 compressed KV) breaks the rotation kernel but
+chunks (see App. U “Follow-up arm E”). The im-                     the span-level directive remains well-typed. Ap-
+plications split cleanly by what a workload is bot-                pendix N develops the two concrete DeepSeek
+tlenecked on: workloads constrained on allocator                   cases (V3.2-Exp (DeepSeek-AI et al., 2025),
+pressure should not expect splice to drop their                    V4 (DeepSeek-AI, 2026)).
+watermark, while workloads constrained on re-
+prefill compute under high cross-tenant overlap                    7   Discussion
+should see the splice’s content advantage only at
+the discovery-active configuration (C=4, 2-tenant,                 The serving-stack interface boundary moves.
+with warm-start), until the candidate-filter general-              Pre-agentic serving systems had a single inter-
+ization above lands.                                               face to the agent layer: the prompt. Post-agentic
+                                                                   systems need a second one, a cache-edit chan-
+6   Generalizing beyond MLA: an                                    nel, which Leyline’s directive defines concretely.
+    invitation                                                     The interface decouples policy (“what should be
+                                                                   in cache?”) from mechanism (“how to splice the
+We validate on MLA because it admits the clean-                    cache to match without re-prefill”), so policies can
+est rotation correction: positions are isolated to a               emit (span, replacement) without knowing MLA,
+64-dim RoPE-rotated slice Kpe , leaving the bulk                   RoPE, or radix internals.
+of K position-free (DeepSeek-AI et al., 2024a;
+Ma et al., 2026). The four largest agent-trained                   Composition with concurrent and adja-
+open-weight models we evaluated are all MLA                        cent work. Signal-side detectors (Side-
+(DeepSeek-V2-Lite, JoyAI-LLM Flash, GLM-4.7-                       Quest (Kariyappa and Suh, 2026), LoopGuard (Xu
+Flash, Moonlight-16B-A3B), so the cost of swap-                    et al., 2026)) and active-RAG retrieval patterns
+ping architecture for our purposes was zero. Above                 (FLARE (Jiang et al., 2023), Self-RAG (Asai et al.,
+the kernel, every layer of Leyline is architecture-                2024), CacheBlend (Yao et al., 2024), EPIC (Hu
+agnostic by construction: the directive interface,                 et al., 2025)) compose naturally with Leyline’s
+the radix-cache integration, and the policy inter-                 directive interface: any signal expressible as a
+face depend only on token spans, not on how posi-                  span-set drives a directive without retraining the
+tions are encoded. Only step (3) of Section 3.3, the               kernel or the detector. Furthermore, the recom-
+rotation kernel itself, is MLA-specific.                           putation mechanisms of CacheBlend (dynamic
+
+                                                              10
+high-deviation token selection) and EPIC (static             reindexing positions, so the directive can be ap-
+chunk-boundary recomputation) plug in at the                 plied in place without re-prefilling work the edit
+kernel layer beneath the directive, providing the            never touched. The directive abstraction itself is
+GQA/MHA path identified in Section 6. See                    architecture-agnostic, and only the rotation ker-
+Appendix K for the detailed mapping.                         nel is MLA-clean, with the natural extension to
+                                                             GQA/MHA sketched in Section 6. The longer arc
+Safety as an API contract. Locating the mode                 is broader than eviction. Once the agent can declare
+declaration (AMORTIZE vs FORGET) at the agent                what should be in cache, the KV cache becomes a
+layer rather than the serving stack mirrors how              programmable memory layer rather than a system-
+database clients declare isolation level: it moves           side guess (Section 7). This paper validates one
+the choice between in-place amortization and se-             verb in that layer, splice; the vocabulary the direc-
+mantic forgetting from hidden serving-stack default          tive interface admits is the agenda the abstraction
+to a declared, auditable per-edit contract. Concrete         opens.
+governance patterns and the concurrency/tenant-
+isolation discussion are in App. O.                          Limitations
+Beyond eviction: a programmable memory                       Architecture coverage. The kernel-side rotation
+primitive. The splice verb validated here is                 is MLA-specific in its implementation (one matmul
+one of several the directive layer naturally hosts           on the 64-dim Kpe slice). The directive abstrac-
+(App. J). DECAY declares an aging-out window for             tion generalizes, and the rotation algebra transfers
+tool output the next reasoning step is unlikely to           to GQA (Ainslie et al., 2023) and MHA at full
+revisit (for example, the read stage’s output once           dK width (Section 6, App. H). On live GQA mod-
+analyze has consumed it), freeing GPU capacity               els the rotation acts on dimensions that also carry
+proactively rather than waiting for end-of-request           content, so the same model-side sensitivity to ill-
+eviction. PIN declares hard retention for context            formed cache state observed on MLA manifests
+the agent knows it will revisit, converting specula-         more strongly (App. H); a boundary-token recom-
+tive tool-output prefetch (Nichols et al., 2025) from        putation pass (Hu et al., 2025) as a kernel-layer
+a probabilistic guess into a declared guarantee; it          addition is the natural next step, leaving the direc-
+composes with SHARE to keep a reference code-                tive layer unaffected.
+base reusable across multiple refactoring agents on
+the same serving stack. SCRATCH carves attention-            Numerics. The δ-rotation drift bound (4.7×10−3
+mask isolation for reasoning that participates in            rel-L2 per rotation in bf16) was established in prior
+the current step but is reclaimed before the next.           work (Ma et al., 2026); RoPE’s unitary-rotation
+A common pattern runs through these verbs: the               closure R(a)R(b) = R(a + b) makes chained ap-
+agent has earlier and more reliable knowledge of             plications mathematically equivalent to a single
+context fate than any system-side predictor can in-          rotation by the sum. Empirically (Appendix F, Ta-
+fer, and Leyline externalizes that knowledge as a            ble 6) chained bf16 rotations accumulate drift sub-
+semantic-edit layer above the storage layer. The             linearly: 100 chained rotations show 2.6×10−2 rel-
+effect is to turn KV cache management from a re-             L2 against a fresh-RoPE-at-target reference, 5.5×
+active eviction problem, where the system guesses,           the per-rotation bound for a 100× increase in rota-
+into a cooperative scheduling one, where the agent           tion count. Deployments where the same physical
+declares and the storage layer executes.                     slot is re-rotated thousands of times per session
+                                                             would benefit from periodic re-prefill; we have not
+8   Conclusion                                               measured drift in that extreme regime.
+
+Agentic LLM serving has two cache sub-problems               Position-arbitrariness sensitivity. JoyAI and
+(Section 2): reuse across position shifts (Irmin-            GLM exhibit high model-side sensitivity to
+sul (Ma et al., 2026)) and policy-driven mutation            position-arbitrary (mid-message, mid-template-tag)
+(this paper). Leyline addresses mutation through             splices in the randomized edit-suite (Section E); the
+the (span, replacement) directive, a declarative             policy-derived runs splice at chat-message bound-
+span-level edit interface composed over a closed-            aries and the same kernel produces clean tool-
+form δ-rotation kernel. The kernel preserves down-           selection agreement on those models. We read
+stream attention against the original chunk while            this as model-side sensitivity to ill-formed mid-
+
+                                                        11
+template splices, not a kernel correctness find-              Determinism controls. All replays in Section 4
+ing. Characterizing the gradient between boundary-            use greedy decoding (argmax, no sampling, no
+aligned and arbitrary splices per model is follow-up          temperature) over bf16 model weights loaded via
+work.                                                         stock HuggingFace forward passes (no fused cus-
+                                                              tom kernels, no cudnn-deterministic flag). The
+Workload coverage. The deployment (Sec-                       full/re-prefill/Leyline paths share identical model
+tion 5) covers 8 debug-gym mini_nightmare tasks               state and tokenizer state on each step. We have
+× 4 seeds × 2 policies at a single truncation                 not measured whether residual bf16 nondetermin-
+threshold on one model. We do not characterize                ism (matmul-reduction ordering on H100 tensor
+how the gains depend jointly on policy aggressive-            cores) explains any portion of the observed per-step
+ness across thresholds, benchmark family (SWE-                disagreements; the magnitude of cross-path diver-
+bench (Jimenez et al., 2023), web-research, longer-           gence we observe (mean common-prefix lengths
+horizon workloads), model capability, trajectory-             far from 128 on GLM-4.7-Flash) far exceeds plau-
+divergence behavior, or eviction aggressiveness.              sible bf16 reduction noise, so we attribute the dis-
+Mapping the surface is deferred to follow-up work,            agreements primarily to cached-KV sensitivity, not
+and the mechanism contribution does not depend                floating-point reordering.
+on which cell wins.
+                                                              bf16 K-storage precision floor. Distinct from
+Composed mechanism × policy ablation. The                     matmul-reduction nondeterminism, the bf16 KV
+mechanism leg of the validation runs on synthetic             pool imposes a structural per-K-entry precision
+prompts (Section B); the policy leg runs on debug-            floor of ∼1–3% (uniform across rotation positions;
+gym under the standard re-prefill arm (Section 5).            measured in App. Q). Argmax flips happen on
+The composed ablation that would attribute the                the small fraction of prompts (∼4% on our long-
+deployment win between the two contributions,                 context replay) whose top-1 vs top-2 logit gap
+namely running the splice arm against the same                is smaller than that noise. The current mitiga-
+truncation policy on the same debug-gym tasks,                tion (AKASHA_PIC_ROTATION_FP32=1, de-
+is the natural next step. Exercising the splice               fault on) removes the rotation computation’s contri-
+path through the agent’s per-turn message-edit                bution by running the cos/sin multiply in fp32; the
+flow rather than through the controlled microbench            rotation storage (the bf16 KV pool itself) remains
+of Section B is engineering on the agent–serving              the floor. Workloads that require byte-identical out-
+seam, not a Leyline-design gap. Section 4 predicts            puts to a full prefill on every prompt would need
+the splice arm would preserve original-chunk con-             either higher-precision K storage or an argmax-
+text that the re-prefill arm loses, and we expect this        margin gate before committing a splice. Workloads
+to manifest as a different (likely smaller) per-step          that tolerate sampling-noise-scale token differences
+context-cleanup magnitude under splice than under             (chat, long agentic loops where individual token
+re-prefill.                                                   choice is not load-bearing) are unaffected.
+Empirical-coverage scope. Appendices E, F,                    Cold-start coverage and warm-start scope.
+and G cover the corner cases we identified as load-           The manifest warm-start mechanism (Section 5,
+bearing: varied span sizes (8–200 tokens), 1–2                App. S) bypasses the within-batch peer-discovery
+non-overlapping edits per turn, positive and nega-            race only for content the manifest covers, and
+tive ∆, two stub-content modes, chained rotations             we have demonstrated its activation in the nar-
+up to N =100 on the same logical slot, and 50-step            row 2-tenant C=4 configuration. Tenant-count
+trajectories with up to 8 edits per turn. The ran-            sweep ({3, 4, 8} tenants at C=4) and concurrency
+domized suite uses a single base prompt (counter              extension (C=8 at 2 tenants with warm-start)
+step 4) per model and 40 trials per cell; widening            all reach cand_total=0 even though the reg-
+to multiple base prompts would tighten confidence             istry shows 15–35 unique observed hashes (jobs
+intervals but is unlikely to change the qualitative           473946–473952, App. U). The candidate filter re-
+picture. The contract’s full-vs-rp prediction is most         jects the warmup-time inserts once the live work-
+cleanly testable on Moonlight (where the two refer-           load’s first batch reaches match_prefix, con-
+ences diverge with non-trivial frequency); a broader          sistent with the warmup request’s pool slots having
+suite spanning more diverging-reference-frequent              been freed by then. The directive contract (Sec-
+models is follow-up work.                                     tion 4) is independent of this filter behavior; closing
+
+                                                         12
+it is concrete engineering (separate warmup pro-             prefix-cache leakage. The directive abstraction is
+cess, or persistent fetchable representation in the          correct independently of either answer (it splices
+registry) and not on the critical path of the design.        what the policy says to splice); both are deploy-side
+                                                             policy work.
+KV-pool occupancy is not the figure of merit.
+The savings reported in Section 5 are re-prefill
+compute and pool writes avoided, not concur-                 References
+rent allocator memory. Role B inserts spliced                Joshua Ainslie, James Lee-Thorp, Michiel de Jong,
+chunks into the radix trie by reference, so the                Yury Zemlyanskiy, Federico Lebrón, and Sumit Sang-
+spliced slots remain trie-pinned and the alloca-               hai. 2023. Gqa: Training generalized multi-query
+tor’s peak available_size() does not drop.                     transformer models from multi-head checkpoints.
+                                                               Preprint, arXiv:2305.13245.
+The 4-tenant measurement (App. U) shows splice-
+ON and splice-OFF peaks identical to the slot                Anthropic. 2024. Prompt caching. https://
+(97.5 MB), and the 2-tenant ON + warm-start peak               platform.claude.com/docs/en/docs/
+is +12 MB above OFF (from the four warm-up-                    build-with-claude/prompt-caching.
+                                                               Anthropic developer documentation; describes
+preloaded articles staying pinned). The matched-               cache_control breakpoints (up to four per
+configuration tenant slope at concurrency C=4 is               request), ephemeral cache type with 5-minute
+1.82× (splice OFF, 2-tenant → 4-tenant) vs 1.71×               default and 1-hour extended TTL, and the absence of
+(splice ON + warm-start, same range; the 4-tenant              a manual-expiration API.
+arm of that pair produces no spliced chunks, so the          Anthropic.    2025.                  Context  editing:
+slope reduction beyond the splice-OFF baseline is              clear_tool_uses_20250919.          Claude API docu-
+from warm-start pinning rather than splice activity            mentation.
+at 4-tenant). Read together, the splice’s chunk-             Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, and
+level overlap detection produces a measurable but              Hannaneh Hajishirzi. 2024. Self-RAG: Learning to
+modest tenant-scaling-slope reduction (the linear              retrieve, generate, and critique through self-reflection.
+projection is 2.0×). Deployments whose mem-                    Preprint, arXiv:2310.11511.
+ory constraint is peak allocator pressure cannot             Aichen Cai, Anmeng Zhang, Anyu Li, et al. 2026.
+rely on the splice to drop their watermark; deploy-            JoyAI-LLM flash: Advancing mid-scale LLMs with
+ments whose constraint is prefill compute under                token efficiency. Preprint, arXiv:2604.03044.
+high cross-tenant overlap will see the savings as            Yihua Cheng, Kuntai Du, Jiayi Yao, and Junchen Jiang.
+re-prefill ms not spent.                                       2024. Do large language models need a content
+                                                               delivery network? Preprint, arXiv:2409.13761.
+Logit-level vs token-level equality. The head-
+line metrics in Tables 4 and 5 are token-level               Nathan Cole. 2026.         How to stop Claude
+                                                               Code from slowing your local LLM by
+(argmax agreement, common-prefix length, parsed                90%.      https://www.roborhythms.com/
+tool-name agreement); Appendix I additionally re-              stop-claude-code-slowing-local-llm/.
+ports per-step logit-level ℓ2 and KL distances be-             Roborhythms blog, April 23, 2026; documents that
+tween Leyline and the two reference paths on the               per-request header variation invalidates vLLM’s
+counter trajectory for all four models. The pic-               prefix cache, costing 90% throughput on agentic
+                                                               sessions.
+ture is consistent with argmax: on edit steps where
+argmax matches, the per-step KL between Leyline              DeepSeek-AI. 2026.       DeepSeek-V4 technical
+and the matched reference is below 0.5 nats; the               documentation.         https://fe-static.
+                                                               deepseek.com/chat/transparency/
+bulk distribution can still differ on dimensions far           deepseek-V4-model-card-EN.pdf.          Hy-
+from the top, but the rank-1 token is preserved. A             brid CSA+HCA attention; not MLA.
+logit-level acceptance test for sampling regimes
+(rather than greedy) would tighten the empirical             DeepSeek-AI et al. 2024a. Deepseek-v2: A strong, eco-
+                                                               nomical, and efficient mixture-of-experts language
+contract further and is a natural extension.                   model. Preprint, arXiv:2405.04434.
+Open corner cases for pin-style directives. A                DeepSeek-AI et al. 2024b. Deepseek-v3 technical re-
+deployed PIN-style directive must answer two                   port. Preprint, arXiv:2412.19437.
+engineering questions raised in the vLLM RFC                 DeepSeek-AI et al. 2025. DeepSeek-V3.2: Pushing
+thread (vLLM Project contributors, 2024): resource             the frontier of open large language models. Preprint,
+contention under user-issued pins, and cross-tenant            arXiv:2512.02556.
+
+
+                                                        13
+Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang,                 NIPS ’24, Red Hook, NY, USA. Curran Associates
+  Jiawei Han, and Jianfeng Gao. 2024. Model tells you           Inc.
+  what to discard: Adaptive kv cache compression for
+  llms. Preprint, arXiv:2310.01801.                           Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun
+                                                                Chen, Shaoting Feng, Yuyang Huang, Samuel Shen,
+Google. 2024.      Google gemini context caching.               Rui Zhang, Kuntai Du, and Junchen Jiang. 2025. LM-
+  https://ai.google.dev/gemini-api/                             Cache: An efficient KV Cache layer for enterprise-
+  docs/caching. Cached-content objects with                     scale LLM inference. Preprint, arXiv:2510.09665.
+  explicit TTL and replace-on-update semantics;
+  read-side reuse only, no positional-edit primitive.         Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray,
+                                                                Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi
+Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu,                  Yao, Shan Lu, Ganesh Ananthanarayanan, Michael
+  Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang,                  Maire, Henry Hoffmann, Ari Holtzman, and Junchen
+  Yungang Bao, Ninghui Sun, and Yizhou Shan.                    Jiang. 2024a. CacheGen: KV Cache compression
+  2024. MemServe: Context caching for disaggregated             and streaming for fast large language model serving.
+  LLM serving with elastic memory pool. Preprint,               In Proceedings of the ACM SIGCOMM 2024 Confer-
+  arXiv:2406.17565.                                             ence, ACM SIGCOMM ’24, page 38–56, New York,
+                                                                NY, USA. Association for Computing Machinery.
+Junhao Hu, Wenrui Huang, Weidong Wang, Haoyi
+  Wang, Tiancheng Hu, Qin Zhang, Hao Feng,                    Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao
+  Xusheng Chen, Yizhou Shan, and Tao Xie. 2025.                 Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyril-
+  EPIC: Efficient position-independent caching for              lidis, and Anshumali Shrivastava. 2023. Scis-
+  serving large language models. In Proceedings of the          sorhands: exploiting the persistence of importance
+  42nd International Conference on Machine Learning             hypothesis for LLM kv cache compression at test
+  (ICML).                                                       time. In Proceedings of the 37th International Con-
+                                                                ference on Neural Information Processing Systems,
+Zhengbao Jiang, Frank F. Xu, Luyu Gao, Zhiqing Sun,             NIPS ’23, Red Hook, NY, USA. Curran Associates
+  Qian Liu, Jane Dwivedi-Yu, Yiming Yang, Jamie                 Inc.
+  Callan, and Graham Neubig. 2023. Active retrieval
+  augmented generation. Preprint, arXiv:2305.06983.           Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen (Henry)
+                                                                 Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi
+Carlos E. Jimenez, John Yang, Alexander Wettig,                  Chen, and Xia Hu. 2024b. Kivi: a tuning-free asym-
+  Shunyu Yao, Kexin Pei, Ofir Press, and Karthik                 metric 2bit quantization for kv cache. In Proceed-
+  Narasimhan. 2023. SWE-bench: Can language mod-                 ings of the 41st International Conference on Machine
+  els resolve real-world GitHub issues? Preprint,               Learning, ICML’24. JMLR.org.
+  arXiv:2310.06770.
+                                                              Bole Ma, Jan Eitzinger, and Harald Köstler. 2026.
+Shuowei Jin, Xueshen Liu, Qingzhao Zhang, and                   Irminsul:    MLA-native position-independent
+  Z. Morley Mao. 2024. Compute or load KV Cache?                caching for agentic LLM serving.      Preprint,
+  why not both? Preprint, arXiv:2410.03065.                     arXiv:2605.05696.
+
+Sanjay Kariyappa and G. Edward Suh. 2026. SideQuest:          Moonshot AI. 2025. Moonlight: A 16B/3B-active
+  Model-driven kv cache management for long-horizon            MLA-MoE based on the DeepSeek-V3 architecture.
+  agentic reasoning. Preprint, arXiv:2602.22603.               Hugging Face Model Card.
+                                                              Daniel Nichols, Prajwal Singhania, Charles Jekel, Abhi-
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying
+                                                                nav Bhatele, and Harshitha Menon. 2025. Optimiz-
+ Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-
+                                                                ing agentic language model inference via speculative
+ zalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+                                                                tool calls. Preprint, arXiv:2512.15834.
+ memory management for large language model serv-
+ ing with PagedAttention. In Proceedings of the 29th          OpenAI. 2024.            OpenAI prompt caching.
+ Symposium on Operating Systems Principles, SOSP                https://developers.openai.com/api/
+ ’23, page 611–626, New York, NY, USA. Association              docs/guides/prompt-caching. Longest-
+ for Computing Machinery.                                       prefix caching with 5–10 minute TTL on inputs
+                                                                above the cacheable-prefix threshold; read-side reuse
+Hyungwoo Lee, Kihyun Kim, Jinwoo Kim, Jungmin So,               only, no semantic-edit interface.
+  Myung-Hoon Cha, Hong-Yeon Kim, James J. Kim,
+  and Youngjae Kim. 2025. Shared disk KV Cache                Pete Spano. 2026.         I found a hidden fea-
+  management for efficient multi-instance inference in          ture in Claude Code called speculation.
+  rag-powered llms. Preprint, arXiv:2504.11765.                 https://www.zerotopete.com/p/
+                                                                i-found-a-hidden-feature-in-claude.
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat                   Zero to Pete blog, March 26, 2026.
+  Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai,
+  Patrick Lewis, and Deming Chen. 2024. SnapKV:               Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan,
+  LLM knows what you are looking for before genera-              Wen Bo, and Yunfeng Liu. 2024. Roformer: En-
+  tion. In Proceedings of the 38th International Con-            hanced transformer with rotary position embedding.
+  ference on Neural Information Processing Systems,              Neurocomput., 568(C).
+
+
+                                                         14
+Team GLM et al. 2024. ChatGLM: A family of large             Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak
+  language models from GLM-130B to GLM-4 all                   Shafran, Karthik Narasimhan, and Yuan Cao. 2023.
+  tools. Preprint, arXiv:2406.12793.                           ReAct: Synergizing reasoning and acting in language
+                                                               models. Preprint, arXiv:2210.03629.
+vLLM Project contributors. 2024. [RFC] pinned
+  caching with automatic prefix caching (related to An-      Xingdi Yuan, Morgane M Moss, Charbel El
+  thropic prompt caching API). https://github.                 Feghali, Chinmay Singh, Darya Moldavskaya, Drew
+  com/vllm-project/vllm/issues/8333.                           MacPhee, Lucas Caccia, Matheus Pereira, Minseon
+  vLLM issue #8333, filed 2024-09-10; manual-                  Kim, Alessandro Sordoni, and Marc-Alexandre Côté.
+  expiration and TTL-based directive proposal.                 2025. debug-gym: A text-based environment for
+                                                               interactive debugging. Preprint, arXiv:2503.21557.
+vLLM Project contributors. 2025a. [RFC] gener-
+  alized KV cache reuse.        https://github.              Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong
+  com/vllm-project/vllm/issues/25950.                          Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-
+  vLLM issue #25950 (follow-up to #25672), filed               dong Tian, Christopher Ré, Clark Barrett, Zhangyang
+  2025-09-30, closed not-planned 2026-05-16; pro-              Wang, and Beidi Chen. 2023. H2O: heavy-hitter or-
+  poses reuse of KV entries for non-prefix-aligned             acle for efficient generative inference of large lan-
+  token subsets and documents a request-batching               guage models. In Proceedings of the 37th Interna-
+  workaround using dummy requests because the                  tional Conference on Neural Information Processing
+  cache layer cannot express the operation directly.           Systems, NIPS ’23, Red Hook, NY, USA. Curran
+                                                               Associates Inc.
+vLLM Project contributors. 2025b.        [RFC] KV-
+  Cache interoperability API standardization.                Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue
+  https://github.com/vllm-project/                              Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos
+  vllm/issues/20492. vLLM issue #20492,                         Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark
+  filed 2025-07-04; proposal for a public contract on           Barrett, and Ying Sheng. 2024. SGLang: efficient
+  cache lifecycle events.                                       execution of structured language model programs. In
+                                                               Proceedings of the 38th International Conference on
+vLLM Project contributors. 2025c.     [RFC]                    Neural Information Processing Systems, NIPS ’24,
+  sparse KV cache management framework.                         Red Hook, NY, USA. Curran Associates Inc.
+  https://github.com/vllm-project/
+  vllm/issues/12254. vLLM issue #12254,                      A    Deployment-cell setup and
+  filed 2025-01-21; pluggable framework for                       methodology details
+  sparse-attention eviction policies.
+                                                             This appendix expands the setup, methodology, and
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song
+  Han, and Mike Lewis. 2024. Efficient streaming             provenance details supporting the deployment-cell
+  language models with attention sinks. Preprint,            evidence reported in Section 5 (Table 2).
+  arXiv:2309.17453.
+                                                             Setup. debug-gym mini_nightmare (Yuan et al.,
+Dongjie Xu, Hao Wu, Weijie Shi, Yue Cui, Yuanjun Liu,        2025) (eight Python-debugging tasks under hidden-
+  Jiawei Li, Haolun Ma, An Liu, Jia Zhu, and Jiajie          test scoring; the per-task breakdown is in Ta-
+  Xu. 2026. LoopGuard: Breaking self-reinforcing
+  attention loops via dynamic kv cache intervention.         ble 2; pandas_dataframe excluded per Sec-
+  Preprint, arXiv:2604.10044.                                tion 5); JoyAI-LLM Flash (Cai et al., 2026) on
+                                                             H200 TP=4 via SGLang (Zheng et al., 2024)
+Huan Yang, Renji Zhang, Mingzhe Huang, Weijun
+                                                             with the Leyline-integrated RadixCache; two
+  Wang, Yin Tang, Yuanchun Li, Yunxin Liu, and Deyu
+  Zhang. 2025. KVShare: An LLM service system                policy classes (truncate_older_than:n=2,
+  with efficient and effective multi-tenant KV Cache         max_chars=200 as treatment, keep_all as
+  reuse. Preprint, arXiv:2503.16525.                         baseline) at 4 seeds per cell, N =32 baseline + 33
+John Yang, Carlos E. Jimenez, Alexander Wettig, Kil-
+                                                             treatment reliable trials (counter has one additional
+  ian Lieret, Shunyu Yao, Karthik Narasimhan, and            treatment trial; the 31 cells with both arms run an-
+  Ofir Press. 2024. SWE-agent: agent-computer in-            chor the paired analysis), max=50 agent steps per
+  terfaces enable automated software engineering. In         task. The treatment policy truncates tool messages
+  Proceedings of the 38th International Conference on
+                                                             older than 2 turns to a 200-character head/tail stub;
+  Neural Information Processing Systems, NIPS ’24,
+  Red Hook, NY, USA. Curran Associates Inc.                  Leyline computes the corresponding directive and
+                                                             applies the splice via δ-rotation per Section 3.2.
+Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yi-          The two policies are exercised through the same
+   hua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu,
+   and Junchen Jiang. 2024. CacheBlend: Fast large
+                                                             re-prefill arm of Section 4.1 (standard radix-cache
+   language model serving for RAG with cached knowl-         prefix matching plus re-prefill of the changed suf-
+   edge fusion. Preprint, arXiv:2405.16444.                  fix), so the observed difference attributes solely to
+
+                                                        15
+policy behavior at the message-edit interface, not                 unchanged conversation prefix up to the edit
+to any splice contribution at the KV-slot layer.                   point but not past it.
+Provenance: policy-loaded check. All 64 tri-                     • splice: Leyline’s directive-driven splice path
+als carry policy_loaded=1 in their per-trial                       active in the same SGLang process via a
+metadata. This check was added after a fix to                      content-hash + δ-rotation hook in the radix-
+the SLURM harness on 2026-05-26 that resolved                      match path (the in-place mechanism of Sec-
+an unexported MEMOKEEPER_ROOT environment                          tion 3.2). The arm under test.
+variable in earlier pilots; the post-fix runs reported
+here are the policy-applied evaluation, and the               Workload. Each session is a multi-theme syn-
+provenance flag is the harness-level confirmation             thetic conversation (cooking / programming / his-
+that the intended truncation policy was active in             tory / science) with a long system prompt (≈ 4096
+every cell.                                                   tokens) and six user turns of ≈ 2048 tokens each,
+                                                              constructed from topic words slotted into a fixed
+What this evidence shows about the primitive.                 template family (“How do I get the consistency of
+Three observations frame what Section 5 estab-                risotto right when I’m a beginner?”). Total prompt
+lishes about the directive abstraction itself. (i) A          length at the final turn reaches ≈ 17 K tokens.
+10-line Python policy class produces a stream of              We run the same three-phase trace as the synthetic
+(sstart , send , R) tuples consumed cleanly by the            message-edit pattern of prior work:
+policy hook with no per-policy serving-side code,
+operationalizing the signal-agnosticism property                1. Build: issue turns 1 through K incrementally,
+(Section 3). (ii) The integration runs end-to-end on               populating the radix cache (and, on the splice
+SGLang + debug-gym + JoyAI-LLM Flash with                          arm, the content-hash registry) with the origi-
+no friction at the agent-policy interface. (iii) Under             nal conversation prefix.
+the message-edit regime, the radix prefix matches
+across consecutive turns on every prefix-stable di-             2. Edit: re-issue the conversation up to the edit
+rective, realizing the cache-friendliness property                 turn with the topic word swapped for a same-
+at the message-list level (the same property the                   template synonym (“risotto” → “paella”).
+splice mechanism realizes at the KV-slot level in-                 The surrounding template tokens are byte-
+side the kernel). Scope limits are catalogued in                   identical to the original, so the post-edit turns
+Limitations.                                                       tedit+1 , . . . , tK are content-identical to the
+                                                                   build phase — only shifted in absolute po-
+                                                                                                   orig
+B    Three-arm message-edit                                        sition by ∆ = |tedit edit | − |tedit |.
+     microbenchmark
+                                                                3. Replay: issue the full edited conversation as
+Section 5 reports the policy leg of the two-leg                    one POST. This is the message-edit re-prefill
+validation under the standard re-prefill arm; this                 case: the radix path matches the unchanged
+appendix reports the mechanism leg by isolating                    system prompt and the pre-edit turns; every-
+the splice kernel’s contribution under controlled                  thing past the edit must be re-prefilled. The
+prompts. We run a three-arm microbenchmark                         splice path additionally content-hash-matches
+against the live SGLang scheduler on DeepSeek-                     the shifted-but-identical post-edit turns and
+V2-Lite (DeepSeek-AI et al., 2024a) (and JoyAI-                    rotates their cached Kpe by ∆.
+LLM Flash; see end of section) with the same work-
+load across all three arms:                                     Decoding is greedy (T =0) so the three arms
+                                                              are expected to agree token-for-token on the re-
+    • cache-off:                SGLang         with           play phase when the splice path is correctness-
+      -disable-radix-cache — every                            preserving — the same contract validated at single-
+      request re-prefills from scratch. Lower bound           prompt scale in Section 4.
+      on what the splice mechanism can possibly
+      beat.                                                   Cross-arm output equivalence — production-
+                                                              scale correctness check across the batch-scaling
+    • radix: vanilla SGLang with its default radix            sweep. Across the four-cell concurrency sweep
+      cache. The serving-stack baseline an agen-              we run the post-hoc cross-arm aggregator on
+      tic harness already gets for free; matches the          the leading 16 decoded tokens of every request
+
+                                                         16
+(128 phase-keyed records per cell, joined by                 content); this matches the directive contract’s pre-
+(PHASE, SESSION, TURN, ORDER)). The splice                   diction in Section 3.1.
+arm matches the radix arm on first-token argmax
+                                                             Tail-latency (p99) corroborates the p50 picture
+in 100%/97.7%/98.4%/94.5% of records at
+                                                             at the peak and exposes a localized rotation-
+C∈{1, 4, 8, 16} and on the full 16-token head
+                                                             contention outlier at low C. The replay-phase
+in 99.2%/95.3%/93.0%/67.2%. The reference
+                                                             p99 e2e tracks the p50 story at the headline cell: at
+disagreement floor — cache-off vs. radix, two
+                                                             C=8 the splice arm reaches 5298 ms p99 against
+arms that share no directive code path — shows
+                                                             radix’s 5543 ms p99 (−245 ms, −4.4%), and the
+the same degradation pattern across concur-
+                                                             radix-vs-splice gap is consistent at p50/p90/p99.
+rencies (97.7%/97.7%/97.7%/94.5% first-token;
+                                                             At C=1 and C=4 the splice arm produces a mild
+85.2%/93.8%/90.6%/68.8% full head), confirm-
+                                                             tail spike — one or two requests per cell hit
+ing the splice-vs-radix disagreement is scheduler-
+                                                             p99 ≈ 5300 ms vs radix’s ≈ 4100–4740 ms p99 —
+induced bf16-reduction noise (matmul-reduction
+                                                             which we attribute to the first-time rotation walk
+ordering on H100 tensor cores reorders under batch-
+                                                             on a cold registry (the chunk-content hash takes
+ing, see Section 8), not a directive-layer correct-
+                                                             a microsecond-scale extra walk on the very first
+ness gap. The splice path tracks the warm-prefix
+                                                             match, amortizing across subsequent requests; the
+path at the noise floor of batched scheduling —
+                                                             chunker’s CDC pass on a ≥ 17 K-token prompt ac-
+the production-scale analogue of the single-prompt
+                                                             counts for the variability). At C=16 the splice arm
+argmax claim in Table 4.
+                                                             matches radix on p99 (7218 ms vs 7171 ms, within
+                                                             noise). The headline cell (C=8) is the deployment-
+Result — splice arm produces a uniform
+                                                             relevant one for production agentic serving — a
++11.2 pp cache-hit gain across the C=1→16
+                                                             single H100 typically runs more than one session
+batch-scaling sweep, with peak e2e latency win
+                                                             concurrently — and the splice arm beats radix on
+at C=8. Table 3 reports the four-cell batch-
+                                                             every percentile reported.
+scaling sweep. The replay cache-hit ratio is in-
+variant across concurrency: cache-off 0.0%, stan-            What unlocks the gain across the entire batch
+dard radix 49.6%, Leyline splice 60.8% (+11.2 pp             range. Three workload-and-stack properties to-
+uniformly at C ∈ {1, 4, 8, 16}). The splice mecha-           gether make the splice arm exceed radix at every
+nism’s correctness property holds across the entire          concurrency: (i) the post-edit suffix is large enough
+batch range. The e2e latency win is non-monotonic:           (≥ 4 turn-pairs of ≈ 2 K tokens ≈ 8 K tokens)
+−51 ms at C=1, −85 ms at C=4, −241 ms                        that the CDC chunker’s Gear-hash rolling signa-
+(−4.4%) at C=8, and +45 ms (within scheduler                 ture has multiple opportunities to find a bound-
+noise) at C=16. The peak at C=8 matches the                  ary aligned with a previously registered chunk’s
+prediction that splice gains compound when pre-              boundary; (ii) AKASHA_PIC_ABSPOS_CDC=1
+fill contention is high relative to the decode tail;         stabilizes chunk hashes across requests that share
+at C=1 the splice saves prefill compute that runs            content but have differing radix-match prefixes, so
+in serial with decode, producing a smaller abso-             registered chunks remain findable on the replay-
+lute win; at C=16 the saved prefill compute is               phase prompt; (iii) the A1 anchored CDC vari-
+absorbed into the now decode-dominated tail and              ant of the chunker (activated via AKASHA_PIC_
+stops moving the p50 needle, though the splice               ANCHOR_CDC=1; the production default in the
+still produces 203 chunk hits worth of saved com-            runs above) forces a CDC boundary AND resets
+pute (re-issued in the next request batch). Per-cell         the rolling hash at chat-template special tokens
+PIC counters: chunks_spliced ∈ {167, 203}                    auto-extracted from the tokenizer at model-runner
+(lower in the C=4 cell where four sessions par-              init. (iii) is the load-bearing fix at concurrency
+tially serialize through the splice path’s lookup);          > 1: without it, the registry-side content-hash
+cumulative bytes_rotated ≥ 740 MB; cumu-                     match rate at C=16 collapses to zero (cf. the doc-
+lative in-place rotation-kernel time ≤ 2.9 ms per            umented cand_local/noncontig_chunks_
+run (negligible against the multi-second e2e). The           skipped regression on the unanchored chun-
+BUILD and EDIT phases show the splice and radix              ker that motivated A1).          With (iii) active,
+arms at identical cache-hit ratios because the splice        cand_local climbs to 128–203 matches at ev-
+mechanism only activates on REPLAY (where the                ery concurrency tested. None of (i)–(iii) is bespoke
+message-edit pattern produces shifted-but-identical          to this workload; they describe what an agentic
+
+                                                        17
+workload at production scale would naturally ex-            constructed single-prompt microbenchmark of
+hibit once the chunker is chat-template-aware.              Section 4.1 establishes that the kernel correctness
+                                                            contract holds under in-place splice; this section
+What the (then) small-prompt negative iso-
+                                                            establishes that the production-scheduler integra-
+lated, and the anchored-CDC fix that closed
+                                                            tion of that kernel is mechanically alive, produces
+it. An earlier sweep at Lsys =512, Lturn =256,
+                                                            a measurable cache-hit gain at every concurrency
+Lout =64, with the legacy purely-Gear-hash chun-
+                                                            tested, and the chunker-side small-prompt regres-
+ker (i.e. AKASHA_PIC_ANCHOR_CDC unset),
+                                                            sion is closed by the anchored-CDC fix described
+produced 0 chunks_spliced despite the splice
+                                                            above.
+path firing ∼ 56 times per session: break_
+first_chunk_hash_miss incremented on                        C    Kernel specification: tensors and
+every loop_entered. The diagnosis was that at                    composition
+small workload scale the Gear-hash rolling-window
+state past the radix-match boundary differs too             Step-by-step tensor effect of one directive. A
+sharply between BUILD and REPLAY for the                    directive’s kernel effect on the cache is fully speci-
+chunker to converge on the same boundaries; the             fied by four operations on three regions of the cache
+chunks of the byte-identical-but-shifted post-edit          layout. (a) The evicted span’s slots [sstart , send )
+suffix are then never registered under matching con-        are freed: Kpe , Knope , and V at those positions
+tent hashes. We characterized this as a localized           are released back to the KV-pool allocator. (b) The
+chunking-strategy gap forward-compatible with the           replacement R is freshly prefilled into newly allo-
+directive contract and identified the chat-template-        cated slots at positions [sstart , sstart +|R|), comput-
+anchored chunker as the natural fix; that fix has           ing K and V for these tokens against the cache pre-
+since landed in the underlying Akasha stack as the          fix up to sstart via a normal forward pass. (c) Down-
+A1 anchored CDC chunker (env: AKASHA_PIC_                   stream slots originally at positions i ≥ send have
+ANCHOR_CDC=1), is the active configuration in               only their Kpe rotated by ∆ (Equation (1)) and are
+all four runs of Table 3, and is the load-bearing           re-keyed in the radix structure to occupy logical
+mechanism for the uniform +11.2 pp gain across              positions i + ∆; their Knope and V are untouched.
+concurrencies C ∈ {1, 4, 8, 16} above. The kernel           (d) No Q tensor is cached for the decode path (Q is
+and directive contract are unchanged; the change is         recomputed each step from current hidden states),
+purely in how the chunker selects boundaries.               so no Q reindexing is required. Sink tokens (the
+                                                            first N tokens for streaming-attention-style sinks)
+Scope and what this section does and
+                                                            are unaffected provided sstart > N ; deployments
+does not show. The microbenchmark val-
+                                                            that violate this can either widen sstart or treat the
+idates that Leyline’s serving-stack integra-
+                                                            sink prefix as pinned. We rule out layernorm and
+tion     (sitecustomize-driven       monkey-patch
+                                                            attention-sink interactions as confounders by val-
+of           Req.init_next_round_input,
+                                                            idating bit-identity in the no-edit case (Section 4)
+Scheduler._add_request_to_queue,
+                                                            and by the closed-form rotation-algebra argument
+and ModelRunner.__init__; rotary-emb
+                                                            in Section 3.2.
+stash; splice_at_match hook into the radix-
+cache match path; byte-counter instrumentation              Multiple directives, overlapping spans, signed
+through the rotation kernel; chat-template-                 ∆. A turn may carry multiple directives. We re-
+anchored CDC) is live in a production SGLang                quire non-overlapping spans at the directive layer
+scheduler and produces a uniform +11.2 pp replay-           (an overlapping submission is rejected at apply-
+cache-hit improvement over the standard radix               time; merging two adjacent removals is the policy’s
+baseline across concurrencies C ∈ {1, 4, 8, 16}             responsibility, not the kernel’s). Within one turn
+at production-scale prompts (≈ 17 K tokens),                the kernel processes directives left-to-right with
+with the e2e win peaking at −241 ms (−4.4%)                 the running position shift carried over: a direc-
+at C=8. It does not characterize how the splice             tive at sstart,2 applied after one with shift ∆1 sees
+gain compounds across mixed workload profiles               the downstream slots at their already-shifted posi-
+(heavy-tail per-session prompt sizes, variable              tions i + ∆1 , and the rotation algebra closes under
+edit-rates), under HiCache/disk-tier prefix-cache           composition (R(∆1 )R(∆2 ) = R(∆1 + ∆2 ), so
+stacks, or under multi-tenant request routing; those        re-rotating an already-rotated slot is well-defined).
+extensions are deployment-side follow-up. The               ∆ may be positive (replacement longer than the
+
+                                                       18
+Table 3: Three-arm message-edit microbenchmark batch-scaling sweep on DeepSeek-V2-Lite (single H100, greedy
+decode, T =0, Nsessions =16, K=6 turns/session, Lsys ≈4096, Lturn ≈2048, Lout =128, anchored CDC active).
+Replay-phase p50 e2e and replay cache-hit ratio across concurrencies C ∈ {1, 4, 8, 16}. The splice arm produces
++11.2 pp cache-hit improvement at every C; the e2e win peaks at C=8 (−241 ms, −4.4%). The latency-win
+shape (small at C=1, peak at C=8, absorbed at C=16) is the expected prefill-vs-decode trade: at low C the
+saved prefill runs in serial with decode; at high C the saved prefill compute is absorbed into the longer decode-
+dominated tail. Per-cell PIC counters (in the splice arm): chunks_spliced ∈ {167, 203}, cumulative
+bytes_rotated ≥ 740 MB, cumulative kernel time ≤ 2.9 ms. Source: jobs 466469/466478/466479/466480 on
+h12-* / h13-*.
+
+                             replay p50 e2e (ms)                    replay cache hit (%)
+            C    cache-off    radix                splice (∆)    cache-off   radix   splice   chunks spliced
+            1        4278     4087              4036 (−51)             0.0   49.6      60.8             203
+            4        5481     4729              4644 (−85)             0.0   49.6      60.8             167
+            8        7120     5533    5292 (−241, −4.4%)               0.0   49.6      60.8             203
+            16      10217     7166        7211 (+45, noise)            0.0   49.6      60.8             203
+
+
+
+evicted span; downstream tokens shift right; new                contract from Section 3.1) and (iii) against the re-
+slots are allocated) or negative (the common case:              prefill-of-edited-prompt path (a stricter reference
+replacement shorter; downstream tokens shift left;              Leyline does not promise); (iv) mean common-
+freed slots are released after the rotation). The radix         prefix length between the directive-active decode
+invariant maintained across both signs is: for every            and each reference.
+cached prefix the path from root to leaf encodes a                 The JoyAI, DSv2-Lite, and Moonlight configura-
+contiguous, position-monotonic sequence of slot                 tions overlap with Irminsul’s cross-architecture val-
+pointers with K/V consistent with the prompt that               idation (Ma et al., 2026); GLM-4.7-Flash is added
+produced them under the contract of Section 3.1.                here. On the 6 edit steps the JoyAI run shows
+Holes (positions deallocated by negative ∆ but not              first-token agreement with both references on 3/6
+yet reclaimed by the allocator) are normal radix                (the three paths converge or diverge together at the
+bookkeeping handled by the existing allocator.                  first-token level on this trajectory); on the other 3
+                                                                edit steps Leyline emits an extra block of reasoning
+D    Cross-architecture counter-trajectory                      text where the full-context path emits a tool call
+     replay                                                     directly. Full 128-token strings match on 2/6 edit
+                                                                steps; mean common-prefix length is 41.8 tokens
+The primitive runs unmodified on four MLA-                      against both references (rounded to 42 in Table 4).
+family open-weight models: DeepSeek-V2-Lite                     On GLM the mean common-prefix length against
+(16B) (DeepSeek-AI et al., 2024a), JoyAI-LLM                    rp (9.7, table 10) marginally exceeds that against
+Flash (DSv3-derivative, 48B/3B) (DeepSeek-AI                    full (6.2, table 6); both are short because GLM’s
+et al., 2024b; Cai et al., 2026), GLM-4.7-                      first-token disagreement diverges the suffix early
+Flash (Team GLM et al., 2024), and Moonlight-                   in the decode, and the 3-token gap is incidental
+16B-A3B (Moonshot AI, 2025). The replay is a                    given the per-trajectory references agree on every
+12-step counter trajectory with a 128-token greedy              edit-step first token (see caption to Table 4).
+decode at each step; six of the twelve steps in-
+                                                                E   Randomized edit-suite stress test
+volve a directive edit (the policy’s truncation hori-
+zon takes effect once enough turn history has ac-               The replay setups in Section 4.1 and Appendix D
+cumulated; the first six steps have no edits). No               use policy-derived edits: span sizes are whatever
+per-model code; the same rotation kernel; the same              the truncation policy produces, ∆ is always nega-
+directive interface. We report per-model metrics:               tive (truncation only), and each turn contains at
+(i) tool-name agreement on edit steps where both                most one edit. To probe corner cases this dis-
+the directive-active and full-context paths emit a              tribution misses — positive ∆ (insertion), wider
+parseable tool call within the 128-token decode                 span-size range, multiple non-overlapping edits per
+(denominator: number of such “both-parseable”                   turn — we run a synthetic random-edit harness
+steps out of 6 edit steps); (ii) first-token argmax             against the same kernel as the replay path. Each
+agreement against the full-context baseline (the                trial samples (i) k ∈ {1, 2} non-overlapping spans
+
+                                                          19
+                                                                1st-tok        Mean CP
+                            Model                  Tool   vs full    vs rp   vs full   vs rp
+                            DSv2-Lite               6/6     6/6       6/6     128      128
+                            JoyAI-LLM Flash         4/4     3/6       3/6      42       42
+                            GLM-4.7-Flash           2/2     4/6       4/6       6       10
+                            Moonlight-16B-A3B       3/3     6/6       5/6      75       50
+
+Table 4: Cross-architecture replay on a 12-step counter trajectory (6 edit steps; 128-token greedy decode). Tool:
+parsed tool-name agreement among “both-parseable” edit steps. 1st-tok vs full / vs rp: argmax first-token agreement
+on edit steps against the full-context baseline and the re-prefill-of-edited-prompt baseline (the two columns are equal
+by construction on rows where full ≡ rp on every edit step). Mean CP: mean common-prefix length, in tokens
+out of 128. Leyline’s positional contract (Section 3.1) predicts agreement with full, not rp; on Moonlight (the only
+row where the two references diverge on this trajectory) the prediction holds (6/6 vs full > 5/6 vs rp). Tool-name
+agreement is 15/15 across all models on the steps where both paths chose to act: the directive-driven splice never
+changes tool selection in this trajectory.
+
+
+from the same base prompt (step 4 of the counter               side the chat-rendered prompt body, frequently cut-
+trajectory, L ≈ 3200 tokens after chat templat-                ting across chat-template structure (mid-message,
+ing); (ii) each span’s size uniformly in [8, 200] to-          mid-tool-tag, between role markers), whereas the
+kens at a position uniformly inside the prompt’s               policy-derived runs splice at chat-message bound-
+body; (iii) each replacement length uniformly in               aries the model expects to be edited. We docu-
+[0, 2·|span|], so ∆ ranges over both signs. The ker-           ment this as a model-side sensitivity to ill-formed
+nel splices the sampled directives in a single call            prompt structure, not a kernel correctness finding
+alongside a substituted-prompt re-prefill for com-             — the deployment-relevant policies (turn-window
+parison. We report on 40 trials per model per stub             truncation, span-aligned eviction, summarization-
+mode.                                                          into-stub) splice at message boundaries by con-
+   The four-model picture together with the                    struction. The 18–29 positive-∆ trials per row and
+random-vs-semantic comparison gives the honest                 19–21 multi-edit-per-turn trials per row exercise
+version of the contract story. DSv2-Lite is invari-            the composition closure in Section 3.3 and the
+ant: no trial produces a first-token divergence under          signed-∆ allocator behavior; the patterns above
+either stub mode, so the contract’s full-vs-rp pre-            apply uniformly across single-edit/multi-edit and
+diction is vacuous (consistent with Table 4 and the            positive/negative ∆ subsets.
+bit-identical stub ablation in Appendix M). Moon-
+light is the model on which the prediction is cleanly          F    Chained-rotation drift in bf16
+testable: 13–17 trials produce diverging references
+and Leyline tracks full-context on 11–14 of them,              The composition closure R(a)R(b) = R(a +
+re-prefill on 0, with the remainder matching nei-              b) holds in exact arithmetic, so chained rota-
+ther — consistent with the positional contract (Sec-           tions should be mathematically equivalent to a
+tion 3.1) across both stub modes.                              single rotation by the sum. Under bf16 we
+   JoyAI and GLM behave more brittly under both                ask whether per-rotation round-off accumulates.
+random-position stub modes: Leyline produces a                 We test at the kernel level on synthetic K vec-
+first token that matches neither reference on 20–              tors, comparing N chained random-delta rota-
+36/40 trials, and never matches the full-context               tions against (a) a single equivalent-sum rotation,
+reference exclusively. The random↔semantic com-                and (b) the fresh-RoPE-at-target-position refer-
+parison rules out stub content as the discriminator:           ence. Each N uses 10 seeds; deltas sampled
+switching from random-in-vocab tokens to a fixed               in [−512, +512] with the running position con-
+placeholder string changes the rates only slightly             strained to the cache range. K vectors are bf16
+(e.g. JoyAI “matches neither” goes 30→20/40,                   of shape [batch=8, heads=32, head_dim=64].
+GLM stays 33→36/40). The discriminator versus                     Rel-L2 drift grows from 4.3×10−3 at N =2 to
+Table 4 — where the same kernel on JoyAI hits 4/4              2.6×10−2 at N =100, a 6.1× growth across a 50×
+parsed tool-name agreement and 3/6 first-token                 rotation-count increase — sub-linear in N , consis-
+agreement — is edit position: the random-edit har-             tent with random-walk noise accumulation. Work-
+ness splices at uniform-random token offsets in-               loads where the same physical slot is re-rotated
+
+                                                          20
+                                                      1st-tok                        when full ̸= rp:
+               Model (stub)                 N     vs full    vs rp       Leyline =full only    Leyline =rp only
+               DSv2-Lite (rand)           40      40/40      40/40         0/0 (vacuous)         0/0 (vacuous)
+               DSv2-Lite (sem)            40      40/40      40/40         0/0 (vacuous)         0/0 (vacuous)
+               Moonlight (rand)           40      37/40      23/40             14/17                  0/17
+               Moonlight (sem)            40      38/40      27/40             11/13                  0/13
+               JoyAI-LLM Flash (rand)     40       0/40      10/40              0/10                 10/10
+               JoyAI-LLM Flash (sem)      40       0/40      20/40              0/20                 20/20
+               GLM-4.7-Flash (rand)       40       1/40       6/40              1/23                  6/23
+               GLM-4.7-Flash (sem)        40       2/40       2/40              2/28                  2/28
+
+Table 5: Randomized edit-suite stress test. N =40 trials per model per stub mode with span sizes uniform in [8, 200]
+tokens, multiple non-overlapping edits per turn (1–2), ∆ over both signs. rand: stub is uniform in-vocab tokens;
+sem: stub is a tokenized placeholder string (“[truncated content]” repeated). The two stub modes produce nearly
+identical patterns per row, so the JoyAI/GLM divergence from Table 4 is not a stub-content effect; the discriminator
+is edit position (the random-edit harness places spans at arbitrary token offsets, unlike the policy-derived runs which
+place them at chat-message boundaries). Leyline =full only / Leyline =rp only count diverging-reference trials
+where the splice agrees exclusively with one reference.
+
+                                        N       rel-L2 vs fresh        max-abs vs fresh
+                                                            −3
+                                        2         4.3×10                  4.7×10−2
+                                        5         5.6×10−3                6.2×10−2
+                                       10         7.5×10−3                7.8×10−2
+                                       20         1.1×10−2                1.2×10−1
+                                       50         1.7×10−2                1.9×10−1
+                                      100         2.6×10−2                3.3×10−1
+
+Table 6: Chained-rotation drift in bf16 against a fresh-RoPE-at-target-position reference. N rotations with random
+signed deltas, 10 seeds per row, worst-case max-abs / mean rel-L2 across seeds. The N =1 single-rotation bound
+from Ma et al. (2026) is 4.7×10−3 rel-L2; growth from N =2 to N =100 (50× more rotations) is 6.1× in rel-L2 —
+sub-linear in N , consistent with diffusive noise accumulation.
+
+
+more than ∼100 times — e.g. very-long-horizon                         8 simultaneous edits at L∼28K tokens. GLM-4.7-
+agentic sessions with hundreds of edits targeting                     Flash holds ≥ 80% on both; the multi-edit subset
+positions downstream of the same persistent pre-                      is slightly higher than single, which we attribute to
+fix — would benefit from periodic re-prefill of the                   the later-trajectory stubs being well-rehearsed by
+affected slots; we document this as a deployment                      the model. Moonlight-16B-A3B is the case where
+guideline (Section 8) rather than a correctness gap.                  long-horizon trajectory replay degrades on tokens:
+                                                                      first-token agreement drops to ∼56% on single-
+G    Long-horizon trajectory replay                                   edit turns at sum_tree’s later steps. JoyAI-LLM
+                                                                      Flash degrades further — 12% single-edit and 4%
+The counter trajectory of Section D has 12 steps
+                                                                      multi-edit token agreement at L∼28K. The full
+with 6 edit steps; deployment scenarios commonly
+                                                                      and re-prefill references on JoyAI agree on first-
+run much longer (debug-gym’s sum_tree problems
+                                                                      token 82% of the time and on extracted tool name
+regularly produce 50-step trajectories (Yuan et al.,
+                                                                      42/43=98%; Leyline tracks the references at 67%
+2025)). We replay a 50-step sum_tree trajectory
+                                                                      (single-edit) and 72% (multi-edit) on tool-name un-
+through each of the four MLA models with the
+                                                                      der a permissive multi-format parser, while diverg-
+same truncation policy as the counter case, sep-
+                                                                      ing at token granularity. We do not attribute this
+arating per-turn-edit counts (the policy’s trunca-
+                                                                      to chained-rotation drift (App. F shows sub-linear
+tion horizon means later turns truncate more older
+                                                                      growth up to N =100); the more likely explanation
+messages: up to 8 edits per turn by step 50). Ta-
+                                                                      is the same model-side sensitivity to ill-formed mid-
+ble 7 reports first-token agreement against the full-
+                                                                      template content observed in Table 5, manifesting
+context baseline, split between single-edit-per-turn
+                                                                      on a long-prompt-length axis: JoyAI alternates be-
+and multi-edit-per-turn subsets.
+                                                                      tween JSON-list and XML <tool_call> output
+   The single- vs multi-edit split is informative.
+                                                                      formats turn-by-turn, and small KV perturbations
+DSv2-Lite is robust on both subsets even with up to
+
+                                                                 21
+                Model                 Valid edit steps   1st-tok @ single-edit   1st-tok @ multi-edit
+                DSv2-Lite                   49                16/16 (100%)          33/33 (100%)
+                GLM-4.7-Flash               45                13/16 (81%)           26/29 (90%)
+                Moonlight-16B-A3B           39                 9/16 (56%)           13/23 (57%)
+                JoyAI-LLM Flash             43                 2/16 (12%)            1/27 (4%)
+
+Table 7: Long-horizon replay on a sum_tree trajectory with a 50-step policy cap (raw trajectory extends to step 57
+on the model with no early termination; 128-token decode; the run ends earlier on some models when the prompt
+exceeds 90 GiB-per-GPU during decode). Valid edit steps excludes steps that raised an OOM during the multi-path
+comparison. The single-edit subset covers steps 0–21; the multi-edit subset covers steps 22–57 (2–8 edits per turn).
+Tool-name agreement under a permissive multi-format parser (JSON-list and XML tags) is reported for JoyAI in
+the text below; the other three rows had ≥ 95% tool agreement with the default extractor.
+
+
+flip which format the model emits even when the                  We do not develop logit-level metrics as paper
+tool choice is preserved.                                     claims; they are reported here for completeness and
+                                                              live in the artifact alongside the underlying JSONL
+H    Cross-architecture rotation-algebra                      records.
+     validation
+Section 6 claims that the kernel math transfers to            J   Programmable memory verbs beyond
+GQA/MHA. We validate at the rotation-algebra                      splice
+level (no live serving stack) by sweeping the per-            This appendix elaborates the four verbs sketched
+architecture RoPE parameter sets and verifying the            in Section 7. The directive abstraction is the same;
+closed-form equivalence                                       each verb names a distinct semantic intent the agent
+           R(∆) R(p) k = R(p + ∆) k                           can declare and the kernel can execute. Experimen-
+                                                              tal validation of each is future work.
+holds to within bf16 round-off. For each con-
+fig we sweep 24 (source_pos, ∆) cases                         Lifecycle hints: DECAY for tool-call chains.
+(4 source positions × 7 deltas, retaining only                Multi-step agent workflows have well-defined util-
+those keeping p, p + ∆ inside the cache range)                ity horizons. In a read → analyze → write
+and 5 seeds. K vectors are bf16 of shape                      pipeline, the KV entries for file contents retrieved
+[batch=8, heads=32, head_dim=d] per config.                   during read are no longer needed once analyze
+   The unit test that produces Table 8 ships with             completes. A semantic DECAY directive issued at
+the artifact (no model weights required).                     the boundary of analyze tells the storage layer
+                                                              to deprioritize these entries proactively (e.g., com-
+Live-model GQA microbenchmark. To com-
+                                                              press and migrate to CPU), freeing GPU capac-
+plement the algebra-level validation, we run the
+                                                              ity for write without waiting for end-of-request
+constructed Section 4.1-style microbenchmark on
+                                                              eviction. The agent knows the phase boundary; no
+two live GQA models with the same splice ker-
+                                                              system-side predictor does.
+nel (qk_nope_head_dim=0 degenerate case
+rotates the full 128-dim K; no architecture-specific          Span isolation: EVICT for reasoning traces
+code). Each trial is a single decoded greedy to-              and failed tool calls. Reasoning models emit
+ken in three paths (full-context, re-prefill, splice).        extended internal monologues (within <think>
+Table 9 reports the result.                                   spans) that are semantically inert to the final output.
+                                                              Under standard serving, these KV entries persist
+I   Logit-level distance metrics
+                                                              until request completion. A semantic EVICT di-
+Beyond       argmax    agreement,       we     cap-           rective at the closing tag enables immediate recla-
+ture per-step logit-level distances on the                    mation, reducing peak memory pressure during
+counter trajectory:      mean ℓ2 and mean                     long-horizon tasks. This is the canonical splice op-
+KL(softmax(leyline) ∥ softmax(ref)) between                   eration that this paper validates, applied at a span
+Leyline and the full-context (full) and re-prefill            boundary the agent can identify exactly.
+(rp) references, computed on the first-position                 A second instance arises naturally in agentic cod-
+logits in fp32. The means across the 6 counter edit           ing: when a str replace style edit tool call fails
+steps are:                                                    because the old_str string does not match the
+
+                                                         22
+        Config                                              d      rope_theta          worst rel-L2     median rel-L2
+                                                                                                −3
+        MLA (DSv2 / JoyAI / GLM / Moonlight, dense)          64       3.2×10 7
+                                                                                        4.3×10            3.7×10−3
+        MLA (alternative tuning)                             64         104             4.8×10−3          4.6×10−3
+        GQA (Llama-3.1-style)                               128        5×105            4.6×10−3          4.1×10−3
+        GQA (Qwen-3-style)                                  128         106             4.7×10−3          4.0×10−3
+        GQA (Phi-3-style)                                    96         104             4.9×10−3          4.5×10−3
+
+Table 8: Cross-architecture rotation-algebra validation. 5 seeds × 24 (source_pos, ∆) cases per config;
+worst-case and median rel-L2 between R(∆)R(p)k and R(p + ∆)k in bf16. All configurations agree to the same
+scale — the GQA/MHA rows are not distinguishable from the MLA rows. The rotation math is architecture-agnostic;
+only the K slice the kernel acts on (full K vs the Kpe band) changes.
+
+  Model                               Trials   Refs diverge         Leyline ≡full / diverging        Leyline ≡rp / diverging
+  Llama-3.1-Minitron-4B-Width-Base       8            8/8                        1/8                           1/8
+  Qwen3-4B                               8            6/8                        0/6                           6/6
+
+Table 9: Live-model GQA splice microbenchmark on the Section 4.1 constructed prompts (chunk carries the
+answer; stub elides it). On Minitron-4B-Width-Base (a width-pruned Llama-3.1 base model), the contract holds on
+1/8 trials; the model produces a coherent “number-shaped” first token matching neither reference on the others,
+with full-context itself producing incorrect arithmetic on most trials (the base model is poor at the underlying
+arithmetic). On Qwen3-4B, Leyline tracks the re-prefill reference on all 6/6 diverging trials — the same model-side
+ill-formed-cache sensitivity Table 5 reports on MLA, manifested more strongly here because GQA fuses position
+and content into the full K dimensions (rather than separating into Kpe /Knope as in MLA). The chunk-boundary
+recomputation of Hu et al. (2025) can be added as a kernel-layer drop-in without changing the directive layer
+(Section 6).
+
+
+current file state, the model retries with a corrected            mands in an isolated sandbox before user confirma-
+call. Once the corrected call succeeds, the KV                    tion (Spano, 2026), indicating that agent–serving
+span covering the failed attempt — the original                   co-design around execution prediction is already a
+old_str/new_str pair, any interleaved reason-                     practical concern.
+ing, and the error response — is semantically dead:
+                                                                  Attention-mask isolation: SCRATCH. A natural
+it records an action the agent has superseded. An
+                                                                  extension is scratchpad KV — context that par-
+EVICT directive emitted alongside the successful
+                                                                  ticipates in attention during a reasoning step but
+retry reclaims this span immediately. The agent
+                                                                  is excluded from the output stream and reclaimed
+possesses the reliable signal (it knows the retry
+                                                                  immediately on span completion. This requires
+succeeded); the storage layer does not.
+                                                                  attention-mask-level isolation beyond the current
+                                                                  splice vocabulary and beyond LMCache’s block-
+Hard retention: PIN for deterministic prefetch.
+                                                                  level Compress, but the directive interface offers
+Speculative tool-execution work (Nichols et al.,
+                                                                  a clean extension point: a SCRATCH annotation
+2025) prefetches predicted future tool calls dur-
+                                                                  could instruct the kernel to apply the appropriate
+ing generation, reducing end-to-end latency but
+                                                                  mask and reclaim entries at span close. The mask-
+wasting work on mispredictions. A semantic PIN
+                                                                  level mechanism is not in this paper; the interface
+directive provides a complementary mechanism:
+                                                                  space that admits it is.
+when an agent explicitly declares “the span I am
+about to emit will be needed in the next turn,” the               Cross-session sharing:            SHARE(scope,
+storage layer can treat this as a hard retention guar-            placement_hint). The four verbs above
+antee rather than a probabilistic estimate, convert-              describe intra-session, intra-agent KV lifecycle. A
+ing speculation into deterministic prefetch. The                  fifth verb extends the vocabulary across the session
+block-level Pin in LMCache is the storage-side                    boundary: scope ∈ {session, user_group, global}
+enforcement; the semantic PIN is the agent-side                   and placement_hint ∈ {local, rank_k, replicated}.
+declaration that produces it. Industry deployments                SHARE differs from PIN: PIN prevents eviction
+are converging on related designs: analysis of                    for the current agent; SHARE declares “make
+Claude Code’s internals describes a speculative-                  this chunk available to other agents.” The two
+execution subsystem that pre-runs predicted com-                  compose: PIN+SHARE is the canonical pattern
+
+                                                            23
+         Model                  ℓ2 (leyline, full)   ℓ2 (leyline, rp)   KL(leyline∥full)   top-10 overlap (vs full)
+         DSv2-Lite                    927                 927                 1.16                  0.52
+         Moonlight-16B-A3B            471                 441                 0.13                  0.85
+         JoyAI-LLM Flash              329                 339                 0.43                  0.87
+         GLM-4.7-Flash                2816                2647                0.20                  0.83
+
+Table 10: Logit-level distances on the first decoded token across the 6 edit steps of the counter trajectory (Sec. D).
+Means across edit steps; computed in fp32 from bf16 model output. On DSv2-Lite the full and re-prefill paths
+produce bit-identical logits on every edit step in this trajectory, so the two ℓ2 columns are equal. The pattern in
+pairwise comparison is consistent with argmax agreement (when argmax matches, KL is small; when it doesn’t, KL
+is several times larger).
+
+
+for a reference codebase served across multiple                   breakdown in RLHF-trained models, which makes
+refactoring agents. The directive abstraction is                  the uncertainty trigger unreliable; and position-
+the right home for this verb because the agent,                   encoding invalidation when retrieved content is
+not the storage layer, knows when a chunk has                     spliced into a live cache, which forces a re-prefill
+cross-session intent. The system-side substrate                   on every injection. CacheBlend (Yao et al., 2024)
+already exists:      knowledge-delivery-network                   addresses the second obstacle on MHA via selec-
+architectures (Cheng et al., 2024; Liu et al., 2025)              tive cross-attention recomputation; for MLA, the
+supply the storage tier, compute-vs-load tradeoff                 position-invariant cKV channel plus the δ-rotation
+schedulers (Jin et al., 2024) the orchestration,                  of Ma et al. (2026) provides a structurally cheaper
+RAG-specific shared caches (Lee et al., 2025)                     resolution. Leyline’s directive interface makes the
+the persistence layer, multi-tenant KV reuse                      first obstacle tractable by separating the uncertainty
+systems (Yang et al., 2025; Hu et al., 2024) the                  oracle (an external policy that decides when to re-
+cross-instance migration. The closest naming                      trieve and what to inject) from the cache-edit mech-
+overlaps come from adjacent layers: LMCache                       anism (the directive that splices without re-prefill).
+exposes operator-side pin/unpin (Liu et al.,                      The result is a clean division of labor across the
+2025) (system-orchestration vocabulary, not agent-                stack: an external oracle supplies policy; the direc-
+emitted), and Anthropic’s cache_control (An-                      tive supplies the semantic edit; the storage layer
+thropic, 2024) is agent-emitted but single-tenant,                (LMCache (Liu et al., 2025), where deployed) han-
+single-prefix, and stands alone rather than sitting               dles the resulting block-level movement across the
+in a vocabulary. The empirical validation, threat                 GPU/CPU/storage hierarchy.
+model (cross-tenant prefix-cache leakage in
+                                                                  Scope notes. Two non-claim items from the main
+particular), and provider-curated deployment are
+                                                                  text bear restating. First, we do not develop the
+the subject of follow-up work.
+                                                                  side observation that Leyline preserves more con-
+K    Composition with concurrent and                              text than the rendered prompt suggests; that de-
+     adjacent work                                                pendence is workload-specific and deserves sep-
+                                                                  arate empirical treatment. Second, variation we
+Concurrent signal-side work. The signal-side                      observe across models is in agent behavior under
+contributions of SideQuest (Kariyappa and Suh,                    Leyline-managed cache (signal-policy-workload-
+2026) (learned semantic-utility detector) and Loop-               dependent), not in whether the directive-driven ro-
+Guard (Xu et al., 2026) (decoder-side degeneration                tation works.
+detection) compose naturally with Leyline: any
+signal expressible as a span-set to evict can drive               L     vLLM framework RFC threads
+a Leyline directive without retraining the kernel
+                                                                  The block-level lifecycle half of the agentic cache
+or the signal detector. The right division of labor
+                                                                  problem is now consolidated in production. LM-
+in the agentic-LLM stack is signal source in one
+                                                                  Cache (Liu et al., 2025) ships an enterprise-grade
+paper, mechanism abstraction in another.
+                                                                  control API with Pin, Clear, Move, Compress,
+Active-RAG. FLARE (Jiang et al., 2023) and                        and Lookup operating on cache blocks in physical
+Self-RAG (Asai et al., 2024) promise uncertainty-                 storage tiers, integrated with vLLM and SGLang.
+triggered retrieval mid-generation, but in produc-                vLLM’s internal KVEvents mechanism (con-
+tion stumble on two coupled obstacles: calibration                sumed by the NVIDIA Dynamo router) covers the
+
+                                                             24
+introspection side.                                         place rather than forcing the workaround out to
+   The semantic-edit half has not. Four re-                 the scheduler layer. The mutation half currently
+cent vLLM proposals each request a slice of                 forces deployments into a correctness-versus-reuse
+cache control at the layer above the storage                tradeoff that Leyline closes.
+backend: [RFC] Pinned Caching (vLLM
+Project contributors, 2024) asks for manual-                M     Stub-content invariance ablation
+expiration directives over the radix cache (a               The δ-rotation, not the stub text, is the load-bearing
+higher-level Pin than LMCache’s block-level Pin);           operation. We demonstrate this with a 4 × 3 × 2
+[RFC] KV-Cache Interoperability                             ablation:
+API (vLLM Project contributors, 2025b) proposes
+to expose KVEvents as a public contract for                     • 4 stub modes: faithful (a short human-
+external policy consumers; [RFC] Sparse                           readable marker), pad (length-matched
+KV Cache Management (vLLM Project                                 whitespace), scrambled (length-matched
+contributors, 2025c) sketches a pluggable frame-                  noise), empty (|R|=0).
+work for non-LRU eviction policies; [RFC]
+                                                                • 3    trajectories:       counter,   shop-
+Generalized KV Cache Reuse (vLLM
+                                                                  ping_cart, sum_tree from debug-gym
+Project contributors, 2025a) lifts the prefix-only
+                                                                  mini_nightmare (Yuan et al., 2025).
+restriction so non-prefix token subsets can be
+reused, the necessary precondition for splice.                  • 2 models: DeepSeek-V2-Lite (DeepSeek-AI
+None of these proposals defines a span-level edit                 et al., 2024a), JoyAI-LLM Flash (Cai et al.,
+operation with the position-encoding correctness                  2026).
+story that splicing through the kernel requires;
+each surfaces a piece of the unsolved layer.                  On DeepSeek-V2-Lite, all four stub modes pro-
+   The threads on these four RFCs follow a consis-          duce bit-identical character-level outputs within
+tent pattern. The maintainers engage substantively,         each trajectory — zero observable variation. On
+raise corner cases (resource contention when GPU            JoyAI-LLM Flash, tool-name agreement holds at
+memory runs out under user-issued pins, cross-              ≥ 0.98 across all 12 cells.
+user prefix-cache leakage under content-addressed           Practical implication. Deployments can use
+cache, hole-filling under H2O-style sparse evic-            |R|=0 (the empty stub) and reduce prefill cost fur-
+tion), then run out of consensus on the right level         ther without measurable quality change. This com-
+of abstraction. The Sparse-KV thread is exem-               plements Irminsul’s stance that content-addressed
+plary: contributors converge on the diagnosis that          caching is a first-class primitive: the cache’s cor-
+the framework needs to decouple logical from phys-          rectness is governed by the rotation rule and the
+ical memory management so that the scheduler                radix structure, not by the surface form of interme-
+does not have to know which eviction or offloading          diate stubs.
+policy is in effect, but the discussion ends without
+a maintainer-accepted abstraction (vLLM Project             N    Forward compatibility across
+contributors, 2025c). The same shape recurs in the               attention-architecture changes
+Generalized-Reuse follow-up: with no cache-layer
+                                                            The δ-rotation correctness story applies to
+primitive available, contributors propose a request-
+                                                            DeepSeek V2/V3-class MLA, where the trained
+batching workaround — splitting one prompt into
+                                                            model expects RoPE-encoded keys at their origi-
+three (tokens 0-9, 0-19, 0-29), batching
+                                                            nal absolute positions and attends densely over the
+with two as placeholders, discarding the place-
+                                                            causal range. Two recent DeepSeek releases test
+holder outputs — to recompute holes outside the
+                                                            the directive abstraction at different points in the
+cache layer entirely (vLLM Project contributors,
+                                                            attention-architecture design space — one that pre-
+2025a).
+                                                            serves MLA and adds trained sparsity (V3.2-Exp),
+   Leyline’s directive abstraction is the layer this
+                                                            and one that replaces MLA outright (V4).
+pattern is missing: a single declarative interface
+in which all four verbs (pin, expose, evict, splice)        Within-MLA evolution: V3.2-Exp. DeepSeek-
+are well-typed, with one mathematical foundation            V3.2-Exp (DeepSeek-AI et al., 2025) retains
+(the δ-rotation rule) that gives correctness across         MLA and adds DeepSeek Sparse Attention (DSA):
+the vocabulary — and which the kernel applies in            a learned Lightning Indexer scores each query
+
+                                                       25
+against MLA’s compressed token representations                 mechanism on different sides of the directive: the
+and the model attends only to the top-k selected               rotation kernel is MLA-specific and will not survive
+keys per query rather than to a dense window. Two              the architecture replacement, but the span-level in-
+properties carry over from the dense MLA baseline.             terface above it does.
+First, causality is preserved: the indexer selects
+only from the causal range, and the selected posi-             O    Discussion notes: governance patterns,
+tions remain in their natural causal order. Second,                 release plan, open follow-ups
+RoPE correctness is per-position: each selected key
+carries its RoPE encoding at its original absolute             This appendix expands four items referenced from
+position. Sparse attention is a trained-in operation,          the Discussion (Section 7): the concrete gover-
+not a license to feed the model K vectors at arbi-             nance patterns the two-mode directive enables,
+trary new positions.                                           the open-source release plan, the rotate-only-vs-
+                                                               boundary-recomputation open question, and the
+   What V3.2-Exp changes for the directive ab-
+                                                               concurrency / tenant-isolation guarantees produc-
+straction is the cost of non-splice verbs. PIN- and
+                                                               tion deployments need on top of the per-request
+SHARE-style retention (Appendix J) can be imple-
+                                                               contract.
+mented more efficiently when the kernel is sparse-
+aware: a content-addressed store of pinned spans               Governance patterns on top of the
+composes naturally with top-k selection, and the               mode-declaration          contract. Three         pat-
+indexer can be biased to include or exclude partic-            terns follow once the API surface declares
+ular spans without touching positional encodings.              m ∈ {AMORTIZE, FORGET}. (i) Sensitive-
+A splice that re-anchors downstream positions still            content default. A serving stack that receives
+requires the δ-rotation correction or an equivalent,           directives from harnesses handling PII or regulated
+because RoPE correctness applies regardless of                 data should configure the policy hook to mark such
+which attention pattern — dense or sparse — con-               spans FORGET-mode by default and require an
+sumes the keys.                                                opt-in for AMORTIZE. (ii) Per-edit auditability.
+                                                               The serving telemetry distinguishes the two modes,
+Out-of-MLA evolution: DSv4. DeepSeek-                          so an audit pipeline can answer “which evictions
+V4 (DeepSeek-AI, 2026) replaces MLA with a Hy-                 truly erased context vs. amortized it forward”
+brid Attention Architecture: Compressed Sparse                 without inspecting the cache. (iii) Reviewer-
+Attention (CSA), which compresses the KV cache                 debugger consistency. A debugger or safety
+along the sequence dimension and applies DSA-                  auditor inspecting a conversation transcript needs
+style top-k selection, and Heavily Compressed At-              to know whether displayed-prompt edits are
+tention (HCA), which applies heavier sequence-                 AMORTIZE-mode (cache still attends to the original
+dimension compression with dense attention. The                chunk) or FORGET-mode (cache rebuilt past the
+cKV /Kpe /Knope structure of MLA is no longer                  edit); the API contract surfaces that distinction
+present; MLA’s per-position RoPE-on-Kpe cor-                   rather than burying it in serving-stack defaults. We
+rectness argument does not transfer to a sequence-             do not claim these patterns close all governance
+compressed representation. Whatever position-                  questions; the two-mode split moves them from
+correctness story V4 admits (CSA-specific, HCA-                “hidden serving-stack behavior” to “declared API
+specific, or layer-mixed) lives below the directive            contract,” which is what makes them auditable.
+interface. The directive itself remains well-typed:
+a span [sstart , send ) to splice with replacement R is        Open-source release plan. The artifacts de-
+the same input regardless of how the kernel realizes           scribed in this paper — the MLA Kpe rota-
+it. Empirical validation on V4-class architectures             tion kernel, the policy-driven directive API in-
+is out of scope for this paper.                                cluding the AMORTIZE/FORGET mode split, the
+    For the four MLA configurations validated in               live SGLang content-hash hook, and the Hug-
+Section D — DeepSeek-V2-Lite, JoyAI-LLM                        gingFace transformers replay path used for Sec-
+Flash (DSv3-derived), GLM-4.7-Flash, Moonlight-                tion 4 — will be released under a permissive
+16B-A3B — splice + δ-rotation is the correctness               license on de-anonymization. The release is
+mechanism, and V3.2-Exp inherits it with sparse-               structured in three layers matching the abstrac-
+aware optimizations available for non-splice verbs.            tion stack: a kernel package (rotation primitives,
+V4 is the case that motivates keeping policy and               mode-routed splice entry point), a policy SDK
+
+                                                          26
+(the Policy.transform interface plus the in-                  a prompt prefix in the radix tree, a directive is-
+process directive scheduler), and an integration              sued by tenant A at a position downstream of the
+shim (SGLang radix-cache patch plus an HF-                    shared subtree must not affect tenant B’s view of
+transformers replay harness for offline correctness).         the cache. Leyline’s implementation routes each
+The three-arm message-edit microbenchmark of                  directive through the tenant-scoped allocator that
+Section B and the constructed-microbench of Sec-              already owns the slot range past the shared pre-
+tion 4.1 are included as reproducer scripts. Subse-           fix; the rotation operates on the local (per-tenant)
+quent work — vendor / framework-specific adap-                copy of Kpe and never touches the shared sub-
+tations, complementary recomputation strategies               tree. Concretely the reference cache carries a per-
+under the directive layer (Section 6), and signal-            chunk ChunkEntry.tenant_tag field with
+side policies (Section K) — should plug in without            cross-tenant filter on splice candidate selection;
+forking the kernel.                                           default tenant_tag=None is the shared-pool
+                                                              opt-in (behaviorally identical to the pre-tenancy
+Open question: when rotate-only suffices vs.
+                                                              baseline), and activation is per-request (operator
+when boundary recomputation is needed. The
+                                                              sets req._akasha_tenant_tag from request
+empirical picture of Sections D to 6 is gradiated: on
+                                                              headers), so per-tenant resource accounting com-
+MLA models with well-separated Kpe /Knope the
+                                                              poses with the splice mechanism without a kernel-
+splice path tracks the full-context reference cleanly
+                                                              level change. (iii) Pinned segments. The PIN
+at chunk-boundary-aligned edits; under position-
+                                                              verb of Section 7 interacts with the cross-tenant
+arbitrary splices (mid-template) some models ex-
+                                                              case (does a pinned tenant-A segment block tenant-
+hibit attention shifts away from the rotated suffix
+                                                              B from reclaiming allocator budget?); the vLLM
+that look like the chunk-boundary effects EPIC doc-
+                                                              RFC thread on pinned caching identifies this as
+uments at the reuse boundary (Hu et al., 2025). We
+                                                              a deploy-side policy question rather than a kernel
+hypothesize the relevant architectural cues are (a)
+                                                              correctness question (App. L). The directive layer
+the degree to which K dimensions co-encode con-
+                                                              expresses both the edit and the per-tenant scope; the
+tent and position (full in GQA/MHA, partial-K in
+                                                              allocator and the radix layer enforce the isolation.
+MLA), (b) the attention-sink strength at the chunk-
+start position (stronger sinks make the rotated suffix
+more sensitive to boundary mismatch), and (c) the             P   RoPE pairing convention: the post-hoc
+rope frequency band the rotation crosses for typical              fix on MLA
+|∆| in the workload. A lightweight runtime detec-
+tor — decode the first rotated-suffix token under
+                                                              The kernel referenced in Section 3.3 initially hard-
+both rotate-only and rotate+k-recompute, and se-
+                                                              coded the NEOX (half-split) pairing of RoPE dims
+lect whichever matches the full-context reference
+                                                              (pairing index i with i+d/2 via rotate_half).
+at higher confidence — is implementable in the
+                                                              MLA on DeepSeek-V2-Lite uses interleaved
+existing kernel and is the natural follow-up. The
+                                                              (GPT-J) pairing (mixing 2i, 2i+1). The mis-
+directive layer is unchanged in either case.
+                                                              match leaves Kpe · cos correct but corrupts the
+Concurrency, batching, and tenant isolation.                  sin(∆f )-rotated half, hiding at ∆→0 and grow-
+The Section 3.3 pipeline is described per-request;            ing with |∆|. The fix is a small helper that
+production deployments need three additional guar-            reads rotary_emb.is_neox_style and ap-
+antees. (i) Per-request transactionality of multi-            plies the matching pairing; the path for half-split
+directive turns. A turn carrying k directives must            models (Llama, Qwen2) is arithmetically identi-
+commit all or none. The kernel applies them left-to-          cal to the prior code. Post-fix bit-exact valida-
+right and the rotation algebra closes under compo-            tion against a single-rotation reference covers ∆ ∈
+sition (R(∆1 )R(∆2 )=R(∆1 +∆2 )), but the radix               {1, 21, 48, 76, 512, 2000} on a hand-built (model-
+update should be a single transaction so a par-               independent) cos/sin cache; the end-to-end bit-
+tial failure rolls back to the pre-turn cache state.          exact check on the live serving stack covers |∆| up
+This matches existing SGLang scheduler seman-                 to ≈ 4531, with target positions past original_
+tics; the directive layer adds no new atomicity re-           max_position_embeddings=4096 to exer-
+quirement beyond what the underlying radix-cache              cise the YaRN-interpolated regime. Full prove-
+writeback already provides. (ii) Cross-tenant iso-            nance and the bit-exact unit test live in scratch/
+lation under shared prefixes. When tenants share              rope_convention_fix_test.py.
+
+                                                         27
+Q    bf16 K-storage precision floor                         indices, dst_slots))) and re-runs the un-
+                                                            wrapped match_prefix (stashed at install time
+Distinct from the rotation primitive’s mathe-               as tree_cache._akasha_orig_match_
+matical correctness, the bf16 KV pool imposes               prefix) to obtain a native, longer trie match. The
+a structural per-K-entry precision floor. We                scheduler’s inc_lock_ref then locks the new
+sweep the rotation kernel at fixed sources                  last node, the slots are owned by the radix trie, and
+{10, 100, 1000, 4000, 8000, 8836} and signed                the borrowed-slot orphan-detection retires. Future
+deltas up to |∆|=6794, comparing against an fp32            requests with the same prefix match the spliced
+reference and a bf16-throughout path:                       range natively via match_prefix, without
+                                                            any Leyline hook at lookup time. Correctness
+    • fp32 (entire path in single precision): max-          check: on the cross-tenant validation answered_
+      abs error per K entry of 1.4×10−6 at                  correctly_frac is identical between Role B
+      (p=10, ∆=1), growing to ∼1.6×10−3 at                  L2 on and off across both tenants at C=1 and C=4.
+      (p=8836, ∆=6794) — the kernel’s mathe-                The architectural design and the lock-ref ordering
+      matical precision floor under finite-position         argument are in docs/feedback/ROLE_B_
+      fp32 cos/sin.                                         RADIX_PREPOPULATOR_2026-05-27.md.
+    • bf16 (cos/sin and KV pool both bf16): error
+      saturates at ∼1–3% per entry at every (p, ∆)          S   Manifest warm-start for cross-tenant
+      tested, including (p=10, ∆=1).                            discovery
+
+                                                            At C>1, peer requests in the same batch all call
+   The bf16 floor is independent of ∆; it is the in-
+                                                            match_prefix before any has finished prefill;
+herent quantization noise of storing K in bf16 in
+                                                            the popular registry entries are not yet visible, and
+the pool. Argmax flips happen on prompts whose
+                                                            the splice attempts walk chunks at positions that
+top-1 vs top-2 logit gap is smaller than the noise;
+                                                            miss the registry. We close this race by serializing
+on the 50-step long-context replay of Section 5,
+                                                            {content_hash, chunk_tokens, count, first_observed}
+48/50 first-token outputs are bit-identical to the
+                                                            tuples to a JSONL manifest at runtime (incre-
+full-prefill reference, the remaining two differing
+                                                            mentally on first observation of each new unique
+in cases where the model’s logit margin lies be-
+                                                            hash, so the file is correct under abrupt termi-
+low the floor. The mitigation (AKASHA_PIC_
+                                                            nation), and at startup replaying each chunk’s
+ROTATION_FP32, on by default) runs cos/sin in
+                                                            tokens as a /generate request to the live
+fp32 and downcasts the rotated Kpe to bf16 on
+                                                            server before the benchmark begins. SGLang’s
+the way to the pool, matching the model’s own
+                                                            cache_finished_req hook then populates
+attention-forward dtype policy; this removes the
+                                                            both the PIC registry and the radix trie with valid
+rotation computation’s contribution to the floor
+                                                            slot indices for every manifest chunk.
+but does not eliminate the bf16 storage contri-
+bution. The data is in scratch/rope_bf16_                      Empirically (Cross-tenant cell of Section 5,
+precision_probe.py; the engineering note                    C=4, 2 tenants × 32 requests, 8 articles,
+is in docs/feedback/BF16_ROTATION_                          1500-character bodies): without warm-start,
+PRECISION_FLOOR_2026-05-28.md.                              cand_total=6,              chunks_spliced=2;
+                                                            with warm-start of the same workload’s prior-
+R    Role B: radix-trie pre-population via                  run manifest (15 unique chunks, ∼4 KB),
+     insert + re-match                                      cand_total=96,           chunks_spliced=16,
+                                                            tenant-1 p50 e2e drops from 1.016 s to 0.953 s
+Two integration paths share the rotation kernel.            (−6.2%). The warm-up phase completes in
+Role A (the original) intercepts match_prefix,              ∼1.2 s. The mechanism is gated by AKASHA_
+returns a patched MatchResult with borrowed                 PIC_MANIFEST_OUT on the producer and
+slots appended, and tracks the borrowed slots on            AKASHA_PIC_MANIFEST_IN on the consumer;
+the request for free at cache_finished_req.                 replay code is at tools/akasha_warmup_
+Role B Level 2 goes one layer further: after a suc-         replay.py. The cold-start gap (the very first
+cessful splice, it calls tree_cache.insert(                 run with no manifest) is unfixed by this mechanism
+InsertParams(key=token_ids[:cur_                            and is named in Section 8; the design discussion
+prefix_end], value=concat(orig_                             is in docs/feedback/CONC4_DISCOVERY_
+
+                                                       28
+GAP_DESIGN_2026-05-28.md.                                        These are the splice’s incremental contribution
+                                                              to cached KV content over vanilla RadixCache;
+T    Real-trace long-context replay                           the splice still allocates fresh dst slots per request,
+The synthetic three-arm microbenchmark of Sec-                so peak occupancy of the KV pool is not directly
+tion B establishes that the splice mechanism is alive         reduced — only re-computation is. The data is in
+in a production SGLang scheduler at fixed-template            scratch/kv_savings_audit.py.
+prompts. We additionally measure on a real agentic
+                                                              Peak pool occupancy (2×2 matrix).
+trajectory (07be28b9/shopping_cart from
+                                                              We instrumented the SGLang TokenTo
+a debug-gym capture (Yuan et al., 2025)): 50
+                                                              KVPoolAllocator               via     PICCache.
+steps, prompts growing from 334 to ≈ 28K to-
+                                                              sample_pool_occupancy(tree_
+kens, C=1. Vanilla RadixCache reaches sum-e2e
+                                                              cache, source) called inside the write-
+52.65 s (27.6% replay cache-hit). Leyline (Role
+                                                              back wrap of cache_finished_req and
+B L2 + fp32 rotation) reaches 49.85 s (27.8% re-
+                                                              cache_unfinished_req. Each call records
+play cache-hit), a 5.3% wall-clock improvement;
+                                                              (ts, avail, total, source) as one line
+cross-arm first-token agreement against the radix
+                                                              of a per-process JSONL stream (AKASHA_PIC_
+arm is 48/50 (the remaining two land on prompts
+                                                              POOL_OCCUPANCY_OUT); writes are incremen-
+inside the bf16 floor of Section Q). Decomposing
+                                                              tal rather than at atexit so SLURM/SIGTERM
+by ablating one toggle at a time: fp32 rotation on /
+                                                              teardown cannot lose data. The total pool size on
+Role B L2 off reaches 49.62 s — within run-to-run
+                                                              our DSv2-Lite configuration is 1,698,846 slots (the
+variance of the full configuration. Role B L2 is
+                                                              same number across runs since model and engine
+timing-neutral at this single-trajectory scale (the
+                                                              flags are fixed); peak occupancy is computed as
+architectural benefit, cross-request amortization
+                                                              total − mint (availt ). We ran four arms on the
+through a populated trie, requires more same-prefix
+                                                              cross-tenant Zipf workload (C=4, 1500-character
+repeats than 50 steps provides); fp32 rotation con-
+                                                              article bodies, 32 requests/tenant):
+tributes essentially all of the e2e win. A second tra-
+jectory (0f724375/shopping_cart, 91.6%                           • A: 2-tenant, splice ON + manifest warm-start.
+RadixCache hit rate, fewer divergent tail tokens                   147 samples, peak 2,111 slots (65.7 MB); 16
+per step) returns splice 0.6% slower than radix and                chunks spliced (cand_total 96).
+20/20 bit-identical — consistent with the predic-
+tion that splice has nothing to do when RadixCache               • B: 2-tenant, splice OFF. 133 samples, peak
+already covers the workload.                                       1,724 slots (53.6 MB).
+U    KV bytes attributable to splice                             • C: 4-tenant, splice ON, no warm-start. 135
+Per-token KV in the DSv2-Lite MLA pool is                          samples, peak 3,135 slots (97.5 MB); 4
+(kv_lora_rank + qk_rope_head_dim) × nlayers ×                      chunks spliced (cand_total 6, hit by the
+bytes_per_dtype = (512 + 64) × 27 × 2 =                            conc=4 discovery gap).
+31,104 bytes (≈30.4 KB). Per-run KV-bytes at-
+                                                                 • D: 4-tenant, splice OFF. 135 samples, peak
+tributable to splice across the configurations of this
+                                                                   3,135 slots (97.5 MB).
+paper:
+
+    • Cross-tenant C=1, no warm-start: 5 chunks                  Same-tenant-count ON-vs-OFF deltas are
+      ×51 tokens = 256 tokens, 7.96 MB.                       +12.0 MB at 2 tenants (warm-up-preloaded
+                                                              articles staying trie-pinned, plus 14 extra warmup
+    • Cross-tenant C=4, no warm-start: 2 chunks               requests growing the trie) and 0.0 MB at 4 tenants
+      ×64 tokens, 3.98 MB.                                    (spliced chunks inserted by reference, no fresh
+    • Cross-tenant C=4, with warm-start (Sec-                 slots freed, same slot count as OFF). We later
+      tion S): 16 chunks ×56 tokens average,                  extended the tenant sweep to 3 and 8 tenants
+      27.87 MB (7× no-warmup).                                with splice-OFF and splice-ON (no-warmup) at
+                                                              C=4, plus 2-tenant warm-start at C=8, on the
+    • Long-context agentic replay (Section T):                same Zipf workload (jobs 473946–473952). The
+      +1,750 tokens cached over the radix arm,                splice-OFF curve is monotone sub-linear and
+      ≈ 52.5 MB.                                              grows the savings with tenant count:
+
+                                                         29
+   • 2 tenants → 3 tenants: 53.6 → 74.3 MB                  cross_tenant.py; replaces a 128-character
+     (1.39× vs linear 1.5×; 7.6 pp savings).                window at the middle of each article body with
+                                                            per-occurrence-deterministic random text, holding
+   • 2 tenants → 4 tenants: 53.6 → 97.5 MB                  the position fixed so chunks before and after the
+     (1.82× vs linear 2.0×; 9.0 pp).                        edit align across occurrences via CDC’s content-
+                                                            defined boundaries). The result: the registry
+   • 2 tenants → 8 tenants: 53.6 → 182.0 MB
+                                                            observed 89 unique hashes (6× baseline arm A’s
+     (3.40× vs linear 4.0×; 15.0 pp).
+                                                            15), peak pool occupancy reached 371.5 MB (5.7×
+    Splice ON (without warm-start) is indistinguish-        baseline A’s 65.7 MB), and 39/159 chunks hit
+able from OFF at every tenant count we mea-                 the observe path — evidence the edit-shape does
+sured beyond 2: 3-tenant 74.3 MB vs 74.3 MB,                materialize the [shared prefix] [unique
+4-tenant 97.5 MB vs 97.5 MB, 8-tenant 182.0 MB              edit] [shared suffix] structure expected.
+vs 182.0 MB. The mechanism does not change                  The current splice loop’s break-on-first-miss
+peak pool occupancy — inserts into the radix trie           caps phase-1 discovery (and the candidate-filter
+are by reference, and the warmup-preloaded chunks           issue above further empties cand_total at the
+(when present) raise peak by 12–15 MB regardless            splice loop’s entry); a phase-2 continuation hook
+of whether the live workload reaches splice activa-         firing from cache_unfinished_req after
+tion.                                                       the engine prefills the edit window would, by
+    The discovery side of these arms is the bottle-         construction, recover the suffix chunks — worth
+neck. We observed cand_total=0 in every                     on the order of 371 − 65 ≈ 300 MB of edit-related
+splice-ON arm except the original 2-tenant C=4 +            pinned KV in this synthetic configuration. The
+warmup (arm A), including 3-tenant no-warmup                phase-2 implementation is gated on production
+(15 splice-loop entries, all empty), 4-tenant               workloads with naturally-occurring edit-shape
+no-warmup with reduced Narticles =4, 8-tenant               (code-completion agents that revise earlier
+no-warmup (40 entries), and 2-tenant C=8                    turns, user-driven chat correction flows); the
+warm-up (22 entries). The registry was populated            workload-side scaffolding is in place.
+in every case (15–35 unique hashes observed) and
+the splice loop entered as expected; the candidate          Follow-up arm E: 4-tenant warm-start. A fifth
+filter     (src_kv_indices is not None                      arm exercises the manifest warm-start at C=4
+and request_id ̸= rid_now) returned the                     (147 samples, peak 3,613 slots = 112.4 MB,
+empty set, consistent with the warmup-time slots            +15 MB above arm D’s 97.5 MB from the same
+having been freed by the time the workload’s                warmup-pinned-articles mechanism as arm A’s
+first batch reaches match_prefix. The fix                   +12 MB at C=2). The pool-occupancy delta
+is concrete (run warmup-replay in a separate                is consistent with the arm-A/B pattern. The
+process pre-startup, or extend the registry to              splice-discovery side of E, however, exhibited
+retain a fetchable representation past the warmup           an unexpected cand_total=0 despite a fully
+request’s lifetime) and is parked as follow-up work         populated registry (35 unique hashes observed,
+distinct from the directive contract. The JSONL             of which only 2 broke on first-chunk hash-miss
+streams live at results/pool_occupancy/                     across 35 splice-loop entries; reproduced with
+{A,B,C,D,E,E2,F,G,H,I,J,K,L}_                               AKASHA_PIC_ROLE_B_L2∈{0, 1} as arm E2 ,
+                                                            jobs 472782/472792). The candidate-filter de-
+*.jsonl; analyzers are scratch/pool_
+occupancy_audit.py and scratch/kv_                          generate at C=4 when both warmup and live
+117_full_audit.py.                                          workload populate the same registry concurrently
+                                                            is a known limitation isolated by this measure-
+Edit-shape headroom (arm F, 473946). To                     ment; the occupancy claim above does not depend
+quantify what a multi-segment splice (Section V             on it, and the splice’s chunk-discovery through-
+discussion of cross-instance reuse; design sketch           put at C=4 is therefore reported from the no-
+in      docs/feedback/MULTI_SEGMENT_                        warmup arm C, not from E. Investigating this fil-
+EDIT_SHAPE_DESIGN_2026-05-28.md)                            ter interaction is parked as a follow-up — the
+would unlock, we ran a 2-tenant C=4 +                       proximate path-of-least-effort is to run warmup-
+warmup arm with the new AKASHA_XTENANT_                     replay in a separate process pre-startup (rather
+EDIT_WINDOW_CHARS=128 knob (added to                        than against the live server), so the warmup-time
+
+                                                       30
+and workload-time observations don’t share a reg-             benchmark.  We create a ∼200-LOC patch
+istry mutator window. The pool-occupancy stream               to SGLang’s RadixCache plus a Python
+for E is at results/pool_occupancy/E_                         LeylineCacheManager class.
+4tenant_spliceon_warmup.jsonl.
+                                                              B1 Citations of creators. All artifacts are cited
+V    Related-work positioning:                                at first mention in the main text: DeepSeek-V2-
+     position-shifted vs cross-instance reuse                 Lite (DeepSeek-AI et al., 2024a), JoyAI-LLM
+                                                              Flash (Cai et al., 2026), GLM-4.7-Flash (Team
+The Leyline contribution lives at the position-               GLM et al., 2024), Moonlight-16B-A3B (Moon-
+shifted reuse layer: a kernel that rotates cached             shot AI, 2025), SGLang (Zheng et al., 2024),
+Kpe by ∆ so a single instance can reuse content at            debug-gym (Yuan et al., 2025).
+shifted positions, plus the directive abstraction that
+lets a policy drive that rotation. The cross-session          B2 Licenses. All artifacts we use are released
+sharing verb (Section J) and the warm-start mani-             under permissive open-source licenses suitable for
+fest (Section S) are the first steps of a complemen-          academic research: the four MLA models under
+tary layer: cross-process / cross-instance content            their respective Hugging Face model-card licenses
+reuse. The two share content-hash addressing as               (MIT or Apache-2.0 equivalents); SGLang under
+their handle on identity. The cross-instance KV               Apache-2.0; debug-gym under the upstream Mi-
+transfer story (live byte movement between GPU                crosoft research license. Our Leyline patch is re-
+pools across a cluster, with the consumer applying            leased under Apache-2.0, consistent with the up-
+the Leyline-style rotation on top of the transferred          stream SGLang project.
+bytes) is the natural extension; we treat the mani-
+                                                              B3 Intended use. Each used artifact was released
+fest as the static-disk version of what a live RDMA
+                                                              for research and benchmarking; our use is consis-
+fetch would do dynamically. The infrastructure for
+                                                              tent. The MLA models are intended for inference
+that live fetch is the subject of follow-up work and
+                                                              research; debug-gym is intended as an agentic-
+is out of scope here.
+                                                              debugging benchmark; SGLang is intended as a
+W    Responsible research checklist                           research-and-production serving stack. Our patch
+                                                              is intended for research use on top of SGLang and
+This appendix concentrates the items of the ACL               inherits its access terms.
+Rolling Review Responsible Research Checklist
+that warrant separate elaboration. Item A1 (Lim-              B4 PII / offensive content. debug-gym
+itations) is satisfied by the dedicated Limitations           mini_nightmare consists of three synthetic
+section preceding the bibliography.                           Python debugging tasks (counter, shopping_cart,
+                                                              sum_tree); the inputs are program source and
+A2 Potential risks. Leyline is a serving-side                 hidden tests, containing no human-generated
+mechanism for KV-cache editing; it does not al-               natural-language text, no personally identifying
+ter the model weights, training data, or output               information, and no offensive content. Our
+content. Two deploy-side risks warrant explicit               experiments do not involve human-subject data
+naming, both already surfaced in Limitations and              collection.
+the [RFC] Pinned Caching thread (vLLM
+Project contributors, 2024): (i) cross-tenant prefix-         B5 Documentation of artifacts. Documentation
+cache leakage under content-addressed caching                 of used artifacts is at their respective project pages
+admits a prefix-guessing side-channel, which ex-              (Hugging Face model cards, debug-gym repository,
+plicit user-keyed partitioning at deploy time closes;         SGLang documentation). The Leyline patch is doc-
+(ii) user-issued retention directives in future de-           umented via its inline code release accompanying
+ployments could exhaust KV memory, requiring                  the camera-ready.
+per-request fail-fast policy. Neither is a property of
+                                                              B6 Data statistics. The deployment eval-
+the directive abstraction itself; both are deploy-side
+                                                              uation (Section 5) covers 8 debug-gym
+policy work.
+                                                              mini_nightmare tasks × 4 seeds × 2 policy
+B Scientific artifacts (overview). We use four                conditions    (truncate_older_than:n=2
+open-weight MLA models, the SGLang serv-                      as treatment, keep_all as baseline), with 32
+ing stack, and the debug-gym mini_nightmare                   baseline + 33 treatment reliable trials and a
+
+                                                         31
+50-step trajectory cap per cell, run under the                 level disagreement analysis quoted in Section 5 (9
+post-2026-05-26 harness fix described in B2. A                 treatment-wins vs 5 baseline-wins) restricts to the
+ninth mini_nightmare task, pandas_dataframe,                   14 of 31 paired cells where the two policies dis-
+was excluded because it requires fetching the                  agreed on the binary solve outcome. Tool-name
+Titanic CSV over the network and our compute                   agreement in Table 4 is measured per-step over a
+nodes have no outbound internet access; both                   12-step counter trajectory under Leyline versus the
+policies failed equally on every pandas_dataframe              full-context baseline.
+trial we ran (max-steps reached with zero score
+                                                               C4 Package versions. SGLang 0.5.2 with the
+on 0/3 completed; 5/8 trials terminated in the
+                                                               Leyline patch; debug-gym 1.3.0.
+download retry loop). All returned trials carry
+policy_loaded=1 in their per-trial metadata.                   D Human subjects. The work does not involve
+The stub ablation (Appendix M) covers 4 stub                   human annotators, human participants, or human-
+modes × 3 trajectories × 2 models. The multi-step              subject data of any kind. Items D1–D4 are there-
+replay (Section D) is a single 12-step counter                 fore not applicable.
+trajectory replayed under three execution paths.
+                                                               E1 AI-assistant use. The authors used AI assis-
+C1 Model size and compute budget. Parame-                      tants (Claude) for code editing, scripting, prose
+ter counts: DeepSeek-V2-Lite (16B total / 2.4B                 drafting, and bibliography formatting during the
+active), JoyAI-LLM Flash (48B total / 3B active),              preparation of this paper. All technical claims,
+GLM-4.7-Flash (30B / 3B), Moonlight-16B-A3B                    derivations, experimental results, and citations
+(16B / 3B). All experiments are inference-only; no             were reviewed and verified by the authors; all AI-
+model training. Experiments ran on an internal                 assisted code was tested by the authors before inclu-
+HPC cluster (institution withheld for anonymity)               sion; all AI-assisted text was substantially revised
+under mixed GPU configurations: GLM-4.7-Flash                  before inclusion.
+and JoyAI-LLM Flash served on 4× NVIDIA
+H200 with SGLang tensor-parallelism (TP=4);
+Moonlight-16B-A3B on 2× H100; DeepSeek-V2-
+Lite on 1× H100; auxiliary single-GPU probes
+(stub ablation, short-trajectory replays) on 1×
+H200 or 1× H100. Per-trajectory wall-clock is
+on the order of minutes, and the full sweep fits in
+single-digit GPU-days. Leyline’s own kernel over-
+head is microsecond-scale per slot per the bound
+inherited from Ma et al. (2026); we do not report
+end-to-end latency at production batch sizes here
+(see Limitations).
+
+C2 Experimental setup and hyperparame-
+ters. Sampling parameters follow each model’s
+recommended defaults. Policy hyperparame-
+ters in Section 5: truncate_older_than(
+n=2, max_chars=200, tools=bash) as
+treatment, keep_all as baseline. Trajectory cap:
+50 steps. Seeds: 4 per cell. We did not run a hy-
+perparameter search; the chosen n=2 threshold is
+the single point on the policy-aggressiveness axis
+at which the treatment-vs-baseline contrast is re-
+ported.
+
+C3 Descriptive statistics. Solve-rate numbers
+in Section 5 are aggregated across 4 seeds per
+(task, policy) cell; Table 2 reports per-task fractions
+and the overall sum. The paired (task, seed)-cell-
+
+                                                          32
+

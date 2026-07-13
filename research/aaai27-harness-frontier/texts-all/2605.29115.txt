@@ -1,0 +1,1320 @@
+                                                 unix-ctf: Procedural Environments for
+                                                 Unix-Competence Reinforcement
+                                                 Learning
+
+
+
+
+arXiv:2605.29115v1 [cs.CR] 27 May 2026
+                                                A procedural training surface for shell and operating-system
+                                                competence
+                                                Geoffrey Bradway, Roger Creus Castanyer, Lorenz Wolf, Maxwill Lin,
+                                                Matthew James Sargent, Augustine N. Mavor-Parker
+                                                Vmax
+                                                Unix competence is the ability to use shell and operating-system primitives as first-class tools,
+                                                not merely to write programs through a terminal. Current terminal benchmarks tend to blur
+                                                this distinction: a solver fluent in Python but weak in Unix can pass a substantial fraction of
+                                                Terminal-Bench 2.0, while the reverse skill profile is rarely exercised. We make the distinction
+                                                operational and build a training surface for the Unix component. unix-ctf is a procedural
+                                                generator of capture-the-flag tasks for shell agents. Each task hides a short token (a ﬂag of
+                                                the form flag{a3b1c9...}) inside a fresh Linux container using a single Unix feature,
+                                                and the agent must recover it. Tasks are produced by an LLM-assisted synthesis pipeline that
+                                                generates candidate hiding techniques, rewrites them into parameterized hide-and-find script
+                                                pairs, and filters them with a bidirectional contract: the hide script must leave no plaintext trace
+                                                of the flag on disk, and the find script must recover the flag in a fresh directory. Because the
+                                                LLM only writes the planting and recovery steps (the container, layout, and grading harness
+                                                are fixed), the pipeline lands 656 of 750 raw attempts as portable, reusable variants (87.5%).
+                                                Our reproduction of Endless Terminals’ full-container-generation approach lands only 17.4%
+                                                under the same checks. The 656 variants canonicalize to 155 distinct techniques. Fine-tuning
+                                                Qwen3-8B with LoRA using GRPO on this surface lifts solve rate from 11.6% to 43.6% on a
+                                                15-skill multi-family holdout (𝑛=225), redistributes which InterCode-CTF tasks the model
+                                                solves, and produces a +33 pp gain in Forensics while reaching 32/100 on InterCode-CTF.
+                                                These results suggest that Unix competence is separable, trainable, and best evaluated directly
+                                                rather than folded into programming-through-a-shell.
+
+
+
+                                         1 INTRODUCTION
+                                         Terminal interaction has become a standard setting for evaluating language-model agents. InterCode (Yang
+                                         et al., 2023), Terminal-Bench (Merrill et al., 2026), AgentBench-OS (Liu et al., 2024), NYU CTF Bench (Shao
+                                         et al., 2024a), and Cybench (Zhang et al., 2024) are now common evaluation targets, and large-scale training
+                                         pipelines such as Endless Terminals (Gandhi et al., 2026) and Nemotron-Terminal (Pi et al., 2026) have
+                                         followed. This landscape is usually described as measuring a single capability: using a shell to accomplish a task
+                                         on a computer. We argue that this framing collapses two different skills into one. One is general programming
+                                         performed through a terminal; the other is Unix competence itself. This paper isolates the latter and builds a
+                                             Date: May 29, 2026.   Correspondence: {gb, matthew, augustine}@vmax.ai
+
+
+
+
+                                                                                                 1
+generator for the part of the surface that current pipelines mostly miss.
+We use the capture-the-ﬂag (CTF) format inherited from security competitions (Shao et al., 2024a; Zhang
+et al., 2024). Each task hides a short token, or ﬂag, of the form flag{a3b1c9...} inside a fresh sandboxed
+environment; the agent must find it and print it back. The format is useful because the reward is mechanical
+and unambiguous, and because a planted flag can be tied to a single Unix feature. Recovering the flag then
+requires using that feature rather than solving a loosely specified programming task.
+
+1.1 UNIX-COMPETENCE VERSUS CODING-IN-A-TERMINAL
+We define a task as testing Unix competence when its solution depends on an OS, shell, or file-format feature
+with no clean analogue in ordinary general-purpose programming. Concretely: a flag stored as the value of a
+POSIX extended attribute (user.secret) on a decoy file is invisible to ls -l, stat, file, or a recursive
+grep of the file’s bytes, because xattrs live in a side-channel inode namespace; the canonical recovery is a
+single getfattr -n user.secret decoy.txt. Using a programming language like Python does not
+remove the dependency: os.getxattr is just a wrapper over the getxattr(2) syscall. The OS-specific
+access path is irreducible. Other library instances (the GNU build ID inside an ELF .note.gnu.build-id
+section, files identified by pre-epoch mtime, custom OIDs inside an X.509 certificate) have the same shape;
+six worked exemplars are in Appendix D.
+We define a task as coding-in-a-terminal when the deliverable is a non-trivial program, such as a small neural
+network, an interpreter, a distributed-training primitive, or a statistical sampler, and the shell is only the
+medium through which the program is created, compiled, and tested. In this regime the shell contributes little
+to success: a solver fluent in Python but weak in Unix can still perform well.
+Both skills are legitimate, but they lie on substantially different axes. Treating them as one obscures what a
+benchmark measures and what a training pipeline teaches. We quantify the resulting bias in current terminal
+benchmarks in §2 (Figure 2) and target the underweighted Unix-competence half.
+
+    CONTRIBUTIONS
+
+     1. A pipeline factoring that yields procedural Unix tasks at 5× the rate of comparable LLM-driven
+        generators. unix-ctf separates a pre-debugged ctf-base image from per-technique planting logic, re-
+        stricting the LLM to the hide-and-find script layer that can be validated by a bidirectional contract: no
+        plaintext flag on disk, and recovery in a fresh directory. This produces 656 portable variants from 750 raw
+        attempts (87.5%) versus 17.5% in our Endless Terminals reproduction (𝑛=120, where 71.7% of failures
+        occur at the Docker-build or test-validation stages this factoring removes), canonicalizing to 155 IDs. See §3.
+     2. A procedural environment generator. The generator instantiates fresh Docker containers from the
+        library, plants eight flags per container to provide a denser reward signal than a single binary outcome, and
+        rotates a sticky pool of fifty techniques during training so the agent sees a broad slice of the library across
+        batches. See §4.
+     3. Training as a probe of learnability. Forty batches of GRPO on Qwen3-8B lift solve rate 11.6% → 43.6%
+        on a 15-skill multi-family holdout (3.8×, 𝑛=225). On InterCode-CTF, training redistributes which tasks
+        the model solves, with the largest category gain (+33 pp) in Forensics. See §6.
+
+
+
+
+2 RELATED WORK
+We position unix-ctf against four adjacent lines of work. The full unix-ctf library composition by family
+appears in Appendix C.
+
+What current terminal benchmarks measure. Figure 2 classifies the public task lists of nine terminal
+benchmarks, together with our library, using the Unix-competence vs. coding-in-a-terminal definition from §1.
+Across Terminal-Bench 2.0, Cybench, NYU CTF Bench, AgentBench-OS, InterCode-Bash, and Nemotron-
+Terminal, the Unix-competence share rarely exceeds 30%. The remainder is general programming or shell-
+flavored composition of tools such as find, grep, awk, and sed, usually with a short Python equivalent.
+SWE-bench (Jimenez et al., 2024) is even more specialized: it is Python-repository patching, with the terminal
+
+
+                                                            2
+    Harvest (offline, one-time)                                  Env-gen (per batch)                                        Train
+
+                                                                   Sticky pool (50)                                     GRPO rollouts
+         1. Explore (Opus)
+                                                                  sampled from library                          8 groups × 8 rollouts, 18 turns
+
+
+
+       2. Mechanical verify                                                                                      Reward + LoRA update
+                                                                 Sample 8 techniques
+     grep clean + recovery works                                                                                       Qwen3-8B, rank 32
+
+
+
+       3. Synthesize (Haiku)                                    ctf-base + role dressing                                 Rotate pool
+     parameterize plant / recovery                                    7 server roles                               drop top-15 by solve rate
+
+
+
+       4. Portability validate                                     Run 8 × plant.sh                                    Final checkpoint
+         fresh dir / flag re-run                                   delete plant scripts                                 after 40 batches
+
+
+          5. Canonicalize                                           MultiFlagEnv
+            dedup ≥ 0.85                                            8 flags planted
+
+
+             Library
+       155 IDs, 441 variants
+
+
+
+
+                                   Eval: multi-family holdout   Eval: InterCode-CTF        Eval: InterCode-Bash fs_1
+                                        15 skills, 𝑛 = 225              100 tasks                   60 tasks
+
+
+
+Figure 1. The unix-ctf pipeline. Harvest (left, run offline once) builds a canonicalized library of 155 techniques and
+441 variants through a five-stage cycle that alternates frontier-model exploration, mechanical verification, smaller-model
+synthesis, portability validation, and dedup-based canonicalization. Env-gen (centre, run every training batch) draws a
+sticky pool of 50 techniques from the library, samples eight per batch, and assembles a single MultiFlagEnv on top of
+a pre-built ctf-base container dressed as one of seven server roles. Train (right) runs forty batches of GRPO against
+the env stream, rotating the pool after each batch (grey loop arrow). The final checkpoint is then evaluated on three
+benchmarks (bottom row). Dashed arrows denote inter-stage data flow.
+
+
+mostly serving as the way to invoke tests. The same bias propagates into procedural-generation pipelines.
+Endless Terminals seeds scenarios such as “developer organizing files” or “DevOps engineer debugging logs,”
+which are Unix-flavored but shallow: an agent trained on this material sees grep, awk, and find, but much
+less of the filesystem metadata, binary formats, kernel interfaces, and service-configuration surfaces that matter
+in real Unix administration. Nemotron-Terminal builds on a primitive-skills taxonomy, such as file I/O, string
+manipulation, and graph traversal, that is explicitly cross-language. The most distinctive shell capabilities are
+therefore underrepresented in both evaluation and training data, and progress on terminal benchmarks can
+track programming proficiency more than Unix fluency. This is the gap we target.
+The taxonomy above motivates how we position unix-ctf against four adjacent strands of prior work, in
+increasing order of structural overlap with our setting.
+
+Fixed Linux benchmarks. The most direct evaluation yardsticks for shell and operating-system agents
+are InterCode, InterCode-CTF, Terminal-Bench 2.0, AgentBench-OS, NYU CTF Bench, Cybench, and
+OSWorld (Xie et al., 2024). They are hand-curated and fixed in size (Terminal-Bench 2.0 has 89 tasks, Cybench
+40, NYU CTF Bench 200), so none exposes a generative task surface that an RL loop can draw new instances
+from.
+
+Computer-use benchmarks beyond the terminal. A parallel line, including WebArena (Zhou et al.,
+2023), WorkArena (Drouin et al., 2024), OSWorld (Xie et al., 2024), AndroidWorld (Rawles et al., 2024),
+and Windows Agent Arena (Bonatti et al., 2024), also evaluates agents in executable software environments
+with programmatic success checks. The substrate is web, desktop, or mobile control rather than the Unix shell.
+unix-ctf keeps the executable-environment / mechanical-reward shape but restricts the surface to text-only
+Linux interaction and Unix-specific OS features.
+
+Procedural generation in the shell and CTF space. Our closest precedents share both the procedural-
+generation goal and the shell substrate. Endless Terminals (Gandhi et al., 2026) constructs 3,255 tasks using
+an OpenAI o3 (OpenAI, 2025) solvability filter; Nemotron-Terminal’s Terminal-Task-Gen (Pi et al., 2026)
+
+
+                                                                                 3
+                                   Unix-competence     Shell-flavored coding     General programming     Other
+
+  unix ctf(ours)                                      72%                                                 23%            n = 155
+   AgentBench-OS                    42%                                               46%                        8%      n = 26
+Terminal-Bench 2.0          13%                 35%                                           48%                        n = 241
+   InterCode-Bash           12%                                                88%                                       n = 200
+    InterCode-CTF         7%           29%                                                  61%                          n = 100
+ Endless Terminals                                                      95%                                              n = 120
+Nemotron-Terminal                 33%                                                 59%                                n = 135
+   NYU CTF Bench                    36%                                                      62%                         n = 200
+          Cybench                   37%                                                     60%                          n = 43
+                     0%                   25%                         50%                          75%                100%
+                                                                Share of tasks
+
+Figure 2. What terminal benchmarks actually measure. Each row: share of tasks classified by gpt-5.4-nano (full
+rubric, Appendix M). Unix-competence: non-obvious OS-/format-internal feature with no clean Python analogue. Shell-
+ﬂavored coding: glue using find/grep/awk/sed/sqlite3/tar (Python solve scripts wrapping such glue count
+here, not as general programming). General programming: non-trivial programs (ML, interpreters, cryptanalysis). Other:
+not primarily shell/OS/programming. Endless Terminals: 120 LLM outputs from our reproduction. Nemotron: 135-task
+sample (15×9 skill_based/easy categories; harder tiers may differ). The unix-ctf row is classified by us against our
+own corpus; the other eight rows are external benchmarks whose tasks were passed verbatim through the same single-task
+LLM rubric, without per-benchmark calibration or revision.
+
+
+produces roughly 366,000 trajectories from a cross-language primitive-skills taxonomy; and CTF-Dojo /
+CTF-Forge (Zhuo et al., 2025) provides 658 Dockerized challenges extracted from pwn.college. All three
+put a single task in each container and rely on a single-shot generator rather than a pre-validated skill library
+or an asymmetric-model harvest; CTF-Dojo in particular gives flag-based reward, but only by re-packaging
+existing CTFs rather than by generating new techniques. Adjacent procedural-generation work in the Python-
+repository space (R2E-Gym (Jain et al., 2025), SWE-smith (Yang et al., 2025b), SWE-Gym (Pan et al., 2025))
+is structurally related but trains on a different skill surface.
+
+Skill libraries for language-model agents. Voyager (Wang et al., 2023) for Minecraft, SkillWeaver (Zheng
+et al., 2025) and WALT (Prabhu et al., 2025) for the web, and OS-Copilot / FRIDAY (Wu et al., 2024) for
+operating-system agents all share the goal of accumulating reusable skills. In OS-Copilot and FRIDAY, skills
+are inferred online by the agent rather than harvested offline. To our knowledge, unix-ctf is the first explicit,
+offline-harvested, mechanically validated skill library for Linux shell use. Self-Challenging Agents (Zhou
+et al., 2025) share a Code-as-Task contract (instruction, executable evaluator, solution), but generate tasks
+per episode rather than canonicalizing them into a reusable library.
+
+3 THE TECHNIQUE LIBRARY
+Each technique enters the library through an offline pipeline that alternates language-model generation with
+mechanical verification. The result is a reusable library of 155 canonical technique identifiers ( 𝑘 = 441
+deduplicated variants), summarized in Figure 3.
+
+3.1 HARVEST PIPELINE
+The five stages are designed to keep the language model on the layer it can validate, while letting mechanical
+checks enforce the task contract. (1) Exploration: Claude Opus 4.7 (Anthropic, 2026) runs inside a fresh
+ctf-base Docker container and is asked to hide a flag of the form flag{<8–16 hex bytes>} using a
+target technique. It emits shell commands turn by turn for up to ten turns; we record both the command
+sequence and a candidate recovery command. (2) Mechanical veriﬁcation: in the same container, a recursive
+search for the literal flag must return no occurrences on disk, and the candidate recovery command must
+print the flag and exit zero. Any failure drops the attempt. (3) Synthesis: Claude Haiku 4.5 (Anthropic,
+2025) rewrites the validated exploration into two parameterized scripts, plant.sh (target directory, flag) and
+recovery.sh (target directory), as a pure textual rewrite with no shell execution. (4) Portability validation:
+the synthesized scripts are re-run against a fresh temporary directory with a fresh flag. plant.sh must exit
+
+
+                                                                4
+                            (a) Library coverage                   16 families, 155 IDs                                   (b) Harvest pipeline     750 raw to 155 canonical
+   Text-processing tools                                                          22                                                                                  750
+                                                                                                        Raw attempts
+      Configuration files                                                         22
+ Text encoding / ciphers                                                16
+       DB / serialization                                     12                                 Stage 1 (exploration)                                           712
+         Processes / IPC                                      12
+   Filesystem metadata                                        12                          Stage 2 (mechanical check)                                             700
+ Compression / archives                                  10
+  Crypto / certs / tokens                            9
+                                                                                                   Stage 3 (synthesis)                                          693
+            Binary / ELF                         8
+              Users / OS                     6
+         Unicode / stego                     6                                                    Stage 4 (portability)                                        656
+           Logs / system                     6
+Media / network formats                  5                                             Stage 5 (canonicalize, variants)                             441
+               Shell env                 5
+         Filename tricks                 5
+                                                                                                        Canonical IDs             155
+                    Math         3
+
+                            0        5               10            15        20                                           0   100 200 300 400 500 600 700 800
+                                 Canonical technique IDs in family                                                                      Surviving techniques
+
+Figure 3. The technique library. (a) Coverage of the Unix-competence surface across 16 post-hoc families. The largest
+families (configuration files, text-processing tools, text encoding/ciphers) are general-purpose surfaces; the smaller families
+(binary/ELF, X.509, IPC primitives) are exactly the corners that distinguish Unix fluency from coding. (b) Production
+funnel from 750 raw harvest attempts to 656 portable scripts (87.5% end-to-end) and 441 deduplicated variants, canonical-
+ized to 155 IDs. The pipeline factoring and bidirectional contract together drive the 5× yield gap over Endless Terminals
+(§3.2).
+
+
+zero, a recursive search must find no occurrence of the new flag, and recovery.sh must print the new
+flag on stdout and exit zero. This catches the main synthesis failure mode: inlining the original directory or
+flag. (5) Canonicalization: per-attempt records are archived to data/techniques/<id>.jsonl, and a
+greedy difflib.SequenceMatcher deduplication at threshold 0.85, preferring fewer dependencies and
+shorter scripts, produces the canonical data/library/<id>.json.
+
+3.2 PIPELINE FACTORING AND THE BIDIRECTIONAL CONTRACT
+The 87.5% yield is driven by two choices: what the LLM produces, and how the output is filtered. Endless
+Terminals asks the LLM to generate the Dockerfile, setup script, planting logic, and tests for each task
+(essentially a complete container). In our 𝑛=120 reproduction (17.5% portable), 71.7% of failures occur at
+the Docker-build or test-validation stage, and only 10.8% at the LLM task-generation step. The model is
+competent at inventing hiding techniques but rarely succeeds at the surrounding infrastructure re-derived from
+scratch each time. We therefore lift infrastructure out of the per-attempt budget: a pre-debugged ctf-base
+image handles the system layer, and the LLM produces only the parameterized plant.sh / recovery.sh
+pair. On top of that we apply two complementary filters: a recursive search of the filesystem must not find the
+flag in plaintext, and a re-run of recovery.sh on a fresh directory with a fresh flag must recover it. Upstream
+pipelines use only one half: Endless Terminals filters on whether at least one of sixteen OpenAI o3 (OpenAI,
+2025) samples solves; SWE-smith and R2E-Gym filter on whether a generated change invalidates a unit test.
+Both check solvability without checking non-triviality.
+
+3.3 QUALITY OF SURVIVING TASKS
+Throughput alone does not establish task quality. We audit the 120 Endless Terminals task directories
+from our reproduction and 441 unix-ctf variants using a fixed five-dimension rubric (Appendix L). Three
+LLM judges from separate vendors score each task independently: gpt-5.4-nano (OpenAI, 2026),
+grok-4-20-reasoning, and Kimi-K2.5. We deliberately exclude Claude because it appears in the
+unix-ctf generation loop.
+
+
+
+
+                                                                                            5
+Table 1. Task-quality audit, mean ± std across three LLM judges from three vendors (gpt-5.4-nano,
+grok-4-20-reasoning, Kimi-K2.5; 1 worst, 5 best). 439 unix-ctf variants vs. 120 LLM-output task dirs from our
+Endless Terminals reproduction (intersection of tasks scored cleanly by all three judges). Grading-robustness dimension
+omitted; mechanical count: 99% of Endless Terminals tasks have ≥ 1 hardcoded exact-string assertion vs. 0% unix-ctf.
+Pairwise Pearson 𝑟 on per-task aggregate scores (gpt×grok = 0.82, gpt×kimi = 0.83, grok×kimi = 0.93, 𝑛=559)
+confirms the three judges are measuring a common construct. Per-judge tables in Appendix L.
+                 Dimension                 unix-ctf (𝑛=439)     Endless Terminals (𝑛=120)        Δ
+                 Input richness              4.74 ± 0.45               1.81 ± 0.32            +2.93
+                 Solution non-triviality     3.45 ± 0.34               2.54 ± 0.46            +0.90
+                 Format independence         4.42 ± 1.00               1.07 ± 0.04            +3.35
+                 Tool surface diversity      3.44 ± 0.83               2.85 ± 0.78            +0.59
+                 Discoverability             3.05 ± 0.10               1.12 ± 0.08            +1.93
+                 Aggregate                   3.82 ± 0.43               1.88 ± 0.30            +1.94
+
+
+3.4 PRODUCTION RATES
+On the most recent pipeline run, 712 of 750 raw harvest attempts survived stage 1 (exploration), 700 survived
+stage 2 (mechanical verification), 693 survived stage 3 (synthesis), and 656 survived stage 4 (portability),
+giving an end-to-end portability rate of 87.5%. The 0.85-similarity deduplication in stage 5 collapses these 656
+variants to 441, which aggregate into 155 canonical technique identifiers (median 2 variants per ID, long
+tail to 16). Full per-stage survival numbers are in Appendix B.
+
+3.5 COVERAGE OF THE UNIX-COMPETENCE SURFACE
+Post-hoc taxonomy assigns the 155 IDs to sixteen families spanning filesystem metadata, binary and ELF
+internals, the shell environment, system services, shell-level cryptographic primitives, processes and IPC, logs,
+text-processing tools, databases and serialization formats, media and network formats, and encoding and
+steganographic devices (Figure 3a). Configuration files (∼22 IDs), text tools (∼22), and text encoding and
+ciphers (∼16) are the largest general-purpose Unix surfaces. The smaller families are the distinctive ones the
+library is designed to exercise: filesystem metadata (∼12), processes and IPC (∼12), binary/ELF (∼8), and
+crypto/cert/token formats (∼9). Every canonical entry has a canonical solution of one to five shell commands
+invoking an OS- or format-specific feature. Six worked exemplars (with plant.sh/recovery.sh pairs)
+are in Appendix D; two end-to-end solver trajectories illustrating the agent behavior the surface elicits are in
+Appendix E; the full list of 155 identifiers is in Appendix N; the family table with representative IDs is in
+Appendix C.
+
+4 ENVIRONMENT GENERATION
+4.1 MULTI-FLAG CONTAINERS
+Given a list of eight techniques and a seed, the environment generator instantiates a pre-built ctf-base
+container (Ubuntu plus standard tools). It can also dress the filesystem as one of seven plausible server roles:
+webserver, database, devbox, cicd, mailserver, monitoring, or gateway. Each role supplies
+role-appropriate users, hostnames, service configurations, fictitious logs, and shell histories from templates; for
+example, an agent in the webserver role sees www-data’s crontab, nginx configuration, and SSL certificates.
+For each of the eight techniques, the generator samples a target directory from /home/user/, /var/tmp/,
+/opt/app/, /srv/, and /tmp/, generates a fresh flag, base64-encodes the technique’s plant.sh into
+the container, runs it with the chosen target directory and flag, and records its exit status and output. The
+plant script is then deleted, so it cannot be recovered from disk. The routine returns a MultiFlagEnv
+containing the container name, seed, and manifest of planted flags.
+We plant eight flags per container rather than one. With a single flag, per-rollout reward is binary, the policy
+receives signal only on the (initially rare) successful rollouts, and group-relative methods like GRPO lose most
+batches to constant-reward filtering. Spreading reward across multiple sub-tasks per episode is a standard
+densification move in sparse-reward RL (Andrychowicz et al., 2017; Ng et al., 1999), and we adopt it as a
+practical training choice for validating the library under RL rather than a claim about the optimal 𝑛flags . The
+
+
+                                                           6
+trade-off is that each container consumes eight techniques rather than one, which the pool turnover below
+partially compensates for.
+
+Reward. Per-rollout reward is points_earned − turn_cost × turns_used, with turn_cost = 1 (a maximum
+penalty of about −18) and per-technique points defaulting to fifteen. Each incorrect flag submission costs
+one point. We do not clip reward at zero; negative-reward rollouts still provide within-group gradient signal.
+The shape encodes two objectives directly (find the flag, and find it without burning the turn budget) and
+was chosen, not swept; we leave reward-shape sensitivity to future work.
+
+4.2 STICKY-POOL SKILL SCHEDULING
+The scheduler maintains a rotating pool of fifty techniques from the library. Each environment samples eight
+techniques uniformly from the current pool. After each batch, _rotate_pool drops the top rotation_rate ×
+pool_size = 15 pool members by per-technique solve rate, so mastered techniques graduate out, plus one
+guaranteed random removal for exploration. Replacements come from the ∼105 techniques currently outside
+the pool, preferring those with the fewest prior attempts. Each batch exposes the model to 8 groups × 8 flags =
+64 technique-instances, and each rotation exchanges fifteen techniques. Across the forty-batch runs we report,
+the scheduler cycles most of the 155-technique library through the pool at least once.
+
+5 EVALUATION PROTOCOL
+5.1 TRAINING AS A PROBE
+We fine-tune Qwen3-8B (Qwen/Qwen3-8B) (Yang et al., 2025a) with rank-32 LoRA adapters. Training is
+used as a probe of the generated surface, not as a claim that this recipe is an optimal RL pipeline.
+
+Optional SFT format pass. Before GRPO, we optionally run a brief supervised pass on 492 successful solver
+trajectories from an earlier Haiku-solver run against the library. The purpose is to align the model’s output
+style and tool-call format with the unix-ctf harness (∼92 gradient updates; full hyperparameters in Appendix I).
+We treat this stage as harness adaptation rather than capability transfer; one of the two GRPO initializations
+skips it entirely. The empirical claims concern the environment’s pedagogical content: whether GRPO on the
+unix-ctf surface produces measurable transfer. They are not claims about the intrinsic properties of Qwen3-8B.
+We use Qwen3-8B because it produces well-formed tool calls under our harness’s tool specification without
+adaptation. Preliminary attempts with Llama-3.1-8B-Instruct, Kimi-K2.5, and Nemotron-3-Super-120B-
+A12B exposed harness-renderer compatibility issues: their native tool-call serializations did not round-trip
+cleanly. We therefore treat model selection as a precondition for measurement rather than a variable to ablate.
+The SFT format pass extends the same harness-alignment discipline for one of the two GRPO initializations.
+
+GRPO. From either the SFT-formatted checkpoint or the unmodified base model, we run forty batches of
+group-relative policy optimization with 8 groups × 8 rollouts (64 trajectories per batch), up to 18 turns per
+rollout, temperature 1.0, KL penalty coefficient 0, and remove_constant_reward_groups enabled.
+Fifteen technique families spanning file encoding, filesystem, archives, databases, logs and system state, user
+accounts, text processing, checksums, and process control are held out of the training pool via the technique-
+blacklist mechanism (§6.1); the full list appears in Appendix K. Each batch runs eight concurrent Docker
+containers on a single n2-highmem-16 GCP instance.
+
+5.2 VARIANTS AND BENCHMARKS
+We compare three variants: Base Qwen3-8B (untrained), GRPO from base init (40 batches of GRPO
+from the unmodified base), and GRPO from SFT init (40 batches of GRPO from the SFT-formatted
+checkpoint). The two GRPO runs share hyperparameters and training-budget settings but use independent
+random orderings drawn by the sticky-pool scheduler (§4.2); the principal intentional difference is the brief
+format-adaptation pass that precedes one of them. All evaluations use the final checkpoint.
+
+Benchmark 1: InterCode-CTF (100 tasks). We evaluate on the 100-task picoCTF-2019 split under our
+own driver (scripts/eval_intercode.py), which wraps each agent action in /bin/bash -c ...
+
+
+                                                       7
+before passing it to InterCode’s step. All IC-CTF numbers we report use this wrapped driver. Concurrency
+8, 20-turn budget per task; harness notes in Appendix H.
+
+Benchmark 2: InterCode-Bash fs_1 (60 tasks). We evaluate on the largest filesystem variant (fs_1) of
+NL2Bash under the InterCode harness. Reward is continuous on [ 0, 1] and combines a filesystem-diff signal,
+an MD5 equality-of-changes signal, and the TF-IDF similarity of the final stdout to the gold command’s
+stdout. We report both the conventional threshold (reward ≥ 0.5) and a stricter threshold (reward ≥ 0.8);
+Appendix J shows the per-component breakdown for our variants.
+
+Benchmark 3: Multi-family holdout (15 techniques × 15 trials, 𝑛=225). This is our internal out-of-
+distribution test. During training, we blacklist 15 technique families spanning all major library categories: file
+encoding, filesystem, archives, databases, logs and system state, user accounts, text processing, checksums, and
+process control. We then evaluate on 𝑛=225 pre-built environments, with 15 fresh trials per held-out technique,
+one planted flag per environment, and an 18-turn budget. No instance of any held-out technique appears
+in the training pool, so solving these tasks requires generalization across families rather than memorization
+within one. The full holdout list is in Appendix K. We report Wilson 95% confidence intervals alongside point
+estimates.
+
+6 EMPIRICAL VALIDATION
+We use training as an experimental probe of the generated surface, not as a tuned RL recipe. The principal
+table is in Appendix A.
+
+6.1 THE SURFACE IS LEARNABLE
+We fine-tune Qwen3-8B with rank-32 LoRA (Hu et al., 2022) adapters using GRPO (Shao et al., 2024b),
+then evaluate on the same 15-skill held-out set (full list in Appendix K). Base solves 11.6%; GRPO from base
+init reaches 27.6%; GRPO from SFT init reaches 43.6%. Both GRPO initializations transfer substantially
+above base, and the SFT-formatted initialization adds another +16.0 pp over the base initialization on this
+multi-family set. On timeout_race alone, a dedicated 𝑛=30 run gives GRPO-from-SFT-init 20/30 versus
+base 8/30 (Fisher’s exact 𝑝 ≈ 0.004); details are in Appendix K.
+
+6.2 TRANSFER TO INTERCODE-CTF
+On the external InterCode-CTF benchmark (100 tasks, picoCTF-2019), the GRPO variants change which
+categories the model solves more than they change the aggregate. The largest category-level transition
+is GRPO from base init on Forensics: 1/15 → 6/15, a +33 pp gain (Figure 5b). Reverse Engineering
+also improves. GRPO from SFT init shows the same qualitative redistribution despite no aggregate
+IC-CTF gain (Figure 5a). The training surface therefore appears to raise solve rate preferentially on the
+Unix-competence-adjacent subset of IC-CTF. Full task-level decomposition and the per-category table are
+in Appendix F.1. A secondary RL-pipeline observation is that the two GRPO initializations diverge between
+training reward and IC-CTF transfer. GRPO-from-SFT-init peaks at +27.0 batch reward but reaches only
+23% on IC-CTF, while GRPO-from-base-init never exceeds +1.45 and reaches 32%. The ranking inverts;
+per-batch curves and discussion are in Appendix G.
+Two GRPO initializations diverge across target distributions. GRPO from base init reaches 27.6%
+on the multi-family holdout and 32% on IC-CTF; GRPO from SFT init reaches 43.6% on multi-family but
+only 23% on IC-CTF. The ranking inverts. We use the SFT pass only for harness format adaptation and
+do not isolate its mechanism; practitioners should treat format-adaptation data as an experimental variable
+rather than a fixed step. Each variant is single-seed; per-skill rates are noisy (𝑛≈15); we do not ablate 𝑛flags , the
+scheduler, per-role rates, or non-final checkpoints; IC-Bash answer_similarity is identically zero across
+variants (Appendix J).
+
+7 CONCLUSION AND LIMITATIONS
+Unix-ctf is a novel approach for generating synthetic Unix competence tasks—an eval surface that previous
+terminal task generation methods do not target directly. Furthermore, unix-ctf achieves a higher task yield
+
+
+                                                          8
+                                                                           (a) Multi-family holdout: 15 skills, n = 225                                                                         (b) Episode termination
+                                                                                                                                                                                                                              18-turn budget
+                                                                      60                                                                                                                 17.5      17.2
+                                                                                                                                                                                                                 15.8
+
+
+
+
+                                                                                                                                                       Mean turns per episode (max 18)
+                                                                                                             43.6%                                                                       15.0
+                                                                      50
+
+
+
+
+                                            Held-out solve rate (%)
+                                                                                                                                                                                                                                12.7
+                                                                                                                                                                                         12.5
+                                                                      40
+                                                                                            27.6%
+                                                                                                                                                                                         10.0
+                                                                      30
+                                                                                                                                                                                          7.5
+                                                                      20      11.6%                                                                                                       5.0
+                                                                      10                                                                                                                  2.5
+                                                                       0                                                                                                                  0.0
+                                                                               Base          GRPO             GRPO                                                                                 Base          GRPO           GRPO
+                                                                                           (base init)      (SFT init)                                                                                         (base init)    (SFT init)
+
+Figure 4. Multi-family holdout, 𝑛=225 single-flag environments per variant, 18-turn budget. (a) Aggregate solve rate with
+Wilson 95% intervals. Both GRPO initializations lift substantially over base; GRPO from an SFT-initialized checkpoint
+reaches 43.6%, a 3.8× gain over base. (b) Mean turns per episode (max 18). The SFT-initialized variant uses the budget
+more efficiently.
+
+                                         (a) Tasks repartitioned vs. base                                                                             (b) Per-category solve rate
+                                    45
+                                                held (base & trained solve)                  net +9                                             0.8                                                                                Base Qwen3-8B
+                                    40          lost (base only)                                                                                                                                                                   GRPO from SFT init
+                                                gained (trained only)                                                                           0.7                                                                                GRPO from base init
+                                    35                  net +0
+
+
+
+
+        IC-CTF tasks (out of 100)                                                                                  Solve rate within category
+                                    30
+                                                                                               17                                               0.6
+                                                                      11
+                                                                                                                                                0.5
+                                    25                                                                base = 23                                                                                                     +33\,pp
+                                    20                                                                                                          0.4
+                                                                      11                        8
+                                    15                                                                                                          0.3
+
+                                    10                                                                                                          0.2
+                                                                      12                       15
+                                     5                                                                                                          0.1
+                                     0                                                                                                          0.0
+                                                 GRPO                                        GRPO                                                                )               7)                    )                   )                  )
+                                                                                                                                                      lls (n
+                                                                                                                                                             =33             n=2                   =15                 =19               (n=4
+                                               (SFT init)                                  (base init)
+                                                                                                                                   Ski                             e E ng. (          e n s ics (n         r a p hy (n       E x p loit.
+                                                                                                                  Gen         eral                         Reve
+                                                                                                                                                                rs              Fo  r
+                                                                                                                                                                                                 Cryp
+                                                                                                                                                                                                     to  g
+                                                                                                                                                                                                                     Bina
+                                                                                                                                                                                                                          ry
+
+
+Figure 5. InterCode-CTF capability redistribution. (a) Each trained variant’s IC-CTF-100 results decomposed against
+base into held (both solve), lost (base only), and gained (trained only); the dotted line marks the base solve rate. (b)
+Per-category solve rate.
+
+
+than comparable generation methods by procedurally constructing tasks from a canonicalized library of CTF
+techniques. Finally, we demonstrate that the skills learned from training on unix-ctf can improve downstream
+performance on hand-curated IC-CTF tasks.
+A limitation of unix-ctf is that it relies on LLMs to construct its technique library, so techniques poorly
+represented in the model during harvesting will not make it into the generated tasks. Additionally, our
+approach is constrained to CTF style tasks, which do not measure the full breadth of tasks that can be
+accomplished with unix. A promising direction for future work is to parametrise and train a unix-task
+generator to build curriculums of increasingly difficult unix CTF tasks.
+Dual-use and release. The 155 techniques form a surface for offensive-security training: each entry teaches
+recovery of a Unix-resident artifact, a capability relevant to red-team agents and defenders training against
+them. The library is already in active use in such a pipeline. Releasing the 155-ID set with the associated
+plant.sh/recovery.sh pairs would lower the barrier to equivalent offensive training corpora. We
+therefore release enough methodological detail for academic reproduction, including pipeline factoring,
+bidirectional contract, worked exemplars, full ID enumeration, and judge rubric, while withholding the
+artifact itself.
+
+
+
+
+                                                                                                                                                      9
+REFERENCES
+Marcin Andrychowicz, Filip Wolski, Alex Ray, Jonas Schneider, Rachel Fong, Peter Welinder, Bob McGrew, Josh Tobin,
+  Pieter Abbeel, and Wojciech Zaremba. Hindsight experience replay. In NeurIPS, 2017.
+Anthropic. Claude haiku 4.5. Anthropic model release, 2025. URL https://www.anthropic.com/news/
+  claude-haiku-4-5. Model identifier: claude-haiku-4-5.
+Anthropic. Claude opus 4.7. Anthropic model release, 2026. URL https://www.anthropic.com/claude/
+  opus. Model identifier: claude-opus-4-7.
+Rogerio Bonatti, Dan Zhao, Francesco Bonacci, Dillon Dupont, Sara Abdali, Yinheng Li, Yadong Lu, Justin Wagle,
+  Kazuhito Koishida, Arthur Bucker, Lawrence Jang, and Zack Hui. Windows agent arena: Evaluating multi-modal OS
+  agents at scale. arXiv preprint arXiv:2409.08264, 2024.
+Alexandre Drouin, Maxime Gasse, Massimo Caccia, Issam H. Laradji, Manuel Del Verme, Tom Marty, Léo Boisvert,
+  Megh Thakkar, Quentin Cappart, David Vazquez, Nicolas Chapados, and Alexandre Lacoste. WorkArena: How
+  capable are web agents at solving common knowledge work tasks? arXiv preprint arXiv:2403.07718, 2024.
+Kanishk Gandhi et al. Endless terminals: Scaling rl environments for terminal agents. arXiv preprint arXiv:2601.16443,
+  2026.
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+  LoRA: Low-rank adaptation of large language models. In International Conference on Learning Representations
+  (ICLR), 2022. arXiv:2106.09685.
+Naman Jain, Jaskirat Singh, Manish Shetty, Liang Zheng, Koushik Sen, and Ion Stoica. R2E-Gym: Procedural environ-
+  ments and hybrid verifiers for scaling open-weights SWE agents. arXiv preprint arXiv:2504.07164, 2025.
+Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. SWE-bench:
+  Can language models resolve real-world GitHub issues? In International Conference on Learning Representations
+  (ICLR), 2024. arXiv:2310.06770.
+Xiao Liu et al. AgentBench: Evaluating LLMs as agents. In International Conference on Learning Representations (ICLR),
+  2024. arXiv:2308.03688.
+Mike A. Merrill et al. Terminal-Bench: Benchmarking agents on hard, realistic tasks in command line interfaces. arXiv
+  preprint arXiv:2601.11868, 2026.
+Andrew Y. Ng, Daishi Harada, and Stuart Russell. Policy invariance under reward transformations: Theory and application
+  to reward shaping. In ICML, 1999.
+OpenAI. OpenAI o3 and o4-mini system card. OpenAI model release, 2025. URL https://openai.com/index/
+  o3-o4-mini-system-card/.
+OpenAI.   GPT-5.4 nano. OpenAI model release, 2026.    URL https://openai.com/index/
+  introducing-gpt-5-4-mini-and-nano/. Model identifier: gpt-5.4-nano; deployed via Azure AI
+  Foundry.
+Jiayi Pan, Xingyao Wang, Graham Neubig, Navdeep Jaitly, Heng Ji, Alane Suhr, and Yizhe Zhang. Training software
+   engineering agents and verifiers with SWE-Gym. In Proceedings of the 42nd International Conference on Machine
+   Learning, 2025. PMLR 267; arXiv:2412.21139.
+Renjie Pi, Grace Lam, Mohammad Shoeybi, Pooya Jannaty, Bryan Catanzaro, and Wei Ping. On data engineering for
+  scaling LLM terminal capabilities. arXiv preprint arXiv:2602.21193, 2026.
+Viraj Prabhu et al. WALT: Web agents that learn tools. arXiv preprint arXiv:2510.01524, 2025.
+Christopher Rawles, Sarah Clinckemaillie, Yifan Chang, Jonathan Waltz, Gabrielle Lau, Marybeth Fair, Alice Li, William
+  Bishop, Wei Li, Folawiyo Campbell-Ajala, Daniel Toyama, Robert Berry, Divya Tyamagundlu, Timothy Lillicrap,
+  and Oriana Riva. AndroidWorld: A dynamic benchmarking environment for autonomous agents. arXiv preprint
+  arXiv:2405.14573, 2024.
+Minghao Shao, Sofija Jancheska, Meet Udeshi, Brendan Dolan-Gavitt, Haoran Xi, Kimberly Milner, Boyuan Chen, Max
+  Yin, Siddharth Garg, Prashanth Krishnamurthy, Farshad Khorrami, Ramesh Karri, and Muhammad Shafique. NYU
+  CTF Bench: A scalable open-source benchmark dataset for evaluating LLMs in offensive security. arXiv preprint
+  arXiv:2406.05590, 2024a.
+Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li,
+  Y. Wu, and Daya Guo. DeepSeekMath: Pushing the limits of mathematical reasoning in open language models. arXiv
+  preprint arXiv:2402.03300, 2024b.
+
+
+
+
+                                                          10
+Guanzhi Wang et al. Voyager: An open-ended embodied agent with large language models.                   arXiv preprint
+  arXiv:2305.16291, 2023.
+Zhiyong Wu, Chengcheng Han, Zichen Ding, Zhenmin Weng, Zhoumianze Liu, Shunyu Yao, Tao Yu, and Lingpeng
+  Kong. OS-Copilot: Towards generalist computer agents with self-improvement. arXiv preprint arXiv:2402.07456,
+  2024.
+Tianbao Xie, Danyang Zhang, Jixuan Chen, Xiaochuan Li, Siheng Zhao, Ruisheng Cao, Toh Jing Hua, Zhoujun Cheng,
+   Dongchan Shin, Fangyu Lei, Yitao Liu, Yiheng Xu, Shuyan Zhou, Silvio Savarese, Caiming Xiong, Victor Zhong, and
+  Tao Yu. OSWorld: Benchmarking multimodal agents for open-ended tasks in real computer environments. arXiv
+   preprint arXiv:2404.07972, 2024.
+An Yang et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025a.
+John Yang, Akshara Prabhakar, Karthik Narasimhan, and Shunyu Yao. InterCode: Standardizing and benchmarking
+   interactive coding with execution feedback. In NeurIPS Datasets and Benchmarks Track, 2023. arXiv:2306.14898.
+John Yang, Kilian Lieret, Carlos E. Jimenez, Alexander Wettig, Kabir Khandpur, Yanzhe Zhang, Binyuan Hui, Ofir
+   Press, Ludwig Schmidt, and Diyi Yang. SWE-smith: Scaling data for software engineering agents. arXiv preprint
+   arXiv:2504.21798, 2025b.
+Andy K. Zhang, Neil Perry, Riya Dulepet, et al. Cybench: A framework for evaluating cybersecurity capabilities and risks
+  of language models. arXiv preprint arXiv:2408.08926, 2024.
+Boyuan Zheng et al. SkillWeaver: Web agents can self-improve by discovering and honing skills. arXiv preprint
+  arXiv:2504.07079, 2025.
+Shuyan Zhou, Frank F. Xu, Hao Zhu, Xuhui Zhou, Robert Lo, Abishek Sridhar, Xianyi Cheng, Tianyue Ou, Yonatan
+  Bisk, Daniel Fried, Uri Alon, and Graham Neubig. WebArena: A realistic web environment for building autonomous
+  agents. arXiv preprint arXiv:2307.13854, 2023.
+Yifei Zhou et al. Self-challenging language model agents. arXiv preprint arXiv:2506.01716, 2025.
+Terry Yue Zhuo, Dingmin Wang, Hantian Ding, Varun Kumar, and Zijian Wang. Training language model agents to find
+  vulnerabilities with CTF-Dojo. arXiv preprint arXiv:2508.18370, 2025.
+
+
+
+
+                                                          11
+                                                  Appendix
+                                      Supplementary material for “unix-ctf”
+
+
+A PRINCIPAL RESULTS TABLE
+Table 2 reports the four-variant result summary referenced by §6.
+
+Table 2. Principal results. For IC-Bash we report the conventional reward ≥ 0.5 threshold, the stricter reward ≥ 0.8
+threshold, and raw mean reward; see Appendix J for why the 0.5 threshold is misleading. Multi-family holdout aggregates
+𝑛=225 single-flag environments uniformly sampled across the 15 evaluable held-out skills (see §6.1).
+ Variant                               IC-CTF-100       IC-Bash fs_1 (≥0.5 / ≥0.8 / mean) Multi-family holdout (𝑛=225)
+ Base Qwen3-8B                    23 / 100 (23.0%)        48 / 60 / 0 / 60, mean 0.536          26 / 225 (11.6%)
+ GRPO from SFT init (40 batches)  23 / 100 (23.0%)        42 / 60 / 0 / 60, mean 0.469         98 / 225 (43.6%)
+ GRPO from base init (40 batches) 32 / 100 (32.0%)        52 / 60 / 0 / 60, mean 0.581         62 / 225 (27.6%)
+
+
+
+B STAGE-BY-STAGE SURVIVAL
+
+Table 3. Stage-by-stage survival from 750 raw harvest attempts.
+              Stage                                                Survivors      Cumulative survival
+              Stage 1 (exploration)                                     ∼712                     ∼95%
+              Stage 2 (mechanical check)                                ∼700                     ∼93%
+              Stage 3 (synthesis, Haiku format)                         ∼693                     ∼92%
+              Stage 4 (portability validation)                           656                     87.5%
+              Stage 5 (canonicalization, ≥0.85 sim. dedup)               441                     58.8%
+
+
+
+
+                                                          12
+C LIBRARY COMPOSITION BY FAMILY
+The 155 canonical technique identifiers ( 𝑘 = 441 deduplicated variants) decompose into sixteen post-hoc
+families. Counts are approximate because some IDs span more than one family.
+
+Table 4. Library composition by family (approx. 155 IDs; overlap allowed).
+     Family                     # IDs Representative IDs
+     Text encoding / ciphers     ∼16 base64, base64_then_rot13, caesar_shift_n, atbash_-
+                                     cipher, vigenere_cipher, uuencode, morse_code_text,
+                                        iconv_charset
+     Compression / archives      ∼10 ar_archive, bzip2_file, cpio_archive, gzip_then_-
+                                     base64, tar_nested, xz_file, zip_password, zstd_-
+                                        compress
+     Filesystem metadata         ∼12 xattr,       acl_metadata,    chattr_immutable,     file_-
+                                        capabilities,     sticky_setuid,      mtime_pre_epoch,
+                                        hardlink, symlink_chain, sparse_file, whiteout_-
+                                        overlay
+     Filename tricks              ∼5    filename_control_chars,        filename_leading_dash,
+                                        unicode_homoglyph,      punycode_idn,      combining_-
+                                        diacritics
+     Unicode / stego              ∼6    whitespace_steg,       variation_selectors,       tag_-
+                                        characters, braille_unicode
+     Binary / ELF                 ∼8    elf_note_section, elf_gnu_build_id, nm_symbol_name,
+                                        strings_binary, xxd_hex, gcc_const_string, strace_-
+                                        trace
+     Config files                ∼22    ini_config,   toml_config_file,     sshd_config_match,
+                                        sshd_auth_keys_options, sudoers_comment, systemd_-
+                                        unit_file, systemd_drop_in, cron_d_file, crontab_user,
+                                        anacrontab_entry, udev_rule, ldso_conf_d, pam_config,
+                                        nsswitch_conf_source
+     Shell env                    ∼5    bash_alias, bash_function, bash_history, bash_profile,
+                                        etc_environment_var
+     Crypto / certs / tokens      ∼9    gpg_symmetric,   openssl_enc,    openssl_dgst_salted,
+                                        cert_subject, x509_custom_oid, htpasswd_hash, jwt_-
+                                        hs256_token, hmac_signed_token
+     Processes / IPC             ∼12    background_process,     flock_lockfile,     named_pipe,
+                                        unix_socket, shm_segment, signal_handler, timeout_-
+                                        race, proc_maps, proc_fd, ss_connections, iptables_-
+                                        rules
+     Logs / system                ∼6    syslog, journalctl, dmesg_kernel, auth_log, mail_spool,
+                                        script_replay
+     Text tools                  ∼22    awk_begin_end,   awk_field,    sed_hold_space,    sed_-
+                                        transform, tac_reverse, tr_cipher, xargs_exec
+     DB / serialization          ∼12    sqlite_blob, sqlite_query, python_marshal, python_-
+                                        pickle, python_shelve, ruby_yaml_obj, php_serialize,
+                                        msgpack_binary, protobuf_serialized, plist_xml_-
+                                        apple
+     Media / network formats      ∼5    pcap_icmp_payload, flac_vorbis_comment, jpeg_exif_-
+                                        comment, pdf_metadata_info
+     Users / OS                   ∼6    passwd_shadow,    user_creation,     unusual_location,
+                                        mktemp_tmpfile
+     Math                         ∼3    bc_math, factor_prime, find_size
+
+
+
+D SIX WORKED LIBRARY EXEMPLARS
+Each technique below is extracted from data/library/<technique_id>.json, variants[0].
+Each script is parameterized by a target directory and a flag; none hardcodes either value. The six examples
+
+
+                                                         13
+were selected to span the families in Table 4 and to illustrate the range of operating-system knowledge exercised
+by the library.
+
+D.1 XATTR: STORING THE FLAG IN A POSIX EXTENDED ATTRIBUTE ON A DECOY FILE
+ # plant.sh
+ echo "nothing to see here" > "$target_dir/decoy.txt"
+ encoded=$(echo -n "$flag" | base64)
+ setfattr -n user.secret -v "$encoded" "$target_dir/decoy.txt"
+
+
+ # recovery.sh
+ getfattr --only-values -n user.secret "$target_dir/decoy.txt" | base64 -d
+
+The decoy file prints “nothing to see here” under cat, and standard inspection commands such as stat,
+ls -l, file, strings, and a recursive grep for the flag prefix do not surface the flag. The data lives
+in the user.* extended-attribute namespace, a POSIX/Linux filesystem feature with no direct analogue
+in ordinary programming; the canonical access path is getfattr -n, or equivalently the getxattr(2)
+syscall. Solving the task requires knowing that this namespace exists and identifying the attribute name to
+query, or dumping all user-namespace attributes on every file. A solver who uses Python still has to invoke
+os.getxattr, which is precisely the Unix knowledge being tested.
+
+D.2 ELF_GNU_BUILD_ID: EMBEDDING THE FLAG AS THE .NOTE.GNU.BUILD-ID OF A
+    STOCK ELF
+ # plant.sh (abbreviated)
+ flag_desc=$(echo -n "$flag" | xxd -p)
+ python3 <<PYEOF
+ import struct
+ name = b"GNU\x00"
+ desc_raw = bytes.fromhex("$flag_desc")
+ desc_padded = desc_raw + b"\x00" * ((4 - len(desc_raw) % 4) % 4)
+ note = struct.pack("<III", len(name), len(desc_raw), 3) + name + desc_padded
+ with open("buildid.note", "wb") as f: f.write(note)
+ PYEOF
+ cp /bin/ls ./hidden_elf
+ objcopy --update-section .note.gnu.build-id=buildid.note ./hidden_elf ./
+     hidden_elf_marked
+ rm -f buildid.note hidden_elf
+ mv hidden_elf_marked hidden_elf
+
+
+ # recovery.sh
+ readelf -n "$target_dir/hidden_elf" 2>/dev/null \
+     | grep -oE ’Build ID: [0-9a-f]+’ | awk ’{print $3}’ | xxd -r -p
+
+The file utility identifies hidden_elf as a 64-bit ELF executable, while strings surfaces nothing
+because the flag is hex-encoded. Solving the task requires familiarity with the ELF note-section convention
+and with readelf -n.
+
+D.3 MTIME_PRE_EPOCH: PRE-1970 TIMESTAMP AS THE DISCRIMINATOR
+ # plant.sh: hide real file among 10 decoys, marked by pre-epoch mtime
+ mkdir -p "$target_dir/data"
+ cd "$target_dir/data"
+ for i in {1..10}; do echo "random log entry $i" > "log_$i.txt"; done
+ echo -n "$flag" | base64 > note.txt
+ touch -d ’1969-06-15 12:00:00’ note.txt
+
+
+
+
+                                                       14
+ # recovery.sh
+ find "$target_dir/data" -type f ! -newermt ’1970-01-01’ -exec cat {} \; |
+     base64 -d
+
+Every file is plain text, and ls -lt shows eleven similar files. The discriminating signal is the negative
+modification time, a filesystem attribute that most find invocations never exercise.
+
+D.4 SHM_SEGMENT: TMPFS STORAGE, DOUBLY ENCODED
+ # plant.sh
+ encoded=$(echo -n "$flag" | base64 | tr ’A-Za-z’ ’N-ZA-Mn-za-m’)
+ echo -n "$encoded" > /dev/shm/.cache_seg_42
+
+
+ # recovery.sh
+ cat /dev/shm/.cache_seg_42 | tr ’N-ZA-Mn-za-m’ ’A-Za-z’ | base64 -d
+
+The flag does not live on the persistent filesystem, and recursive searches rooted at / commonly exclude /dev.
+Solving the task requires knowing that /dev/shm is a tmpfs mount, then applying ROT13 and base64 in
+the correct order.
+
+D.5 X509_CUSTOM_OID: FLAG STORED AS A UTF8STRING IN A CUSTOM X.509 EXTEN-
+    SION
+ # plant.sh
+ cat > openssl.cnf << ’EOFCNF’
+ [ req ]
+ distinguished_name = req_dn
+ x509_extensions = v3_ext
+ prompt = no
+ [ req_dn ]
+ CN = ctf.example.com
+ [ v3_ext ]
+ 1.3.6.1.4.1.55555.1.1 = ASN1:UTF8String:PLACEHOLDER_FLAG
+ EOFCNF
+ sed -i "s/PLACEHOLDER_FLAG/$flag/g" openssl.cnf
+ openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days
+     365 -config openssl.cnf
+ rm openssl.cnf
+
+
+ # recovery.sh
+ openssl x509 -in "$target_dir/cert.pem" -text -noout 2>/dev/null | grep -oE ’
+     flag\{[^}]+\}’
+
+Inspecting cert.pem as text reveals only a PEM block. openssl x509 -text is the specific command
+that decodes the ASN.1 custom object identifier, and most agents will not invoke it without reasoning about
+public-key infrastructure.
+
+D.6 WHITEOUT_OVERLAY: ONE CHARACTER PER DIRECTORY NAME, SEPARATED BY
+    ZERO-WIDTH SPACES
+ # plant.sh
+ ZWSP=$’\xe2\x80\x8b’    # U+200B
+ mkdir -p "$target_dir/hidden"
+ cd "$target_dir/hidden"
+ for (( idx=0; idx<${#flag}; idx++ )); do
+   ch="${flag:$idx:1}"
+   printf -v padded "%02d" $idx
+   mkdir -- "data_${padded}_${ZWSP}${ch}${ZWSP}end"
+
+
+                                                     15
+ done
+
+
+ # recovery.sh
+ cd "$target_dir/hidden"
+ ls -1 | sort | python3 -c "import sys; print(’’.join(l.rstrip(’\n’).split(’_
+     ’,2)[2].replace(chr(0x200b),’’)[0] for l in sys.stdin))"
+
+A directory listing shows about twenty-two directories with names of the form data_00_*end, data_-
+01_*end, and so on. Zero-width spaces are invisible in most terminals, so solving the task requires noticing
+that the names are not actually identical, sorting them lexically, and stripping the zero-width spaces.
+
+E WORKED SOLVER TRAJECTORIES
+To make the kind of agent behavior the library elicits concrete, we reproduce two successful solver trajectories
+from a Claude Haiku 4.5 reference run. Lines beginning with > are the agent’s narration before each tool call;
+lines beginning with $ are the bash invocations the agent issued; following lines are the captured stdout. Tool
+calls and tool returns are abridged for space; the full message logs are recorded in the project artifact directory.
+
+Exemplar 1: passwd_shadow (3 turns). The instruction primes the agent for “a system administrator
+account [with] hidden information embedded in its metadata.” The agent recognizes the GECOS convention
+of /etc/passwd (the comma-separated metadata in the fifth field) and extracts a base64-encoded flag.
+[turn 1]
+> I’ll start by exploring the system to find the hidden information in the
+> administrator account metadata.
+$ whoami
+user
+$ cat /etc/passwd | grep -E "root|admin"
+root:x:0:0:root:/root:/bin/bash
+gnats:x:41:41:Gnats Bug-Reporting System (admin):/var/lib/gnats:/usr/sbin/nologin
+sysadmin2024:x:1001:1001:System Admin,ZmxhZ3syM2FiZGM0NGI5ODliMjJjfQ==,Room
+     101,555-1234:/home/sysadmin2024:/bin/false
+$ ls -la /home
+drwxr-x--- 1 sysadmin2024 sysadmin2024 54 Apr 8 20:22 sysadmin2024
+drwxr-x--- 1 user         user         54 Apr 6 22:14 user
+
+[turn 2]
+> Excellent! I found something interesting. In /etc/passwd, the user
+> sysadmin2024 has what looks like base64-encoded text in the GECOS field
+> (the comment field): ZmxhZ3syM2FiZGM0NGI5ODliMjJjfQ==. Let me decode it.
+$ echo "ZmxhZ3syM2FiZGM0NGI5ODliMjJjfQ==" | base64 -d
+flag{23abdc44b989b22c}
+
+[turn 3]
+> Perfect -- the flag was hidden in the GECOS field of the system
+> administrator account. The encoded string decoded to reveal the flag.
+submit_flag(flag{23abdc44b989b22c}) -> Acknowledged.
+
+
+The Unix-specific knowledge here is the structure of /etc/passwd (seven colon-separated fields, with the
+fifth carrying free-form GECOS metadata as comma-separated subfields) and the convention of stashing
+administrative metadata there rather than in a separate database. A solver that defaults to grepping for flag{
+would never see this.
+
+Exemplar 2: mail_spool (4 turns). The instruction primes for “a secret message [...] hidden within
+the system’s mail infrastructure” and “a custom email header containing encoded data.” The agent probes
+the standard mail-spool locations (/var/mail/, /var/spool/mail/, ~/Mail/) and recognizes the
+mailbox file format with custom X- headers.
+[turn 1]
+> I’ll help you find the flag hidden in the mail infrastructure. Let me
+> start by exploring the filesystem structure and looking for mail files.
+
+
+
+                                                        16
+$ ls -la /var/mail/
+-rw-r--r-- 1 root mail 576 Apr 8 20:20 testuser
+$ ls -la /var/spool/mail/
+-rw-r--r-- 1 root mail 576 Apr 8 20:20 testuser
+$ ls -la ~/Mail/ 2>/dev/null || ls -la ~/mail/ 2>/dev/null || echo "No Mail directory"
+No Mail directory
+
+[turn 2]
+> Great! I found a mailbox file at /var/mail/testuser. Let me examine its
+> contents.
+$ cat /var/mail/testuser
+From sender@example.com Mon Mar 22 14:30:00 2024
+Return-Path: <sender@example.com>
+Received: from mail.example.com (mail.example.com [192.168.1.1])
+         by localhost with SMTP id ABC123
+         for <testuser@localhost>; Mon, 22 Mar 2024 14:30:00 +0000
+From: Admin <sender@example.com>
+To: testuser@localhost
+Date: Mon, 22 Mar 2024 14:30:00 +0000
+Subject: System Notification
+Message-ID: <msg001@example.com>
+X-Secret-Code: ZmxhZ3s5NjI3MGQ2NWJhZDdhMTNjfQ==
+Content-Type: text/plain; charset=UTF-8
+Content-Length: 42
+
+This is an automated system notification.
+Please ignore this message.
+
+[turn 3]
+> Perfect! I found a custom email header called X-Secret-Code with what
+> appears to be base64-encoded data. Let me decode it.
+$ echo "ZmxhZ3s5NjI3MGQ2NWJhZDdhMTNjfQ==" | base64 -d
+flag{96270d65bad7a13c}
+
+[turn 4]
+> Excellent! I found the flag. Let me submit it.
+submit_flag(flag{96270d65bad7a13c}) -> Acknowledged.
+
+
+The Unix-specific knowledge is twofold: the mail-spool location convention (/var/mail/<user>) and
+the mailbox file format with From_ envelope lines and arbitrary RFC-822 X--prefixed headers. Both are
+instances of the broader “concealed data inside a structured system file” pattern that the library exercises across
+∼22 configuration-file techniques and ∼12 filesystem-metadata techniques (§3.5).
+
+F INTERCODE-CTF CAPABILITY REDISTRIBUTION: REFERENCE DATA
+This section gives the reference data behind §6.2 and Figure 5.
+
+F.1 PER-CATEGORY SOLVE COUNTS
+
+Table 5. IC-CTF per-category decomposition (count / category-N). Category labels are reconstructed canonically by
+task_id from the full InterCode-CTF task list, so every variant is evaluated against the same fixed 100-task partition.
+Cell totals correspond to the principal table (Table 2).
+               Category                    Base         GRPO from SFT init       GRPO from base init
+               General Skills          14 / 33 (42%)           11 / 33 (33%)         14 / 33 (42%)
+               Reverse Engineering      4 / 27 (15%)           6 / 27 (22%)          7 / 27 (26%)
+               Forensics                 1 / 15 (7%)            2 / 15 (13%)          6 / 15 (40%)
+               Cryptography             3 / 17 (18%)            3 / 19 (16%)          4 / 19 (21%)
+               Binary Exploitation      1 / 4 (25%)             1 / 4 (25%)            1 / 4 (25%)
+               Web Exploitation              0/2                    0/2                    0/2
+
+
+
+
+                                                          17
+F.2 EXAMPLE TASKS BY CLASS
+The puzzle-versus-programming-task distinction is qualitative. The following are representative examples.
+    • Puzzle (forfeited by training): picoCTF{61} (concatenating a file whose contents are the number
+      61); picoCTF{CRYPTOISFUN} (a trivial Caesar shift on a single-line input); several General Skills
+      tasks with single-line gold flags.
+    • Programming-style (acquired by training): picoCTF{0x6e8} (staged reverse engineering across
+      multiple related binaries); picoCTF{p4ck37_5h4rk_...} (pcap filtering and payload extraction);
+      picoCTF{not_too_bad_of_a_problem} (multi-step chained cryptography).
+
+F.3 TASK-LEVEL OUTCOME DECOMPOSITION
+    • GRPO-from-base versus base (net +9): both 15; base-only 8 (6 General Skills, 2 Reverse Engineering);
+      GRPO-only 17 (5 Forensics, 6 General Skills, 5 Reverse Engineering, 1 Cryptography); neither 60.
+    • GRPO-from-SFT versus base (net ±0): both 12; base-only 11 (predominantly trivial General Skills
+      decodings); GRPO-only 11 (more challenging Reverse Engineering, Cryptography, Forensics); neither
+      66.
+
+F.4 WHY FORENSICS SPECIFICALLY
+The transition from 1/15 (7%) for base to 6/15 (40%) for GRPO-from-base is the largest category-level move
+in our sweep. By the definition in §1, Forensics is the IC-CTF category most aligned with the library’s design
+intent: it rewards systematic filesystem exploration and parsing of non-obvious artifacts, including pcaps,
+carved images, filesystem metadata, and steganographically concealed data. The +33 pp improvement is
+consistent with the training distribution teaching these skills, and is our most direct evidence that the library’s
+coverage transfers to a third-party benchmark.
+
+G GRPO TRAINING-REWARD CURVES
+
+                                                             2.5
+
+
+
+
+                Approx flags solved per rollout (out of 8)
+                                                                       GRPO-from-SFT (peak reward +27.0, IC-CTF 23%)
+                                                                       GRPO-from-base (peak reward +1.45, IC-CTF 32%)
+                                                             2.0                                                                            20
+
+
+
+
+                                                                                                                                                 Mean batch reward
+                                                             1.5
+                                                                                                                                            10
+                                                             1.0
+
+                                                             0.5                                                                            0
+
+                                                             0.0                                                                                10
+
+                                                             0.5
+                                                                   0       5         10          15         20          25   30   35   40
+                                                                                                       GRPO batch
+
+Figure 6. Per-batch GRPO training reward over forty batches. Solid blue: GRPO-from-SFT (peaks at +27.0). Dashed red:
+GRPO-from-base (peaks at +1.45). Despite the training-reward gap, GRPO-from-base reaches 32% on InterCode-CTF
+and GRPO-from-SFT only 23%; the variant ranking inverts.
+
+
+GRPO-from-SFT climbs to roughly 2.4 flags per rollout while GRPO-from-base barely escapes zero (Figure 6),
+yet GRPO-from-base is the better InterCode-CTF solver (32% vs. 23%). The SFT warm-start helps when
+evaluation matches the training distribution (§6.1) but hurts when the distributions diverge (§6.2). Pipelines
+targeting OOD transfer should therefore monitor downstream evaluations directly rather than using training
+reward as a proxy.
+
+H INTERCODE-CTF HARNESS NOTES
+Our IC-CTF eval driver (scripts/eval_intercode.py) prepends /bin/bash -c ... to every
+agent action before passing it to the CTFEnv.step method, with a single exception for bare cd <path>
+commands so that CTFEnv’s workdir-tracking branch persists directory changes across calls. We document
+
+
+                                                                                                           18
+this so that comparisons across IC-CTF results from different driver implementations can be calibrated. We
+also hint to the agent in the system prompt that task files reside under a per-task subdirectory, which avoids
+unnecessary path-discovery turns in IC-CTF’s shared-image layout.
+
+I TRAINING HYPERPARAMETERS
+Base model. Qwen3-8B (Qwen/Qwen3-8B) (Yang et al., 2025a) with rank-32 LoRA (Hu et al., 2022)
+adapters. SFT format pass. 492 successful Haiku-solver trajectories against the unix-ctf library, ∼92 gradient
+updates on hosted Tinker; we use Tinker’s recipe defaults for optimizer, learning rate, and batch size at this
+stage and treat the pass as harness alignment rather than capability transfer. GRPO. 40 batches, 8 groups ×
+8 rollouts (64 trajectories per batch), maximum 18 turns per rollout, sampling temperature 1.0, KL penalty
+coefficient 0, remove_constant_reward_groups enabled. Reward per rollout is points_earned −
+turn_cost × turns_used, with turn_cost = 1, per-technique points 15, and −1 per incorrect flag submission.
+Each batch runs eight concurrent Docker containers on a single n2-highmem-16 GCP instance. Seeds.
+Each variant is trained with a single random seed; we have not run multi-seed replications.
+
+J INTERCODE-BASH PER-COMPONENT BREAKDOWN
+InterCode-Bash reward is 31 ( ﬁle_diff + ﬁle_changes + answer_similarity) . We report numbers in Table 2
+at both the conventional (≥ 0.5) and stricter (≥ 0.8) thresholds. Disaggregating the base Qwen3-8B run
+on fs_1 (𝑛=60): file_diff mean 0.264, file_changes mean 0.264, answer_similarity mean
+0.000 (0/60 tasks above 0.05), strict success (≥ 0.8) of 0/60. The same pattern holds across our four variants:
+answer_similarity is zero on every task, and no variant clears the strict threshold. We therefore use
+the strict threshold as our primary IC-Bash signal in this paper and report the conventional threshold for
+cross-paper comparability.
+
+K EXTENDED HOLDOUT AT 𝑛=30
+The 15 evaluable held-out skills. ar_archive, bash_history, crontab_user, dd_extract,
+find_inode, gpg_symmetric, ini_config, mail_spool, od_octal, paste_merge,
+sha256_verify, sparse_file, timeout_race, xml_grep, zstd_compress. They span
+archives, shell environment, configuration, filesystem metadata, IPC, logs, encoding, text-processing,
+checksums, and binary formats.
+§6.1 gives the principal multi-family result at 𝑛=225. As a complementary deep dive on one held-out family, we
+ran an extended timeout_race-only evaluation at 𝑛=30; the corresponding table is reproduced here. Per-
+environment outcomes are recorded in docs/paper/data/holdout_results_all_variants_-
+n30.csv.
+
+Table 6. Held-out timeout_race solve rate at 𝑛 = 30 fresh environments per variant. Wilson 95% CI shown. Fisher’s
+exact two-sided 𝑝 tests Base versus GRPO-from-SFT.
+                  Variant              Solved       Solve rate (95% CI)     Mean turns to solve
+                  Base Qwen3-8B        8 / 30    26.7% ([14.2%, 44.4%])            10.5
+                  GRPO-from-SFT       20 / 30    66.7% ([48.8%, 80.8%])             5.0
+
+
+Fisher’s exact two-sided test gives 𝑝 ≈ 0.0040. The qualitative finding is preserved: GRPO-from-SFT solves
+the held-out family at a substantially higher rate than the base model, with non-overlapping Wilson 95%
+intervals. The mean-turns-to-solve gap is also preserved (5.0 turns vs. 10.5 turns), a pattern consistent with a
+policy that recognizes the family rather than discovering the flag by chance.
+
+The principal ratio drops from ∼ 5× to ∼ 2.5×. This revision concerns only the timeout_race solve-
+rate multiplier, not the unrelated production-yield 5× of §3.2 (87.5% vs. 17.5%), which uses different numerators
+and denominators. At 𝑛=8, the base timeout_race solve rate was 1/8 = 12.5%, making the GRPO-from-
+SFT result appear as a 5× improvement. With the 𝑛=30 base estimate (8/30 = 26.7%), the ratio drops to
+∼ 2.5×. The absolute gap (+40 pp) and statistical significance ( 𝑝 ≈ 0.004) are robust; the multiplicative “5×”
+
+
+                                                       19
+framing was an artifact of the small-𝑛 base estimate. We therefore recommend the absolute improvement,
+Wilson interval, and Fisher’s exact 𝑝 for future executions of this comparison.
+
+L TASK-QUALITY AUDIT RUBRIC
+Three LLM judges, gpt-5.4-nano (OpenAI, 2026), grok-4-20-reasoning, and Kimi-K2.5, all
+served via Azure Foundry, are independently given the rubric below, the task instruction, the canonical
+solution, and the test specification. Each judge outputs a JSON object with one (score, justification) cell per
+dimension. Aggregation is the mean of dimension means; the headline numbers in Table 1 are means ± standard
+deviation across the three judges. Per-judge dimension means are reproduced in Table 7. Grading robustness
+was originally a sixth dimension, but the LLM judges could not reliably distinguish exact-match against a
+harness-generated oracle from exact-match against a hardcoded LLM-authored expected string without rubric
+language that prejudged the corpus. We therefore drop that dimension and rely on a mechanical count of
+assertEqual calls instead (99% of Endless Terminals tasks; 0% of unix-ctf, by construction).
+
+Table 7. LLM-rubric task-quality scores broken out by judge model (1 worst, 5 best; corresponds to the 3-judge mean
+reported in Table 1). Each cell is the mean rubric score over all tasks in the listed corpus, scored by the listed LLM judge
+against the rubric defined below. Aggregate is the mean of the five non-grading-robustness dimensions. Pairwise Pearson 𝑟
+on per-task aggregate scores: gpt×grok = 0.82, gpt×kimi = 0.83, grok×kimi = 0.93 (𝑛=559 common tasks).
+                                        unix-ctf (𝑛=439)                                Endless Terminals (𝑛=120)
+ Dimension                 gpt-5.4-nano grok-4-20 Kimi-K2.5 gpt-5.4-nano grok-4-20 Kimi-K2.5
+ Input richness                4.21             5.00             4.99            1.48               2.12            1.82
+ Solution non-triviality       3.52             3.75             3.08            2.33               3.07            2.23
+ Format independence           3.26             5.00             5.00            1.10               1.02            1.08
+ Tool surface diversity        2.51             4.11             3.70            2.09               3.65            2.80
+ Discoverability               3.16             3.00             2.99            1.14               1.19            1.03
+ Aggregate                     3.34             4.17             3.95            1.63               2.21            1.79
+
+
+LLM-judge rubric (verbatim). The text below is the exact rubric supplied to each of the three LLM judges
+(gpt-5.4-nano, grok-4-20-reasoning, Kimi-K2.5) along with the task instruction, canonical
+solution, and grading specification; the judge returns a JSON object with one (score, justification) pair per
+dimension, and per-task scores are aggregated as the mean of dimension means.
+Dimension 1 -- Input richness:
+  5 = realistic container/system state (real logs, multiple processes, role-dressing
+      with hundreds of records or a multi-file fixture)
+  3 = moderately-sized fixture (>50 lines, multiple files)
+  1 = tiny synthetic fixture (<=15 lines via heredoc/echo, single file)
+
+Dimension 2 -- Solution non-triviality (depth of OS knowledge required, not solution
+     length):
+  5 = requires non-obvious OS or format knowledge (xattrs, ELF sections/notes,
+      sparse files, IPC, signals, X.509 internals, /proc/* internals,
+      archive metadata, kernel interfaces). Solution length is irrelevant.
+  3 = requires composing familiar Unix tools in a non-trivial way
+  1 = single one-line awk/grep/sed pipeline applying a stock idiom, OR trivially
+      solvable in any general-purpose language with no Unix-specific knowledge
+
+Dimension 3 -- Format independence:
+  5 = minimal instructions; success depends on functional correctness
+  3 = instructions specify a few output format details
+  1 = instructions are heavy with format trivia (specific decimal places, comma-separated
+     ,
+       sorted ascending, exact column header text) AND grading checks every detail
+
+Dimension 4 -- Tool surface diversity:
+  5 = solution uses >=2 features beyond the awk/sort/grep/sed/find/cat core
+      (signals, IPC, fs metadata, binary formats, encodings, X.509, archives,
+      kernel interfaces)
+  3 = solution uses 2-3 of the core utilities in combination
+
+
+
+                                                            20
+  1 = single application of awk/grep/sed/find/sort
+
+Dimension 5 -- Discoverability (investigation required):
+  5 = task requires genuine investigation; the relevant feature is not announced
+      in the prompt and the agent must explore filesystem/process/state to
+      find clues
+  3 = task hints at the surface but agent still must locate the specific entry point
+  1 = task tells the agent exactly what tool/file/command to use ("use sqlite3 to
+      query table X and write to file Y in this format")
+
+
+
+M SKILL-CATEGORY CLASSIFICATION RUBRIC (FIGURE 2)
+The same judge model (gpt-5.4-nano (OpenAI, 2026)) classifies each task into one of four skill categories.
+The per-task input is the instruction text, canonical solution, and grading specification. The output is
+{"category": "<one of four>", "reason": "<one sentence>"}.
+Discriminating question for unix_competence vs the others: "Could a competent
+Python programmer who knew nothing about Unix internals beyond subprocess.run
+solve this task by reading the prompt and writing Python?" If yes, NOT
+unix_competence.
+
+CATEGORY: unix_competence
+The canonical solution invokes a NON-OBVIOUS OS-, kernel-, or format-internal
+feature that most engineers would not know to look for without being told. The
+Python-stdlib path either does not exist or requires invoking the same OS
+feature via syscall/ctypes.
+Examples: getfattr, readelf -n, debugfs/find -inum, systemctl in non-trivial
+ways, git plumbing (cat-file, pack files, reflog format), POSIX IPC (named
+pipes, signals, fifos), filesystem metadata (sparse files, ACLs, capabilities),
+pre-epoch mtimes, X.509 custom OIDs, kernel /proc internals.
+NOT unix_competence: sqlite3, tar, gzip, awk, sed, find, git status/log/commit,
+mkdir, chown, chmod, formatted-text generation, CSV/JSON manipulation -- these
+all have clean Python equivalents.
+
+CATEGORY: shell_flavored_coding
+Glue pipeline of core text utilities (find, grep, awk, sed, sort, cut, tr, head,
+tail, uniq) and/or familiar binaries (sqlite3, tar, gzip, jq, curl) for which
+a Python-stdlib (or pandas/sqlite3 module) equivalent of comparable length exists.
+Shell is convenient but not load-bearing.
+
+CATEGORY: general_programming
+Deliverable is a non-trivial program; success depends on programming proficiency
+in a general-purpose language. Multi-hundred-line solve scripts, custom
+algorithms, ML training, parsers/interpreters, network services.
+
+CATEGORY: other
+Not primarily about shell, OS features, or programming. Pure cryptographic
+puzzles solvable with paper-and-pencil, web exploitation, single-string decoding,
+trivia.
+
+
+
+Per-benchmark provenance.
+    • unix-ctf : 155 canonical techniques (one variant per technique ID).
+    • Endless Terminals: 120 LLM-output task directories from our reproduction (excluding
+      16 verified_good/+validated_batch1/ re-run duplicates and 19 pre-generate_-
+      remaining.sh tasks in the log analysis and text processing categories whose run sum-
+      maries were overwritten).
+    • Terminal-Bench 2.0:           all 241 tasks under original-tasks/ on the public
+      laude-institute/terminal-bench repository (head of main).
+    • InterCode-CTF: data/ctf/ic_ctf.json (100 tasks; picoCTF-2019).
+    • InterCode-Bash: data/nl2bash/nl2bash_fs_{1,2,3,4}.json (200 tasks).
+    • Cybench: 43 metadata.json files under benchmark/ on andyzorigin/cybench (paper
+
+
+                                                   21
+       claims 40; we audit all 43 present).
+     • NYU CTF Bench: 200-task test_dataset.json from NYU-LLM-CTF/NYU_CTF_Bench.
+     • AgentBench-OS: 26-task dev.json from THUDM/AgentBench/data/os_interaction/.
+     • Nemotron-Terminal: 135-task subsample, drawn as 15 per category × 9 skill_based/easy cate-
+       gories from the public HuggingFace dataset nvidia/Nemotron-Terminal-Corpus (random
+       seed 42).
+
+N COMPLETE LIST OF 155 CANONICAL TECHNIQUE IDS
+Table 8 lists every canonical technique identifier in the library, together with the number of deduplicated
+variants ( 𝑘 ) per identifier after the ≥ 0.85 difflib.SequenceMatcher similarity deduplication of §3.1.
+Each identifier corresponds to a JSON entry of the form data/library/<id>.json, which bundles the
+per-variant plant.sh and recovery.sh pair together with the per-stage validation flags.
+
+Table 8. All 155 canonical technique IDs in the library, with per-ID variant counts after the ≥ 0.85 similarity dedup of
+§3.1 (total 441 variants). Pulled directly from data/library/_manifest.json.
+            id                           𝑘    id                         𝑘   id                           𝑘
+            acl_metadata                 3    fmt_reflow                 6   seq_pattern                  1
+            anacrontab_entry             1    gpg_symmetric              2   services_file_port           1
+            apt_pref                     2    gzip_file                  2   sha256_verify                1
+            ar_archive                   3    gzip_then_base64           2   shm_segment                  1
+            at_spool_job                 3    hardlink                   6   signal_handler               1
+            atbash_cipher                1    head_tail                  5   sort_uniq                    2
+            auth_log                     1    hidden_dotfile             9   sparse_file                  1
+            awk_begin_end                5    hmac_signed_token          4   split_across_files           6
+            awk_field                    15   htpasswd_hash              2   split_rejoin                 2
+            background_process           2    iconv_charset              2   sqlite_blob                  4
+            base32_encode                1    ini_config                 6   sqlite_query                 4
+            base64                       5    iptables_rules             2   ss_connections               2
+            base64_then_rot13            1    journalctl                 2   ssh_keys                     6
+            base85_ascii85               1    jpeg_exif_comment          2   sshd_auth_keys_options       2
+            bash_alias                   3    json_jq                    3   sshd_config_match            2
+            bash_function                2    jwt_hs256_token            1   stat_metadata                2
+            bash_history                 2    ldso_conf_d                1   sticky_setuid                3
+            bash_profile                 8    lsof_files                 1   strace_trace                 2
+            bc_math                      1    mail_spool                 1   strings_binary               1
+            bzip2_file                   1    md5sum_verify              2   sudoers_comment              2
+            caesar_shift_n               1    mktemp_tmpfile             2   symlink_chain                5
+            cert_subject                 1    mtime_pre_epoch            3   syslog                       6
+            chattr_immutable             2    named_pipe                 3   systemd_drop_in              1
+            column_format                3    netcat_listen              5   systemd_env_file             3
+            comm_compare                 3    nl_numbering               6   systemd_unit_file            2
+            cpio_archive                 2    nm_symbol_name             2   tac_reverse                  1
+            cron_d_file                  2    nsswitch_conf_source       1   tar_nested                   5
+            cron_job                     3    nsswitch_lookup            6   tee_duplicate                2
+            crontab_user                 9    od_octal                   2   timeout_race                 3
+            csv_awk                      7    openssl_dgst_salted        2   tr_cipher                    3
+            cut_field                    7    openssl_enc                1   udev_rule                    1
+            dd_extract                   5    pam_config                 5   unicode_homoglyph            2
+            df_space                     1    passwd_shadow              2   unix_socket                  1
+            diff_patch                   3    paste_merge                5   unusual_location             3
+            dmesg_kernel                 1    pcre_regex                 3   user_creation                6
+            dns_records                  2    pdf_metadata_info          1   uuencode                     1
+            du_size                      2    php_serialize              3   vigenere_cipher              1
+            elf_gnu_build_id             3    php_session_file           1   wc_counting                  3
+            elf_note_section             4    printf_escape              1   whiteout_overlay             1
+            env_var                      2    proc_cmdline               1   whitespace_steg              3
+            etc_environment_var          3    proc_fd                    4   x509_custom_oid              1
+            expand_tabs                  2    proc_maps                  3   xargs_exec                   6
+            file_capabilities            2    profile_d_drop_in          2   xattr                        4
+            filename_control_chars       4    punycode_idn               2   xml_grep                     8
+            filename_leading_dash        1    quoted_printable           1   xor_simple                   3
+            find_inode                   1    rev_reverse                1   xxd_hex                      7
+            find_newer                   6    rot13                      6   xz_file                      1
+            find_perm                    7    rot47_ascii                1   yaml_anchors                 1
+            find_size                    1    ruby_yaml_obj              1   yes_timeout                  1
+            find_user                    10   script_replay              3   zip_password                 1
+            flac_vorbis_comment          2    sed_hold_space             1   zstd_compress                1
+            flock_lockfile               3    sed_transform              1
+
+
+
+
+                                                          22
+

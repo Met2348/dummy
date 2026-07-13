@@ -1,0 +1,782 @@
+                                                       Experience Graphs: The Data Foundation for
+                                                                 Self-Improving Agents
+                                                 Gang Liao† Yujia He Abdullah Ozturk Zhouyang Li Ying Wang Zhitong Guo
+                                                  Hongsen Qin Yaobin Qin Tao Yang Zewei Jiang Dianshi Li Jort Gemmeke
+                                                 Jiangyuan Li Liyuan Li Nathan Yan Masha Basmanova Uladzimir Pashkevich
+                                            Matt Steiner Pedro Pedreira Rob Fergus Anirudh Goyal Carole-Jean Wu Gaoxiang Liu†
+                                                                                                          Meta Platforms
+                                                                                               gangliao@meta.com,gaoxiang@meta.com
+
+                                                                                               Andrew Witten               Daniel J. Abadi†
+
+
+
+
+arXiv:2606.29823v1 [cs.DB] 29 Jun 2026
+                                                                                                   University of Maryland, College Park
+                                                                                                             abadi@umd.edu
+                                         Abstract                                                                           as architectural byproducts. We ground the design in Ker-
+                                         The database community has repeatedly advanced the state                           nelEvolve, a production accelerator-kernel optimizer at Meta,
+                                         of the art by recognizing that new workloads demand new                            where cross-session reuse reaches a target speedup roughly
+                                         system architectures. We argue that long-horizon agentic                           10× faster at 52% lower token cost per valid solution. More
+                                         tasks—code generation, scientific discovery, hardware de-                          broadly, Trellis turns inference-time search from disposable
+                                         sign, security research—are such a workload. Rather than                           computation into a durable institutional asset: logs made
+                                         producing a single answer, these agents explore: they gener-                       databases reliable; experience graphs may make agents cu-
+                                         ate artifacts, execute tools, observe failures, branch, repair,                    mulative.
+                                         and compare alternatives over hundreds of steps, improv-
+                                         ing over a baseline as they go. This search produces a rich,                       1    Introduction
+                                         structured object we call an experience graph: executable ar-                      Database systems tailor-designed for workloads outperform
+                                         tifacts, tool outputs, objective rewards, sibling comparisons,                     generic systems [44, 45]. Transaction processing, warehous-
+                                         mutable search statistics, and causal lineage. Yet existing                        ing, streaming, graphs, and key-value serving have each
+                                         agent frameworks treat this experience as disposable state—                        grown into its own research area once its access patterns
+                                         serialized into JSON checkpoints and session logs that cannot                      were named precisely. We expect that long-horizon agen-
+                                         be recovered after a crash, queried across users, searched                         tic tasks [50, 53] are driving the next wave that transforms
+                                         by similarity, or materialized into training data without brit-                    database design.
+                                         tle, after-the-fact scraping. Even the file-based memory that                         These tasks are solved not by one-shot inference but by it-
+                                         production agents have converged on—declarative facts, pro-                        erative search: the agent explores, evaluates, fails, repairs, and
+                                         cedural skills, episodic logs—captures what an agent knows,                        refines solutions over tens to hundreds of steps before con-
+                                         not the reward-bearing experience graph of what its search                         verging, each attempt informed by the ones before it. Because
+                                         tried.                                                                             every converged solution raises the baseline for the next,
+                                            We propose Trellis1 : a data foundation that treats the                         this loop is a concrete form of recursive self-improvement
+                                         experience graph as first-class, governed, queryable data-                         (RSI) [13, 46]. Agentic applications are already adopted in
+                                         base state rather than ephemeral logs. The core insight is                         real production environments at scale. For example, AlphaE-
+                                         that search over experience graphs is a database access pattern.                   volve [33] uses evolutionary search to discover algorithms,
+                                         Frontier selection is a query, cross-session reuse is vector-                      optimizes TPU circuits, and improves Spanner [10] com-
+                                         seeded graph retrieval, training-data extraction is a materi-                      paction heuristics. Anthropic’s Project Glasswing [4] chains
+                                         alized view, and reconstructing what an agent knew at any                          multi-step exploits to find vulnerabilities across every major
+                                         past step is a time-travel query. When the database owns                           OS and browser. Meta’s KernelEvolve [26–28] uses Monte
+                                         the experience graph instead of the agent process, agents                          Carlo Tree Search (MCTS) [5, 23] and evolutionary search
+                                         become stateless, serverless compute, and crash recovery, hor-                     algorithms to generate optimized kernels for AI hardware—
+                                         izontal scaling, and a closed-loop training flywheel emerge                        programs that translate machine learning model operations
+                                                                                                                            into chip-specific instructions—for NVIDIA, AMD, Meta
+                                                                                                                            Training Inference Accelerators (MTIA) [9], and CPU targets,
+                                         1 A trellis is the structural lattice that plants climb and grow on—it does not    delivering over 60% inference throughput improvement on
+                                         grow itself, but supports and guides all growth. That is the role of the data
+                                         foundation: agents explore, evolve, and improve; the trellis holds the shape.      † Corresponding authors.
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                    Liao, et al.
+
+
+production ranking and recommendation workloads [28]. A          these are new important areas that need more investments
+growing ecosystem of frameworks [1, 6, 20, 38, 47, 49] has       from the data management community (Section 7). Through-
+emerged that drives ML engineering and scientific discovery      out this paper, we ground the research on real-world produc-
+through agentic tree search.                                     tion measurements from KernelEvolve—an agentic kernel
+   This search leaves behind far more than a final answer.       coding framework deployed in the production environment,
+Each step records the prompt the model saw, the artifact it      including a controlled study in which cross-session memory
+produced, the tool outputs it observed, an objective reward,     converges 10× faster at 52% lower token cost while revealing
+and causal links to its parent and siblings—together forming     an exploration–anchoring tradeoff (Section 6).
+what we call an experience graph. Yet every one of the systems
+above keeps this graph in Python objects and JSON check-         2     Self-Improving Agentic Systems
+points. We learned the cost of this firsthand. KernelEvolve’s    The first generation of AI assistants, such as GitHub Copilot
+first implementation stored its search tree in process-local     and ChatGPT, was one-shot: prompt in, answer out, session
+state and file checkpoints; this sufficed for a single session   over. The current generation, such as Claude Code [3] and
+but failed as a production foundation. Progress was lost on      Codex [34], is agentic: the tool reads files, runs commands,
+crashes, parallel workers needed ad hoc coordination, prior      observes errors, and iterates within a single session. These
+discoveries could not be reused systematically, and training     agents are no longer session-isolated. They persist declara-
+data had to be scraped from logs after the fact. Each miss-      tive facts across sessions (CLAUDE.md, MEMORY.md), accumu-
+ing capability was really the same missing abstraction: the      late reusable skills, maintain searchable episode archives,
+experience graph was not a database object.                      and run consolidation pipelines—such as Claude’s dreaming
+   A purpose-designed database for long-horizon agentic          pass—that distill and prune what they have learned. But the
+tasks dissolves these problems. We therefore explore the         state these tiers capture is knowledge: what the agent knows,
+system architecture design space, leading to a new data          what it prefers, how it solved a class of problems before.
+foundation—Trellis—that treats the experience graph as              Long-horizon tasks produce a different kind of state. Sci-
+first-class, governed, queryable database state rather than      entific discovery, hardware design, security research, and
+ephemeral logs. The core insight is that search over experi-     infrastructure optimization are problems where the right
+ence graphs is a database access pattern: recovery is a query    answer emerges only after dozens or hundreds of failed at-
+against the frontier, cross-session reuse is a vector-seeded     tempts, each informed by the failures before it. The state
+graph traversal, training-data extraction is a materialized      this search generates is not knowledge to be recalled but a
+view, and agent replay is an as-of temporal query. Trellis is    reward-bearing experience graph: a causal tree of attempts,
+our attempt to define the database architecture for agentic      fitness scores, sibling comparisons, and the tool outputs that
+tasks before accidental abstractions become permanent.           justify each decision. No file-based memory tier has a place
+   This paper makes three important contributions. First, we     for this graph, and no existing agent framework exposes it as
+define the self-improving agentic system as a two-loop           queryable, governed, shared state. A single session is insuffi-
+architecture: an inner loop of skill-driven agent sessions,      cient; the system must orchestrate many sessions into a struc-
+and an outer loop of RSI tree search over a persistent data      tured search, accumulate results across sessions, and learn
+substrate that renders agents stateless and serverless. We       from the entire history. This is the RSI process introduced
+then show how this framework extends from a single-agent         above. We call the system that supports RSI a self-improving
+search to multi-agent scientific societies where agents share    agentic system, and argue that it has three essential compo-
+hypotheses, critiques, and distilled knowledge (Section 2).      nents (Figure 1): an inner loop that executes individual steps,
+Second, we show that declarative, procedural, and episodic       an outer loop that orchestrates search, and a persistent data
+memory tiers around which production agents have con-            substrate that records everything both loops produce.
+verged are an incomplete, ungoverned special case, and de-
+scribe a concrete data foundation that unifies them with           The inner loop. Each node in the experience graph is
+the reward-bearing experience graph through a query layer        produced by a single execution of the inner loop—an au-
+composing graph traversal, vector similarity, and structured     tonomous agent session (Claude Code, Codex, or any tool-
+filters. In doing so, we identify common access patterns—        using LLM) driven by skills2 . A skill tells the agent what to
+append-heavy writes mixed with multi-hop path updates,           do, how to evaluate the result, and what constitutes success.
+vector retrieval, and as-of temporal reconstruction—that         For example, one skill generates and benchmarks GPU ker-
+could benefit from new system architectures (Sections 3–5).      nels; another runs timing analysis on a chip design; another
+Third, we introduce new database research opportunities—         measures binary size after a compiler-pass reordering; an-
+multi-modal query planning, consistency for concurrent tree      other searches for security vulnerabilities. The inner loop
+search, physical design for the above-described access pat-      2 Skills are reusable, user-defined task specifications for agent ses-
+tern, governed view maintenance, bi-temporal memory, and         sions; see https://platform.claude.com/docs/en/agents-and-tools/agent-
+database semantics for multi-agent institutions. We believe      skills/overview.
+Experience Graphs: The Data Foundation for Self-Improving Agents                                                                                CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands
+
+
+                                  Outer Loop — Search Orchestration                                                                                       Inner Loop — Agent Session
+                                                                                                                 context
+                      MCTS              Evo              Greedy            Linear       One-Shot                                                Skill → Meta LLM → Sandbox → Evaluate → Persist
+
+                                                                                                                                          Claude Code                     Codex                       Meta LLM
+                             Frontier Select · Assemble Context · Insert · Update Rewards
+                                                                                                                  result
+                                                                                                                                                  Generate · Benchmark · Debug · Optimize · Validate
+
+                                              insert / query                                                                                                                   persist
+
+                                                                                                   Trellis — Data Foundation
+
+                                                                                                                                                                                                                    feedback loop
+                                       Tasks                          Sessions                     Nodes                     Prompts                      Embeddings                      Artifacts
+
+                                                                                            SQL                 Cypher                 Vector
+
+                                                                                            Axiom Optimizer · Velox Engine · XDB/MySQL · Hive
+
+                                                      views
+
+                                                 Training Views                                                                                             Self-Improving Flywheel
+                    SFT Trajectories            DPO Preference Pairs                GRPO Groups                                           Better Models              Better Exploration               Better Data
+
+                                       materialized views over operational state
+                                                                                                                                                             every round compounds on the last
+                                  sample → expand N → train → append 1
+
+
+                data flow            feedback loop             entity / component
+
+
+
+
+                                                           Figure 1. Architecture of a self-improving agentic system.
+
+does not change across skills. It always follows the same                                                                  in-context state and a flat log—queryable by no one. At the
+pattern: consume a task description and context from the                                                                   other, many workers expand a wide tree or a population of
+outer loop, generate candidate artifacts via LLM inference,                                                                islands concurrently, and collaboration across heterogeneous
+execute and evaluate in an isolated sandbox, and persist the                                                               harnesses (Codex, Claude Code, and others) is just another
+structured output—execution logs, evaluation metrics, cor-                                                                 point on the same spectrum. What is invariant across all of
+rectness results, analysis report, fitness score—as the node’s                                                             them is the substrate: every policy reads frontier nodes and
+record. The agent then terminates; it holds no state.                                                                      writes results through one data interface. The control plane
+                                                                                                                           decides how to search; the data foundation is indifferent to
+   The outer loop. The outer loop decides which step to                                                                    that choice.
+take next based on a search strategy. Each step becomes a
+point in an experience graph. Figure 2 shows some exam-                                                                       Memory scaling through external state. The two loops
+ple search strategies and the experience graphs that they                                                                  produce a graph. The question is where it should live. The
+produce. A one-shot search strategy produces a single node                                                                 central claim of this paper is that all exploration state should
+graph. Linear strategies chain revisions into a path. Greedy                                                               be placed inside a persistent, queryable store. When the
+strategies draft multiple candidates, pick the best, and deepen.                                                           database owns the graph, the system acquires memory scal-
+MCTS strategies balance exploration and exploitation via                                                                   ing [12]: performance improves as the store grows, because
+UCB scores [5, 23, 43]. Evolutionary search maintains multi-                                                               new sessions query prior solutions, borrow high-fitness sub-
+ple islands with mutation, selection, crossover, and migration,                                                            trees, and skip dead ends. Knowledge compounds rather than
+producing a DAG [41].                                                                                                      evaporates.
+   The outer loop selects a frontier node based on the search
+strategy, assembles context from the existing experience                                                                      Separating compute from state. Persisting the graph
+graph—ancestors, siblings, prior failures—invokes the inner                                                                in this way is not a mere convenience; it is the same archi-
+loop, and records the result. It is task-agnostic: it reads fitness                                                        tectural move that has frequently reshaped data systems.
+scores and selects frontiers over the same data interface,                                                                 Shared-disk parallelism, cloud storage disaggregation [11],
+regardless of the skill.                                                                                                   and serverless functions [18, 25] all rest on one principle:
+                                                                                                                           once durable state lives in a storage tier and the compute
+   The outer loop is a control plane. These strategies are                                                                 tier holds nothing it cannot afford to lose, compute becomes
+not different systems but different policies over the same                                                                 elastic, interchangeable, and fault-tolerant. A self-improving
+substrate: one-shot, linear, greedy, MCTS, and evolutionary                                                                agent should be built the same way. Because every node,
+search all read the current graph and decide which node to                                                                 reward, and frontier pointer lives in the database, the agent
+expand next, differing only in how that decision is made. It is                                                            process holds no irreplaceable state—it is disposable com-
+therefore a mistake to equate the outer loop with any single                                                               pute. Any worker can claim any frontier node at any time; a
+algorithm. The outer loop is a control plane that selects a                                                                worker that dies mid-expansion loses at most one inner-loop
+policy, and the policies form a spectrum. At one end, fixing                                                               invocation, never the search tree. There is no checkpoint to
+the outer loop to a single expansion and letting the inner                                                                 deserialize, no session pinned to a machine, and no warm-up.
+loop iterate internally yields the “auto research” configura-                                                              How much a crash costs depends on the granularity at which
+tion [22], in which one self-managing agent session runs                                                                   the graph is externalized: a single step when every step is a
+the entire search and its experiment history survives only as                                                              node, but an entire task when the outer loop is one and the
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                                                                                                  Liao, et al.
+
+
+
+                      One-Shot                               Linear                                  Greedy                                 MCTS                                    Evolutionary
+                                                                                                                                                                                    island A   island B
+                                                                                                           R                                    R
+                                                                R
+
+
+                         R
+
+
+
+
+                    insert one node                      expand latest leaf                      deepen best leaf                     UCB select + backprop                     islands + migration
+                 no frontier query                      parent_id chain                        ORDER BY fitness                      visit_count, reward                     generation, island_id
+
+
+
+                                                                                                                                                      increasing graph complexity
+               root          valid       best so far           buggy                evolutionary islands
+
+
+                                                   Every strategy writes the same exploration_nodes table — only the selection query and mutated fields differ.
+
+
+
+
+                                     Figure 2. Example search strategies and the experience graphs they produce.
+
+inner loop runs long. The foundation collapses this differ-                                                    MEMORY.md and USER.md [32]. Procedural memory stores
+ence by treating the inner-loop session itself as resumable                                                    reusable how-to playbooks—the skills of Section 2. Episodic
+state—each node references the session that produced it—so                                                     memory stores searchable records of past sessions—ranging
+an interrupted session is reattached rather than restarted. Ex-                                                from plain transcripts to SQLite-backed hybrid vector-plus-
+ternalization granularity thus becomes a tuning knob rather                                                    FTS5 indexes with background consolidation pipelines. Sev-
+than a correctness boundary, and the recovery guarantee                                                        eral of these systems bolt on a process that distills and prunes
+holds at either extreme. Recovery is a query against the fron-                                                 the tiers—Claude Code’s dreaming pipeline, OpenClaw’s
+tier, and scaling is adding or removing workers against a                                                      three-phase consolidation, Hermes’s curator—an implicit
+shared store.                                                                                                  admission that memory must evolve, not merely accumulate.
+                                                                                                                  These tiers are genuine engineering achievements, yet
+   The self-improving loop. The two loops, connected                                                           they all capture what the agent knows—facts, preferences,
+through a shared store, form a recursive intelligence                                                          playbooks, and past transcripts. Long-horizon search pro-
+system. Exploration populates the store with structured                                                        duces a fundamentally different kind of state: a reward-
+trajectories. These trajectories are materialized as training                                                  bearing experience graph—a causal tree of attempts, each
+views—supervised examples, preference pairs, reinforce-                                                        carrying the executable artifact it produced, the tool outputs
+ment groups [16, 39, 42]—and used to post-train specialized                                                    and objective reward that scored it, the sibling comparisons
+models. These post-trained models drive better exploration,                                                    that say which variant won, and the mutable search statistics
+which produces higher-quality data, which trains better                                                        (visit counts, UCB scores) that the algorithm rewrites as it
+models. The system improves by using itself. Taken further,                                                    learns. This graph is orthogonal to the three knowledge tiers,
+the data substrate can support not just parallel workers over                                                  not a replacement for them. The knowledge tiers tell each
+a single tree but a society of agents that propose hypotheses,                                                 inner-loop agent how to generate a candidate; the graph
+critique each other’s results, and distill lessons into shared                                                 records what happened when it did. Table 1 makes the struc-
+memory—scientific compounding, not just parallel search.                                                       tural gap concrete across seven dimensions: an episodic tran-
+None of this is possible if the data substrate is ephemeral.                                                   script can be searched; an experience graph can be queried,
+Without a durable, queryable, governed foundation, the loop                                                    traversed, versioned, and trained from. Yet no file-based mem-
+cannot close.                                                                                                  ory tier has a place for this graph, and no existing agent
+                                                                                                               framework exposes it as queryable, governed, shared state.
+3    Why Agent Memory Is a Database                                                                               In a future where agents act increasingly independently,
+     Workload                                                                                                  running their own code and yielding rewards, these pro-
+At first blush, it may seem that agent memory can be re-                                                       cedural memory stores consisting of local files or single-
+duced to retrieval-augmented generation: embed text, search                                                    embedded database are becoming hard to manage and con-
+by nearest neighbor, and inject the results into the context                                                   trol centrally. This complicates querying across these data
+window. Such a design would miss most of the workload.                                                         stores. Fundamentally, a unified, governed data foundation is
+                                                                                                               needed in order to provide an infrastructure for independent
+   Beyond files: the three-tier memory model is incom-                                                         agents to work together in harmony, all serving as workers
+plete. Section 2 noted that production agents already main-                                                    that produce and consume a rich, integrated dataset that
+tain persistent memory across sessions. To make the gap con-                                                   includes the cross-agent experience graph.
+crete, consider the three tiers on which they have indepen-                                                       To see why this is a database workload, we must consider
+dently converged. Declarative memory stores durable facts                                                      the properties of the experience-graph data, the requirements
+and preferences—Claude Code’s CLAUDE.md [3], Hermes’s
+Experience Graphs: The Data Foundation for Self-Improving Agents                        CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands
+
+
+                     Table 1. The structural differences between the experience graph and episodic memory
+                    Episodic memory                     Experience graph
+   Records         what the agent said (transcript)     what search tried and how well it worked (executable artifacts + objective rewards)
+   Structure       flat text chunks                     tree / DAG: nodes with parent links, rewards, and siblings
+   Retrieval       FTS5 keyword / vector similarity     graph traversal (ancestor, subtree, sibling paths) + vector + structured filters
+   Mutability      append-only                          mutable: visit_count, ucb_score, island_id rewritten by search algorithms
+   Time travel     none                                 CDC changelog → AS-OF reconstruction at any step
+   Training        not extracted                        SFT trajectories, DPO sibling pairs, GRPO groups as materialized views
+   Sharing         per-agent, per-machine               governed cloud store, cross-user, cross-session
+
+Table 2. Agent operations as queries over the data foundation, and the properties and requirements each relies on: Causality,
+Executability, Reward (data properties); Collectivity, Governance (substrate requirements).
+ Operation         What the database must support                                                                               Draws on
+ Resume            Look up a session’s frontier, pending jobs, and best node.                                                   C, R
+ Reuse             Find similar prior tasks via vector search, then retrieve their high-fitness subtrees via graph traversal.   C, R, Co
+ Repair            Query all prior failures sharing the same error signature to avoid repeating known dead ends.                E, R, Co
+ Train             Extract path trajectories, sibling preference pairs, and reward groups as materialized views.                C, E, R
+ Replay            Reconstruct a node’s state as of any past step.                                                              C, E
+ Observe           Query search progress, reward distributions, and algorithm comparisons; render lineage graphs.               C, R
+ Audit             Trace which prior attempts, tool outputs, and documents influenced a given decision.                         C, G
+ Govern            Enforce policy over raw traces and the artifacts derived from them—embeddings, distilled skills, and         G, Co
+                   training views alike.
+
+
+those properties place on any substrate data foundation that               to raw traces and derived artifacts—embeddings, distilled
+holds all four tiers together, and the operations agents run               rules, and training examples. Governance is a cross-cutting
+against it.                                                                constraint on the entire foundation: a distilled skill inherits
+Data properties (of the experience graph). Three proper-                   the access policy of the episodes it was derived from, and a
+ties are intrinsic to RSI traces and absent from both retrieved            training view inherits the policy of the exploration nodes it
+documents and the file-based tiers.                                        materializes.
+   Causality. A failed action only has value given the context
+of its parent plan, the tool output it reacted to, and the sibling
+that succeeded—a path query, not a similarity search.                      Operations. Agents run eight operations against this foun-
+   Executability. Memories are programs, configurations,                   dation (Table 2). Most are queries over the experience graph;
+test cases, and tool outputs—artifacts that must be replayed,              Reuse and Repair also reach across tiers, since vector search
+diffed, and reused, not passages to be embedded.                           spans episodic and declarative memory. The table maps each
+   Reward. Every node carries objective feedback: cor-                     operation to the properties and requirements it relies on.
+rectness, latency, throughput. Memory is an experience                     Every one of these operations is a query over the same gov-
+buffer [29, 31] for both future search and model training—not              erned data foundation—there is no separate search engine,
+only context for the next prompt.                                          training pipeline, or observability stack.
+Substrate requirements (across all four tiers).                               The resulting access pattern is unlike any existing work-
+   Collectivity. One engineer’s discovery should seed ev-                  load. Writes are a mix of appends (new nodes) and local-
+ery future session on a similar workload—not merely shared                 ized path updates (MCTS backpropagation walks the ances-
+high-fitness starting points, but shared claims, evidence, cri-            tor chain to update visit counts and cumulative rewards).
+tiques, and replications that compound scientific knowledge                Reads span four modalities: ordered scans for frontier se-
+rather than accumulate isolated data points. This applies                  lection, multi-hop graph traversal for ancestor and subtree
+equally to declarative facts (a distilled rule should be visible           context, vector similarity for cross-session reuse, and full
+to every agent), procedural skills (a proven playbook should               table scans for training-data extraction. No existing system—
+be reusable organization-wide), episodic history (prior fail-              OLTP, OLAP, graph database, or vector store—is designed
+ures should be queryable across users), and the experience                 for this combination. A vector store cannot answer “which
+graph (prior subtrees should seed future search).                          sibling approach succeeded where this one failed.” A JSON
+   Governance. Traces contain generated code, production                   checkpoint cannot support ten concurrent workers exploring
+metadata, and hardware-specific signals. Policies must apply               the same tree.
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                Liao, et al.
+
+
+4    The Data Foundation                                          each fragment to the backend that can serve it—an opera-
+No existing system is optimized to serve as the data founda-      tional store for sub-50 ms frontier queries, a vector index for
+tion for self-improving agents. The workload demands an           similarity search, and a columnar warehouse for training
+operational store for online search with sub-50 ms latency, a     extraction—all over one logical schema. Cypher exposes
+graph substrate for multi-hop traversal, and a training-data      virtual parent–child edges over the foreign key, enabling
+warehouse for offline learning—all over the same governed         traversal without a separate edge table—an approach proven
+state. The architecture therefore separates a unified logical     effective for tree-structured metadata in distributed file sys-
+model from heterogeneous physical backends.                       tems [24]—and compiles to the same engine that serves SQL,
+                                                                  so graph and relational queries are run over the same copy
+   Logical model. The experience graph and episodic               of the data.
+history—two of the four memory tiers of Section 3—share a
+relational schema with a four-level hierarchy. Tasks define          Skills and memory as evolvable shared state. The pro-
+the problem: specification, target environment, and success       cedural and declarative tiers (Section 3) need to support
+metric. Sessions record who is searching, with which              fast reads and writes since they are consulted on nearly ev-
+algorithm, and how far they have gotten. Nodes capture            ery inner-loop invocation, yet must change as agents learn.
+every individual attempt: parent link, generated artifacts,       Trellis stores them as versioned artifacts in a distributed file
+execution output, fitness score, evaluation evidence, and         system, mounted read-mostly into each stateless worker over
+algorithm-specific metadata (UCB score for MCTS, genera-          FUSE. A worker sees an ordinary local path, while a write,
+tion and island for evolutionary search). Prompt histories        such as a refined skill or a corrected fact, commits centrally.
+preserve the exact messages the LLM saw and produced.             The background distillation that today rewrites a machine-
+Task-description embeddings support vector similarity             local CLAUDE.md or MEMORY.md thus becomes a governed,
+search across sessions—given a new task, the system can           audited update to shared state, with provenance linking each
+use these to find prior tasks with similar specifications         distilled skill back to the episodes and exploration nodes that
+and retrieve their best results. Large artifacts—logs, traces,    justified it.
+binaries—live in object storage, linked by reference, keeping
+                                                                     Why a unified query layer matters. Today’s agent mem-
+the relational tables lean while preserving full lineage. This
+                                                                  ory retrieval stitches together three or four service calls at
+four-table schema is thus algorithm-agnostic, task-agnostic,
+                                                                  every step: a vector retrieval RPC, a structured-filter query,
+and skill-agnostic.
+                                                                  a graph traversal for context, and a scope check for gover-
+   Context as managed state. A recurring failure mode in          nance. A graph query layer with hybrid retrieval collapses
+tree search is context discontinuity: a new node re-derives       these into a single optimizable statement—one round-trip
+what its ancestors already established, wasting tokens and        instead of four, with the planner choosing join order and
+reintroducing bugs that were already solved. Existing frame-      predicate pushdown across modalities.
+works mitigate this by threading a session identifier from           This is particularly important for the tree operations at
+parent to child, or by resuming the parent’s session in place—    the core of search—ancestor chains, subtree expansion, and
+but there the session lives in agent memory and is lost when      sibling comparison. Walking parent pointers in application
+the process exits. Trellis makes context a property of the sub-   code issues 𝑂 (𝐷) round-trips per lookup. Although recursive
+strate instead. The prompt_history table serves two roles:        SQL operators can solve the round-trip problem, they tend
+it supplies the transcript that trajectory replay requires for    to materialize every intermediate path rather than expand a
+training, and it lets a child node either inherit its parent’s    frontier, and, do not currently compose with vector similarity.
+session as a cheap resume or reconstruct context from the         The Trellis graph layer instead offers first-class variable-
+graph through an ancestor query. Which of the two is used is      length traversal ([:HAS_CHILD*1..k]) and path predicates,
+a decision for the data foundation, not a constant wired into     and, most importantly, fuses traversal, relational filters, and
+the agent. The context that justifies a node is thus durable,     vector seeding into one planned statement.
+queryable, and shared, rather than trapped in a live process.
+                                                                     Collective intelligence via vector-seeded graph re-
+  Physical architecture: separating storage from com-             trieval. Vector indexes over task-description embeddings
+pute. The architecture disaggregates a stateless query and        enable cross-session and cross-user knowledge reuse
+execution engine from durable storage—the same separation         through a query pattern we call vector-seeded graph
+that makes the agents stateless (Section 2), applied one level    expansion. Given a new task, the system first retrieves
+down. Although this architecture allows for any engine to         semantically similar prior tasks via approximate nearest-
+be used, the current implementation uses Axiom [30], a            neighbor search, then follows the relational links from
+cost-based optimizer over Velox [37], Meta’s open-source          matching tasks to their sessions, and from sessions to their
+vectorized execution engine. Axiom plans SQL, Cypher [14],        highest-fitness exploration nodes. A graph traversal then
+and vector retrieval into a single physical plan and routes       expands each top-𝑘 candidate into its full optimization
+Experience Graphs: The Data Foundation for Self-Improving Agents              CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands
+
+
+trajectory. This pattern composes three query modalities—          backpropagation later overwrites; reconstructing a trajec-
+vector similarity, relational joins, and variable-length graph     tory from final state would train the model on decisions
+traversal—in a single logical request:                             justified by information that did not yet exist.
+MATCH (t:tasks)
+WHERE t.embedding <~> $q > 0.8                                     5   From Memory to Training
+MATCH (t)<-[:BELONGS_TO]-(s:sessions)                              Many agent systems bolt on training-data collection as an
+MATCH (s)<-[:IN_SESSION]-(n:nodes)                                 afterthought, scraping logs into a separate pipeline. That
+WHERE n.is_buggy = false                                           approach loses structure, provenance, and governance. In
+  AND policy_allows($user, n)
+                                                                   our architecture, training data is not collected—it is queried.
+RETURN t.task_id, score(t), n.node_id,
+                                                                   The same node table that drives online search yields training
+       n.fitness_score
+ORDER BY score(t) DESC, n.fitness_score DESC                       data as materialized views.
+LIMIT 10                                                             SFT trajectories. Root-to-leaf paths through non-buggy,
+This allows early sessions to perform the hard exploration,        high-fitness nodes are multi-turn agentic trajectories. The
+while later sessions can begin with the best prior solutions       prompt_history table preserves the exact messages the
+surfaced as reference context and refine from there. The same      LLM saw at each step. But message fidelity is not enough:
+retrieval also runs during a session, injecting similar prior      the numeric state that drove each decision—visit counts,
+nodes step by step at a tunable rate. Thus, the more sessions      UCB scores, island membership—is mutated in place by later
+the store accumulates, the less work each new one requires—        search, so replaying it from final state leaks future infor-
+a network effect at the database level. How aggressively to        mation into the example. A faithful trajectory reads each
+inject prior nodes trades off convergence against exploration,     node as of its own step, an AS-OF reconstruction over the
+a knob we quantify in Section 6.                                   change log of Section 4. A recursive ancestor query then
+                                                                   reconstructs any trajectory with full provenance.
+   Concurrent multi-agent search. Managing the tree in
+the database system allows multiple agents to explore the            DPO preference pairs [39]. Siblings with the same par-
+same session in parallel. Workers read frontier nodes, invoke      ent where one has substantially higher fitness are natural
+the inner loop independently, and insert results.                  preference pairs—a graph pattern match, not a post-hoc log
+   An interesting database question is what happens dur-           scrape:
+ing backpropagation. After evaluating a node, MCTS walks           MATCH (p)-[:HAS_CHILD]->(a),
+the ancestor chain and updates each ancestor’s visit count               (p)-[:HAS_CHILD]->(b)
+and cumulative reward. When two workers backpropagate              WHERE a.fitness_score > b.fitness_score + $m
+through a shared ancestor simultaneously, the visit-count            AND a.is_buggy = false
+                                                                   RETURN a AS chosen, b AS rejected
+increment must be atomic. Stale UCB scores may cause sub-
+optimal frontier selection but do not compromise correctness.         GRPO: database as episode buffer [42]. Rolling out a
+In practice, the workload tolerates eventual consistency on        complete search tree can take hours to days; generating mul-
+statistics while requiring durability on node insertion—a          tiple trees from the same starting point for group-relative
+mixed isolation profile that does not map cleanly to standard      training is prohibitively slow. The database eliminates this
+OLTP levels. Understanding the right consistency semantics         bottleneck. We sample a state from the persistent buffer,
+for concurrent tree search is an open research question.           generate 𝑁 child candidates (a GRPO group), evaluate them
+                                                                   in the target environment, compute group-normalized ad-
+   Multi-version state and time travel. Nodes are inserted
+                                                                   vantages, train using the policy gradient, and append one
+once and never deleted, but some fields are mutated in place:
+                                                                   canonical node back. Multi-turn rollout cost collapses to
+backpropagation rewrites visit counts and rewards along the
+                                                                   single-step expansions. Advantages are computed via SQL
+ancestor chain, and evolution reassigns a node’s island. To
+                                                                   window functions over same-depth or same-generation co-
+avoid discarding history, Trellis captures every field-level
+                                                                   horts.
+mutation in a lightweight change log keyed by a logical step
+number, the evaluation order rather than wall-clock time, so          Value models over experience-graph states. The same
+that progress is comparable across machines and runs. This         store defines the state space for learned control of the outer
+turns the experience graph into a multi-version object: any        loop. A value model can estimate the expected gain from
+past state is reconstructible by replaying the log backward        expanding a given frontier node, reusing a prior subtree,
+to a target step.                                                  merging two branches, or invoking a verifier—conditioning
+   Multi-version state is not merely an observability              not on a token sequence but on graph features the database
+convenience—it is a correctness requirement for training.          already holds: ancestor rewards, sibling diversity, failure
+The statistics an agent acted on—the visit counts and UCB          signatures, artifact diffs, retrieval scores, visit counts, and
+scores that drove a frontier choice—are exactly the fields         remaining budget. The experience graph is therefore not
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                                                                          Liao, et al.
+
+                                                                                                            Baseline (no memory)              CS p=0.1              CS p=0.5
+only a replay buffer for policy training; it is the structured
+state over which future inference-time search policies are
+                                                                                                  1.5
+themselves learned.
+
+
+
+                                                                  best fitness so far (speedup)
+                                                                                                                           memory clears 1.2× by ~step 5
+                                                                                                                                                                              1.2× threshold
+                                                                                                  1.2
+                                                                                                                                                               baseline: step 51
+   The closed loop. Production exploration populates mem-                                         1.0
+
+ory. Memory improves retrieval and frontier selection. The
+resulting traces train future models via SFT/DPO/GRPO [16,                                        0.5
+
+39, 42]. Improved models produce higher-quality attempts.
+The flywheel compounds: more users → more states →                                                 0
+                                                                                                        1        2          5         10         20       30        50           75       100
+better RL → better models → better exploration → higher-                                                                                   evaluated step
+quality states. Every production session is simultaneously a
+serving operation and a training-data generation pipeline—        Figure 3. Best fitness over evaluated steps. Both memory
+because both are views over the same governed store. This         settings clear 1.2× within ∼5 steps; the no-memory base-
+coupling raises a governance question: when a source node is      line takes 51 steps—a 10× early-convergence improvement.
+retracted or invalidated, the training examples derived from      Memory converges fast but plateaus early; the baseline keeps
+it must be retracted too. The data foundation must propagate      climbing and eventually reaches the single best point (1.49×),
+these retractions through materialized views while respect-       illustrating the exploration–anchoring tradeoff that the in-
+ing access policies that may differ between the source trace      jection policy must manage (Section 7).
+and its derivatives.
+                                                                                                                     Valid (non-buggy)            Buggy — triggers debug-retry
+
+6    Early Measurements
+KernelEvolve [26–28], built on Trellis, optimizes accelera-                                        Baseline                44 valid                      55 buggy                  55%
+
+tor kernels across four hardware platforms (NVIDIA, AMD,
+                                                                                                   CS p=0.1                      65 valid                      34 buggy            34%
+MTIA, CPU). Its data foundation has accumulated a substan-
+tial corpus of experience graphs spanning many tasks and                                           CS p=0.5                           78 valid                           21        21%
+sessions. We report preliminary results across three dimen-
+                                                                                                                0               25               50            75                100
+sions; a fuller evaluation is left to future work.
+
+   Recovery and statelessness. In the prior in-memory ar-         Figure 4. Valid versus buggy nodes per configuration (of
+chitecture, a crashed session lost all progress. With database-   ∼100 each). The baseline wastes 55% of compute on buggy
+native state, any worker resumes from the last committed          nodes; cross-session memory cuts that to 34% (𝑝=0.1) and
+node: recovery is a frontier query rather than checkpoint         21% (𝑝=0.5). Because each buggy node triggers an expensive
+deserialization, with no warm-up and nothing pinned to the        debug-retry loop, this failure reduction drives the 52% token-
+failed machine. In production, sessions that hit infrastructure   cost saving.
+failures resume automatically on another worker with no
+lost nodes—durability we never engineered as a feature but        them cuts tokens per valid node by 52%, even though each
+inherited from putting the state in the database.                 individual step costs the same.
+                                                                     These gains come with a tradeoff the architecture must
+   Cross-session reuse. Cross-session memory embeds each
+                                                                  expose rather than hide. Higher injection makes search more
+task description and node analysis, retrieves semantically
+                                                                  consistent (lower variance, fewer bugs) but more anchored:
+similar prior tasks and nodes, and injects them as reference
+                                                                  at 𝑝=0.5 the agent collapses onto 8 strategy combinations
+context during exploration; the injection rate 𝑝 is a tunable
+                                                                  versus 20 for a cold start, and the single best solution comes
+knob. Holding the model, step budget (100 steps), worker
+                                                                  from no memory (1.49× versus 1.36×). The balanced setting
+count, and greedy search strategy fixed, we compared no
+                                                                  𝑝=0.1 retains most of the convergence win while producing
+memory against 𝑝=0.1 and 𝑝=0.5 over ∼100-node sessions
+                                                                  the most high-quality (≥1.3×) solutions. Memory accelerates
+(Figures 3–4). All figures are averaged over three indepen-
+                                                                  and stabilizes search, but unbounded reuse suppresses the
+dent sessions per configuration to control for the high vari-
+                                                                  diversity that finds the best answers—making the injection
+ance of LLM sampling, and the trends reported below were
+                                                                  policy a first-class tuning question for any memory-backed
+consistent across runs. Memory cuts the buggy-node rate
+                                                                  agent (Section 7).
+from 55% to 34% (𝑝=0.1) and 21% (𝑝=0.5), raises the frac-
+tion of valid nodes meeting the baseline speedup from 79.5%          Training data without re-rollout. Every production ses-
+to 90.8% and 100%, and reaches a 1.2× speedup within ∼5           sion leaves behind complete multi-turn trajectories, so train-
+steps versus 51 for a cold start—a 10× acceleration. Because      ing data—SFT paths, DPO sibling pairs, GRPO cohorts—is
+buggy nodes trigger expensive debug-retry loops, avoiding         extracted as queries over the same store rather than produced
+Experience Graphs: The Data Foundation for Self-Improving Agents               CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands
+
+
+by a separate pipeline (Section 5). The payoff is wall-clock.         Physical design. The workload combines appends, path
+The multi-turn rollout that dominates agentic RL—where             updates, ordered reads, multi-hop traversals, vector similar-
+a single search tree takes hours to days and group-relative        ity, and full scans. No existing physical design—row store,
+methods need many from the same state—collapses into               column store, LSM tree, or graph-native storage—is opti-
+reuse of trajectories the store already holds, plus single-step    mized for this combination [44, 45]. What indexing and lay-
+expansions from a sampled state when fresh samples are             out strategies minimize total cost across all access patterns?
+needed. Every production run is thus simultaneously a serv-
+ing operation and a training-data generator, with full prove-         Governed view maintenance. Training views are materi-
+nance (task, hardware, session, algorithm) attached.               alized from operational state (Section 5). When a source
+                                                                   node is retracted, all derived training examples must be
+                                                                   invalidated—a view-maintenance problem under governance
+7    Beyond Kernels and Research Agenda                            constraints where access policies may differ between the
+                                                                   source trace and its derivatives [14, 37].
+KernelEvolve is one instance of a general pattern, and we
+have already exercised that generality. We retargeted the             Retrieval policy and memory quality. Section 6 showed
+same Trellis foundation from optimizing machine learning           that how much prior memory to inject is a tunable knob
+kernels to validating MTIA silicon hardware—a different ap-        with a sharp tradeoff: more reuse converges faster and fails
+plication use case entirely—by changing only the fitness           less, but anchors the search and suppresses the diversity
+function and the skills. Instead of rewarding speedup, the         that finds the best solutions. This is a retrieval-planning
+agent is incentivized for finding bugs—a mismatch between          and data-quality problem in disguise. What is the right in-
+the silicon simulator and the golden reference scores high         jection policy—fixed, decayed over a session, or chosen per
+while a clean pass scores zero. The skills now describe the in-    query from the selectivity and confidence of the match? How
+struction set architecture (ISA), known errata, and coverage-      should the store score memory quality, detect stale or low-
+guided bug-hunting strategies; cross-session memory tracks         quality entries that would reinforce past mistakes [12], and
+an ISA coverage matrix so each session targets the gaps left       keep retrieval fresh as hardware and workloads drift? Treat-
+by prior ones, and self-evolving search expands a single bug       ing reuse as a cost-based, quality-aware retrieval decision
+into a family across dtypes, shapes, and hardware units. The       rather than a fixed heuristic is an open problem the database
+experience graph, query layer, search orchestration, train-        community is well-positioned to tackle.
+ing views, and observability carried over unchanged—the
+infrastructure is domain-agnostic, and the domain is just a           Bi-temporal memory. The change log of Section 4 ver-
+skill. We have exercised this silicon-validation configuration     sions exploration state along a single axis—evaluation order—
+end to end. Drug discovery, chip floorplanning, compiler           which already supports time travel over a search. Full bi-
+optimization, and automated scientific research [7, 36] share      temporal semantics add a second axis, separating valid time
+the same structure—tree-structured exploration traces with         (when a fact was true) from transaction time (when the
+objective rewards.                                                 entry was committed), unlocking late-arriving corrections,
+                                                                   memory-drift detection across environment changes, and
+                                                                   distillation audit (“what did the agent know at time 𝑇 , and
+   Query planning for multi-modal composition. Vector-             was it still true?”). Lifting versioning from a field-level log to
+seeded graph expansion (Section 4) composes vector similar-        first-class temporal predicates in the query layer—and plan-
+ity, relational joins, and variable-length graph traversal in a    ning queries that range over both axes—is an open problem.
+single logical request. No existing query planner has a cost
+model for this composition: the vector index’s selectivity            Learned control over experience graphs. A database of
+determines the join fan-out, which determines the traversal        experience graphs turns the outer loop from a fixed search
+cost, but no system maintains cross-modal statistics [2, 21].      heuristic into a policy learned from accumulated experience.
+Building a planner that reasons across these three stages is       Value models over graph state (Section 5) can predict which
+an open problem.                                                   frontier node, retrieved subtree, verifier call, or repair is
+                                                                   worth the next unit of compute, making the database the
+                                                                   state representation for inference-time control. What graph
+   Consistency for concurrent tree search. As discussed            features, freshness guarantees, and training objectives such
+in Section 4, MCTS backpropagation is a multi-hop read-            a controller needs—and how to serve its predictions within
+then-write that tolerates eventual consistency on statistics       the agent loop’s latency budget—are open questions.
+but requires durability on node insertion. Formalizing the
+right isolation level for this mixed profile—and proving that        From parallel search to scientific societies. The concur-
+relaxed consistency does not degrade search quality beyond         rent search model in Section 4 treats agents as independent
+a bounded factor—is a question the database community is           workers over a shared tree. A more ambitious design orga-
+well-equipped to answer.                                           nizes agents as a scientific society: ideator agents propose
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                  Liao, et al.
+
+
+hypotheses, builder agents implement them, reviewer agents          do not. These are offline, sidecar registries that log metrics
+critique results and request replications, and distiller agents     about runs after the fact. They do not serve the online,
+consolidate lessons into reusable memory. Each institution          sub-50 ms frontier queries that drive an agent’s next step;
+in this society—a leaderboard that separates score from con-        they do not model the mutable search statistics (visit counts,
+fidence, an idea store whose claims carry state machines            UCB scores) that search rewrites in place; they offer no
+(proposed → tested → replicated → distilled), a structured          as-of reconstruction of the state an agent acted on; and they
+forum for evidence-linked peer review, and a scheduler that         provide no graph-native ancestor/sibling traversal fused
+converts disagreement into compute allocation—maps to               with vector retrieval. Trellis is the operational store that
+database tables, state transitions, and queries. The data foun-     drives search and materializes training views from the same
+dation becomes the institutional infrastructure for collective      state, not a record of experiments past.
+intelligence. Designing the transactional semantics, consis-           Agent orchestration. Meta-harness systems such as Om-
+tency models, and governance policies for such multi-agent          nigent [52] lift orchestration above individual harnesses,
+institutions is, we believe, among the most consequential           providing multi-agent composition, policy governance, and
+open problems at the intersection of databases and AI.              real-time collaboration. Sakana Fugu [15] trains an orches-
+                                                                    trator to dynamically compose agentic scaffolds over a pool
+                                                                    of frontier workers, with inter-workflow shared memory
+8    Related Work                                                   and GRPO-based training—demonstrating that multi-agent
+Trellis sits at the intersection of agent memory, recursive self-   coordination increasingly requires persistent, shared state.
+improvement, graph/vector data management, and training-            These systems validate the need for a shared layer above
+data infrastructure.                                                agents but operate at the control plane—session routing, cost
+   Agent memory systems. MemGPT [35] introduced the                 budgets, cross-vendor review. The data plane—how to per-
+OS analogy—paging information between fast (in-context)             sist, query, version, and train from the exploration state these
+and slow (external) memory—establishing that agents need            agents produce—remains unaddressed and is precisely the
+a memory hierarchy, not just a larger window. Trellis takes         gap Trellis fills.
+the complementary database analogy: MemGPT is a trans-                 Graph/vector data management. Graph databases [2]
+port layer; Trellis is the storage engine underneath—how you        and Cypher [14] provide the language of paths and neigh-
+structure, index, query, version, and govern the data that lives    borhoods. Vector indexes [21] provide semantic retrieval.
+outside context. Dedicated agent-memory services such as            The Trellis workload needs both at once, composed with
+Mem0 [8] add structured long-term memory; Graphiti [40]             structured filters, transactional updates, and temporal recon-
+goes further with a temporal knowledge graph that dynami-           struction. Its contribution is not a new graph language or
+cally synthesizes conversational data—the closest prior work        a new vector index, but the composition required by agent
+in spirit, though aimed at enterprise memory rather than            memory.
+RSI experience graphs and without CDC, materialized train-             RL data and temporal databases. Experience replay [29,
+ing views, or a graph-native query layer. Production coding         31], DPO [39], and GRPO [42] motivate the training views.
+agents have moved further still with declarative facts, pro-        The database contribution is provenance and fidelity: exam-
+cedural skills, and episodic transcripts (Section 3), yet these     ples are extracted from the operational store with rewards,
+remain per-agent local files or embedded databases with no          siblings, trajectories, and AS-OF state rather than scraped
+cross-user query and no governance. A recent comprehen-             after the fact. Temporal databases, MVCC, and CDC provide
+sive survey [19] calls for treating memory as a “first-class        the historical lineage for the time-travel design. Trellis ap-
+primitive”—precisely Trellis’s thesis, which the survey moti-       plies those old ideas to a new object: the mutable search state
+vates but does not realize as a database system.                    of a self-improving agent.
+   Recursive self-improvement systems. AlphaE-
+volve [33], FunSearch [41], AIDE [20], AIRA [47], the AI
+Scientist [49], and open frameworks such as OpenEvolve [1]          9   Conclusion
+show that long-horizon exploration can produce valuable             Self-improving agent memory is a database problem. Larger
+results, building on code-generation foundations [7] and            models and longer context windows will not solve it. What
+multi-agent simulation [36]. All keep their traces as appli-        self-improving agents need is a durable, governed data foun-
+cation state—Python objects and JSON checkpoints. Trellis           dation where the experience graph—every artifact, reward,
+treats those traces as the primary database workload.               decision, and causal link—lives as queryable, shared, training-
+   Experiment tracking and ML metadata. Run                         ready state. We design, implement, and demonstrate Trellis
+trackers such as MLflow [51] and ModelDB [48], and                  for long-horizon agentic coding tasks, running in production.
+dataset/metadata catalogs such as Google Goods [17], record         The properties that matter most—crash recovery, horizontal
+runs, hyperparameters, metrics, and artifact lineage, and           scaling, cross-user reuse, and training-view materialization—
+might appear to already cover the experience graph. They            are addressed by an application-specific database design
+Experience Graphs: The Data Foundation for Self-Improving Agents                            CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands
+
+
+rather than engineered as one-off features. But the deeper                     [9] Joel Coburn, Chunqiang Tang, Sameer Abu Asal, Neeraj Agrawal,
+prize is not infrastructure efficiency; it is collective intelli-                  Raviteja Chinta, Harish Dixit, Brian Dodds, Saritha Dwarakapuram,
+gence. Today’s self-improving systems are individual agents                        Amin Firoozshahian, Cao Gao, et al. 2025. Meta’s Second Generation
+                                                                                   AI Chip: Model-Chip Co-Design and Productionization Experiences. In
+searching alone over private trees. The architecture we de-                        Proceedings of the 52nd Annual International Symposium on Computer
+scribe makes it possible for populations of agents to share                        Architecture. 1689–1702.
+structured knowledge, critique each other’s results, and com-                 [10] James C Corbett, Jeffrey Dean, Michael Epstein, Andrew Fikes, Christo-
+pound discoveries across sessions, users, and time. When                           pher Frost, Jeffrey John Furman, Sanjay Ghemawat, Andrey Gubarev,
+the data foundation becomes the institutional infrastructure                       Christopher Heiser, Peter Hochschild, et al. 2013. Spanner: Google’s
+                                                                                   Globally Distributed Database. ACM Transactions on Computer Systems
+for multi-agent scientific societies—with leaderboards, struc-                     (TOCS) 31, 3 (2013), 1–22.
+tured peer review, and governed distillation—the result is                    [11] Benoit Dageville, Thierry Cruanes, Marcin Zukowski, Vadim Antonov,
+not just agents that remember but agents that learn as a                           Artin Avanes, Jon Bock, Jonathan Claybaugh, Daniel Engovatov, Mar-
+community.                                                                         tin Hentschel, Jiansheng Huang, et al. 2016. The snowflake elastic
+   The decades of research in databases have defined clean,                        data warehouse. In Proceedings of the 2016 International Conference on
+                                                                                   Management of Data. 215–226.
+functional interfaces and system architectures for transac-                   [12] Databricks AI Research Team. 2026. Memory Scaling for AI Agents.
+tions, warehousing, streaming, and graphs that power the                           https://www.databricks.com/blog/memory-scaling-ai-agents.
+Internet. Agentic memory is the next wave of workloads,                       [13] Marina Favaro and Jack Clark. 2026. When AI Builds Itself. https://
+demanding new interfaces and database designs, thereby                             www.anthropic.com/institute/recursive-self-improvement. Anthropic
+                                                                                   Institute, 2026.
+shaping the future of AI. Logs made databases reliable; expe-
+                                                                              [14] Nadime Francis, Alastair Green, Paolo Guagliardo, Leonid Libkin, To-
+rience graphs may make agents cumulative.                                          bias Lindaaker, Victor Marsault, Stefan Plantikow, Mats Rydberg, Pe-
+                                                                                   tra Selmer, and Andrés Taylor. 2018. Cypher: An Evolving Query
+Acknowledgments                                                                    Language for Property Graphs. Proceedings of the 2018 International
+We thank Jia Jiunn Ang, Ming Chen, Barry Dong, Amit                                Conference on Management of Data (SIGMOD) (2018), 1433–1445.
+                                                                              [15] Fugu Team, Sakana AI. 2026. Sakana Fugu Technical Report. Technical
+Dutta, Yuanwei Fang, Zacharias Fisches, Vishal Gandhi, Ali-                        Report. June 2026.
+cia Golden, Chanoch Goldfeder, Wei Guo, Samuel Hsia, Ro-                      [16] Daya Guo, Dejian Yang, He Zhang, Junxiao Song, Runxin Zhang,
+hit Jain, Jacob Kahn, Michael Kuchnik, Richard Li, Yiting Li,                      Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, et al. 2025.
+Jimmy Lu, Keyur Muzumdar, Michael Norris, Dmitrii Ped-                             DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Rein-
+                                                                                   forcement Learning. arXiv preprint arXiv:2501.12948.
+chenko, Honghao Qiu, Andrii Rosa, Shiqin Wang, Ruichao
+                                                                              [17] Alon Halevy, Flip Korn, Natalya F. Noy, Christopher Olston, Neoklis
+Xiao, Chao Xie, Yavuz Yetim, Hongtao Yu, and Roger Zheng                           Polyzotis, Sudip Roy, and Steven Euijong Whang. 2016. Goods: Or-
+for discussions and feedback that helped shape the systems                         ganizing Google’s Datasets. In Proceedings of the 2016 International
+agenda in this paper.                                                              Conference on Management of Data (SIGMOD). ACM, New York, NY,
+                                                                                   USA, 795–806.
+References                                                                    [18] Joseph M. Hellerstein, Jose Faleiro, Joseph E. Gonzalez, Johann Schleier-
+                                                                                   Smith, Vikram Sreekanti, Alexey Tumanov, and Chenggang Wu. 2019.
+ [1] Algorithmic Superintelligence Inc. 2025.         OpenEvolve: Open-            Serverless Computing: One Step Forward, Two Steps Back. In Confer-
+     Source Evolutionary Coding Agent.                 https://github.com/         ence on Innovative Data Systems Research (CIDR).
+     algorithmicsuperintelligence/openevolve.                                 [19] Yuyang Hu, Shichun Liu, Yanwei Yue, Guibin Zhang, Boyang Liu, et al.
+ [2] Renzo Angles, Marcelo Arenas, Pablo Barceló, Aidan Hogan, Juan
+                                                                                   2025. Memory in the Age of AI Agents: A Survey—Forms, Functions
+     Reutter, and Domagoj Vrgoč. 2017. An Introduction to Graph Data               and Dynamics. arXiv preprint arXiv:2512.13564 (2025).
+     Management. Springer (2017).                                             [20] Zhengyao Jiang, Dominik Schmidt, Dhruv Srikanth, Dixing Xu, Ian
+ [3] Anthropic. 2025. Claude Code: An Agentic Coding Tool. https://docs.           Kaplan, Deniss Jacenko, and Yuxiang Wu. 2025. AIDE: The Machine
+     anthropic.com/en/docs/claude-code.                                            Learning Engineer Agent. arXiv preprint arXiv:2502.13138 (2025).
+ [4] Anthropic. 2025. Project Glasswing: Securing Critical Software for the   [21] Jeff Johnson, Matthijs Douze, and Hervé Jégou. 2019. Billion-Scale
+     AI Era. https://www.anthropic.com/glasswing.                                  Similarity Search with GPUs. IEEE Transactions on Big Data 7, 3,
+ [5] Cameron B. Browne, Edward Powley, Daniel Whitehouse, Simon M.                 535–547.
+     Lucas, Peter I. Cowling, Philipp Rohlfshagen, Stephen Tavener, Diego     [22] Andrej Karpathy. 2026. autoresearch. https://github.com/karpathy/
+     Perez, Spyridon Samothrakis, and Simon Colton. 2012. A Survey of              autoresearch.
+     Monte Carlo Tree Search Methods. IEEE Transactions on Computational      [23] Levente Kocsis and Csaba Szepesvári. 2006. Bandit Based Monte-
+     Intelligence and AI in Games 4, 1 (2012), 1–43.                               Carlo Planning. In European Conference on Machine Learning. Springer,
+ [6] Nicholas Carlini. 2026. Building a C Compiler with a Team of Par-             282–293.
+     allel Claudes. https://www.anthropic.com/engineering/building-c-         [24] Gang Liao and Daniel J. Abadi. 2023. FileScale: Fast and Elastic Meta-
+     compiler.                                                                     data Management for Distributed File Systems. In Proceedings of the
+ [7] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde              2023 ACM Symposium on Cloud Computing (SoCC). 459–474.
+     de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas     [25] Gang Liao, Amol Deshpande, and Daniel J Abadi. 2023. Flock: A
+     Joseph, Greg Brockman, et al. 2021. Evaluating Large Language Models          Low-Cost Streaming Query Engine on FaaS Platforms. arXiv preprint
+     Trained on Code. arXiv preprint arXiv:2107.03374 (2021).                      arXiv:2312.16735 (2023).
+ [8] Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and           [26] Gang Liao, Hongsen Qin, Ying Wang, Alicia Golden, Michael Kuchnik,
+     Deshraj Yadav. 2025. Mem0: Building Production-Ready AI Agents                Yavuz Yetim, Jia Jiunn Ang, Chunli Fu, Yihan He, Samuel Hsia, Zewei
+     with Scalable Long-Term Memory. arXiv preprint arXiv:2504.19413               Jiang, Dianshi Li, Liyuan Li, Uladzimir Pashkevich, Varna Puvvada,
+     (2025).
+CIDR’27, January 19-22, 2027, Amsterdam, The Netherlands                                                                                      Liao, et al.
+
+
+     Feng Shi, Matt Steiner, Ruichao Xiao, Nathan Yan, Xiayu Yu, Zhou          [40] Preston Rasmussen, Pavlo Paliychuk, Travis Beauvais, Jack Ryan, and
+     Fang, Roman Levenstein, Kunming Ho, Haishan Zhu, Alec Hammond,                 Daniel Chalef. 2025. Graphiti: Building Real-Time Knowledge Graphs
+     Richard Li, Ajit Mathews, Kaustubh Gondkar, Abdul Zainul-Abedin,               for AI Agents. arXiv preprint arXiv:2501.13956 (2025).
+     Ketan Singh, Hongtao Yu, Wenyuan Chi, Barney Huang, Sean Zhang,           [41] Bernardino Romera-Paredes, Mohammadamin Barekatain, Alexander
+     Noah Weller, Zach Marine, Wyatt Cook, Carole-Jean Wu, and Gaoxiang             Novikov, Matej Balog, M. Pawan Kumar, Emilien Dupont, Francisco
+     Liu. 2026. KernelEvolve: Scaling Agentic Kernel Coding for Heteroge-           J. R. Ruiz, Kai Olav Ellefsen, et al. 2024. Mathematical Discoveries
+     neous AI Accelerators at Meta. arXiv preprint arXiv:2512.23236 (2026).         from Program Search with Large Language Models. In Nature, Vol. 625.
+     Meta Technical Report.                                                         468–475.
+[27] Gang Liao, Hongsen Qin, Ying Wang, Alicia Golden, Michael Kuch-           [42] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song,
+     nik, Yavuz Yetim, Ruichao Xiao, Jia Jiunn Ang, Chunli Fu, Yihan He,            Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo. 2024. DeepSeekMath:
+     Samuel Hsia, Zewei Jiang, Roman Levenstein, Dianshi Li, Liyuan Li,             Pushing the Limits of Mathematical Reasoning in Open Language
+     Ajit Mathews, Varna Puvvada, Feng Shi, Nathan Yan, Xiayu Yu, Uladz-            Models. arXiv preprint arXiv:2402.03300 (2024).
+     imir Pashkevich, Matt Steiner, Carole-Jean Wu, and Gaoxiang Liu.          [43] David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis
+     2026. KernelEvolve: Scaling Agentic Kernel Coding for Heteroge-                Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker,
+     neous AI Accelerators at Meta. In Proceedings of the 52nd International        Matthew Lai, Adrian Bolton, et al. 2017. Mastering the Game of Go
+     Symposium on Computer Architecture (ISCA).                                     Without Human Knowledge. Nature 550, 7676 (2017), 354–359.
+[28] Gang Liao, Yavuz Yetim, Ruichao Xiao, Zewei Jiang, Raghav Boinepalli,     [44] Michael Stonebraker, Daniel J. Abadi, Adam Batkin, Xuedong Chen,
+     Sheela Yadawad, Liyuan Li, Nathan Yan, Ajit Mathews, Chunqiang                 Mitch Cherniack, Miguel Ferreira, Edmond Lau, Amerson Lin, Sam
+     Tang, Carole-Jean Wu, and Gaoxiang Liu. 2026. KernelEvolve:                    Madden, Elizabeth O’Neil, Pat O’Neil, Alex Rasin, Nga Tran, and Stan
+     How Meta’s Ranking Engineer Agent Optimizes AI Infrastructure.                 Zdonik. 2005. C-Store: A Column-Oriented DBMS. In Proceedings
+     https://engineering.fb.com/2026/04/02/developer-tools/kernelevolve-            of the 31st International Conference on Very Large Data Bases (VLDB).
+     how-metas-ranking-engineer-agent-optimizes-ai-infrastructure/.                 553–564.
+[29] Long-Ji Lin. 1992. Self-Improving Reactive Agents Based on Rein-          [45] Michael Stonebraker and Ugur Çetintemel. 2005. “One Size Fits All”:
+     forcement Learning, Planning and Teaching. Machine Learning 8, 3–4             An Idea Whose Time Has Come and Gone. Proceedings of the 21st
+     (1992), 293–321.                                                               International Conference on Data Engineering (ICDE) (2005), 2–11.
+[30] Meta Platforms. 2025. Axiom: A Cost-Based Optimizer for Multi-Modal       [46] John Sviokla. 2026. The Most Important Idea in AI: Recursive Self-
+     Query Planning. https://github.com/facebookincubator/axiom. Open               Improvement (RSI). https://www.forbes.com/sites/johnsviokla/2026/
+     source.                                                                        03/16/the-most-important-idea-in-ai-recursive-self-improvement-
+[31] Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A. Rusu,               rsi/. Forbes, March 2026.
+     Joel Veness, Marc G. Bellemare, Alex Graves, Martin Riedmiller, An-       [47] Edan Toledo, Karen Hambardzumyan, Martin Josifoski, Rishi Hazra,
+     dreas K. Fidjeland, Georg Ostrovski, et al. 2015. Human-Level Control          Nicolas Baldwin, Alexis Audran-Reiss, Michael Kuchnik, Despoina
+     Through Deep Reinforcement Learning. Nature 518, 7540 (2015), 529–             Magka, Minqi Jiang, Alisia Maria Lupidi, Andrei Lupu, Roberta
+     533.                                                                           Raileanu, Kelvin Niu, Tatiana Shavrina, Jean-Christophe Gagnon-
+[32] Nous Research. 2025.        Hermes Agent.         https://hermes-agent.        Audet, Michael Shvartsman, Shagun Sodhani, Alexander H. Miller,
+     nousresearch.com/docs.                                                         Abhishek Charnalia, Derek Dunfield, Carole-Jean Wu, Pontus Stene-
+[33] Alexander Novikov, Ngân Vũ, Marvin Eisenberger, Emilien Dupont,               torp, Nicola Cancedda, Jakob Nicolaus Foerster, and Yoram Bachrach.
+     Po-Sen Huang, Adam Zsolt Wagner, Sergey Shirobokov, Borislav Ko-               2025. AI Research Agents for Machine Learning: Search, Exploration,
+     zlovskii, Francisco J. R. Ruiz, Abbas Mehrabian, M. Pawan Kumar,               and Generalization in MLE-bench. arXiv preprint arXiv:2507.02554
+     Abigail See, Swarat Chaudhuri, George Holland, Alex Davies, Sebas-             (2025).
+     tian Nowozin, Pushmeet Kohli, and Matej Balog. 2025. AlphaEvolve: A       [48] Manasi Vartak, Harihar Subramanyam, Wei-En Lee, Srinidhi
+     Coding Agent for Scientific and Algorithmic Discovery. arXiv preprint          Viswanathan, Saadiyah Husnoo, Samuel Madden, and Matei Zaharia.
+     arXiv:2506.13131 (2025).                                                       2016. ModelDB: A System for Machine Learning Model Management.
+[34] OpenAI. 2025. Codex: A Cloud-Based Software Engineering Agent.                 In Workshop on Human-In-the-Loop Data Analytics (HILDA). ACM,
+     https://openai.com/index/introducing-codex/.                                   New York, NY, USA.
+[35] Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G.         [49] Yutaro Yamada, Robert Tjarko Lange, Cong Lu, Shengran Hu, Chris
+     Patil, Ion Stoica, and Joseph E. Gonzalez. 2023. MemGPT: Towards               Lu, Jakob Foerster, Jeff Clune, and David Ha. 2025. The AI Scientist-
+     LLMs as Operating Systems. arXiv preprint arXiv:2310.08560 (2023).             v2: Workshop-Level Automated Scientific Discovery via Agentic Tree
+[36] Joon Sung Park, Joseph C. O’Brien, Carrie J. Cai, Meredith Ringel              Search. arXiv preprint arXiv:2504.08066 (2025).
+     Morris, Percy Liang, and Michael S. Bernstein. 2023. Generative Agents:   [50] Justin Young. 2025.         Effective Harnesses for Long-Running
+     Interactive Simulacra of Human Behavior. In Proceedings of the 36th            Agents. https://www.anthropic.com/engineering/effective-harnesses-
+     Annual ACM Symposium on User Interface Software and Technology                 for-long-running-agents. Anthropic Engineering, November 2025.
+     (UIST).                                                                   [51] Matei Zaharia, Andrew Chen, Aaron Davidson, Ali Ghodsi, Sue Ann
+[37] Pedro Pedreira, Orri Erling, Masha Basmanova, Kevin Wilfong, Laith             Hong, Andy Konwinski, Siddharth Murching, Tomas Nykodym, Paul
+     Sakka, Krishna Pai, Wei He, and Biswapesh Chattopadhyay. 2022.                 Ogilvie, Mani Parkhe, Fen Xie, and Corey Zumar. 2018. Accelerating
+     Velox: Meta’s Unified Execution Engine. Proceedings of the VLDB                the Machine Learning Lifecycle with MLflow. IEEE Data Engineering
+     Endowment 15, 12 (2022), 3372–3384.                                            Bulletin 41, 4 (2018), 39–45.
+[38] Alberto Pepe, Chien-Yu Lin, Despoina Magka, Bilge Acun, Yannan Nel-       [52] Matei Zaharia, Kasey Uhlenhuth, and Corey Zumar. 2026. Intro-
+     lie Wu, Anton Protopopov, Carole-Jean Wu, and Yoram Bachrach.                  ducing Omnigent: A Meta-Harness to Combine, Control and Share
+     2026. Agentic Discovery of Neural Architectures: AIRA-Compose and              Your Agents. https://www.databricks.com/blog/introducing-omnigent.
+     AIRA-Design. arXiv preprint arXiv:2605.15871 (2026).                           Databricks, June 2026.
+[39] Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christo-    [53] Zhipu AI. 2026. GLM-5.2: Built for Long-Horizon Tasks. https://z.ai/
+     pher D. Manning, and Chelsea Finn. 2023. Direct Preference Optimiza-           blog/glm-5.2. June 2026.
+     tion: Your Language Model Is Secretly a Reward Model. In Advances
+     in Neural Information Processing Systems.
+

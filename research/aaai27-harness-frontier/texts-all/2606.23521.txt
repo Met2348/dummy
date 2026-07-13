@@ -1,0 +1,1158 @@
+                                                 Concordia: JIT-Compiled Persistent-Kernel
+                                               Checkpointing for Fault-Tolerant LLM Inference
+                                                       Yuhang Gan                                 Yiwei Yang                                      Yuyi Li
+                                             University of California Santa Cruz                UC Santa Cruz                         University of California, Davis
+                                                            USA                                      USA                                           USA
+                                                     ygan11@ucsc.edu                          yyang363@ucsc.edu                            nylli@ucdavis.edu
+
+                                                       Xiangyu Gao                              Yichen Wang                                     Rain Jiang
+                                                 University of Washington                         ByteDance                                      ByteDance
+                                                           USA                                       USA                                            USA
+
+
+
+
+arXiv:2606.23521v1 [cs.DC] 22 Jun 2026
+                                               xiangyug@cs.washington.edu                yichen.wang@bytedance.com                      rain.jiang@bytedance.com
+
+                                                      Xiaoning Ding                              Andi Quinn                                    Chen Qian
+                                                         ByteDance                    University of California Santa Cruz          University of California Santa Cruz
+                                                            USA                                      USA                                          USA
+                                               xiaoning.ding@bytedance.com                    aquinn1@ucsc.edu                             cqian12@ucsc.edu
+
+                                         Abstract                                                             log record. Concordia exploits the structure of LLM infer-
+                                         Long-running LLM agents keep valuable state resident on              ence without requiring the application to log every KV up-
+                                         GPUs: KV caches, request schedulers, communication state,            date: base weights remain static, while KV-cache and adapter
+                                         and sometimes online adapters. Losing this state after a GPU         pages change sparsely and can be detected on the GPU at
+                                         or communicator failure can discard minutes to hours of              HBM bandwidth. On RTX PRO 6000 Blackwell, GPU-side
+                                         work, yet existing recovery mechanisms either restart the            delta checkpointing is up to 219× faster than CPU-side page
+                                         whole serving stack or require application-specific check-           scanning, per-boundary checkpoint triggers avoid extra ker-
+                                         point logic inside every attention and runtime component.            nel launches, and a two-GPU recovery prototype restores
+                                         This paper argues that fault tolerance for such workloads            service in about 1.5 s rather than restarting NCCL and reload-
+                                         needs a GPU-resident execution context: checkpoint hooks             ing the model.
+                                         must run at device synchronization points, observe binary            ACM Reference Format:
+                                         kernels that frameworks and libraries actually execute, and          Yuhang Gan, Yiwei Yang, Yuyi Li, Xiangyu Gao, Yichen Wang, Rain
+                                         recover without putting the host CPU on the critical path.           Jiang, Xiaoning Ding, Andi Quinn, and Chen Qian. 2026. Concordia:
+                                            We present Concordia, a runtime that uses a device-resident       JIT-Compiled Persistent-Kernel Checkpointing for Fault-Tolerant
+                                         persistent kernel as the substrate for fault-tolerant LLM in-        LLM Inference. In . ACM, New York, NY, USA, 16 pages. https:
+                                         ference. Concordia interposes on GPU module loading and              //doi.org/10.1145/nnnnnnn.nnnnnnn
+                                         supports PTX- and SASS-level instrumentation, allowing
+                                         checkpoint and pause hooks to be inserted below framework
+                                                                                                              1   Introduction
+                                         code and library boundaries. For each registered LLM state re-
+                                         gion, Concordia JIT-compiles a specialized delta-checkpoint          Large Language Model (LLM) serving is moving from short,
+                                         handler—for example, a KV-block scanner, adapter-page scan-          stateless requests to long-running agents that maintain large
+                                         ner, or recovery applier—and hot-swaps it into the persistent        GPU-resident state across many turns, tool calls, and some-
+                                         kernel’s operator table. The persistent kernel consumes a            times online adaptation [4, 7, 19]. For these workloads, fault
+                                         lock-free ring buffer of compute, checkpoint, append-log,            tolerance is no longer a background availability feature.
+                                         and recovery tasks, so the same always-on executor triggers          A failed GPU can destroy an active KV cache, scheduler
+                                         dirty-page detection, stages deltas, and appends committed           state, in-flight collective, and adapter update accumulated
+                                         records to a CPU-visible log in CXL memory or host DRAM.             over a long session. Restarting the process, reloading model
+                                            Concordia assumes a standard fail-stop model in which             weights, and replaying the conversation is too slow, and of-
+                                         application kernels, GPU ranks, or communicators may fail,           ten semantically impossible once tool calls have affected the
+                                         while the small persistent checkpoint worker is the trusted          outside world.
+                                         control loop until the device is declared lost; if the device           The obvious alternative is application-specific checkpoint-
+                                         disappears, recovery uses the last committed append-only             ing. For LLM inference, the dominant changing state is well
+                                                                                                              structured: each decoded token appends KV entries, while
+                                                                                                              base weights are static and LoRA adapters mutate only a
+                                                                                                              small parameter subset. A hand-written serving engine could
+                                                                                                          1
+log those KV writes directly. This is an important baseline,         Concordia persists the resulting deltas as an append-only
+but it is not a complete systems substrate. Modern serving           recovery log in CPU-visible CXL memory or host DRAM.
+stacks combine PagedAttention allocators [20], fused atten-          The design is analogous to Redis AOF: every committed
+tion libraries, generated Triton/CUDA kernels, NCCL col-             state mutation is appended to a sequential log, and periodic
+lectives, framework graph compilers, and vendor libraries.           compaction rewrites the log into a smaller base snapshot
+The recovery contract crosses module and binary bound-               plus recent deltas. Dispatch acceleration and JIT amortiza-
+aries: it must know when device work is quiescent, which             tion are consequences of the same persistent context, not
+physical cache blocks have changed, whether a collective             independent claims.
+can be safely bypassed, and where execution can resume.                 Concordia assumes the persistent checkpoint worker is a
+Re-implementing this contract separately inside every frame-         trusted control loop. It may observe failures in application
+work path is brittle.                                                kernels, GPU ranks, or NCCL communicators; it is not de-
+   Concordia takes a different position: fault tolerance for         signed to recover from an independent software crash of the
+long-running LLM inference should be implemented below               persistent worker itself. If the whole device is lost, recovery
+the framework, at the GPU binary/runtime boundary. This              starts from the last committed AOF record in CXL/DRAM
+makes the central technical problem different from tradi-            on a replacement GPU.
+tional LLVM or x86 instrumentation. GPU kernels execute                 This framing also clarifies what Concordia does not claim.
+under SIMT semantics, synchronize at CTA and collective              For a static single-model decode benchmark, a carefully en-
+boundaries, use device memory allocators whose physical              gineered CUDA Graph path may outperform eager PyTorch
+layout is managed by the serving runtime, and are launched           and can be used alongside Concordia. For a serving engine
+through a host driver path that may itself be stalled during         willing to modify every attention kernel and allocator, ex-
+recovery. Instrumentation must therefore work on PTX and             plicit KV logging can reduce checkpoint data movement fur-
+SASS kernels that the framework actually loads, while the            ther than transparent page tracking. Concordia targets the
+checkpoint executor must already be resident on the GPU              harder deployment point: unmodified or partially modified
+before a failure occurs.                                             GPU binaries, dynamic serving paths, and failure recovery
+   The core mechanism in Concordia is a device-resident              across framework/library boundaries.
+persistent kernel. It runs for the lifetime of an LLM session,          In summary, this paper makes the following contributions:
+polls a lock-free ring buffer in host-mapped memory, and                 • We identify persistent-kernel execution as the missing
+executes compute, checkpoint, communication, and recov-                     substrate for transparent LLM fault tolerance: without
+ery tasks without requiring a fresh host-launched CUDA                      a live device-side executor, checkpointing and recovery
+kernel. This persistent kernel is not introduced primarily as               fall back to host launches, CPU page scans, and full
+a faster replacement for CUDA Graphs on static inference.                   communicator restarts.
+CUDA Graphs remain effective for stable decode regions                   • We design Concordia, a GPU runtime that combines
+and are complementary to Concordia. The reason Concordia                    PTX/SASS instrumentation, a lock-free persistent ex-
+needs persistence is fault tolerance: checkpoint hooks need                 ecutor, JIT-compiled GPU-side delta checkpoint han-
+a live device-side executor at NCCL boundaries; dirty-page                  dlers, and append-only CXL/DRAM recovery logging
+detection needs to scan GPU memory at HBM bandwidth;                        under one recovery contract.
+and recovery needs a control path that does not depend on                • We show how Concordia exploits LLM state structure
+rebuilding the failed communicator before any GPU code                      without requiring application-specific KV logging: im-
+can run.                                                                    mutable weight regions, mutable KV/cache pages, and
+   The persistent executor enables three mechanisms that are                adapter pages are registered and diffed on the GPU at
+useful only when co-designed. First, Concordia interposes                   HBM bandwidth.
+on GPU module loading and instruments PTX/SASS code                      • We evaluate Concordia on Blackwell GPUs and hetero-
+to insert cooperative pause and checkpoint hooks at kernel                  geneous targets, showing up to 219× faster delta check-
+and collective boundaries. Second, Concordia JIT-compiles                   pointing than CPU-side page scanning, sub-microsecond
+checkpoint handlers for the registered memory layout of                     checkpoint trigger submission, low persistent-kernel
+each workload: a PagedAttention KV arena receives a block-                  SM footprint, and second-scale recovery in a two-GPU
+table-aware scanner, LoRA adapters receive dense page scan-                 prototype.
+ners, and opaque mutable buffers receive shadow-compare
+scanners. These handlers are hot-swapped into the persis-
+tent kernel’s operator table and invoked as ring-buffer tasks.       2   Background and Motivation
+This is transparent to the application while still exploiting        Concordia is motivated by a fault-tolerance problem rather
+LLM structure: base weights are registered as immutable              than by launch overhead alone. Long-running LLM inference
+regions, KV/cache allocators register their physical blocks,         keeps three classes of state on GPUs: (1) immutable model
+and adapter/optimizer regions are tracked separately. Third,         weights, (2) append-heavy KV-cache and scheduler state,
+                                                                 2
+                                                                                                          (a) Save latency (1 dirty page / 4 KB)                                     (b) Cost breakdown
+and (3) small mutable regions such as LoRA adapters and                                                      CPU-side (DtoH all + CPU diff)                                  DtoH (PCIe)
+                                                                                                                                                                                                          96%
+                                                                                                                                                                                                          CPU
+                                                                                                    100      GPU-side (GPU diff + DtoH dirty)                        100     CPU page diff
+                                                                                                                                                                                                96%
+                                                                                                                                                                                                CPU
+optimizer state. The first class is large but rarely changes; the
+
+
+
+                                                                        Checkpoint save time (ms)
+                                                                                                                                                                             GPU diff (HBM)
+                                                                                                                                                                                         96%
+                                                                                                                                                                                         CPU
+                                                                                                                                                                             DtoH dirty only
+                                                                                                                                                                           95%
+second and third classes change frequently and determine                                            10                                                               10    CPU
+
+
+                                                                                                                                                         Time (ms)
+whether a session can resume after a failure. The system                                             1                                                                1
+                                                                                                                                                  197x
+question is where this state should be observed and check-                                                                               171x
+                                                                                                             85x           219x
+pointed.                                                                                             0                                                                0
+
+                                                                                                     0                                                                0
+2.1   Why Application-Level KV Logging Is Not                                                             16 MB         50 MB         128 MB    256 MB                     16 MB        50 MB   128 MB    256 MB
+
+      Enough
+                                                                           Figure 1. Motivating experiment on RTX PRO 6000 Black-
+For a single attention implementation, the most efficient
+                                                                           well. (a) Checkpoint save latency for a single dirty page
+checkpoint is clear: record the KV slice appended by each
+                                                                           (4 KB), simulating a sparse KV-cache update. CPU-side delta
+decoded token and replay it during recovery. Concordia does
+                                                                           checkpointing transfers and scans the full region; GPU-side
+not dispute this. The difficulty is that production serving
+                                                                           delta checkpointing scans at HBM bandwidth and transfers
+stacks do not expose one uniform KV write path. Page-
+                                                                           only dirty pages. (b) Cost breakdown: host page comparison
+dAttention [20] maps logical tokens onto dynamically al-
+                                                                           dominates CPU-side transparent checkpointing, while GPU-
+located physical cache blocks; fused attention kernels may
+                                                                           side diffing is bounded by HBM bandwidth.
+update multiple cache regions; LoRA or test-time adapta-
+tion changes separate parameter pages; and communication
+libraries mutate collective buffers outside the model code.
+                                                                            2.3                           Why Append Deltas to CXL or DRAM
+An application-level logger must be threaded through all of
+these paths and kept consistent with every generated kernel                 Once dirty state is discovered on the GPU, the recovery
+and vendor library version.                                                 target should not be another GPU-only shadow copy. HBM
+   Concordia instead uses page-level tracking as a transpar-                is scarce, and a failed GPU may take its local memory with
+ent recovery contract. The serving runtime can still provide                it. Concordia instead treats deltas as a sequential recovery
+semantic hints, such as registering PagedAttention phys-                    stream, similar to an append-only file (AOF) in Redis. Each
+ical KV blocks and marking base weights immutable, but                      checkpoint boundary appends a compact record containing
+correctness does not depend on hand-logging every token                     a region ID, version, dirty page list, payload, and commit
+update. This is the reason Concordia instruments GPU bina-                  marker to CPU-visible storage. The natural targets are host
+ries rather than only compiler IR from the application source:              DRAM and CXL memory pools [9], which provide byte-
+the relevant writes may occur in PTX/SASS kernels emitted                   addressable capacity close enough to the GPU node to serve
+by Triton, NVRTC, vendor libraries, or framework code.                      as a low-latency recovery log.
+                                                                                This log has two advantages over periodic full snapshots.
+2.2   Why the Checkpoint Executor Must Be                                   First, it matches the mutation pattern of LLM inference: KV-
+      Persistent                                                            cache and adapter updates are append-heavy and sparse.
+Host-mediated checkpointing has two costs. First, the host                  Second, it separates durability from HBM capacity. Recent
+must launch the checkpoint kernel or copy operation at every                records can stay in DRAM/CXL for fast restart, while a back-
+checkpoint boundary. This overhead is small for occasional                  ground compactor periodically rewrites the log into a consol-
+snapshots, but it matters when checkpoints are tied to de-                  idated base snapshot plus a short suffix of deltas. Recovery
+code or NCCL boundaries. Second, if dirty-page detection                    replays the latest base snapshot and AOF suffix onto a re-
+runs on the CPU, the host must either copy and scan large                   placement GPU.
+GPU regions or rely on application-specific logs. The for-
+mer wastes bandwidth and CPU time; the latter gives up                      2.4                           Motivating Experiment: Host-Side Dirty
+transparency.                                                                                             Detection
+   A persistent GPU executor changes the control path. Once                We quantify the cost of host-side dirty detection because
+launched, it can receive a checkpoint task through a ring                  it is the operation Concordia moves most directly into the
+buffer, scan registered GPU regions at HBM bandwidth, stage                persistent GPU executor. The experiment simulates a per-
+dirty pages, and update metadata without a new CUDA                        token KV-cache update: a single contiguous 4 KB page is
+launch. It also remains available while the host is handling               modified in a GPU memory region of 16–256 MB. This is
+agent orchestration or while a communicator is being re-                   intentionally a page-level transparent checkpoint, not an
+paired. This is different from CUDA Graphs [6, 25]. Graphs                 application-specific KV logger.
+reduce launch overhead for replayable DAGs and are useful                      CPU-full copies the entire GPU region to pinned host
+for stable decode regions, but they do not by themselves pro-              memory with cuMemcpyDtoH(). CPU-delta copies the re-
+vide a live recovery executor, binary-level pause hooks, or                gion and compares it against a host shadow copy at 4 KB
+dirty-page scanning across framework/library boundaries.                   granularity, storing only dirty pages. GPU-delta compares
+                                                                    3
+                                                                                       Host (CPU)
+current data with a GPU-resident shadow copy on device,
+then transfers only dirty pages to host memory.                               PyTorch Dispatch                                  CUDA Templates
+                                                                          Decide Concordia submission                             param → code
+   The results in Figure 1 show three points.                                            custom op?
+
+   (1) Transparent CPU-side diffing is dominated by host scan-                 Checkpoint JIT                                  CUDA Driver API
+                                                                               region spec → PTX                            cuModuleLoad, cuGetFunction
+ning. For a 256 MB region, the device-to-host copy takes                              enqueue & commit
+
+
+4.72 ms, while page comparison takes 106.65 ms in our pro-                                    SPSC Ring Buffer (device-visible)
+totype. This comparison path uses Python/NumPy, so the                                   TaskDesc: op_id, ptrs, shape/stride, flags
+                                                                                    Device (GPU)
+exact multiplier is not a claim about an optimized check-                                    poll                                                           write inactive slot
+                                                                                                                                                            + publish version
+                                                                                                                                  Worker Warps
+point library. The underlying scaling remains the problem: a                 Persistent Kernel Executor          dispatch
+                                                                                                                                  configurable blocks;
+                                                                        poll ring → lookup fnptr → call → release
+transparent CPU diff must read the whole region from host                                                                     spin/backoff; low footprint
+                                                                                             fnptr lookup
+memory even when only one page changed.
+                                                                                      Versioned Operator Table (device function pointers)
+   (2) GPU-side diffing matches the hardware locality of the                    slots: kv_scan / lora_scan / aof_append / restore / . . .    version: N
+data. The GPU comparison kernel reads current and shadow
+buffers at HBM bandwidth, taking 0.04–0.53 ms for 16–256 MB,
+and transfers only the dirty 4 KB page. The measured end-              Figure 2. Concordia persistent kernel architecture: a ring
+to-end latency is 0.08–0.56 ms, up to 219× faster than our             buffer connects the host submission path to persistent device
+CPU-side transparent prototype. The important point is not             threads, with a dynamically updatable operator table for JIT-
+the exact multiplier, but the cost model: CPU-side trans-              compiled checkpoint and recovery handlers. Solid arrows
+parent diffing scales with total region size at CPU memory             show the steady-state data path; the dashed arrow shows
+bandwidth, whereas GPU-side diffing scales with total region           the hot-swap injection path for new handlers.
+size at HBM bandwidth plus dirty bytes over PCIe.
+   (3) Checkpoint triggers should not require new host launches.       3.1     Persistent Kernel Runtime
+If each checkpoint is a separate cudaLaunchKernel, the host
+                                                                       The foundation of Concordia is a persistent kernel that con-
+remains on the recovery critical path. The persistent execu-
+                                                                       tinuously processes work from a shared queue. In the fault-
+tor turns checkpointing into a task descriptor submitted to
+                                                                       tolerance configuration evaluated in this paper, the executor
+an already-running kernel. This same mechanism handles
+                                                                       reserves one resident worker block on the GPU, giving the
+dispatch and communication tasks, but in Concordia those
+                                                                       runtime a live device-side control path at 0.53% SM footprint
+are supporting roles for the recovery substrate.
+                                                                       on RTX PRO 6000. For pure micro-dispatch experiments the
+   These observations lead to Concordia’s design: instru-
+                                                                       same code can be launched with more worker blocks, but
+ment GPU binaries to expose safe checkpoint/pause points,
+                                                                       the recovery path does not require one block per SM. This
+keep a persistent device-side executor alive for the whole
+                                                                       distinction matters: Concordia relies on persistence, not on
+session, JIT-compile checkpoint handlers specialized to the
+                                                                       occupying the whole device.
+registered memory layout, and append committed deltas to
+a CXL/DRAM recovery log.                                                  Fault model. Concordia targets fail-stop faults in applica-
+                                                                       tion kernels, GPU ranks, and collective communication. The
+                                                                       persistent checkpoint worker is treated as a trusted control
+                                                                       loop: it is small, launched before application work, monitored
+3   Design                                                             by a heartbeat, and assumed not to fail independently of the
+Concordia is organized around one recovery invariant: be-              device. If the worker heartbeat stops, Concordia treats the
+fore a failure, the GPU must already contain a small executor          GPU as lost and recovers from the last committed append-
+capable of observing safe points, running checkpoint code,             only log record in CXL/DRAM. The design does not handle
+and appending recovery records without asking the host to              Byzantine corruption of the persistent worker or arbitrary
+launch new kernels. The device-resident persistent kernel pro-         silent data corruption inside HBM.
+vides this executor (§3.1). PTX/SASS instrumentation inserts              The persistent runtime consists of three components. A
+cooperative pause and checkpoint hooks into the kernels                lock-free ring buffer in device-mapped memory connects
+that frameworks and libraries actually load, while runtime             host submissions to device execution: the host enqueues
+JIT compilation specializes delta-checkpoint handlers for the          compact task descriptors (64–128 bytes including operator
+registered LLM memory layout (§3.2). GPU-side delta check-             ID, tensor pointers, dimensions, and control flags) with store-
+pointing then runs as persistent-kernel tasks at kernel and            release semantics, while device threads poll a read cursor
+NCCL collective boundaries, scanning mutable LLM regions               with load-acquire semantics to ensure visibility. A single
+at HBM bandwidth and appending dirty-page records to a                 persistent kernel launches at process startup and remains
+CXL/DRAM recovery log (§3.3). Dispatch acceleration, oper-             resident; each worker warp claims work atomically from
+ator hot-swap, and optional portable recovery follow from              the ring, dispatches through a function pointer table, and re-
+this substrate, but the design is driven by checkpoint/replay.         turns for the next task as shown in Fig. 2. The operator table
+                                                                   4
+is a device-resident array indexed by operator ID. Check-                   Table 1. Concordia host-side runtime API.
+point handlers are compiled via NVRTC [27] from region
+specifications, loaded through the CUDA Driver API [26],              Function              Description
+written into an inactive slot, and made visible by flipping
+a version counter, enabling hot-swapping without service              init(capacity, tpb)   Initialize runtime, allocate queue
+interruption.                                                         fuse()                Fuse consecutive operations
+   The host-side path is streamlined for minimal overhead:            set_yield_every(n)    Control yield policy (0 = never)
+                                                                      peek_queue()          Query queue state
+  // Enqueue atomically
+                                                                      worker_alive()        Check if persistent kernel runs
+  TaskDescriptor desc = {                                             shutdown()            Signal exit, free resources
+    .op_id = OP_ADD,
+    .input_a = a.data(), .input_b = b.data(),
+    .output = c.data(), .size = a.size()
+  };                                                                   Table 1 summarizes the host-side API exposed by Concor-
+  uint32_t slot = ring_buffer.acquire_slot();                       dia and is used by the PyTorch interposition layer to con-
+  ring_buffer.write(slot, desc);                                    figure capacity, fusion, yielding, and liveness checks during
+  ring_buffer.commit(slot); // store-release                        deployment.
+                                                                       The persistent kernel’s continuous device presence ex-
+   Device-side dispatch treats checkpoint and recovery as           tends beyond operator dispatch. Because it maintains direct
+first-class tasks rather than special host-launched kernels:        access to device memory and a steady execution context,
+                                                                    Concordia uses the ring buffer to enqueue checkpoint scans,
+  while (true) {                                                    AOF appends, restore operations, and optional GPU-initiated
+      TaskDescriptor desc;
+                                                                    network transfers without returning to the host. This makes
+      if (!ring_buffer.poll_acquire(&desc)) {
+          backoff_or_yield();                                       the host CPU stateless with respect to the inference data
+          continue;                                                 path: the GPU autonomously dispatches checkpoint han-
+      }                                                             dlers, appends committed deltas, and can initiate inter-node
+                                                                    communication, while the CPU handles only initialization
+      Handler fn = operator_table.load(desc.op_id,
+                                                                    and agent-level orchestration such as tool calls.
+                                    desc.version);
+      switch (desc.kind) {
+      case TASK_COMPUTE:                                            3.2   PTX/SASS Instrumentation and JIT Checkpoint
+          fn(desc);                                                       Handlers
+          break;
+                                                                    Because the persistent kernel never exits, it provides a sta-
+      case TASK_DELTA_CKPT:
+          Delta d = fn.scan_dirty(desc.region);                     ble device-resident context into which Concordia can in-
+          aof_append(desc.epoch, d); // CXL/DRAM log                stall checkpoint code after model loading. Concordia uses
+          break;                                                    PTX/SASS instrumentation to discover safe points and mem-
+      case TASK_RESTORE:                                            ory regions, then JIT-compiles checkpoint handlers special-
+          fn.apply(aof_read(desc.epoch));
+                                                                    ized to the registered layout. The JIT target is the persistent
+          break;
+      }                                                             kernel’s operator table, not a separate application kernel
+      ring_buffer.complete_release(desc.seq);                       launch. For example, a PagedAttention region produces a
+  }                                                                 handler that walks the physical block table and dirty bitmap;
+                                                                    a LoRA region produces a dense page scanner; an opaque
+   This achieves host-side task submission latencies under          region produces a shadow-compare scanner; and each re-
+100 ns. End-to-end completion latency also includes GPU             gion gets a matching restore/applier handler. When recovery
+polling, operator execution, and system-scope completion            must move across GPU architectures, the same instrumented
+fences; §5 reports both.                                            state can optionally be lowered through CTX, but cross-
+   Concordia integrates with PyTorch through dispatch in-           architecture portability is a recovery extension rather than
+terposition at the autograd engine level. A dispatcher hook         the main purpose of the JIT.
+evaluates whether each operation is a candidate for ring               As shown in Fig. 3, Concordia first instruments the GPU
+buffer submission based on operation type (favoring element-        code that the framework actually loads. For PTX modules,
+wise ops, small reductions, cache updates, and checkpoint           Concordia rewrites the PTX before driver JIT compilation.
+triggers), tensor size, and current load. Eligible operations       For precompiled cubins or vendor libraries where PTX is
+route through Concordia; ineligible ones proceed through            unavailable, Concordia uses SASS-level patching to redirect
+PyTorch’s normal path. This hybrid approach is intended to          selected entry, exit, and barrier-adjacent points through tram-
+coexist with CUDA Graph capture for stable decode regions           poline stubs. The PTX path is preferred because symbolic reg-
+rather than replace it.                                             isters and memory spaces are still explicit; the SASS path is
+                                                                5
+     Multi-GPU                                           ...                     llvm.concordia.ld.shared), and SASS hooks attach meta-
+                             vLLM        KTransformer
+  LLM Inference
+                                                                                 data that reconstructs the corresponding CTX-level state at
+                                                                                 safe points. At runtime, CTX modules translate to the recov-
+  DL Framework                   PyTorch          JAX
+                                                                                 ery target.
+   DSL / IR Ten-
+      sor Comp.
+                        Triton    ATen     CUDA   MLIR           XLA                Per-target lowering. For NVIDIA/PTX, CTX instructions
+                                                                                 map to PTX via NVVM: GET_GLOBAL_ID becomes a sequence
+      Compilers         NVCC                  LLVM               ...             reading ctaid and tid registers; predicated blocks map to
+                                                                                 @predicate-guarded instructions; the result is JIT-compiled
+                                                                                 to cubin via ptxas. For AMD/ROCm, CTX lowers through
+    Portable IR        CTX (Concordia Thread eXecution)                          AMD Comgr using appropriate storage classes (CrossWorkgroup
+                                                                                 for global, Workgroup for shared) and OpControlBarrier
+   Binary Codes                                                        ...
+                                                                                 for workgroup-scope barriers, with predication realized through
+                          NVIDIA PTX              x86 with AVX
+                                                                                 structured OpSelectionMerge/OpBranchConditional. For
+                                                                                 Intel/SPIR-V, the output feeds Level Zero compilation. For
+Figure 3. Concordia instrumentation and recovery                                 Tenstorrent/TOSA, CTX maps to TOSA MLIR tensors: scalar
+pipeline. CUDA/PTX/SASS modules are instrumented                                 registers become 0-D tensors, vector registers become 1-D
+with pause/checkpoint hooks; registered memory layouts                           tensors; arithmetic uses tosa.add/tosa.mul; synchroniza-
+drive JIT generation of persistent-kernel checkpoint                             tion markers are handled by the TT-MLIR backend during
+handlers. CTX lowering is used only when recovery crosses                        lowering.
+architectures.
+                                                                                    SIMT–MIMD reconciliation. The deepest challenge is
+                                                                                 reconciling SIMT and MIMD execution models. SIMT GPUs
+necessary for binary-only kernels and requires architecture-                     execute threads in lockstep warps with implicit synchro-
+specific decoding, relocation, and register-liveness constraints.                nization, whereas Tenstorrent’s architecture exposes explicit
+This is why the problem differs from LLVM or x86 instrumen-                      DMA and scratchpads without a warp scheduler. Concor-
+tation: GPU instrumentation must preserve SIMT reconver-                         dia employs two strategies. In vectorized warp emulation, a
+gence, CTA barriers, memory-space qualifiers, and system-                        warp’s threads are mapped onto a single core’s vector unit
+scope ordering while running inside a driver-controlled launch                   to execute SIMD-width operations per cycle. In multi-core
+model.                                                                           partitioning, a block’s warps are distributed across multiple
+                                                                                 Tensix cores with explicit inter-core synchronization at bar-
+   Checkpoint-handler JIT.. For every registered region,
+                                                                                 rier points. The runtime selects between these modes based
+Concordia builds a compact region specification: base ad-
+                                                                                 on kernel characteristics: regular, vectorizable kernels use
+dress, page size, page count, mutability class, optional al-
+                                                                                 the former, while irregular kernels with divergence benefit
+locator metadata pointers, AOF record format, and restore
+                                                                                 from the latter.
+policy. The host JIT emits a CUDA template specialized to
+that specification and installs the resulting device function                       Cooperative pause and resume. Concordia does not
+into the persistent kernel’s operator table. Specialization                      attempt arbitrary instruction-level preemption. At instru-
+removes branches from the hot checkpoint path: KV han-                           mented safe points, code checks a pause_flag in device
+dlers know whether they should read a dirty-block bitmap,                        memory. When set, threads write live register values, program-
+adapter handlers know the dense page range, and opaque                           counter labels, CTA coordinates, and memory-region ver-
+handlers know the shadow-buffer address. The same JIT also                       sion numbers into a CTX state buffer. On the target device,
+emits the corresponding AOF append and restore handlers,                         a resume kernel reconstructs the CTX state, remaps base
+so checkpoint and recovery use symmetric code paths.                             addresses, restores registers through target-specific mech-
+   Optional CTX lowering. When recovery stays on the                             anisms, and jumps to the saved basic block. The persistent
+same GPU architecture, the JIT-compiled checkpoint han-                          executor coordinates this protocol and keeps the checkpoint
+dlers and the AOF log are sufficient. When recovery crosses                      metadata live while the host allocates a replacement de-
+architectures, Concordia normalizes instrumented code into                       vice. For kernels without safe points, Concordia falls back to
+CTX (Concordia Thread eXecution), a compact assembly                             boundary checkpointing at kernel completion.
+that records thread/block indices, memory spaces, barriers,
+predication, and explicit safe points. We extend LLVM 22.0                       3.3   GPU-Side Delta Checkpointing at NCCL
+with a custom backend (CTXTarget) that emits CTX as-                                   Boundaries
+sembly from instrumented IR. The frontend remaps CUDA                            The persistent kernel’s ring buffer provides a natural mecha-
+builtins to abstract intrinsics (llvm.concordia.barrier,                         nism for GPU-side delta checkpointing at NCCL collective
+                                                                             6
+                                              GPU 3
+                                                                                                         GPU 9        GPU 10       GPU 11                 Exploiting the static-weight structure identified in §2.4,
+                                GPU 2         FAILED
+                                                 △
+                                                            GPU 4              GPU 5
+                                                                                                                                                       Concordia performs page-level dirty detection entirely on
+                                                                                 Live Migration
+                                                                                                                                      GPU 12           the GPU at HBM bandwidth (∼1.8 TB/s), avoiding the CPU-
+                                                                                 1. Detect Failure
+                      GPU 1            GPU 8           GPU 7       GPU 6         2. Isolate GPU 3
+                                                                                 3. Restore Delta Ckpt                                                 side scanning bottleneck. A JIT-compiled persistent-kernel
+                                                                                 4. Reconfigure Ring
+
+                                    replace                                                                                                            handler discovers dirty pages from allocator metadata or, for
+                   Concordia Resource Pool (Standby GPUs)                                      Concordia Control Plane                                 opaque mutable regions, by comparing against GPU-resident
+                   Standby 1        Standby 2          Standby 3
+                                                                             Delta Ckpt
+                                                                                JIT Scan
+                                                                                                      NCCL Wrapper
+                                                                                                         Error Intercept
+                                                                                                                               Coordinator
+                                                                                                                               Failure Detection
+                                                                                                                                                       shadow copies at 4 KB page granularity. The handler emits
+                      HOT             WARM               COLD                 AOF Append
+                                                                            CXL/DRAM Log
+                                                                                                         Health Monitor
+                                                                                                         Topology Adapt
+                                                                                                                               Recovery Orch.
+                                                                                                                                  State Sync           an AOF record containing the epoch, region ID, dirty page
+Timeline:
+                                                                                                                                                       descriptors, payload offsets, and a checksum. Only dirty page
+                                                                                      Reintegration
+             Detection
+            0 ms
+                                Isolation
+                            10 ms             310 ms
+                                                        State Restoration
+                                                                            1110 ms                   1510 ms
+                                                                                                                                                       data and metadata are copied into the CXL/DRAM log.
+                                                                                                                                                          Deltas are stored as an append-only recovery stream rather
+Figure 4. Concordia fault tolerance architecture: GPU ring                                                                                             than as independent checkpoint files. The format follows a
+topology with failure detection, Concordia standby pool for                                                                                            Redis-like AOF discipline: write record header, write dirty
+live migration, and control plane with GPU-side delta check-                                                                                           payloads, write commit marker, then publish the epoch. Re-
+pointing, NCCL wrapper, and recovery coordinator. The                                                                                                  covery ignores any suffix without a commit marker. Sparse
+timeline bar shows the four recovery phases totaling about                                                                                             page maps use index-value records; contiguous dirty ranges
+1.5 s in our prototype.                                                                                                                                use run-length encoding. We report these as data-reduction
+                                                                                                                                                       ratios rather than claiming generic compression: a single
+                                                                                                                                                       dirty page in an 8,192-page KV arena gives 8,192:1 delta re-
+boundaries. Rather than launching separate checkpoint ker-
+                                                                                                                                                       duction, while mixed LoRA and KV workloads show lower
+nels from the host, Concordia executes dirty-page detec-
+                                                                                                                                                       aggregate ratios. A background compactor periodically rewrites
+tion as a task within the already-resident persistent kernel—
+                                                                                                                                                       the AOF into a consolidated base snapshot plus a short suffix
+the same executor that handles operator dispatch and net-
+                                                                                                                                                       of recent deltas, bounding replay time.
+work initiation—achieving zero-overhead checkpoint trig-
+                                                                                                                                                          An NCCL communicator’s execution plan can be viewed
+gers. Combined with enhanced NCCL error handling and
+                                                                                                                                                       as a dependency graph of collective operations, channels,
+dynamic resource management, this enables rapid fault re-
+                                                                                                                                                       and point-to-point send/recv primitives. Concordia does
+covery for distributed LLM inference, directly motivated by
+                                                                                                                                                       not require replacing NCCL’s internal scheduler. Instead,
+the 85–219× speedup of GPU-side over CPU-side checkpoint-
+                                                                                                                                                       it uses API-level interposition to identify coarse collective
+ing demonstrated in §2.4.
+                                                                                                                                                       boundaries where participating GPUs have a consistent view
+   As shown in Figure 4, the fault tolerance layer integrates
+                                                                                                                                                       of communication progress. Those boundaries provide se-
+at three levels. The enhanced NCCL wrapper intercepts com-
+                                                                                                                                                       mantically meaningful checkpoint points without relying
+munication operations, monitors health, and exposes col-
+                                                                                                                                                       on arbitrary instruction-level preemption. For recovery, the
+lective boundaries as checkpoint opportunities. Concordia
+                                                                                                                                                       same wrapper can select a pre-computed fallback ring or
+maintains a global view of GPU resources—including health
+                                                                                                                                                       activate a replacement device before rebuilding the commu-
+metrics and standby pools—and orchestrates replacement al-
+                                                                                                                                                       nicator.
+location and workload migration. The GPU-side delta check-
+                                                                                                                                                          The NCCL wrapper preserves the standard API while
+pointing subsystem captures incremental state changes, per-
+                                                                                                                                                       adding fault tolerance. Before each collective, it consults
+forming dirty detection on-device and appending committed
+                                                                                                                                                       cached per-GPU health signals; healthy calls proceed with
+records to a CXL/DRAM recovery log.
+                                                                                                                                                       negligible overhead, while unhealthy devices trigger recov-
+   Registered recovery regions. Concordia tracks memory                                                                                                ery. On failure in a ring-based AllReduce, the wrapper switches
+through explicit region registration rather than treating the                                                                                          to a pre-computed ring that bypasses the failed device. Issues
+whole CUDA heap as one opaque blob. Model weights are reg-                                                                                             are classified as transient (retry with backoff), degraded (pre-
+istered as immutable after the base snapshot. PagedAttention-                                                                                          emptive migration), or permanent (immediate replacement).
+style KV caches are registered at the physical block arena: the                                                                                           When a permanent failure is confirmed, Concordia re-
+serving runtime exposes the block table, allocation bitmap,                                                                                            constructs the communicator DAG with the failed GPU
+and optional dirty-block/version metadata, while Concordia                                                                                             removed and a replacement inserted without full NCCL
+records the logical-to-physical mapping needed for restore                                                                                             re-initialization. Concordia maintains GPU resource pools
+and falls back to page diffing only when such metadata is                                                                                              at varying readiness levels: hot standbys keep models pre-
+unavailable. LoRA adapter and optimizer buffers are regis-                                                                                             loaded for activation within seconds; warm standbys initial-
+tered as mutable parameter regions. Temporary activations                                                                                              ize CUDA contexts but require model loading; cold standbys
+can be marked non-recoverable because they are recreated                                                                                               require full initialization. The replacement replays the latest
+after resuming from the last collective or kernel boundary.                                                                                            base snapshot and committed AOF suffix from CXL/DRAM.
+This interface gives applications a way to provide semantic                                                                                            If the replacement has a different architecture, the optional
+hints without requiring them to log every KV write.
+                                                                                                                                                   7
+CTX path in §3.2 translates instrumented kernels and restore          path is intentionally conservative; kernels that cannot be
+handlers for the target.                                              patched safely still run, but can only be checkpointed at
+   Within roughly 10 ms, the wrapper detects timeouts, clas-          kernel boundaries. This binary-level path is the main differ-
+sifies the failure, and marks the GPU unavailable. By 300 ms,         ence from LLVM-only instrumentation and is necessary for
+communication is reconfigured to bypass the failed device.            framework-generated code and binary vendor libraries.
+Within the next 800 ms, Concordia activates a replacement
+and applies the latest delta checkpoint. The replacement                 Compilation and bootstrapping. The persistent kernel
+rejoins the topology in roughly 400 ms. Total recovery in             is compiled from an inline CUDA C source embedded in
+our prototype is about 1.5 seconds with continuous partial            the Rust library. At initialization, the source is compiled to
+service, vs. 47+ seconds of complete outage with standard             PTX via nvcc –ptx -arch=sm_120 and loaded through the
+NCCL restart.                                                         real CUDA driver—bypassing our shim to avoid recursive
+                                                                      interception. This care is critical: if the persistent kernel’s
+4     Implementation                                                  launch went through the Concordia dispatch hook, it would
+Concordia is implemented as a Rust library (1,800 lines)              attempt to enqueue itself into the ring buffer it is supposed to
+with a 200-line CUDA C persistent kernel, integrated into             poll—an infinite loop. An initialization kernel populates the
+a CUDA driver API shim (libnvcuda.so). The Rust code                  device function pointer table with built-in operators, after
+is split across driver interposition and bootstrap (420 LOC),         which the persistent worker launches on a dedicated stream
+ring-buffer/runtime management (360 LOC), checkpoint re-              and remains resident.
+gion tracking (360 LOC), checkpoint-handler JIT and AOF
+logging (360 LOC), PTX/SASS instrumentation glue (220 LOC),              Host-mapped memory. All shared state between host
+and optional portable-IR support (80 LOC). The central im-            and device uses pinned (host-mapped) memory, not CUDA
+plementation challenge is bootstrapping and sustaining a              managed memory. This is a hard constraint: managed mem-
+device-resident runtime substrate within the CUDA ecosys-             ory triggers page-migration deadlocks when a persistent
+tem, which assumes the host initiates all GPU operations—             kernel holds GPU resources, because the NVIDIA driver
+any misstep during initialization triggers recursive intercep-        serializes page migration with kernel execution. The ring
+tion or driver-level deadlocks. Applications interact through         buffer occupies 16 KB of pinned memory (256 task descrip-
+two paths: transparent interception via LD_LIBRARY_PATH               tors × 64 bytes); Unified Virtual Addressing provides identi-
+substitution, and an explicit C-callable API for dispatch life-       cal pointer values on both sides, eliminating address transla-
+cycle, checkpoint registration, allocator hints, AOF log place-       tion.
+ment, and recovery control.                                              Synchronization follows a release-acquire protocol with-
+                                                                      out any CUDA API calls on the critical path. The host writes
+4.1   Persistent Kernel Substrate                                     task descriptors and advances the tail with a store-release
+   CUDA driver shim. The shim replaces libcuda.so.1                   fence; the GPU polls with acquire semantics, executes the
+and exports all standard cu* symbols. The critical inter-             operator, and issues __threadfence_system() followed by
+ception point is cuGetProcAddress_v2, which determines                a system-scope atomic increment to make the completion
+whether each requested symbol returns our wrapper or the              visible across the PCIe bus. The host observes completion via
+real CUDA function pointer via dlsym. Only functions that             a volatile read—sub-microsecond overhead with zero driver
+require instrumentation—module loading, kernel launch, and            involvement.
+selected device queries—are intercepted; ordinary memory
+operations pass through unmodified unless the application        Blackwell constraints. On NVIDIA Blackwell (sm_120),
+has registered a checkpoint region. This selective design was cudaMalloc, cudaFree, and cudaDeviceSynchronize can
+validated with PyTorch 2.10.0 on CUDA 12.8, including full    deadlock while the persistent kernel is running, because the
+Qwen3-0.6B inference through the shim.                        driver serializes memory management and global synchro-
+                                                              nization with active kernels. Concordia handles this through
+   PTX/SASS instrumentation. The module-loading wrap-         lifecycle-aware resource management. Model weights, KV-
+pers intercept cuModuleLoad, cuModuleLoadData, and cuModuleLoadDataEx.
+                                                              cache arenas, checkpoint buffers, and operator tables are allo-
+If PTX is available, Concordia parses kernel entries, injects cated before the persistent kernel launches. PagedAttention-
+calls to lightweight pause/checkpoint probes at entry, exit,  style dynamic KV allocation remains compatible because
+and compiler-visible barrier sites, and passes the rewritten  page assignment occurs inside a pre-allocated arena by up-
+PTX to the real driver. If only a cubin is available, Concor- dating block tables and bitmaps, not by calling cudaMalloc
+dia applies a SASS patching path: it disassembles the target  on every token. If a framework must call a driver-level al-
+basic blocks, checks that a trampoline can preserve live reg- locator or cudaDeviceSynchronize during model loading
+isters and reconvergence state, patches a branch to the probe or graph reconfiguration, Concordia suspends the persistent
+stub, and records relocation metadata for resume. The SASS    worker, lets the call complete, and relaunches the worker
+                                                                  8
+afterward. The compiled PTX is cached after the first invo-       device-agnostic assembly. When the shim intercepts a mod-
+cation, making the suspend/resume overhead negligible.            ule load, it parses incoming PTX or SASS metadata, lowers
+                                                                  the instrumented representation to LLVM IR with CUDA
+4.2   GPU-Side Delta Checkpoint Pipeline                          builtins remapped to abstract intrinsics, and emits CTX as-
+The checkpoint system tracks registered regions with one          sembly via the custom backend. JIT translation to each target
+of three policies. Immutable regions, such as base model          ISA occurs once per module: the result is installed into the
+weights after loading, are included in the base snapshot but      persistent kernel’s operator table and reused for the kernel’s
+do not keep GPU shadows. Allocator-aware regions, such            lifetime. Target lowering proceeds through backend-specific
+as PagedAttention KV arenas, use block-table version coun-        compilers—ptxas for NVIDIA, AMD Comgr for ROCm, Level
+ters or dirty-block bitmaps supplied by the serving runtime;      Zero for Intel SPIR-V, and TT-MLIR for Tenstorrent. Com-
+Concordia then copies the marked physical pages and the           piled modules are cached and indexed by content hash; sub-
+logical-to-physical metadata needed for restore. Opaque mu-       sequent loads of identical modules skip compilation entirely.
+table regions, such as adapter or optimizer buffers without
+                                                                    GPU-initiated networking. The persistent kernel ini-
+semantic hints, use GPU-resident shadows and page com-
+                                                                 tiates inter-node transfers by processing network task de-
+parison as a transparent fallback.
+                                                                 scriptors from the same ring buffer used for compute and
+   At registration time, Concordia JIT-compiles a checkpoint
+                                                                 checkpoint operations. During initialization, the host config-
+handler for each mutable region. The handler is specialized
+                                                                 ures RDMA queue pairs and registers GPU memory regions
+for the region’s page size, metadata layout, dirty-discovery
+                                                                 for GPUDirect RDMA access. At runtime, the persistent ker-
+policy, AOF record format, and restore path, then installed
+                                                                 nel issues RDMA writes directly from device memory to
+into the persistent kernel’s operator table. At each NCCL or
+                                                                 remote GPUs based on destination and offset fields in the
+kernel boundary, a four-stage GPU-side pipeline executes as
+                                                                 task descriptor, bypassing the host entirely on the inference
+persistent-kernel tasks:
+                                                                 data path. This makes the host CPU fully stateless with re-
+    1. Dirty discovery: The JIT handler reads allocator dirty
+                                                                 spect to inference communication: after one-time RDMA
+       metadata or compares opaque regions against shadows
+                                                                 setup, the GPU autonomously dispatches operators, appends
+       at 4 KB page granularity at HBM bandwidth (∼1.8 TB/s).
+                                                                 committed deltas, and transfers data to peers without any
+    2. AOF record construction: The handler writes dirty
+                                                                 host round-trip.
+       page descriptors, payload offsets, and checksums into
+       a staging buffer.
+    3. Append and commit: Dirty payloads and metadata
+                                                                 5 Evaluation
+       are copied to a CXL-backed or DRAM-backed append-         We evaluate Concordia along four axes: the persistent execu-
+       only log; a commit marker publishes the epoch only        tor substrate, JIT-compiled GPU-side delta checkpoint effi-
+       after all bytes are visible.                              ciency, LLM inference with CXL/DRAM append-log check-
+    4. Metadata/shadow update: Allocator version coun-           points, and optional cross-architecture recovery. The pri-
+       ters are advanced, and opaque-region shadows are          mary claims are about checkpoint and recovery behavior.
+       overwritten with current contents for the next delta.     The  persistent-kernel microbenchmarks characterize the cost
+   This approach has fundamentally different scaling from        of the always-on executor; they should not be read as a claim
+CPU-side checkpointing. For transparent opaque regions,          that Concordia   outperforms CUDA Graphs on static decode
+CPU-side cost is 𝑂 (total_size/PCIe_BW+total_size/CPU_BW)        graphs.
+regardless of mutation rate; GPU-side cost is 𝑂 (total_size/HBM_BW+
+dirty_size/PCIe_BW). For allocator-aware KV regions, dis-        5.1 Experimental Setup
+covery is proportional to the dirty block bitmap, so the dom-       Hardware. NVIDIA RTX PRO 6000 Blackwell Server Edi-
+inant term is dirty data transfer into the AOF log. Thus Con-    tion (98 GB, 188 SMs) and NVIDIA GeForce RTX 5090 (32 GB,
+cordia can use exact application metadata when available         Blackwell).  Host: PCIe 5.0 interconnect between GPUs (no
+and fall back to transparent GPU diffing when it is not. The     NVLink).  Cross-architecture targets: AMD Radeon RX 9070 XT
+log lives in host DRAM by default and can be placed in a CXL     (RDNA4, 16 GB), Intel Iris Xe (512 MB), and Tenstorrent
+memory pool when available. Like Redis AOF, incomplete           BlackHole (32 GB).
+suffix records are ignored during replay, and a background
+                                                                    Software. CUDA 12.8, PyTorch 2.10.0, Transformers 4.57.3,
+compactor periodically writes a new base snapshot to bound
+                                                                 NCCL 2.27.5+cuda12.9, Ubuntu 24.04. Concordia implemented
+recovery time.
+                                                                 in Rust (1,800 lines) with persistent kernel in CUDA C.
+4.3   Optional Cross-Architecture Execution and                      Workloads. Element-wise micro-benchmarks (64–262,144
+      GPU-Initiated Networking                                    elements, 5 operators), GPU-side vs. CPU-side delta check-
+  Portable IR compilation. The CTX portable IR extends            point (16–256 MB regions, structured mutation), production
+LLVM 22.0 with a custom target (CTXTarget) that emits             LLM inference (Qwen3-0.6B, bf16, 50 tokens/prompt), and
+                                                              9
+Table 2. Persistent kernel dispatch latency and throughput                                Dispatch Latency (µs)    NVIDIA RTX PRO 6000 Blackwell Server Edition
+on RTX PRO 6000 Blackwell (1 block × 128 threads). Native                         ADD       80        81          82         87         105     177          468
+                                                                                                                                                                         500
+PyTorch synchronized dispatch: 7 𝜇s.                                              MUL       81        81          82         87         105     177          466
+                                                                                                                                                                         400
+
+                                                                      Operator
+                                                                                  SILU      81        81          82         88         111     203          570           µs
+                      Add             Mul             SiLU                                                                                                               300
+
+           N     𝜇s     ops/s    𝜇s     ops/s    𝜇s      ops/s                    RELU      81        81          82         86         104     173          453
+                                                                                                                                                                         200
+
+           64    80    12,378    81    12,346    81     12,324                   FUSED      81        81          82         87         105     178          471
+                                                                                                                                                                         100
+          256    81    12,292    81    12,294    81     12,285                              64        256         1K         4K         16K     64K          256K
+                                                                                                                         Tensor Size
+        1,024    82    12,087    82    12,123    82     12,070
+        4,096    87    11,490    87    11,483    88     11,279
+       16,384   105     9,499   105     9,517   111      8,973        Figure 5. Dispatch latency heatmap (𝜇s): operator × tensor
+       65,536   177     5,624   177     5,636   203      4,918        size. The uniform color at small 𝑁 shows dispatch-dominated
+      262,144   468     2,137   466     2,141   570      1,755        regime.
+
+                                                                      Table 4. Native PyTorch dispatch latency (on RTX PRO 6000).
+2-GPU NCCL AllReduce with per-boundary checkpointing                  This is a launch-path reference point, not a CUDA Graph
+into a host DRAM append log.                                          baseline.
+
+5.2   Persistent Executor Characterization
+                                                                                                            N     Sync p50 (𝜇s)               Batch (𝜇s)
+Table 2 shows dispatch latency and throughput for all opera-
+tors across tensor sizes, measured on the real device-resident                                    1,024                                   7                         2
+persistent kernel. The 80 𝜇s baseline for small tensors (𝑁 ≤                                      4,096                                   7                         2
+256) represents the full ring-buffer round-trip: host write to                                   16,384                                   7                         2
+pinned memory, GPU poll via atomicAdd, task copy from                                            65,536                                   6                         2
+shared memory, operator execution, __threadfence_system,
+atomicAdd_system to host-mapped counter, and host volatile            Table 5. Delta checkpoint: CPU-side vs. GPU-side on RTX
+read.                                                                 PRO 6000 Blackwell. Structured mutation: 1 contiguous 4 KB
+   All operators show near-identical latency at small 𝑁 , con-        page modified per checkpoint, simulating per-token KV-
+firming that dispatch overhead dominates compute. SiLU                cache update. CPU-side must DtoH the entire region and diff
+is 22% slower at 𝑁 =262,144 due to the expf transcendental            on host; GPU-side JIT handlers diff at HBM bandwidth and
+function. The fused add+relu operator demonstrates zero-              append only dirty data to the recovery log.
+cost fusion—identical latency to plain add at every size.
+                                                                                                       CPU-delta                         GPU-delta
+Table 3. All operators at 𝑁 =4,096 (RTX PRO 6000 Blackwell).                        Region            DtoH    Diff                      Diff Append                 Speedup
+                                                                                                       (ms)  (ms)                      (ms)    (ms)
+           Operator               p50 (𝜇s)      ops/s                                 16 MB                0.32          6.46          0.04           0.04               85×
+                                                                                      50 MB                0.95         20.86          0.06           0.04              219×
+           Add                            87    11,490
+                                                                                     128 MB                2.38         54.72          0.30           0.04              171×
+           Mul                            87    11,483                               256 MB                4.72        106.65          0.53           0.04              197×
+           SiLU                           88    11,279
+           ReLU                           86    11,511
+           Fused Add+ReLU                 87    11,475                back to native or graph execution. The benefit of the persis-
+                                                                      tent path is not single-op latency against CUDA Graphs; it
+                                                                      is that checkpoint, communication, and batches of control
+   The heatmap in Figure 5 visualizes the transition from
+                                                                      tasks can be submitted to an already-running device execu-
+dispatch-dominated (yellow, ≤90 𝜇s) to compute-dominated
+                                                                      tor without new kernel launches and without rebuilding a
+(red, ≥400 𝜇s) regimes.
+                                                                      captured static graph.
+   Native comparison and interpretation. Native PyTorch
+measures 7 𝜇s synchronized dispatch and 2 𝜇s batch dispatch           5.3                GPU-Side vs. CPU-Side Delta Checkpoint
+(Table 4). The one-block persistent executor is slower for a          Table 5 compares CPU-side transparent page diffing and
+single tiny operation: its 80 𝜇s end-to-end latency includes          GPU-side delta checkpointing with sparse LLM mutations (1
+GPU polling, task copy, operator execution, system-scope              dirty page per checkpoint), extending the motivating experi-
+completion fencing, and host observation. This result is ex-          ment (§2.4) with detailed breakdown. CPU-side is dominated
+pected and defines the regime where Concordia should fall             by host page-level comparison (95% of time for 256 MB),
+                                                                 10
+                                                                                                                                     Table 3: Qwen3-0.6B + Concordia Delta Checkpoint
+Table 6. GPU-side checkpoint scaling with dirty page count
+                                                                                    Qwen3-0.6B Inference        NVIDIA RTX PRO 6000 Blackwell Server Edition                                    Delta Checkpoint at NCCL Boundary
+(256 MB region, RTX PRO 6000). GPU-side time remains                                120
+                                                                                             Avg: 108.2 tok/s
+                                                                                                                                                                                         21.6
+                                                                                                                                                                                    20           19.2
+nearly constant while CPU-side is fixed at 111 ms.                                  100                                                                                                                   18.7            18.2   17.8   18.1
+
+
+
+
+                                                                                                                                                             Checkpoint Time (ms)
+                                                                                     80                                                                                             15
+
+
+                                                                       Tokens/sec
+                                                                                     60
+                                                                                                                                                                                    10
+  Dirty       Dirty GPU-delta CPU-delta Speedup                                      40
+  Pages        Size      (ms)      (ms)                                              20
+                                                                                                                                                                                    5
+
+
+                                                                                      0                                                                                             0
+         1   4 KB             0.56        111.38        197×                                 1          2           3
+                                                                                                                        Prompt
+                                                                                                                                 4          5        6                                    1       2        3
+                                                                                                                                                                                                                 Prompt
+                                                                                                                                                                                                                           4      5      6
+
+
+         4 16 KB              0.57        112.01        197×
+        10 40 KB              0.58        112.11        195×           Figure 6. Qwen3-0.6B: inference throughput and checkpoint
+        32 128 KB             0.60        111.26        185×           overhead per checkpoint boundary. First prompt slower due
+                                                                       to KV-cache warmup.
+      Table 7. Per-operation checkpoint trigger overhead.
+                                                                          The first checkpoint detects 5,120 dirty pages (20 MB of
+        Method                          Trigger Latency                KV-cache allocated during warmup); all subsequent check-
+        cudaLaunchKernel (sync)                     7.6 𝜇s             points detect 0 dirty pages because model weights are static
+        cudaLaunchKernel (batch)                    2.5 𝜇s             during inference. This validates the core recovery assump-
+        Persistent kernel ring buffer              <0.1 𝜇s             tion: LLM inference state changes are sparse, and GPU-side
+                                                                       delta checkpointing exploits this structure.
+
+which must scan the entire region regardless of how many               5.5 Two-GPU NCCL with Per-Boundary Checkpoint
+pages changed. GPU-side performs the comparison at HBM                 We evaluated real 2-GPU NCCL AllReduce between RTX
+bandwidth (0.04–0.53 ms for 16–256 MB) and appends only                PRO 6000 and RTX 5090 connected via PCIe 5.0 (no NVLink),
+the dirty page plus metadata (0.04 ms for 4 KB), achieving             using torchrun –nproc_per_node=2 with NCCL 2.27.5.
+85–219× speedup.                                                       The test simulates a 4-layer transformer decoding 10 tokens,
+   The speedup increases with region size because the CPU              producing 40 AllReduce boundaries per rank.
+diff cost grows linearly (𝑂 (total_size/CPU_BW)) while GPU-               Each NCCL AllReduce averaged 4.5 ms per collective, re-
+side log-append volume remains constant at 4 KB plus meta-             flecting the PCIe interconnect bandwidth between hetero-
+data. These numbers evaluate the transparent fallback path;            geneous GPUs. At each collective boundary, Concordia trig-
+allocator-aware KV logging can reduce dirty discovery fur-             gered a delta checkpoint of the 33.6 MB KV-cache region and
+ther, while losing the binary-level transparency Concordia             appended the committed delta record to a host DRAM log,
+targets. At 256 MB—representative of KV-cache regions in               taking 11 ms per boundary including GPU dirty discovery
+8B+ models—the measured improvement over our CPU-side                  and log append. The initial base snapshot captured all 8,192
+transparent prototype is 197×.                                         pages of the full region.
+   Table 6 shows that GPU-side checkpoint time remains                    The critical result is the dirty page detection granularity:
+nearly constant (0.56–0.60 ms) across dirty page counts from           each subsequent delta detected exactly 1 dirty page (4 KB)
+1 to 32 for a 256 MB region, because the GPU diff at HBM               per token per layer—the physical KV-cache slice modified
+bandwidth dominates the total cost (∼0.53 ms), while ap-               by the attention computation. This yields an 8,192:1 delta
+pending dirty data to the recovery log is negligible (0.04–            data-reduction ratio relative to a full checkpoint for incre-
+0.07 ms for 4–128 KB). CPU-side time is effectively constant           mental per-token updates. The 2-GPU test confirms that
+at ∼111 ms regardless of mutation rate, because the full DtoH          Concordia correctly tracks single-page mutations at trans-
++ full CPU scan dominates.                                             former layer boundaries in a real distributed setting with
+   Table 7 shows that the persistent kernel eliminates check-          heterogeneous GPUs on separate PCIe buses.
+point trigger overhead: ring buffer dispatch is 76× faster than
+synchronous kernel launch. Over 40 NCCL boundaries per                 5.6                  LoRA SFT: Delta Checkpoint Under Mutable
+forward pass, this saves 304 𝜇s per pass.                                                   Weights
+                                                                       While inference keeps model weights static, online adapta-
+5.4     LLM Inference with NCCL Checkpoint                             tion via LoRA fine-tuning [14] introduces mutable param-
+Figure 6 shows Qwen3-0.6B inference (bf16, 50 tokens/prompt)           eters. We evaluate whether GPU-side delta checkpointing
+with delta checkpoint at each checkpoint boundary and                  remains effective under this workload.
+AOF-style append into host DRAM. The model sustains                       We fine-tune Qwen2.5-0.5B-Instruct (498M parameters,
+108.2 tok/s average with 18.9 ms checkpoint overhead—less              959 MB at bf16) with LoRA (𝑟 =8, 𝛼=16) targeting all attention
+than 4% of per-prompt generation time.                                 and MLP projections, using AdamW (𝜂=1e-4). LoRA adds
+                                                                  11
+Table 8. Delta checkpoint: inference vs. LoRA SFT (Qwen2.5-                                                                                                  Table 9. SM overhead comparison (RTX PRO 6000, 188 SMs).
+0.5B, RTX PRO 6000). GPU-side delta exploits the static-
+weight structure in both workloads; LoRA SFT modifies only                                                                                                               Method                                                           SM Overhead
+adapter weights (1.75% of pages).
+                                                                                                                                                                         CLC (CUDA 12.4)                                                                    5–10%
+                                                                                                                                                                         Green Contexts (CUDA 12.4)                                                          3–8%
+                  Workload                                     Dirty                                  Dirty        Data red.               GPU-𝛿
+                                                                                                                                                                         Concordia Persistent Kernel                                                        0.53%
+                                                               pages                                  ratio                                 (ms)
+                  Inference (per token)                              1                               0.008%            8,192:1                0.56
+                  LoRA SFT (per step)                            4,296                                1.75%               57:1                 1.4                      Figure 3: Fault Recovery Timeline (~1.5s total)      NVIDIA RTX PRO 6000 Blackwell Server Edition
+
+                                                                                                                                                              Detection Isolation                        State Restoration                          Reintegration
+                                    Figure 11: SM Overhead    NVIDIA RTX PRO 6000 Blackwell Server Edition (188 SMs)
+                                                                                                                                                                0ms
+                                                                                                                                                                10ms                310ms                                                 1110ms                    1510ms
+                                    (a) Resource Overhead                                                          (b) Throughput Impact                                                                               Time
+                         7.2%                                                                       101
+                  7
+                                                                                                    100   100.0%
+                                                                                                                                             99.7%
+                  6                                                                                                 99.5%
+                                                                                                    99                                                       Figure 8. Fault recovery timeline: detection (10 ms) → isola-
+
+                                                                          Relative Throughput (%)
+                  5                         4.8%                                                                                 98.5%
+
+
+
+SM Overhead (%)
+                  4
+                                                                                                    98                                                       tion (300 ms) → state restoration (800 ms) → reintegration
+                                                                                                    97
+                  3                                                                                                                                          (400 ms) = ∼1.5 s total.
+                  2                                                                                 96
+
+                  1                                                                                 95
+                                                               0.5%
+                  0                                                                                 94
+                         CLC              Green Ctx          Concordia                                    Native     + PK       + Delta      + Delta
+                      (CUDA 12.4)        (CUDA 12.4)         Persistent                                                         (naive)     (overlap)
+                                                                                                                                                             is free: the cost appears in the checkpoint latency tables
+                                                                                                                                                             above; the point is that it does not require launching an
+Figure 7. (a) SM overhead: CLC (7.2%), Green Con-                                                                                                            additional worker kernel.
+texts (4.8%), Concordia (0.5%). (b) Throughput impact with
+overlapped delta checkpointing.                                                                                                                              5.8       Fault Recovery
+                                                                                                                                                             Recovery from a single GPU failure proceeds through four
+4.4M trainable parameters (17 MB, 4,296 pages)—0.88% of                                                                                                      phases (Figure 8): (1) detection via health monitoring (∼10 ms),
+total. The remaining 942 MB of base weights are frozen.                                                                                                      (2) topology isolation by switching to a pre-computed fall-
+   Table 8 compares inference and LoRA SFT checkpointing.                                                                                                    back ring (∼300 ms), (3) AOF replay and dirty-page restore
+After the base snapshot, each LoRA training step modifies                                                                                                    via cuMemcpyHtoD (∼800 ms for a 33.6 MB KV-cache snap-
+exactly the 4,296 LoRA adapter pages (100% of trainable                                                                                                      shot plus committed suffix), and (4) reintegration into the
+parameters, as expected from AdamW), while all 241,313                                                                                                       NCCL communicator (∼400 ms). Total recovery: ∼1.5 sec-
+frozen pages remain at 0 dirty. This yields 57:1 data reduc-                                                                                                 onds with continuous partial service, vs. 47+ seconds of
+tion vs. full model checkpoint, with 98.3% PCIe reduction                                                                                                    complete outage with standard NCCL restart.
+(16.78 MB appended vs. 959 MB full copy).
+   Compared to CPU-side delta checkpointing of the full                                                                                                      5.9       Optional Cross-Architecture Performance
+model (estimated 418 ms: 17.6 ms DtoH + 401 ms CPU page                                                                                                      Figure 9 compares Concordia against native compilers across
+diff for 959 MB), GPU-side delta completes in ∼1.4 ms—a                                                                                                      four microbenchmarks for the optional cross-architecture
+299× speedup. The CPU diff dominates because it must                                                                                                         recovery path. On compute-intensive kernels, Concordia
+scan all 959 MB regardless of how many pages changed;                                                                                                        overhead is generally within 10% of native for supported
+GPU-side diffs at HBM bandwidth (1.04 ms for 959 MB) and                                                                                                     targets—the price of instrumentation, runtime JIT, and ab-
+appends only the 16.78 MB of dirty LoRA pages.                                                                                                               straction. Intel Iris Xe, a low-power integrated GPU, shows
+   This result demonstrates that Concordia’s GPU-side delta                                                                                                  larger relative overhead because its limited compute makes
+checkpointing extends naturally from pure inference to on-                                                                                                   JIT and runtime costs more visible. The figure also demon-
+line adaptation workloads. The key structural insight is                                                                                                     strates live migration of a 16K×16K matrix multiply from
+preserved: base model weights remain static, and only a                                                                                                      H100 to AMD to Tenstorrent. Checkpoint (0.5 s) + AMD
+small, predictable subset of parameters changes—whether                                                                                                      restore (0.6 s) + Tenstorrent migrate (1.1 s) = 2.2 s total down-
+KV-cache slots (inference) or LoRA adapters (SFT).                                                                                                           time during a 30 s job, with results identical to non-migrated
+                                                                                                                                                             execution within floating-point precision.
+5.7                    SM Overhead                                                                                                                              Figure 10 shows real-world LLM inference throughput.
+The persistent kernel occupies 1 block out of 188 SMs = 0.53%                                                                                                The overhead varies by model complexity, with simpler mod-
+of GPU resources (Figure 7, Table 9). This is 10× lower than                                                                                                 els experiencing less degradation. This trade-off between
+CLC and 6× lower than Green Contexts. The reserved worker                                                                                                    modest overhead and the ability to dynamically migrate
+processes checkpoint tasks while the rest of the GPU remains                                                                                                 across heterogeneous fleets represents a compelling value
+available to normal kernels. We do not assume checkpointing                                                                                                  proposition for cloud deployments.
+                                                                                                                                                        12
+                                                                                                                                                                                                                  operator injection and production-grade PyTorch integration,
+                                                                                                                                                                                                                  enabling operator hot-swap in running persistent kernels.
+                                                              (a) Vector Add                                                                        (b) Divergent Pi
+
+                   2000                        Native                                                                         160          Native
+                                                                                                                                                                                        +3%                          Launch Overhead Reduction. CUDA Graphs [6, 25] re-
+                   1750
+                                               Concordia                             +12%
+                                                                                                                              140
+                                                                                                                                           Concordia
+                                                                                                                                                                                                                  duce overhead through DAG capture and replay but require
+
+
+Bandwidth (GB/s)
+                                                                                                                              120
+                   1500
+                                                                                                                                                                                                                  stable execution patterns. Dynamic Parallelism [24] relocates
+                                                                                                           Time (µs)
+                                                                                                +3%
+                   1250                                                                                                       100
+
+                   1000                                                                                                        80
+
+                                                                                                                               60
+                                                                                                                                           +7%            +6%
+                                                                                                                                                                        +7%                                       launch to the device but does not eliminate its cost. Compiler
+                     750
+
+                     500
+                                                                             +15%
+                                                                                                                               40                                                                                 frameworks like torch.compile [29], XLA [34], and TVM [5]
+                     250
+
+                            0
+                                                                   +17%                                                        20
+
+                                                                                                                                0
+                                                                                                                                                                                                                  fuse operations but struggle with dynamic workloads. Con-
+                                         1K            16K       262K
+                                                                  Elements
+                                                                            1M       4M       16M                                      1K               8K
+                                                                                                                                                             Threads
+                                                                                                                                                                       65K           262K
+                                                                                                                                                                                                                  cordia complements all these by operating below the graph
+                                                                 (c) GEMM                                                                               (d) Reduction                                             level.
+                            6                  Native                                                                                      Native                                       +6%
+                                                                                                  +0%
+                                               Concordia                                                                      400          Concordia
+                                               Overhead
+                                                                    +1%
+                                                                                                                                                                                                                     GPU Binary Instrumentation. CPU checkpointing and
+
+                                                                                                           Bandwidth (GB/s)
+                            5
+
+                                                                                                                              300
+                            4
+                                                                                                                                                                                                                  debugging systems often rely on LLVM passes or x86 bi-
+                   TFLOPS
+                                                      +4%
+                            3
+
+                            2
+                                                                                                                              200                                            +16%
+                                                                                                                                                                                                                  nary rewriting, but GPU binaries require different machin-
+                            1
+                                                                                                                              100
+                                                                                                                                                                +28%
+                                                                                                                                                                                                                  ery: PTX preserves virtual registers, memory spaces, and
+                                       +16%
+
+                            0
+                                  +18%                                                                                          0
+                                                                                                                                                   +19%                                                           barriers, while SASS exposes final scheduling and register
+                                  128256              512           1024                         2048                                 1K          16K         262K           1M        4M
+                                                               Matrix Size N                                                                              Elements                                                allocation but is architecture-specific. Tools such as SASS
+                                                             (e) JIT Overhead                                                           (f) Average Concordia Overhead
+                                                                  Native 1st         Native cached
+                                                                                                                                                                                    +21.2%                        disassemblers [30] and PTX analyses [21] expose pieces of
+                   1600                                           Concordia 1st      Concordia cached                         20.0
+
+                   1400                                                                                                       17.5   +17.2%                                                                       this stack. Concordia uses PTX rewriting when symbolic
+
+Load Time (µs)                                                                                          Overhead (%)
+                   1200
+
+                   1000
+                                                                                                                              15.0
+
+                                                                                                                              12.5
+                                                                                                                                                                                                                  information is available and conservative SASS patching for
+                     800                                                                                                      10.0                                   +9.2%
+                                                                                                                                                                                              10% overhead
+                                                                                                                                                                                                                  binary-only kernels, with the specific goal of inserting coop-
+                     600                                                                                                       7.5
+
+                     400                                                                                                       5.0
+                                                                                                                                                    +5.6%
+                                                                                                                                                                                                                  erative checkpoint and resume hooks for persistent-kernel
+                     200
+
+                            0
+                                                                                                                               2.5
+
+                                                                                                                               0.0
+                                                                                                                                                                                                                  recovery.
+                                             vector          divergent       gemm         reduction                                  Vec Add        Div Pi           GEMM           Reduction
+                                              add                pi
+
+                                                                                                                                                                                                                     GPU Portability and Binary Translation. GPU Ocelot [10]
+                                                                                                                                                                                                                  translated PTX to x86; ZLUDA [35] runs CUDA on AMD;
+Figure 9. Cross-architecture evaluation of Concordia. Top
+                                                                                                                                                                                                                  CuPBoP [15] compiles CUDA to CPU. SPIR-V and SYCL/oneAPI
+and middle rows show microbenchmark performance (vector
+                                                                                                                                                                                                                  provide portable IRs but require recompilation per target.
+add, divergent control flow, GEMM, and reduction) across
+                                                                                                                                                                                                                  Concordia uses portability only as an optional recovery path;
+NVIDIA H100, AMD RX 9070 XT, Intel Iris Xe, and Tenstor-
+                                                                                                                                                                                                                  its primary use of JIT is to generate checkpoint and restore
+rent BlackHole. Bottom row shows JIT compilation over-
+                                                                                                                                                                                                                  handlers for a persistent kernel.
+head and cross-architecture live migration timeline (H100
+→ RX 9070 XT → BlackHole).                                                                                                                                                                                          GPU Virtualization. rCUDA [28], VirtualCL, and Cricket
+                                                                                                                                                                                                                  enable GPU sharing and migration within single-vendor do-
+  SWE-Bench LLM Inference                                                                  NVIDIA RTX PRO 6000 Blackwell Server Edition                                                                           mains. gVirtuS and GDEV [18] explored GPU virtualization
+                                                                                    +1.8%                                                                       Native
+                                                                                                                                                                Concordia
+                                                                                                                                                                                                                  abstractions. eGPU [38] and hetGPU [39] proposed heteroge-
+                                             60
+                                                                                                                                                                                                                  neous GPU virtualization. Concordia generalizes these ideas
+                                             50
+                                                                                                                                                                                                                  across ISAs with live state transfer.
+
+                                Tokens/sec
+                                             40
+                                             30                                                                                                                                                                      Checkpoint/Restart for GPUs. CheCUDA [33], CRIUgpu,
+                                             20                                                                                                               +49.0%                                              and Phoenix [40] address GPU checkpointing but capture
+                                             10                                                                                                                                                                   full state within single-vendor contexts. DMTCP [2] and
+                                               0                                                                                                                                                                  BLCR [11] provide general checkpointing. Concordia’s GPU-
+                                                                         Llama-3-8B                                                              Qwen2.5-14B
+                                                                                                                                                                                                                  side delta approach exploits LLM inference structure for
+                                                                                                                                                                                                                  orders-of-magnitude smaller checkpoints with cross-architecture
+Figure 10. Real-world SWE-Bench Workloads (tokens/sec-                                                                                                                                                            restore. The key differentiation is performing dirty detection
+ond).                                                                                                                                                                                                             on-device at HBM bandwidth rather than on-host, yielding
+                                                                                                                                                                                                                  85–219× speedup over CPU-side approaches.
+6                               Related Work                                                                                                                                                                         Fault-Tolerant Distributed ML. ULFM [3] adds fault
+  Persistent Threads and Device-Side Scheduling. Persis-                                                                                                                                                          tolerance to MPI. GPipe [16] and PipeDream [23] include
+tent threads were originally proposed for irregular scientific                                                                                                                                                    pipeline flushing for training. Gandiva [37], Tiresias [12],
+workloads [1, 13, 32]. Systems like Whippletree [31], Gun-                                                                                                                                                        and Gavel [22] optimize GPU scheduling but are constrained
+rock [36], and Zelos [41] demonstrated persistent scheduling                                                                                                                                                      by host-mediated recovery. Concordia provides a check-
+for various domains. LithOS [8] explored device-side task                                                                                                                                                         pointable persistent-kernel substrate and CXL/DRAM ap-
+scheduling. Concordia extends this lineage with dynamic                                                                                                                                                           pend log that such schedulers can use for fast restart.
+                                                                                                                                                                                                             13
+7     Discussion                                                         current evaluation does not include a CUDA Graph baseline
+7.1   Resource Etiquette                                                 for static decode, so we avoid claiming end-to-end decode
+                                                                         speedups over graph-optimized vLLM/TensorRT-LLM.
+The persistent kernel occupies one block out of 188 SMs
+(0.53%)—10× lower than CLC and 6× lower than Green Con-
+texts (table 9). It can be confined to a MIG partition for multi-        7.5   Limitations and Future Work
+tenant isolation. Checkpoint work is still real GPU work;                Concordia assumes the persistent checkpoint worker does
+Concordia’s resource advantage is that the worker is already             not fail independently of the GPU. If the worker heartbeat
+resident and does not require a separate launch or reserved              stops, the system treats the GPU as failed and recovers from
+pool per subsystem.                                                      the last committed AOF record; it does not tolerate Byzan-
+                                                                         tine worker corruption or arbitrary silent HBM corruption.
+7.2   Why a Unified FT Substrate                                         Cross-architecture migration requires cooperative check-
+The three capabilities could in principle be provided by sep-            pointing at barrier points; surprise preemption would need
+arate systems. Co-design under a single persistent kernel                always-on instrumentation. The optional CTX recovery path
+yields two advantages that composition cannot.                           has higher cold-start latency than same-architecture replay,
+   First, a never-exiting kernel gives checkpointing a device-           though caching amortizes this across subsequent loads. Delta
+side control path before failure occurs. Second, the ring buffer         checkpointing exploits static model weights—a property that
+unifies dispatch, checkpoint, AOF append, and restore trig-              holds for inference and LoRA (0.88–1.75% mutable pages)
+gers under one mechanism—each a task descriptor rather                   but not full fine-tuning. Opaque mutable regions still re-
+than a separate cudaLaunchKernel call (7.6 𝜇s saved per                  quire GPU-resident shadows; this HBM overhead is why
+trigger, Table 7). The 0.53% SM overhead is shared across all            Concordia prefers allocator hints for KV caches and does
+roles; three independent systems would each reserve their                not shadow immutable weights. The AOF log consumes host
+own GPU resources. JIT amortization and hot checkpoint-                  DRAM or CXL capacity and requires compaction to bound
+handler injection are useful consequences of this substrate,             replay time. On Blackwell, driver-level allocation while the
+but they are secondary to the recovery path.                             persistent worker is active requires pre-allocation or sus-
+                                                                         pend/resume, so engines with highly dynamic cudaMalloc
+7.3   Toward CPU-Stateless Serving                                       behavior need integration with a memory pool. Our evalu-
+                                                                         ation uses 2 GPUs via PCIe; validation at datacenter scale
+GPU-initiated networking allows the persistent kernel to
+dispatch operators, trigger checkpoints, append commit-                  with NVLink and InfiniBand remains future work.
+ted deltas, and transfer data to remote GPUs without host                   Looking forward, hardware support for GPU memory
+involvement, reducing the CPU’s role to initialization and               dirty-page tracking could eliminate the shadow-copy over-
+agent-level orchestration. This frees the CPU for tool calls             head entirely. Ahead-of-time generation for common KV-
+and reasoning-chain management—precisely what makes                      cache and LoRA layouts would remove checkpoint-handler
+                                                                         JIT cold-start penalties. Extending the persistent kernel to
+agentic workloads CPU-bound in current systems [17, 20].
+                                                                         manage GPU-side scheduling decisions—operator prioritiza-
+7.4   Application Logs, Graphs, and PagedAttention                       tion, adaptive batching, preemption—would further reduce
+                                                                         host involvement and move toward a fully autonomous GPU
+Application-specific KV logging can be more efficient than               runtime.
+transparent page diffing when the serving stack controls
+every KV write path. Concordia is meant for the comple-
+mentary point: binary-level coverage across framework ker-               8     Conclusion
+nels, fused libraries, and communication paths. The region-              Concordia argues that fault tolerance for long-running LLM
+registration API lets a serving engine expose PagedAttention             inference needs a GPU-resident execution substrate. The
+block tables and dirty-block bitmaps, so Concordia need not              persistent kernel is valuable not because every operation be-
+shadow immutable weights or rediscover append-only KV                    comes faster than native launch, but because checkpointing
+writes when semantic metadata is available. Once discovered,             and recovery need an executor that is already alive on the
+deltas are appended to a CXL/DRAM recovery log rather                    device, can observe instrumented PTX/SASS safe points, and
+than kept only in HBM; this separates the durability path                can run JIT-compiled dirty-page discovery without routing
+from scarce GPU memory and gives recovery a Redis-like                   control back through the host.
+AOF replay model.                                                           The resulting system combines binary instrumentation,
+   CUDA Graphs are also complementary. They should be                    registered recovery regions, JIT-compiled GPU-side delta
+used for stable decode subgraphs when the workload ad-                   checkpoint handlers, and an append-only CXL/DRAM re-
+mits capture. Concordia’s persistent executor is needed for              covery log under one recovery contract. This lets Concordia
+checkpoint triggers, binary pause hooks, and recovery tasks              exploit the structure of LLM state—static weights, sparse KV/-
+that must remain available outside a captured graph. Our                 cache updates, and small mutable adapter regions—while still
+                                                                    14
+covering framework-generated kernels and communication                                    of the 2012 Innovative Parallel Computing (InPar), pages 1–14, San Jose,
+libraries.                                                                                CA, USA, 2012. IEEE.
+   Our prototype shows that GPU-side dirty detection can be                          [14] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi
+                                                                                          Li, Shean Wang, Lu Wang, and Weizhu Chen. Lora: Low-rank adapta-
+up to 219× faster than CPU-side transparent page scanning,                                tion of large language models. In International Conference on Learning
+that checkpoint triggers can be submitted to an already-                                  Representations (ICLR), 2022.
+running executor, and that a two-GPU failure can recover                             [15] Ruobing Huang et al. Cupbop: Cuda on platform-based portability. In
+in about 1.5 seconds without a full NCCL restart. Optional                                Proceedings of PPoPP, 2023.
+portability and dispatch acceleration are useful side effects,                       [16] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao
+                                                                                          Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui
+but the central lesson is simpler: persistent kernels make fault                          Wu, et al. Gpipe: Efficient training of giant neural networks using
+tolerance a device-side runtime service, and Redis-style AOF                              pipeline parallelism. Advances in neural information processing systems,
+replay gives that service a simple recovery model outside                                 32, 2019.
+scarce HBM.                                                                          [17] Zhihao Jia, Matei Zaharia, and Alex Aiken. Beyond data and model par-
+                                                                                          allelism for deep neural networks. In Proceedings of the 2nd Conference
+                                                                                          on Machine Learning and Systems (MLSys), 2019.
+References                                                                           [18] Shinpei Kato, Michael McThrow, Carlos Maltzahn, and Scott Brandt.
+                                                                                          Gdev: First-class gpu resource management in the operating system.
+ [1] Timo Aila and Samuli Laine. Understanding the efficiency of ray                      In Proceedings of the 2012 USENIX Annual Technical Conference (ATC),
+     traversal on gpus. Proc. High Performance Graphics, 2009.                            2012.
+ [2] Jason Ansel, Kapil Arya, and Gene Cooperman. Dmtcp: Transparent                 [19] Yuto Kojima, Jiarui Xu, Xueyan Zou, and Xiaolong Wang. Lora-ttt:
+     checkpointing for cluster computations and the desktop. In 2009 IEEE                 Low-rank test-time training for vision-language models. arXiv preprint
+     International Symposium on Parallel & Distributed Processing, pages                  arXiv:2502.02069, 2025.
+     1–12. IEEE, 2009.                                                               [20] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+ [3] Wesley Bland, Aurelien Bouteiller, Thomas Herault, George Bosilca,                   Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Sto-
+     and Jack Dongarra. Post-failure recovery of mpi communication                        ica. Efficient memory management for large language model serving
+     capability: Design and rationale. In The International Journal of High               with PagedAttention. In Proceedings of the 29th ACM Symposium on
+     Performance Computing Applications, volume 27, pages 244–254. SAGE                   Operating Systems Principles (SOSP), pages 611–626, 2023.
+     Publications, 2013.                                                             [21] Daniel Lustig, Sameer Sahasrabuddhe, and Olivier Giroux. A formal
+ [4] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D                       analysis of the nvidia ptx memory consistency model. In Proceed-
+     Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish                  ings of the 24th International Conference on Architectural Support for
+     Sastry, Amanda Askell, et al. Language models are few-shot learners.                 Programming Languages and Operating Systems (ASPLOS), 2019.
+     Advances in neural information processing systems, 33:1877–1901, 2020.          [22] Deepak Narayanan, Keshav Santhanam, et al. Heterogeneity-aware
+ [5] Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Yan,                 cluster scheduling for deep learning workloads. In Proceedings of the
+     Haichen Shen, Meghan Cowan, Leyuan Wang, Yuwei Hu, Luis Ceze,                        14th USENIX Symposium on Operating Systems Design and Implemen-
+     Carlos Guestrin, and Arvind Krishnamurthy. Tvm: An automated end-                    tation (OSDI), 2020.
+     to-end optimizing compiler for deep learning. In Proceedings of the 13th        [23] Deepak Narayanan, Keshav Santhanam, Fiodar Kazhamiaka, Amar
+     USENIX Symposium on Operating Systems Design and Implementation                      Phanishayee, and Matei Zaharia. Memory-efficient pipeline-parallel
+     (OSDI), pages 578–594, Carlsbad, CA, USA, 2018. USENIX Association.                  dnn training. In International Conference on Machine Learning, pages
+ [6] Jack Choquette. Cuda graphs for work submission. NVIDIA Developer                    7937–7947. PMLR, 2021.
+     Blog, 2019. https://developer.nvidia.com/blog/cuda-graphs/.                     [24] NVIDIA Corporation. CUDA Dynamic Parallelism Technical Brief.
+ [7] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma,                     NVIDIA Corporation, 2023. CUDA Programming Guide.
+     Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung,
+                                                                                     [25] NVIDIA Corporation. Constant-time graph launch techniques. Tech-
+     Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language                    nical brief, NVIDIA Corporation, 2024. CUDA 12.3 Release Documen-
+     modeling with pathways. arXiv preprint arXiv:2204.02311, 2022.                       tation.
+ [8] Patrick H Coppock, Brian Zhang, Eliot H Solomon, Vasilis Kypriotis,             [26] NVIDIA Corporation. CUDA Driver API Reference. NVIDIA Corpora-
+     Leon Yang, Bikash Sharma, Dan Schatzberg, Todd C Mowry, and Dim-                     tion, 2024. CUDA Toolkit Documentation.
+     itrios Skarlatos. Lithos: An operating system for efficient machine             [27] NVIDIA Corporation. NVRTC: CUDA Runtime Compilation. NVIDIA
+     learning on gpus. In Proceedings of the ACM SIGOPS 31st Symposium                    Corporation, 2024. CUDA Toolkit Documentation.
+     on Operating Systems Principles, pages 1–17, 2025.                              [28] Manos Pavlidakis, Chris Kitching, Nicholas Tomlinson, and Michael
+ [9] CXL Consortium. Compute express link (cxl) specification 3.1. Tech-                  Søndergaard. Scale-ahead-of-time compilation of cuda for amd gpus.
+     nical report, Compute Express Link Consortium, January 2024.                         In Proceedings of the 25th International Middleware Conference: Demos,
+[10] Gregory Diamos, Andrew Kerr, Sudhakar Yalamanchili, and Nathan                       Posters and Doctoral Symposium, pages 5–6, 2024.
+     Clark.     Ocelot: A dynamic optimization framework for bulk-                   [29] PyTorch Team. Pytorch 2.0: The journey to compilation. PyTorch Blog,
+     synchronous applications in heterogeneous systems. In Proceedings of                 2023. https://pytorch.org/blog/pytorch-2.0-release/.
+     the 19th International Conference on Parallel Architectures and Compi-          [30] redplait. Nvidia sass disassembler. Github, June 2025.
+     lation Techniques (PACT), pages 353–364. ACM, 2010.                             [31] Markus Steinberger et al. Whippletree: Task-based scheduling of
+[11] Jason Duell, Paul Hargrove, and Eric Roman. The design and im-                       dynamic workloads on the gpu. In ACM SIGGRAPH, 2014.
+     plementation of berkeley lab’s linux checkpoint/restart. Lawrence               [32] Markus Steinberger, Michael Kenzel, et al. Softshell: Dynamic sched-
+     Berkeley National Laboratory Technical Report, 2003.                                 uling on gpus. In ACM SIGGRAPH Asia, 2012.
+[12] Juncheng Gu et al. Tiresias: A gpu cluster manager for distributed deep         [33] Hiroyuki Takizawa, Katsuto Koyama, Kento Sato, Kazuhiko Komatsu,
+     learning. In Proceedings of the 16th USENIX Symposium on Networked                   and Hiroaki Kobayashi. Checuda: A checkpoint/restart tool for cuda ap-
+     Systems Design and Implementation (NSDI), 2019.                                      plications. In 2011 International Conference on Parallel and Distributed
+[13] Kshitij Gupta, Jeff A. Stuart, and John D. Owens. A study of persistent              Computing, Applications and Technologies, pages 408–413. IEEE, 2011.
+     threads style gpu programming for gpgpu workloads. In Proceedings
+                                                                                15
+[34] Google Brain Team. Xla: Tensorflow, compiled. TensorFlow Developer                 Systems, pages 73–79, 2025.
+     Blog, 2017.                                                                   [39] Yiwei Yang, Yusheng Zheng, Tong Yu, and Andi Quinn. Hetgpu: The
+[35] vosen. Ptx on non nvidia gpus. Github, June 2025.                                  pursuit of making binary compatibility towards gpus. arXiv preprint
+[36] Yangzihao Wang et al. Gunrock: Gpu graph analytics. In ACM Trans-                  arXiv:2506.15993, 2025.
+     actions on Parallel Computing, 2017.                                          [40] Yuke Zhao, Chao Li, Jingyi Jiang, and Haoran Chen. Phoenix: A
+[37] Wencong Xiao et al. Gandiva: Introspective cluster scheduling for                  gpu-based serverless platform for large-scale model inference. In
+     deep learning. In Proceedings of OSDI, 2018.                                       Proceedings of the 2024 USENIX Annual Technical Conference. USENIX,
+[38] Yiwei Yang, Tong Yu, Yusheng Zheng, and Andrew Quinn. egpu: Ex-                    2024.
+     tending ebpf programmability and observability to gpus. In Proceedings        [41] An Zou et al. Rtgpu: Real-time gpu scheduling of hard deadline parallel
+     of the 4th Workshop on Heterogeneous Composable and Disaggregated                  tasks with fine-grain utilization. In Arxiv, 2021.
+
+
+
+
+                                                                              16
+

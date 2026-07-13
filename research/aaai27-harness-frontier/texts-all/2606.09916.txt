@@ -1,0 +1,1143 @@
+                                                      IntentKV: Cross-Turn Intent-Aware KV Cache Pruning
+                                                                       for Agent Inference
+
+                                                                             Junjie Li Jiong Lou Jie Li
+                                                                              Shanghai Jiao Tong University
+
+
+
+
+                                                              Abstract                             KV read bandwidth, rather than parameter com-
+                                                                                                   putation alone, become the dominant bottlenecks
+                                            Multi-turn LLM agents fan short queries into           in serving long-running agent sessions (Li et al.,
+
+
+
+
+arXiv:2606.09916v1 [cs.LG] 6 Jun 2026
+                                            long trajectories of tool calls, search results,
+                                                                                                   2024a; Zheng et al., 2024).
+                                            and intermediate reasoning. Both KV mem-
+                                            ory and KV read bandwidth grow by orders                  A natural response is to apply existing KV-
+                                            of magnitude across a single trajectory, mak-          cache pruning methods, but most were designed
+                                            ing the key–value (KV) cache, not parameter            for single-prompt compression rather than multi-
+                                            compute, the dominant serving bottleneck for           turn agent serving. StreamingLLM (Xiao et al.,
+                                            long-horizon agents. We introduce IntentKV,            2024) keeps attention sinks and a recent window;
+                                            learned KV pruning that keeps the base LLM             SnapKV (Li et al., 2024b) estimates token impor-
+                                            frozen. IntentKV maintains a session-level             tance from prompt-local tail attention; H2O (Zhang
+                                            QueryMemory of cross-turn intent, scores live
+                                                                                                   et al., 2023) retains heavy hitters. These methods
+                                            history tokens with a memory-attention rule,
+                                            and adds a zero-initialized residual head with         decide which past tokens to keep from signals avail-
+                                            cross-attention over current-query K-vectors.          able within a single prompt, and their standard use
+                                            To stay composable with prefix caches, eviction        typically materializes the kept KV rows as a com-
+                                            is a slot-map redirection: dropped positions           pacted request-local cache.
+                                            route to a sentinel dead slot while surviving             When these methods are applied to multi-turn
+                                            K/V rows, RoPE phases, and slot identities stay        agent serving, two assumptions from single-prompt
+                                            in place. IntentKV matches the no-pruning
+                                                                                                   compression become problematic. First, token im-
+                                            full-cache baseline with almost no accuracy
+                                            drop under tight KV budgets: at an 8k KV bud-          portance changes across turns: later queries, re-
+                                            get, mean peak request tokens drop 23.9% on            trieved evidence, and intermediate decisions can
+                                            Qwen3-8B and 30.7% on Qwen2.5-14B. On                  make early history useful again, so a ranking com-
+                                            the 100 longest BCP queries that all methods           puted from one prompt grows stale and may dis-
+                                            complete on Qwen2.5-14B, IntentKV-8k fur-              card future-use evidence. Second, the pruned state
+                                            ther cuts worst-case peak request tokens from          must remain reusable: agent sessions repeatedly
+                                            92.3k to 20.5k (↓ 77.8%) and worst-case raw            submit histories with long shared prefixes, which
+                                            KV reads from 411M to 31M (↓ 92.6%).
+                                                                                                   systems such as SGLang (Zheng et al., 2024) and
+                                        1   Introduction                                           vLLM (Kwon et al., 2023) exploit through radix or
+                                                                                                   prefix caches. Relocating surviving KV rows may
+                                        Modern LLM agents increasingly execute multi-              serve the current request, but it changes the cache
+                                        turn browsing, deep-research, and tool-use work-           identity that later turns would otherwise reuse.
+                                        flows (Yao et al., 2022). In these settings, a short       Figure 1 illustrates both failure modes: prompt-
+                                        user request often expands into a long trajectory of       local scoring can drop future-use evidence, and
+                                        retrieved documents, tool outputs, intermediate de-        relocation-based pruning loses the prefix identity
+                                        cisions, and generated arguments. This creates an          needed across turns.
+                                        asymmetric serving profile: although the original             These two constraints suggest separating what
+                                        user query may contain only a few dozen tokens,            pruning keeps from how the pruned state is rep-
+                                        the agent state can grow to tens of thousands of           resented. The retention policy should track infor-
+                                        prompt tokens, and each generated token must at-           mation needs as they evolve across the session,
+                                        tend to the KV tensors of all previous tokens at           rather than scoring history only against a single
+                                        every layer. As a result, KV memory capacity and           prompt. The layout policy should evict tokens
+
+                                                                                               1
+                                                     Prompt-local KV Pruning in Multi-turn Agents
+       Useful past evidence         Current query         kept             Future-use evidence dropped              Irrelevant        Activate in this turn
+
+  (a) From Single-shot to Multi-turn                                                           Multi-turn agent
+  …                                                              task                   tool-call                 observation                follow-up
+
+         Past context       Current query                                              Accumulated context
+                                                           …
+               Prompt-local
+                  score                                                 initial task                Past evidence          Tool obs       Current query
+
+                                                        Turn 1:task focus              …                                                      …
+                    Top-k
+  …                                                     Turn 2:tool grounding          …                                                      …     time
+
+                                                         Turn 3:task focus             …                                                      …
+
+
+  (b) Signal mismatch vs IntentKV
+
+       1.Prompt-local pruning          …                                                                                                     future-use
+                                                                                                                                          evidence in the
+                                                                                                                                         history is dropped
+                                                initial task        Future-use evidence dropped Tool obs             Current query
+       2.IntentKV                      …                                                                                                    future-use
+                                                                                                                                            evidence is
+                                                                                                                                             retained
+                                                                 future-use evidence retained by prior intent        Current query
+
+Figure 1: Prompt-local KV pruning becomes stale in multi-turn agents. (a) Single-shot compressors score
+history against one query; agent sessions accumulate new intents across turns. (b) Signal mismatch between
+prompt-local scoring and IntentKV’s session-aware retention.
+
+without relocating surviving K/V rows, preserving                                        spans across turns.
+their logical positions and cache identities for later                                 • A learned-residual pruner keeps the session-
+turns. We instantiate this separation in IntentKV: a                                     aware heuristic as the primary signal and adds
+session-aware heuristic provides the primary reten-                                      a frozen-feature correction grounded in future
+tion signal, a small learned residual handles cases                                      actions, without updating the base LLM.
+the rule misses, and a layout-preserving eviction                                      • An eviction recipe for paged KV caches
+recipe keeps pruning compatible with prefix-cache                                        (SGLang/vLLM) that redirects dropped po-
+reuse.                                                                                   sitions to a sentinel slot rather than relocating
+   On the retention side, IntentKV maintains a                                           survivors, so pruning stays composable with
+QueryMemory that aggregates query-like signals                                           radix-prefix reuse without changes to existing
+across the session and scores live history tokens                                        attention kernels: 20.7% prefix-hit rate at an
+against this evolving state. A small zero-initialized                                    8k budget where compaction baselines fall to
+residual head, trained from frozen-model features,                                       0–3%.
+learns a correction for cases the rule scorer misses                                   • On BCP at C=8k, IntentKV-Phase-2 matches
+while recovering the rule score at initialization.                                       Full-cache True Acc within 0.96 points on
+   On the layout side, IntentKV evicts without                                           Qwen3-8B and surpasses the strongest heuris-
+compaction. Dropped positions are redirected to                                          tic by 10.36 points on Qwen2.5-14B; on the
+a sentinel dead slot, while surviving K/V rows,                                          100 longest queries it cuts worst-case peak re-
+RoPE phases, and logical slot identities remain un-                                      quest tokens by 77.8%–81.7% and worst-case
+changed. Agent sessions can therefore combine                                            raw KV reads by 36.9%–92.6% (Table 3).
+KV pruning with cross-turn prefix reuse, rather
+than choosing one or the other.                                                  2         Related Work
+Contributions.                                                                   From prompt-local scores to cross-turn intent.
+  • We formulate agent KV pruning as multi-                                      Most KV eviction methods score tokens against
+    query retention and instantiate it with                                      a single user prompt (Xiao et al., 2024; Liu
+    QueryMemory, a per-session state aggregating                                 et al., 2023; Zhang et al., 2023; Li et al., 2024b;
+    queries, tool calls, search intents, and action                              Zhou et al., 2024; Ahn et al., 2026), with or-
+
+                                                                             2
+thogonal refinements for per-layer budgets, query-            higher layer, MemGPT (Packer et al., 2023) and
+aware decode-time sparsity, and future-query pre-             A-MEM (Xu et al., 2026) manage agent state via
+scoring (Ge et al., 2024; Cai et al., 2024; Tang              OS-style swapping and long-term graph memory,
+et al., 2024; Devoto et al., 2025). All assume a              deciding what to remember at the orchestration
+single request available at prefill. Multi-turn agents        layer; IntentKV operates inside the cache with the
+break this: later turns surface fresh query signals           base LLM and agent loop unchanged and so com-
+in tool outputs and intermediate plans that a one-            poses with such memories rather than competing.
+shot scorer cannot anticipate. IntentKV instead
+formulates pruning as multi-query retention, scor-            3     Method
+ing history against a session-level QueryMemory               IntentKV (Figure 2) intervenes once per request af-
+that absorbs these signals as they arrive. KV quan-           ter prefill, when the sequence length N exceeds a re-
+tization (Liu et al., 2024; Kang et al., 2024) reduces        tention budget C. It produces a kept set K ⊆ [0, N)
+per-token precision rather than token count and is            that always retains the current actionable query
+orthogonal to IntentKV.                                       span and the protected system prefix, holds every
+Semantic pruning without changing the base                    other surviving token at its original logical position
+model. A second line learns token-importance                  and physical KV slot, and lets the cross-request
+policies on frozen-model features (Ahn et al., 2026;          radix tree (Zheng et al., 2024) match prefixes de-
+Zhou et al., 2024), though pure learned scores                spite eviction. The design factors into two layers:
+can be brittle under weak or shifted query sig-               retention ranks history under cross-turn intent, and
+nal. TRIM-KV (Bui et al., 2025) is the closest                layout keeps the surviving prefix reusable.
+peer: it trains a small predictor and biases reten-
+                                                              3.1   Problem Formulation
+tion via a positional time-decay prior, well-suited
+to chain-of-thought trajectories where relevant con-          We frame KV pruning as a budgeted top-k selection
+text is temporally local. Agent loops invert this             over post-prefill tokens, with a small protected set
+regime—useful tokens are often the oldest (initial            fixed in advance. Let Sr ∈ ZN denote the slot map
+request, early retrieved page, first tool result) while       of request r, K, V∈RL×Hkv ×N×D the post-RoPE (Su
+youngest decode tokens are scaffolding—so a time-             et al., 2024) keys and values, and [qs , qe ) the ac-
+decay prior is tuned to a different workload. In-             tionable query span (the latest user, tool, or func-
+tentKV trains a comparable head but conditions it             tion message that can affect the next decision, re-
+on QueryMemory and supervises with which posi-                solved after template rendering). The protected pre-
+tions are re-attended in later turns, yielding a query-       fix π covers the chat-template system span. With
+decay policy anchored to evolving intent. Side-               the forced set F = [0, π) ∪ [qs , qe ), residual bud-
+Quest (Kariyappa and Suh, 2026) and Activation                get C⋆ = max(0,C − |F |), and candidate history
+Beacon (Zhang et al., 2025) modify the base model             H = [0, N) \ F , compression selects
+(deletion commands and learned summary tokens
+                                                                          K ⋆ = F ∪ arg top ∑ s j ,             (1)
+respectively) and so are complementary rather than                                       K ⊆H j∈K
+substitutable; IntentKV keeps the base LLM frozen                                       |K |=C⋆
+and adds only a zero-initialized residual head.
+                                                              where s j is produced by one of three scorer
+Composable serving- and orchestration-layer                   modes: query uses only the current query encod-
+systems. Efficient agent serving reuses KV state              ing, memory accumulates queries across the session
+via paged allocation and prefix/radix caches when             via a recurrence, and learnable adds a residual
+consecutive requests share a prefix (Kwon et al.,             head on top of memory. Thus C controls compress-
+2023; Zheng et al., 2024), and Continuum (Li et al.,          ible history rather than serving as a hard cap on
+2025) extends this to multi-turn agents through KV            prompt-plus-generation tokens; implementation de-
+time-to-live scheduling. Conventional compaction              tails are in Section H.
+shifts the physical slots and RoPE phases of surviv-
+ing tokens and invalidates the prefix identity such           3.2   Cross-Turn Query Memory
+systems would reuse; IntentKV keeps surviving                 Within one agent session, attention from later
+K/V rows in place and redirects dropped logical               queries no longer concentrates on the regions that
+positions to a sentinel slot, so request-local com-           the first user prompt singled out, so a scorer trained
+pression composes with radix-prefix reuse. At a               on q0 alone is mis-calibrated for q1:t (Figure 3).
+
+                                                          3
+                                                                    Cross-turn Intent-aware Token Scoring
+
+ ① Agent context                        ② Query Memory update                                                          ③ score
+
+       User task                         Current query span q t                 a) Rule score                    b) Residual correction               c) Final score combination
+       Find flights
+       from                                             …                  Candidate position j                   per-token features
+       Beijing to Paris                                                                                                                                                           …
+                                                                           1   2    3    4       5    …    n      φj= [ kj | m | kj ⊙ m | srule(j)]   r1     r2   r3   r4   r5           rn
+                                                  Enc(qt)
+       Tool call
+       search_flights(                                  …
+       "PEK","PAR","                                                   Rule score S rule(j)                       Current query span Kq
+       2025-05-20")                                                                                                               …
+                                  Session-level QueryMemory            r1      r2   r3   r4 r5        … rn
+   Observation                  M                …                     QueryMemory state Mt                                                                       α·Δs(j)
+                                 t-1
+   12 options found                                                                                                                                                               …
+                                                                                                                   cj = CrossAttn(LinearQ(φ j),        δ1 δ2 δ3 δ4 δ5                    δn
+                                                        …                                                          LinearK(Kq), LinearV(K q))
+       Follow-up                Mt
+       queryCheapest                                                   Interactions Mt ⊙ Kj
+                                                                                                                                                         s1 s2 s3 s4 s5           … s
+       direct flighton                                                 (per-token features)                                                                                           n
+                                                                                                                    MLP (residual head)
+       May 21?
+                                                                                                                                                           s(j) = srule(j) + α · Δs(j)
+           ……                        Mt = exp(- λ) Mt-1 + Enc(qt)                                                  Residual correction Δs(j)                     (α learnable)
+                                                                                                                                        …
+                                                                                                                  δ1 δ2 δ3 δ4 δ5             δn
+
+
+                Kept token                   Rule score              Current query span                        Residual correction           Dead slot                 Inference flow
+
+Figure 2: IntentKV method overview. (a) Rule score against QueryMemory; (b) zero-init residual correction via
+cross-attention over current-query K-vectors; (c) final score combination feeding top-k retention. Eviction redirects
+dropped positions to a sentinel dead slot on the existing paged KV cache, preserving radix prefix identity.
+
+                                                                                                     max below collapses onto a single coordinate. With
+                                            attention
+                                                                                                     K ∈ RL×Hkv ×N×D from the current request and KV
+                                 0.00      0.02       0.04
+
+  user          non-US arch firm, ∼ 190 m², fruit tree, 45–109°                                      heads expanded to Hq under GQA, candidate posi-
+  tool 1        search firm 2012–22 → Equipo de Arq.                                                 tion j ∈ H receives the rule score
+  tool 2        190 m² fruit tree → Casa Curro (guava)                                                 rule j = ∑ al,h, j ,
+  tool 3        rotated 45–109° → ∼ 70° around guava                                                                  l,h
+                                                                                                                                            √      (3)
+  answer compose → Equipo de Arquitectura                                                                          exp(Mt [l, h]·K[l, h, j]/ D)
+                                                                                                       al,h, j =                               √ .
+                                                                                                                 ∑i∈H exp(Mt [l, h]·K[l, h, i]/ D)
+  q0                                                                                                 Equation (3) replaces SnapKV’s window of W
+  q1                                                                                                 tail Q rows with a single accumulated query state,
+  q2                                                                                                 reducing per-event scoring from O(W LHq N) to
+  q3                                                                                                 O(LHq N) while incorporating evidence from prior
+  q4                                                                                                 turns.
+       0                  400             800                1200   1600
+                                        prefix token position                                        3.3       Residual Learnable Pruner
+                                                                                                     We refer to the rule scorer of Equation (3) as the
+Figure 3: Cross-turn attention drifts away from the                                                  Phase-1 configuration and to the rule-plus-residual
+initial prompt. On a BCP rollout (qid 861, Qwen3-
+                                                                                                     scorer defined below as the Phase-2 configuration.
+8B; turn-aware synthetic preview), each query q0 → q4
+activates a different region of the prefix (positions 0–                                             IntentKV optionally augments the rule score with
+2000).                                                                                               a learned residual that produces the s j consumed
+                                                                                                     by Equation (1),
+Per session, IntentKV maintains a query memory                                                                                                 
+Mt ∈ RL×Hq ×D with the shape of one post-RoPE                                                                  s j = rule j + α · MLP φ j ⊕ c j ,    (4)
+query row, updated by a geometric recurrence:                                                        where α ∈ [−5, 5] is a learned scalar clipped at in-
+                                                                                                     ference, φ j ∈ R3D+1 is the per-token feature vector,
+                     Mt = e−λ Mt−1 + Enc(qt ),                                      (2)
+                                                                                                     and c j ∈ Rdc is a cross-attention readout over the
+   where Enc(qt ) averages the post-RoPE Q rows                                                      current query’s K-vectors.
+over the actionable query span; the decay rate λ
+                                                                                                     Per-token feature vector. Let k̄ j be the mean
+is fixed across the session (value set in Section A).
+                                                                                                     of K[l, h, j] over GQA-expanded heads and layers,
+After each update, Mt is projected to unit norm
+                                                                                                     and m̄ the analogous mean over Mt . Then
+along the head dimension; without this, its norm                                                                                                  
+grows roughly linearly with turn count and the soft-                                                            φ j = k̄ j ∥ m̄ ∥ k̄ j ⊙m̄ ∥ rule j . (5)
+
+                                                                                             4
+Mean aggregation keeps every column of φ j at                 tinues to match this request against later turns shar-
+O(1) regardless of depth or head count, so one                ing its prefix, exactly as if no pruning had hap-
+residual topology covers backbones with the same              pened.
+D. The element-wise interaction k̄ j ⊙ m̄ supplies
+an explicit token–memory alignment channel that               Sentinel as in-place mask. The redirect target
+a linear concatenation cannot represent.                      s† in Equation (7) is a single sentinel slot allo-
+                                                              cated at compressor startup and held in a never-
+Cross-attention over query K-vectors. Per-                    free set, with K[s† ] = −104 1D on every layer and
+token features collapse every layer and head, los-            V[s† ] = 0D . The√pre-softmax logit at the sen-
+ing which current query token a candidate matches.            tinel is thus −10  4 D, driving its softmax weight
+                                                                             √
+The residual therefore reads the query span back              to exp(−104 D), far below the smallest repre-
+through a multi-head cross-attention. Let K̄q ∈               sentable bf16/fp16 value; the zero value then nulls
+Rnq ×D aggregate K-vectors at the live query po-              any residual contribution. The sentinel is numer-
+sitions (positions evicted in a prior round are ex-           ically equivalent to a hard visibility mask, but it
+cluded, so the attention consumes only live evi-              lives at the slot-map level rather than inside the at-
+dence). With Hc = 4 heads and width dc = 128,                 tention kernel, so existing flashinfer and FA3 paths
+                                                              run unmodified.
+     c j = CrossAttn WQ φ j , WK K̄q , WV K̄q .
+                                             
+                                                (6)
+                                                              Alias-aware deallocation. A dropped physical
+Candidate features form the queries; past query
+                                                              slot u = Sr [ j] is returned to the allocator only if (a)
+K-vectors form keys and values.
+                                                              position j lies outside the radix-protected prefix,
+Initialisation and lower bound. The MLP body                  (b) u ̸= s† , and (c) u ∈  / {Sr [i] : i ∈ K ⋆ }. Condi-
+is a two-layer GELU network of hidden width h =               tion (c) catches two alias patterns: positions al-
+256. Its output projection is zero-initialised in both        ready redirected to s† in a prior compression round,
+weight and bias, while α = 1 at start. Under (α =             and slots shared with sibling requests on the same
+1, fc2 = 0) the pruner exactly recovers Equation (3)          radix branch. Without this check, freeing u would
+on day zero, gradients still flow through fc2 , and the       corrupt KV reads from those siblings, which is
+rule scorer remains a strict floor under the learned          the practical obstacle that forces prior compaction-
+head; pairing α = 0 with fc2 = 0 would freeze the             based pruners to disable prefix-cache reuse. The
+gradient path at a (0, 0) saddle. For D = 128, the            slot-map indirection is borrowed from PagedAtten-
+residual head has 214,274 trainable parameters.               tion (Kwon et al., 2023) and the sentinel-as-mask
+                                                              construction is the standard attention-masking id-
+Ablation knobs. The full configuration Full
+                                                              iom; what we add is the integration itself: combin-
+Phase-2 activates all three additions in Equation (4).
+                                                              ing them so per-request pruning becomes compos-
+Section 4.4 ablates them independently: − memory
+                                                              able with radix-prefix reuse without modifying the
+replaces Mt with Enc(qt ), − x-attn forces c j = 0 in
+                                                              attention kernel.
+Equation (6), and − residual clamps α = 0, exactly
+recovering the rule scorer.                                   3.5   Training
+3.4   Slot-Map Eviction                                       Frozen-model feature extraction. Training
+Serving stacks already decouple logical token po-             reads post-RoPE Q and K from a frozen copy of
+sitions from physical KV slots through a paged                the deployed model. We register a RoPE hook that
+allocator and a per-request slot map (Kwon et al.,            captures the post-rotation tensors exactly where
+2023; Zheng et al., 2024). Standard compactors                the attention backend consumes them, so the of-
+copy kept rows into a contiguous range and re-                fline feature distribution matches inference. Long
+rotate keys, which changes both slot identity and             sequences are processed in 4,096-token chunks
+RoPE phase and breaks the radix-tree match against            with KV caching enabled to bound attention-matrix
+later turns. IntentKV instead leaves every kept K/V           memory; chunk boundaries respect the actionable
+row at its original slot and modifies only Sr :               query span so each example sees its full encoding.
+
+          Sr [ j] ← s† ,   ∀ j ∈ [0, N) \ K ⋆ ,    (7)        Future-action       grounding. For       each
+                                                              (session, turn) row, the labeller scans the
+with the token-id stream fill_idsr and sequence               next five tool calls in the same session and
+length N untouched. The radix tree therefore con-             marks any history token whose content matches
+
+                                                          5
+a literal substring of a future tool argument as             830-query deep-research suite over a fixed ∼100K-
+positive. Tokens inside the current query span and           document corpus; the retriever is frozen via a per-
+special-template tokens carry label −100 and are             query cache so compression effects are not con-
+excluded from the loss; rows with no matched                 founded by retrieval drift.
+evidence are dropped rather than back-filled with a
+recency proxy, which improves label precision at             Training. The Phase-2 pruner is trained on strict-
+the cost of some textually unrecoverable turns.              cleaned ToolBench (Qin et al., 2024; Guo et al.,
+                                                             2024) multi-turn traces with future-action labels ob-
+Loss.    The total objective sums four terms,                tained by literal substring matching against the next
+                                                             five tool-call arguments (Section 3.5). Training
+          L = LBCE (s, y) + ρ Lrank
+                                                  (8)        uses reservoir-sampled 3K–5K examples per epoch
+               + γ σ (s) + η (∥Mt ∥2 − 1)2 ,                 for two epochs with AdamW (lr 10−3 , weight de-
+                                                             cay 0.01, grad-accum 8, seed 42); the base LLM
+with defaults ρ = 0.05, γ = 0.01, η = 0.001. LBCE            is frozen in bf16 and only the FP32 residual head
+uses an adaptive positive weight (1 − p̃)/ p̃ with           is updated. Trigger size is 512 tokens and tail win-
+p̃=clip(p, 0.02, 0.5) to absorb the long-tailed posi-        dow W =32. The Qwen3-8B (resp. Qwen2.5-14B)
+tive rate; Lrank is a pairwise softplus surrogate that       run completes in ∼40 (∼55) minutes on 4×80 GiB
+compares each positive against the top-64 hard neg-          A100s with final loss 0.54 (0.51); training curves
+atives; the third term discourages an unbounded              are in Section F.
+keep probability; the last term softly enforces the
+unit-norm projection on Mt used at inference.                Baselines. We        compare     IntentKV-Phase-
+                                                             2 against a no-pruning Full-cache ceiling,
+Optimisation. Sessions are replayed in increas-
+                                                             StreamingLLM (Xiao et al., 2024) (sink 4 +
+ing turn_index so Mt accumulates as at inference
+                                                             recent window), SnapKV (Li et al., 2024b)
+and are shuffled between epochs. One residual
+                                                             (kernel 7, W =32, max-pool), H2O (Zhang et al.,
+head is trained per backbone; the topology is iden-
+                                                             2023) (ratio mode with recent floor), and a
+tical and the differences are captured by separately
+                                                             public TrimKV (Bui et al., 2025) checkpoint
+trained weights. See Section 4.1 for hyperparame-
+                                                             that uses positional time-decay rather than
+ters.
+                                                             query-conditioned retention. All compressors run
+4     Experiments                                            at C ∈ {8192, 16384} applied to the compressible
+                                                             history at each pruning event.
+4.1     Experimental Setup
+Models, serving, and benchmark. We evalu-                    Metrics. Accuracy. Following BCP, a Qwen3-
+ate Qwen3-8B-Instruct (Yang et al., 2025) and                32B LLM judge (Zheng et al., 2023) labels each
+Qwen2.5-14B-Instruct (Qwen et al., 2025) on a sin-           completed trajectory; we report Compl (queries
+gle 80 GiB A100, both Neox-RoPE GQA models.                  finishing without OOM, overflow, turn cap, error,
+The restriction to Qwen backbones is empirically             or empty output), Raw (C ORRECT/C OMPLETED),
+motivated rather than methodological: a seven-               and the headline True Acc (C ORRECT/T OTAL =
+model cross-architecture smoke study spanning                Raw×Compl, with non-completion counted as
+Llama-3.1-8B, Mistral-Nemo-2407, Mistral-Small-              wrong). System cost. All system-side metrics are
+3.2-24B, Hermes-3-Llama-3.1-8B, watt-tool-8B,                lower-is-better. Let Rt denote the raw (pre-pruning)
+gpt-oss-20b, and GLM-4-9B found that no non-                 attended-to set at decode step t and Kt ⊆ Rt the
+Qwen open-source backbone in our sample reliably             effective subset that survives pruning and actually
+engages in autonomous multi-step tool calling on             participates in attention; |Rt | and |Kt | are the corre-
+BCP, even after we fixed the corresponding parser            sponding sizes. We report:
+and tokenizer-protocol incompatibilities; the fail-             • PT (peak request tokens, k): per-query max-
+ures sit at the agentic-behavior layer, not at the                imum maxt |Rt | of the uncompressed request
+KV-compression layer (Section G). All inference                   size; a memory-footprint upper bound.
+uses SGLang (Zheng et al., 2024) with radix pre-                • Eff. Live KV (k tokens): per-query peak of
+fix caching, deterministic decoding (T =0), and at                the live (post-pruning) effective KV, maxt |Kt |;
+most 32 tool-use turns per query. The benchmark                   the attention-workload metric reported on the
+is BrowseComp-Plus (BCP; Chen et al., 2025), an                   bottom row of Figure 4.
+
+                                                         6
+                                  Full-cache         StreamingLLM               SnapKV              H2O               IntentKV
+
+                       ↖ better                     ↖ better                    20 ↖ better                      20 ↖ better
+
+
+
+  True Acc (\%)
+                  15                           15
+
+
+                                                                                10                               10
+                  10                           10
+
+                             12    14                     12    14                        15.0    17.5                     15.0    17.5
+                   Peak request tokens (k)      Peak request tokens (k)          Peak request tokens (k)           Peak request tokens (k)
+                   (a) Qwen3-8B — C = 8k       (b) Qwen3-8B — C = 16k           (c) Qwen2.5-14B — C = 8k (d) Qwen2.5-14B — C = 16k
+                       ↖ better                     ↖ better                    20 ↖ better                      20 ↖ better
+
+
+
+  True Acc (\%)
+                  15                           15
+
+
+                                                                                10                               10
+                  10                           10
+
+                        10        12                 10        12                       12.5     15.0    17.5             12.5    15.0    17.5
+                       Effective live KV (k)        Effective live KV (k)            Effective live KV (k)            Effective live KV (k)
+                   (e) Qwen3-8B — C = 8k        (f) Qwen3-8B — C = 16k          (g) Qwen2.5-14B — C = 8k (h) Qwen2.5-14B — C = 16k
+Figure 4: BCP accuracy under two distinct cost metrics. Each column fixes one (model, budget) configuration.
+The top row plots True Acc against the KV memory footprint (PT, k tokens). The bottom row plots True Acc against
+the decode-side attention workload (Eff. Live KV, k tokens). IntentKV-Phase-2 is Pareto-dominant on both axes at
+C=8k.
+
+   • Raw KV Reads (106 tokens): cumulative pre-                                 14B the margin narrows (14.58 vs. StreamingLLM
+     pruning KV reads ∑t |Rt |.                                                 16.14): Qwen2.5-14B BCP trajectories average
+   • Eff. KV Reads (106 tokens): cumulative                                     ∼17k peak request tokens, so a 16k budget
+     effective KV reads ∑t |Kt |; proxies attention                             rarely triggers eviction— consistent with the same
+     bandwidth.                                                                 model’s 10.36-point IntentKV advantage at the
+We additionally report wall-clock latency (Wall,                                tighter 8k budget where retention decisions actually
+s) and the radix prefix-hit rate (in %, quoted                                  matter.
+inline). Cohort statistics in Tables 2, 4 and 6                                 Table 1: IntentKV-Phase-2 lands within 0.96
+are means across the relevant query set; Table 3                                True Acc of Full-cache on Qwen3-8B and beats the
+reports cohort maxima PTmax = maxq PT(q) and                                    strongest heuristic by 10.36 points on Qwen2.5-14B
+                                                                                (830-query BCP eval). Best non-Full-cache cell per
+Rmax = maxq Raw KV Reads(q).
+                                                                                column in bold, second-best underlined; Full-cache is
+4.2               Main Results: Accuracy                                        shown only at C=16k as the uncompressed ceiling.
+
+The 8k budget is the stress regime. Table 1 re-                                                                 C=8k                 C=16k
+ports the full 830-query evaluation. On Qwen3-8B                                Method                   Raw Compl True Raw Compl True
+at C=8k, the four compaction baselines collapse                                  Qwen3-8B
+on completion: StreamingLLM finishes 65.42%                                     Full-cache          —              —     — 16.92         89.04 15.06
+                                                                                StreamingLLM 18.05              65.42 11.81 18.10        79.88 14.46
+(−23.6 vs. Full-cache); H2O, SnapKV, TrimKV                                     SnapKV           20.06          45.66 9.16 17.29         73.86 12.77
+drop further to 45.66–51.57%. IntentKV-Phase-                                   H2O              21.37          45.66 9.76 19.36         71.57 13.86
+2 keeps 84.58% completion and reaches 14.10                                     TrimKV           21.25          51.57 10.96 18.42        71.93 13.25
+True Acc, surpassing StreamingLLM by 2.29,                                      IntentKV-Phase-2 16.67          84.58 14.10 17.08        87.47 14.94
+
+TrimKV by 3.14, H2O by 4.34, SnapKV by 4.94.                                     Qwen2.5-14B
+                                                                                Full-cache          —              —     — 21.03         97.95 20.60
+The Qwen2.5-14B margin is larger: IntentKV-                                     StreamingLLM 16.54              49.52 8.19 21.61         74.70 16.14
+Phase-2 at C=8k recovers 18.55 True Acc vs. a                                   SnapKV           23.44          32.89 7.71 21.41         73.13 15.66
+20.60 Full-cache ceiling, while the best heuristic                              H2O              19.30          27.47 5.30 22.24         68.80 15.30
+(StreamingLLM) reaches only 8.19—a 10.36-point                                  IntentKV-Phase-2 20.53          90.36 18.55 20.48        71.20 14.58
+gap.
+At 16k the gap to the ceiling closes. On Qwen3-                                 4.3      Main Results: Efficiency
+8B at C=16k, IntentKV-Phase-2 attains 14.94                                     Efficiency gains come from both tighter reten-
+True Acc, within 0.12 of no-pruning and ahead of                                tion and preserved prefix reuse. Table 2 shows
+every heuristic (StreamingLLM 14.46, H2O 13.86,                                 IntentKV’s Eff. KV Reads sits at or below ev-
+TrimKV 13.25, SnapKV 12.77). On Qwen2.5-                                        ery compaction baseline on both backbones: it is
+
+                                                                            7
+within 8M of StreamingLLM on Qwen3-8B and                  Table 2: IntentKV-Phase-2 cuts wall time by up to
+roughly 2× lower than every compaction base-               43% and Raw KV reads by up to 59% versus com-
+                                                           paction baselines on both backbones (lower is better).
+line on Qwen2.5-14B (21.0–24.1 vs. 44.5–58.7M),
+                                                           Column definitions in Section 4.1; best non-ceiling cell
+indicating that QueryMemory selects a tighter              per column in bold.
+live working set than tail-attention or heavy-hitter
+heuristics. On top of this, the hole-preserving lay-       Method             PT (k)    Wall    Raw Rd       Eff. Rd
+out keeps radix prefix caches valid: 20.7%/26.0%            Qwen3-8B, C=8k
+                                                           StreamingLLM           8.4   180.6         54.3     45.2
+prefix-hit at C=8k/16k, while compaction base-             SnapKV                 9.0   279.2         77.1     59.4
+lines fall to 0–3% because relocation renumbers            H2O                    9.1   281.4         77.2     59.7
+positions. With both effects active, IntentKV-             IntentKV-Phase-2       8.1   140.4         31.6     39.8
+Phase-2 at C=16k on Qwen3-8B issues 32.0M                   Qwen3-8B, C=16k
+                                                           Full-cache            10.6   131.4         32.2     45.1
+Raw KV Reads (matching Full-cache’s 32.2M;                 StreamingLLM           9.9   165.3         50.0     51.5
+−51.1% vs. H2O’s 65.5M), with wall time 139.2              SnapKV                 9.9   228.2         60.7     59.1
+s (−43.1% vs. H2O, within 5.9% of no-pruning).             H2O                   10.2   244.7         65.5     63.6
+                                                           IntentKV-Phase-2       9.9   139.2         32.0     43.2
+At C=8k, Raw KV Reads drop to 31.6M (−59.1%
+vs. H2O/SnapKV). The prefix-reuse contribution is           Qwen2.5-14B, C=8k
+                                                           StreamingLLM       10.5      275.3      68.3        44.5
+isolable in Section E: re-running SnapKV and H2O           SnapKV             12.7      574.2     101.0        56.5
+on IntentKV’s dead-slot substrate cuts wall-time           H2O                12.6      373.1      93.6        52.4
+44–46% and Raw KV Reads 39–47% on both base-               IntentKV-Phase-2   11.8      104.0      26.7        21.0
+lines with no change to scoring or budget, while            Qwen2.5-14B, C=16k
+                                                           Full-cache          17.1     203.8         25.2     27.1
+IntentKV-Phase-2 retains a 1.5× reduction in Raw           StreamingLLM        14.5     292.4         64.5     51.8
+KV Reads over SnapKV under the matched sub-                SnapKV              14.9     447.5         70.7     52.6
+strate at indistinguishable True Acc (∆=0.35σ on           H2O                 15.2     521.3         80.9     58.7
+                                                           IntentKV-Phase-2    15.1     105.0         28.8     24.1
+830 queries).
+
+Worst-case KV pressure (vs. uncompressed).                 Table 3: IntentKV-8k cuts worst-case peak request
+Table 3 stress-tests IntentKV against the uncom-           tokens by 78–82% and worst-case Raw KV reads by
+                                                           up to 93% against the uncompressed ceiling. Cohort:
+pressed ceiling on the 100 BCP queries with the
+                                                           the 100 BCP queries with the largest uncompressed
+largest Full-cache PTmax . IntentKV-8k cuts worst-         PTmax where all three methods complete; symbols de-
+case peak request tokens by 77.8–81.7% and worst-          fined in Section 4.1.
+case Raw KV Reads by 36.9–92.6% across the two
+                                                                              Qwen3-8B           Qwen2.5-14B
+backbones, while True Acc stays within 0.96–2.05
+points of the uncompressed ceiling. IntentKV there-        Method         Rmax PTmax     True Rmax PTmax       True
+fore absorbs the heaviest BCP trajectories at a 1–2        Uncompressed    187   114.8 15.06    411      92.3 20.60
+                                                           IntentKV-16k    132    28.0 14.94     55      32.6 14.58
+order-of-magnitude smaller KV footprint without            IntentKV-8k     118    21.0 14.10     31      20.5 18.55
+sacrificing full-cache accuracy.
+
+4.4   Ablations                                            5   Conclusion
+
+We ablate the three additions of Equation (4) on           Multi-turn agents need KV compression that sur-
+Qwen3-8B/BCP; full breakdown in Section B.                 vives cross-turn intent shifts and composes with
+Cross-turn memory is the dominant signal: replac-          radix prefix reuse. IntentKV factors pruning into
+ing Mt with the current query reduces True Acc             a cross-turn QueryMemory retention head and a
+by 3.13 points at C=16k and 1.33 at C=8k. Cross-           sentinel-slot layout. On Qwen3-8B/BCP this re-
+attention and the learned residual each contribute         covers Full-cache True Acc within 0.96 points and
+under 1 point, with the residual adding +0.60              holds a 20.7% prefix-hit rate where compaction
+True Acc at 16k while the rule prior is preferred          baselines collapse to 0–3%; the same dead-slot
+by 0.60 points at the tighter 8k budget—the rule           substrate transfers 44–46% wall-time savings to
+scorer saturates the dead-slot ceiling at 8k, while        SnapKV/H2O. Retention and layout are modular
+the residual lifts only once 16k frees spare capac-        axes, and the substrate accepts any future prompt-
+ity. A TrimKV head-to-head and FRAMES cross-               local scorer. Per-query budget control and ≥ 70B
+benchmark validation appear in Sections C and D.           backbones remain for future work.
+
+                                                       8
+Limitations                                                    Zijian Chen, Xueguang Ma, Shengyao Zhuang, Ping
+                                                                  Nie, Kai Zou, Andrew Liu, Joshua Green, Kshama
+No autonomous budget selection. IntentKV                          Patel, Ruoxi Meng, Mingyi Su, and 1 others. 2025.
+uses a single global KV budget C that is fixed at                 Browsecomp-plus: A more fair and transparent eval-
+deployment time and applied uniformly to every                    uation benchmark of deep-research agent. arXiv
+                                                                  preprint arXiv:2508.06600.
+query: the method cannot currently choose its own
+compression ratio from the trajectory. Short queries           Alessio Devoto, Maximilian Jeblick, and Simon Jégou.
+therefore pay an eviction overhead they do not need,             2025. Expected attention: Kv cache compression by
+                                                                 estimating attention from future queries distribution.
+and the small subset of queries whose peak request               arXiv preprint arXiv:2510.00636.
+tokens grow far beyond the budget (the 92–115k-
+token tail in Table 3) is forced through the same              Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang,
+                                                                 Jiawei Han, and Jianfeng Gao. 2024. Model tells
+compression curve as the median query. A learned
+                                                                 you what to discard: Adaptive kv cache compression
+per-query controller that picks C from early-turn                for llms. In International Conference on Learning
+signals, or a schedule that expands with realized                Representations, volume 2024, pages 22975–22988.
+peak usage, would let IntentKV spend memory
+                                                               Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri,
+only on queries that need it; we leave this to future            Abhinav Pandey, Abhishek Kadian, Ahmad Al-
+work.                                                            Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten,
+                                                                 Alex Vaughan, and 1 others. 2024. The llama 3 herd
+Supervision and scope. The Phase-2 residual                      of models. arXiv preprint arXiv:2407.21783.
+is trained only on strict-cleaned ToolBench multi-
+                                                               Zhicheng Guo, Sijie Cheng, Hao Wang, Shihao Liang,
+turn traces with substring-matched future-action
+                                                                 Yujia Qin, Peng Li, Zhiyuan Liu, Maosong Sun, and
+labels, so expected gains are smaller on workloads               Yang Liu. 2024. Stabletoolbench: Towards stable
+further from agentic tool use; the rule scorer pro-              large-scale benchmarking on tool learning of large
+tects against regression and IntentKV falls back                 language models. In Findings of the Association for
+to its heuristic on single-turn inputs. IntentKV is              Computational Linguistics: ACL 2024, pages 11143–
+                                                                 11156.
+validated on Qwen3-8B and Qwen2.5-14B (Neox-
+RoPE GQA), and the dead-slot sentinel currently                Hao Kang, Qingru Zhang, Souvik Kundu, Geonhwa
+requires fp16/bf16 KV pools. Other open back-                    Jeong, Zaoxing Liu, Tushar Krishna, and Tuo Zhao.
+                                                                 2024. Gear: An efficient kv cache compression
+bones (Llama-3.1 (Grattafiori et al., 2024), Mistral-            recipe for near-lossless generative inference of llm.
+Nemo/Small, Hermes-3, GLM-4, gpt-oss, Watt-                      arXiv preprint arXiv:2403.05527.
+Tool) failed prerequisite agentic behaviour on BCP
+                                                               Sanjay Kariyappa and G Edward Suh. 2026. Sidequest:
+under our serving harness and so cannot isolate
+                                                                 Model-driven kv cache management for long-horizon
+KV-compression effects on this workload; see Sec-                agentic reasoning. arXiv preprint arXiv:2602.22603.
+tion G for the smoke study and failure-mode taxon-
+omy. Evaluation on ≥70B models is left to future               Satyapriya Krishna, Kalpesh Krishna, Anhad Mo-
+                                                                 hananey, Steven Schwarcz, Adam Stambler, Shyam
+work.                                                            Upadhyay, and Manaal Faruqui. 2024.        Fact,
+                                                                 fetch, and reason: A unified evaluation of
+                                                                 retrieval-augmented generation. arXiv preprint
+References                                                       arXiv:2409.12941.
+Jinwoo Ahn, Ingyu Seong, Akhil Kedia, Junhan Kim,              Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying
+   Hyemi Jang, Kangwook Lee, and Yongkweon Jeon.                Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-
+   2026. Lookaheadkv: Fast and accurate kv cache evic-          zalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+   tion by glimpsing into the future without generation.        memory management for large language model serv-
+   arXiv preprint arXiv:2603.10899.                             ing with pagedattention. In Proceedings of the 29th
+                                                                symposium on operating systems principles, pages
+Ngoc Bui, Shubham Sharma, Simran Lamba, Saumitra                611–626.
+  Mishra, and Rex Ying. 2025. Cache what lasts: To-
+  ken retention for memory-bounded kv cache in llms.           Hanchen Li, Runyuan He, Qiuyang Mang, Qizheng
+  arXiv preprint arXiv:2512.03324.                               Zhang, Huanzhi Mao, Xiaokun Chen, Hangrui Zhou,
+                                                                 Alvin Cheung, Joseph Gonzalez, and Ion Stoica.
+Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu,                  2025. Continuum: Efficient and robust multi-turn llm
+  Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong,                agent scheduling with kv cache time-to-live. arXiv
+  Yue Dong, Junjie Hu, and 1 others. 2024. Pyra-                 preprint arXiv:2511.02230.
+  midkv: Dynamic kv cache compression based on
+  pyramidal information funneling. arXiv preprint              Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang,
+  arXiv:2406.02069.                                              Zhanchao Xu, Xuejia Chen, Nicole Hu, Wei Dong,
+
+
+                                                           9
+  Qing Li, and Lei Chen. 2024a. A survey on large                  Wujiang Xu, Zujie Liang, Kai Mei, Hang Gao, Juntao
+  language model acceleration based on kv cache man-                Tan, and Yongfeng Zhang. 2026. A-mem: Agentic
+  agement. arXiv preprint arXiv:2412.19442.                         memory for llm agents. Advances in Neural Informa-
+                                                                    tion Processing Systems, 38:17577–17604.
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat
+  Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai,               An Yang, Anfeng Li, Baosong Yang, Beichen Zhang,
+  Patrick Lewis, and Deming Chen. 2024b. Snapkv:                     Binyuan Hui, Bo Zheng, Bowen Yu, Chang
+  Llm knows what you are looking for before gener-                   Gao, Chengen Huang, Chenxu Lv, and 1 others.
+  ation. Advances in Neural Information Processing                   2025. Qwen3 technical report. arXiv preprint
+  Systems, 37:22947–22970.                                           arXiv:2505.09388.
+
+Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao                   Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak
+  Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyril-                   Shafran, Karthik Narasimhan, and Yuan Cao. 2022.
+  lidis, and Anshumali Shrivastava. 2023. Scis-                      React: Synergizing reasoning and acting in language
+  sorhands: Exploiting the persistence of importance                 models. arXiv preprint arXiv:2210.03629.
+  hypothesis for llm kv cache compression at test time.            Peitian Zhang, Zheng Liu, Shitao Xiao, Ninglu Shao,
+  Advances in Neural Information Processing Systems,                 Qiwei Ye, and Zhicheng Dou. 2025. Long context
+  36:52342–52364.                                                    compression with activation beacon. In International
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong,                   Conference on Learning Representations, volume
+   Zhaozhuo Xu, Vladimir Braverman, Beidi Chen,                      2025, pages 101932–101948.
+   and Xia Hu. 2024. Kivi: A tuning-free asymmet-                  Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong
+   ric 2bit quantization for kv cache. arXiv preprint                Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-
+   arXiv:2402.02750.                                                 dong Tian, Christopher Ré, Clark Barrett, and 1 oth-
+                                                                     ers. 2023. H2o: Heavy-hitter oracle for efficient
+Charles Packer, Vivian Fang, Shishir_G Patil, Kevin
+                                                                     generative inference of large language models. Ad-
+  Lin, Sarah Wooders, and Joseph_E Gonzalez. 2023.
+                                                                     vances in Neural Information Processing Systems,
+  Memgpt: towards llms as operating systems.
+                                                                     36:34661–34710.
+Shishir G Patil, Huanzhi Mao, Fanjia Yan, Charlie                  Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan
+  Cheng-Jie Ji, Vishnu Suresh, Ion Stoica, and Joseph E              Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin,
+  Gonzalez. 2025. The berkeley function calling leader-              Zhuohan Li, Dacheng Li, Eric Xing, and 1 others.
+  board (bfcl): From tool use to agentic evaluation of               2023. Judging llm-as-a-judge with mt-bench and
+  large language models. In Forty-second International               chatbot arena. Advances in neural information pro-
+  Conference on Machine Learning.                                    cessing systems, 36:46595–46623.
+Yujia Qin, Shihao Liang, Yining Ye, Kunlun Zhu, Lan                Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue
+  Yan, Yaxi Lu, Yankai Lin, Xin Cong, Xiangru Tang,                   Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos
+  Bill Qian, and 1 others. 2024. Toolllm: Facilitating                Kozyrakis, Ion Stoica, Joseph E Gonzalez, and 1 oth-
+  large language models to master 16000+ real-world                   ers. 2024. Sglang: Efficient execution of structured
+  apis. In International Conference on Learning Rep-                  language model programs. Advances in neural infor-
+  resentations, volume 2024, pages 9695–9717.                         mation processing systems, 37:62557–62583.
+Qwen, :, An Yang, Baosong Yang, Beichen Zhang,                     Xiabin Zhou, Wenbin Wang, Minyan Zeng, Jiaxian Guo,
+ Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan                          Xuebo Liu, Li Shen, Min Zhang, and Liang Ding.
+ Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan                       2024. Dynamickv: Task-aware adaptive kv cache
+ Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin                 compression for long context llms. arXiv preprint
+ Yang, Jiaxi Yang, Jingren Zhou, and 25 oth-                         arXiv:2412.14838.
+ ers. 2025. Qwen2.5 technical report. Preprint,
+ arXiv:2412.15115.                                                 A    Experimental Details
+Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan,                  Session identification and concurrency. The
+   Wen Bo, and Yunfeng Liu. 2024. Roformer: En-                    session key is resolved in priority order: an explicit
+   hanced transformer with rotary position embedding.
+                                                                   session_id field; the token tuple in a designated
+   Neurocomputing, 568:127063.
+                                                                   session span (typically the first user task message
+Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao,                after the chat template); a hash of the first P = 256
+   Baris Kasikci, and Song Han. 2024. Quest: Query-                input tokens; finally, a per-request key that never
+   aware sparsity for efficient long-context llm inference.
+   arXiv preprint arXiv:2406.10774.                                matches across requests. An LRU store of 1,024
+                                                                   memories per compressor caps memory; concur-
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song                    rent requests update disjoint keys, so multi-tenant
+  Han, and Mike Lewis. 2024. Efficient streaming lan-
+  guage models with attention sinks. In International
+                                                                   serving never cross-contaminates intent. The cross-
+  Conference on Learning Representations, volume                   turn EMA decay (Equation (2)) is λ =0.5 for all
+  2024, pages 21875–21895.                                         reported runs.
+
+                                                              10
+Serving setup. All BCP runs use SGLang with                   tight-budget regime where an unconstrained resid-
+radix prefix caching enabled whenever the compres-            ual can move score mass away from the rule prior.
+sion layout preserves prefix identity. Compaction             Table 4: Component ablations on Qwen3-8B / BCP.
+baselines that left-pack K/V rows are run with                Same checkpoint, inference-time config only. “Eff. LK”
+radix reuse disabled after eviction to avoid incorrect        is Eff. Live KV (k tokens; defined in Section 4.1); abla-
+RoPE positions. IntentKV uses the same attention              tions only shift accuracy.
+kernels as the baselines; only the slot map differs.          Configuration     Raw      Compl       True     Eff. LK
+The evaluation harness controls this through the
+                                                               C=8k
+KV compaction mode: main comparison baselines                 Full Phase-2     16.67      84.58     14.10        10.2
+use compact apply paths, while IntentKV uses the              − memory         14.82      86.14     12.77        10.1
+dead-slot layout.                                             − x-attn         15.58      87.35     13.61        10.3
+                                                              − residual       16.87      87.11     14.70        10.7
+Compression settings. All compressors are                      C=16k
+                                                              Full Phase-2     17.08      87.47     14.94        11.8
+evaluated at nominal retention budgets C ∈                    − memory         13.59      86.87     11.81        11.9
+{8192, 16384}. The budget is applied to compress-             − x-attn         16.29      90.24     14.70        11.9
+ible history at each pruning event, not to the entire         − residual       15.89      90.24     14.34        11.9
+prompt-plus-generation request. IntentKV forces
+the resolved actionable query span to remain live             C     Cross-Benchmark Validation on
+and assigns the remaining budget by score. The                      FRAMES
+W =32 buffer is retained only as a bounded query-
+tail fallback. StreamingLLM uses sink size 4 plus             The main results (Sections 4.2 and 4.3) use
+a recent window, SnapKV uses W =32 with ker-                  BrowseComp-Plus as the primary benchmark. To
+nel size 7 and max-pool smoothing, and H2O uses               verify that IntentKV’s accuracy and efficiency
+ratio mode with a recent-window floor.                        gains transfer beyond BCP’s native agent proto-
+                                                              col and corpus, we replicate the agent loop on
+Training setup. The residual head is trained from             FRAMES (Krishna et al., 2024), an 824-query
+strict-cleaned, ToolBench-only multi-turn trajecto-           multi-hop question answering suite over Wikipedia
+ries with future-action labels over a five-call looka-        developed for the fact-retrieval / multi-hop reason-
+head window. We use AdamW with learning rate                  ing literature. We deliberately adapt FRAMES
+10−3 , weight decay 0.01, gradient accumulation               rather than wholesale-port it, so the resulting num-
+8, 3,000 sampled examples per epoch for Qwen3-                bers measure pruner behaviour under a BCP-style
+8B and 5,000 for Qwen2.5-14B (the smaller bud-                agentic distribution while keeping the FRAMES
+get matches Qwen3-8B’s manifest support; Sec-                 question pool, gold answers, and gold document
+tion 3.5), and two epochs. Loss coefficients are              URLs unchanged.
+ρ = 0.05, γ = 0.01, and η = 0.001; the BCE
+positive-rate clip is [0.02, 0.5]. Qwen3-8B and               C.1    Protocol adaptation
+Qwen2.5-14B each train one 214,274-parameter                  Out of the box FRAMES is shipped as a single-
+pruner with the same D=128 topology.                          shot QA TSV with no agent harness; the orig-
+                                                              inal release uses a free-form ReAct loop with
+B   Component Ablations                                       <search>/<answer> text tags. On Qwen3-8B we
+                                                              observe this protocol yields a ∼21 % unparsable
+Table 4 ablates the three additions of Equation (4)
+                                                              rate (the model emits an unclosed tag and the judge
+on Qwen3-8B/BCP (inference-time only on the
+                                                              sees no answer), which artificially caps accuracy
+same checkpoint; the Eff. Live KV column shifts
+                                                              and confounds compressor effects with parser brit-
+by at most 0.5k across variants). Cross-turn mem-
+                                                              tleness. Our adapted FRAMES loop differs from
+ory is the dominant signal: replacing Mt with the
+                                                              the native release on four axes, each chosen to
+current query reduces True Acc by 3.13 points
+                                                              bring the per-turn KV-pressure distribution into a
+at C=16k (14.94 → 11.81) and 1.33 at C=8k
+                                                              BCP-compatible regime:
+(14.10 → 12.77). Removing cross-attention drops
+True Acc by 0.24 and 0.49 points, respectively. Dis-          (i) Native function calling, BCP-shaped tools.
+abling the residual recovers Phase-1 exactly: the             We replace text-tag ReAct with native OpenAI
+learned correction adds 0.60 True Acc at 16k, while           Chat Completions function calling, registering the
+at 8k the rule prior is preferred by 0.60 points—a            same two tools used in our BCP runs verbatim:
+
+                                                         11
+local_knowledge_base_retrieval for snippet                  the cross-benchmark check is meant to preserve.
+search and get_document for full-text drill-down.
+Structured tool-call JSON arguments are robust to           C.2   Substrate integration: IntentKV’s
+mid-string truncation, dropping the unparsable rate               dead-slot eviction is shared by all
+to ∼0 %.                                                          compressors
+                                                            All compression methods evaluated below—
+(ii) BCP QUERY_TEMPLATE and grader. We                      StreamingLLM, SnapKV, H2O, and IntentKV—
+reuse BCP’s Explanation / Exact Answer /                    execute on the same eviction substrate introduced
+Confidence prompt verbatim, with inline [docid]             in Section 3.4: dropped positions are rewritten
+citations, and grade with the same Qwen3-32B                to a reserved sentinel slot whose K drives soft-
+LLM judge under BCP’s GRADER_TEMPLATE (Sec-                 max weight to zero, and the flashinfer back-
+tion 4.1). This makes the resulting accuracy num-           end strips the sentinel before attention so de-
+bers commensurable across BCP and FRAMES                    code reads only the kept entries while token-
+without rubric-level confounds.                             position identity stays intact. Concretely, the har-
+(iii) Plaintext Wikipedia corpus. We build                  ness defaults KV_COMPACTION_MODE to dead_slot
+a corpus of 2,479 Wikipedia articles—the                    for every score-based method, and the published
+union of all wikipedia_link_* URLs across                   compact-layout RoPE-reindex apply path used in
+the 824 test queries—fetched via the official               the original StreamingLLM (Xiao et al., 2024),
+action=query&prop=extracts&explaintext=1                    SnapKV (Li et al., 2024b), and H2O (Zhang
+endpoint and capped at 3,000 characters per                 et al., 2023) implementations is only retained
+document. The cap is chosen so that a typical               as a reproducibility-only opt-in (it additionally
+get_document call returns roughly 700–800                   forces –disable-radix-cache). This means ev-
+decoded tokens—substantially shorter than BCP’s             ery method in Table 5 shares IntentKV’s memory
+∼7–8k-character tool returns, but already an order          profile and radix prefix-cache eligibility: the only
+of magnitude longer than the ∼400-character                 varying component across rows is the scorer. The
+Wikipedia-intro corpus shipped with FRAMES—                 same property holds for the BCP main table; we
+which is enough to make get_document a                      restate it here so that the FRAMES system met-
+meaningful drill-down on top of the 800-character           rics can be read against a fair-substrate background
+snippet preview rather than a no-op. After fetching,        rather than against each baseline’s original pub-
+99.4 % of documents carry non-empty text.                   lished memory layout.
+
+(iv) Stress profile. FRAMES questions are short             C.3   Results at C=12k
+enough that an unconstrained agent answers ∼30 %            Table 5 reports True Acc, gold-document recall,
+of queries in one turn, which leaves the KV cache           and the system-side metrics of Section 4.1 un-
+too shallow for compression effects to surface. We          der the four compressors plus the no-pruning Full-
+impose a stress profile that pushes the agent into          cache ceiling, at C = 12,288 tokens, N = 824 per
+a multi-turn regime without altering the question           cell. The FRAMES grader uses the same denomi-
+or answer: k = 8 retrieved hits per search joined by        nator convention as BCP (non-completion counted
+4 injected distractor documents drawn from low-             as wrong), so the True Acc column is directly com-
+BM25-score regions of the corpus, a multi-hop               parable with the BCP main table. Full-cache is
+preamble that requires the agent to maintain an             budget-agnostic and serves as the no-pruning ceil-
+inline evidence ledger, and minimum-action con-             ing; PT and Eff. LK are reported in 103 tokens,
+straints of 3 search calls plus 1 get_document call         Raw and Eff. KV reads in 106 tokens, Wall in sec-
+before answering. These knobs convert FRAMES                onds, and Turns is the mean ReAct round count.
+into a multi-turn KV-pressure benchmark while               Wall-clock aggregates across the 824 queries with
+keeping the gold answers and document URLs un-              deterministic decoding (T =0), at most 32 tool-use
+changed.                                                    turns, and an agent thread parallelism of 8.
+   What is intentionally not aligned to BCP: the               Two effects stand out. First, on both backbones
+corpus size (2,479 vs. ∼100k docs), the corpus re-          IntentKV-Phase-2 matches or exceeds Full-cache
+trieval modality (BM25 plaintext vs. FAISS dense),          accuracy while substantially reducing per-query
+the per-document length, and the question pool it-          KV reads: +0.73 True Acc with 2.6× fewer ef-
+self. These are dataset identities of FRAMES that           fective KV reads on Qwen3-8B (6.0 vs. 15.6 M
+
+                                                       12
+Table 5: FRAMES at C=12k. Best non-Full-cache value per column in bold; lower is better in system-cost
+columns.
+Model          Method                    True Acc   Recall        PT    Eff. LK     Raw Rd     Eff. Rd      Wall    Turns
+               Full-cache                   28.52   82.13        17.6        17.8      15.5      15.6       68.7      9.23
+               StreamingLLM                 27.91   82.48        15.4        15.6       8.3       8.4       33.6      8.50
+Qwen3-8B       SnapKV                       29.00   82.67        16.8        17.0      12.9      13.0       48.6      8.91
+               H2O                          27.18   83.00        16.8        17.0      12.8      12.9       46.0      8.94
+               IntentKV-Phase-2 (ours)      29.25   82.11        12.8        12.9       6.8       6.0       28.9      7.53
+               Full-cache                   34.71   86.60        23.9        24.3      39.6      39.9      236.4      8.86
+               StreamingLLM                 29.85   85.16        15.9        16.4      22.6      23.0       83.4      6.95
+Qwen2.5-14B    SnapKV                       33.25   86.63        23.8        24.2      39.9      40.3       86.8      8.82
+               H2O                          33.62   86.87        22.8        23.7      52.1      57.0      109.7      8.66
+               IntentKV-Phase-2 (ours)      34.95   85.71        16.6        16.7      18.7      13.9       76.8      7.14
+
+tokens), and +0.24 True Acc with 2.9× fewer ef-              early retrieval, first tool result)—a time-decay prior
+fective KV reads on Qwen2.5-14B (13.9 vs. 39.9 M             tuned for locally relevant chain-of-thought reason-
+tokens). This is consistent with the stress-profile          ing misaligns with future tool-call evidence, while
+distractor injection making the attended-to set nois-        QueryMemory-driven retention tracks it.
+ier than the unprejudiced model can profitably
+                                                             Table 6: TrimKV vs. IntentKV at C=8k. “Eff. LK” is
+use, so that retention-aware pruning acts as im-             Eff. Live KV (k tokens; defined in Section 4.1).
+plicit context denoising in this regime. Second,
+against the strongest heuristic baseline, IntentKV-          Configuration          Raw       Compl      True      Eff. LK
+Phase-2 dominates every system axis on Qwen3-                TrimKV                 21.25     51.57      10.96        10.1
+                                                             IntentKV-Phase-2       16.67     84.58      14.10        10.2
+8B (−24 % PT, −24 % effective live KV, −54 %
+effective KV reads, −41 % wall-clock, −15 % Re-
+Act turns), while on Qwen2.5-14B it retains the              E     Layout Ablation: Compact vs.
+headline accuracy lead and reduces effective KV                    Dead-Slot
+reads by −65 % relative to H2O at comparable
+wall-clock. StreamingLLM’s lower system num-                 Table 7 isolates IntentKV’s hole-preserving (dead-
+bers on the 14B row come at the price of −5.10               slot) eviction substrate from QueryMemory scoring.
+True Acc against the Full-cache ceiling, illustrating        We re-run SnapKV (observation-window scoring)
+the accuracy/efficiency frontier that the headline           and H2O (heavy-hitter scoring) on Qwen3-8B /
+metric obscures.                                             BCP at C=8k under two apply paths: the stan-
+                                                             dard compact (RoPE-reindex) path used in each
+D    Comparison with TrimKV:                                 method’s published implementation, and Inten-
+     Query-Decay vs. Positional Time-Decay                   tKV’s dead-slot path, in which dropped positions
+                                                             are redirected to a sentinel slot whose K is filled
+We compare IntentKV-Phase-2 against a public                 with −104 (Section 3.4). Budget, scoring kernel,
+TrimKV (Bui et al., 2025) checkpoint that uses               attention backend, prefix-protect marker, and agent
+a positional time-decay retention prior trained              threading are held fixed across the four heuristic
+for math chain-of-thought reasoning, while Inten-            rows; only the eviction substrate varies.
+tKV uses query-decay conditioned on cross-turn                  Switching the substrate cuts wall-time 44–46%
+QueryMemory. Both are evaluated on Qwen3-                    and Raw KV Reads 39–47% on both baselines,
+8B/BCP at C=8k with a matched Eff. Live KV                   while Eff. KV Reads moves by less than 10%—
+budget (∼10.1–10.2k tokens) so that any accuracy             confirming that the wall-time savings flow through
+difference reflects the retention prior, not the bud-        preserved radix-prefix reuse, not tighter retention.
+get. Table 6 shows that TrimKV achieves slightly             True Acc rises by 2.4–5.5 points on both base-
+higher per-completion correctness (21.25 Raw vs.             lines, since radix-prefix reuse keeps per-turn Re-
+16.67), but its completion rate collapses to 51.57%          Act prompts short and trajectories reach a final
+(vs. 84.58% for IntentKV). The result is a 3.14-             answer before exhausting max_tokens. Under the
+point True Acc gap (10.96 → 14.10) once non-                 matched dead-slot substrate, IntentKV-Phase-2 re-
+completion is counted as wrong, indicating that on           tains a 1.5× reduction in Raw and Eff. KV Reads
+multi-turn tool-use trajectories—where the most              over SnapKV (31.6 vs 46.9M Raw; 39.8 vs 59.0M
+useful tokens are often the oldest (initial request,         Eff.) at True Acc within 1σ (14.10 vs 14.70;
+
+                                                        13
+∆=0.35σ on 830 queries), isolating QueryMem-                                        G     Cross-Architecture Evaluation Gap
+ory’s retention-side gain on top of the layout sub-
+strate.                                                                             G.1     Motivation
+                                                                                    To check whether IntentKV generalises beyond
+Table 7: Dead-slot eviction transfers 44–46% wall-                                  the Qwen family used in the main evaluation, we
+time and 39–47% Raw KV Reads savings to H2O /                                       ran smoke tests on seven additional open-source
+SnapKV under matched scoring. Qwen3-8B / BCP
+                                                                                    instruction-tuned models in the 7B–20B range,
+at C=8k; only the eviction substrate varies. Wall in
+seconds; Raw / Eff. in 106 KV reads; True in %.                                     covering four base-model families: Meta Llama
+                                                                                    (including the NousResearch Hermes-3 fine-tune
+Method                             Layout      Wall Raw         Eff.    True        and the watt-ai watt-tool-8B tool-specialist fine-
+H2O                                compact 281.4       77.2 59.7 9.76               tune, both built on Llama-3.1-8B-Instruct), Mistral,
+H2O                                dead-slot 150.9     40.7 54.1 12.17
+                                                                                    OpenAI gpt-oss, and ZhipuAI GLM. Only Qwen-
+SnapKV                             compact 279.3       77.1 59.4 9.16               family models reliably engage in multi-step au-
+SnapKV                             dead-slot 155.5     46.9 59.0 14.70
+                                                                                    tonomous tool-calling on BrowseComp-Plus un-
+IntentKV-Phase-2 dead-slot 140.4                       31.6 39.8 14.10
+                                                                                    der our serving harness; the other backbones fail at
+                                                                                    the agentic-behavior level—not at IntentKV’s KV-
+                                                                                    compression level—which prevents a meaningful
+F               Training Curves                                                     comparison of compression methods on them.
+
+Figure 5 plots the optimisation trajectories for the                                G.2     Empirical Findings
+two Phase-2 pruners released with IntentKV: the                                     Table 8 summarizes the smoke-test results. “Avg.
+BCE loss converges within the first half of epoch 1                                 tools” is per-query tool-call count averaged over
+and remains bounded across epoch 2, and the                                         the smoke set; “ACC” is the judged accuracy on
+clipped residual gain α drifts only mildly from                                     the full 830-query BrowseComp-Plus split when
+its initialisation, consistent with the rule-prior floor                            smoke succeeded.
+preventing the residual from dominating the scorer.
+                                                                                    Table 8: Cross-architecture smoke results on
+                                                                                    BrowseComp-Plus.          Models marked × fail at
+                                Qwen3-8B             Qwen2.5-14B                    the agentic-behavior layer and cannot isolate KV-
+                        2                        epoch 2
+                                                                                    compression effects; failure mode is summarised in the
+                                                                                    last column.
+
+
+           total loss
+                                                                                    Model                   Status Tools Acc Failure
+                        1
+                                                                                    Qwen3-8B-Instruct        ✓     3.3 15.5% —
+                                                                                    Qwen2.5-14B-Instruct     ✓     3.3   — —
+                                                                                    Qwen2.5-7B-Instruct      ✓     3.3   — —
+                                                                                    watt-tool-8B             ×     2.0   4.1%   1-shot bias
+                            0          100           200               300          Llama-3.1-8B-Instruct    ×     0.0    —     No tools
+                                          optimizer step                            Mistral-Nemo-2407        ×     0.0    —     No tools
+                                      (a) Total training loss                       Mistral-Small-3.2-24B    ×     0.0    —     No tools
+                                                                                    Hermes-3-Llama-3.1-8B    ×     0.0    —     Forced-only
+                1.10                                                                gpt-oss-20b (MXFP4)      ×     —      —     No FP4 HW
+                                                                                    gpt-oss-20b-bf16         ×     0.0    —     No tools
+
+
+residual gate
+                                                                                    GLM-4-9B-Chat            ×     0.0    —     Parser
+                1.05
+
+                                                                                    G.3     Failure Mode Taxonomy
+                            0          100           200               300          We categorize the observed failures into four struc-
+                                          optimizer step                            tural types.
+                                    (b) Learned residual gate
+                                                                                    F1: Refusal to use tools. Llama-3.1-8B-Instruct
+Figure 5: Training trajectories for the two trained                                 and Mistral-Nemo-Instruct-2407 load and respond
+pruners. Loss falls quickly and remains bounded; the                                fluently, but never emit a tool-call token on BCP
+learned residual gain α rises from about 1.0 to 1.1 on                              queries; they instead hallucinate direct answers
+both models.                                                                        from parametric memory. As an example, the cor-
+                                                                                    rect answer to one query is a specific Florence
+
+                                                                               14
+hat-shop brand from the 1930s, yet Mistral-Nemo               turn behaviour profile incompatible with multi-hop
+answers “Explanation: The individual who meets                agent workloads, even when the upstream base
+all the given criteria is Dr. Jane Smith. . . . ” — no        (Llama-3.1-8B, itself an F1 zero-tool case above)
+retrieval was attempted; the entity was fabricated.           lacks autonomous tool use to begin with.
+We attribute the gap to differences in post-training:
+                                                              F3:      Hardware-bound quantization mis-
+Qwen’s instruction tuning explicitly includes multi-
+                                                              match (not a model deficiency). OpenAI’s
+turn ReAct (Yao et al., 2022) trajectories and agen-
+                                                              gpt-oss-20b is released in MXFP4 and requires
+tic data, whereas the Llama-3.1 and Mistral-Nemo
+                                                              Hopper-class (H100/H200/B200) tensor cores for
+post-training prioritizes single-turn helpfulness.
+                                                              native FP4 execution; our 80 GiB A100 cluster
+   The pattern persists at larger scale and de-
+                                                              has no FP4 tensor cores and therefore cannot
+spite native tool-call training. Mistral-Small-3.2-
+                                                              serve the native release at all, so it appears in
+24B-Instruct-2506—a 24B-parameter model that
+                                                              Table 8 as the first row gpt-oss-20b (MXFP4)
+ships an [AVAILABLE_TOOLS] / [TOOL_CALLS] /
+                                                              with the T OOLS column left blank—the model
+[TOOL_RESULTS] dialogue protocol and a Tekken
+                                                              was literally not runnable in our environment.
+tokenizer with built-in function-calling support—
+                                                              Lacking access to Hopper-class hardware, we
+also returns zero tool calls on the BCP smoke
+                                                              additionally tried the lmsys/gpt-oss-20b-bf16
+set across three prompt configurations (default,
+                                                              community MXFP4 → bf16 re-upload as a proxy
+“MUST search” system prompt, and the WebSailor
+                                                              (second row). The proxy never emits a tool call
+agent persona at temperature 0.7). In a controlled
+                                                              on BCP queries and produces only short free-text
+probe outside the BCP harness, the same model
+                                                              refusals that degenerate into repetitive token
+does emit a well-formed [TOOL_CALLS] on a short
+                                                              loops on continuation (e.g., “[ ! ] [ ! ] [ ! ] . . . ”),
+single-fact query (“find the SGLang v0.4 release
+                                                              which we attribute to precision loss during the
+date”), so the failure is not a lack of capabil-
+                                                              community dequantization—specifically in the
+ity but a lack of propensity to initiate retrieval
+                                                              layers that emit OpenAI’s Harmony channel-
+when the question is presented in BCP’s long
+                                                              control      tokens     (<|channel|>analysis|>,
+multi-criterion format. To eliminate infrastruc-
+                                                              <|channel|>final|>).         Both rows therefore
+ture as a confounder we resolved a SGLang ↔
+                                                              reflect infrastructure constraints on our side rather
+mistral-common interop bug (the OpenAI protocol
+                                                              than deficiencies in the underlying model; the
+layer generated call_<24hex> tool-call IDs that
+                                                              native MXFP4 release remains untested on BCP
+mistral-common’s request validator rejects as non-
+                                                              and is not evidence for or against gpt-oss-20b’s
+conformant to its 9-character alphanumeric schema,
+                                                              BCP capability.
+breaking the second turn of every multi-turn loop
+with a 500). After this fix multi-turn round-trips            F4: Parser / chat-template incompatibility.
+succeed end-to-end at the protocol level, yet the             GLM-4-9B-Chat produced parser-level garbage in
+model still does not spontaneously initiate retrieval         our SGLang deployment. The model emits struc-
+on BCP queries—confirming that the gap sits at the            tured tool calls in its own proprietary format, but
+agentic-behavior layer, not at the serving layer.             the glm45 parser in SGLang is calibrated for the
+                                                              GLM-4-MoE / GLM-4.5 release—a different to-
+F2: Single-shot tool use. watt-tool-8B, a special-            kenizer and chat-template family. Adapting the
+ist fine-tune of Llama-3.1-8B-Instruct for BFCL-              parser to the GLM-4-9B dense variant would re-
+style function calling (Patil et al., 2025), exhibits         quire approximately 100–150 lines of detector code
+a rigid behavior pattern: exactly one retrieval call          plus chat-template adaptation, which we leave to
+followed by one document fetch followed by a                  future work. The same parser-incompatibility risk
+final answer (avg. 1.0 retrieval + 1.0 fetch per              applies to other promising agent-tuned models (Co-
+query). The pattern reflects the BFCL training                here Command R-7B, IBM Granite-3.1-Instruct,
+data distribution, which is dominated by single-              InternLM2.5) that currently lack native SGLang
+turn and two-turn benchmarks, and cannot sup-                 detectors.
+port BCP’s typical 3–5 hop information need. The
+resulting 4.1% True Acc—well below the 15.5%                  G.4    Forcing-Prompt Robustness Probe
+Qwen3-8B reference in Table 8 under the same                  The four failure modes above are observed under
+harness—demonstrates that specialized function-               each model’s default system prompt. We sepa-
+calling fine-tunes can lock the model into a single-          rately check whether stronger system prompts re-
+
+                                                         15
+cover F1-class refusals, since otherwise the cross-           conditional agentic behavior, which appears to re-
+architecture gap could be dismissed as a prompt-              quire explicit training-data investment that, among
+engineering artifact. We re-ran two representative            the open-source families we tested, only Qwen has
+models under explicit forcing variants—a “you                 made.
+MUST call search before answering” system mes-
+sage, the WebSailor agent persona, and a tool-                G.6    Caveats
+choice-style preamble that directly instructs the             We emphasize three points.
+model to emit a tool call on the first turn. Mistral-             • The claim is restricted to our sample. We
+Small-3.2-24B returned zero tool calls across all                   tested seven non-Qwen models; this is not
+forcing variants on the same three smoke queries on                 an exhaustive evaluation of the open-source
+which it failed by default—under temperature 0.0                    ecosystem. Closed-source models (GPT-4.1,
+the model collapses into degenerate template loops                  Claude, Gemini) likely exhibit different be-
+(“Your Answer: {your answer} | Confidence:                          havior, but their closed nature prevents the KV-
+...”) and under temperature 0.7 it still apologizes                 cache-level access required by our method.
+without retrieving. Hermes-3-Llama-3.1-8B (Nous-
+                                                                  • Prompt-engineering mitigations are orthog-
+Research), a Llama-3.1-8B fine-tune marketed for
+                                                                    onal and, in our experience, largely ineffec-
+tool use, behaved more leniently but still unreli-
+                                                                    tive. We empirically attempted aggressive
+ably: across seven prompt configurations (plain,
+                                                                    system prompts (“You MUST call retrieval
+chat-template override, tool-choice forcing, direct-
+                                                                    at least three times before answering”; the
+prompt, and must-search) the best result was a
+                                                                    WebSailor agent persona; tool-choice-style
+single tool call on 1 of 3 smoke queries (direct-
+                                                                    directives) on the F1 family and found that
+prompt), with must-search yielding zero across all
+                                                                    they do not reliably recover BCP behavior
+three. Neither model approached the 3+ sponta-
+                                                                    in the failing models—Mistral-Small-3.2-24B
+neous calls per query that Qwen issues at default
+                                                                    remained at zero tool calls across all forcing
+prompting. We therefore include the Hermes-3 row
+                                                                    variants, and Hermes-3 reached at most a sin-
+as Forced-only in Table 8 to signal that any tool-call
+                                                                    gle call on 1 of 3 smoke queries (Section G.4).
+activity observed required prompt-level coercion,
+                                                                    In principle, even sufficiently aggressive forc-
+and we read this collectively as evidence that the
+                                                                    ing could elicit some tool use; however, the
+cross-architecture gap is not a prompt-engineering
+                                                                    resulting traces would no longer be compa-
+artifact: where forcing prompts work in isolation,
+                                                                    rable across models—they would reflect the
+they do not produce the consistent multi-turn re-
+                                                                    strength of the forcing prompt rather than the
+trieval behaviour that BCP measures.
+                                                                    model’s intrinsic agentic capability, conflating
+G.5   Why This Gap Exists                                           prompt-engineering effects with IntentKV’s
+                                                                    intrinsic benefit. We therefore exclude both
+The common pattern across F1–F4 is that BCP de-
+                                                                    natural and forced runs of the failing models
+mands a behavior profile—autonomous multi-step
+                                                                    from the main evaluation.
+retrieval over multi-hop trivia questions—which
+few open-source post-training recipes explicitly tar-             • This is not a critique of the failing models.
+get. Existing tool-call benchmarks such as BFCL                     Llama-3.1, Mistral-Nemo, GLM-4-9B-Chat,
+are dominated by single-turn and two-turn function-                 and others remain capable general-purpose
+selection tasks where the system prompt already                     assistants; their training simply does not tar-
+implies which tool to call; they do not stress the                  get the specific agentic behaviour BCP re-
+agent’s ability to initiate retrieval spontaneously                 quires. Closing this gap in future open-source
+when faced with a knowledge gap. The Qwen                           releases would allow a more thorough test of
+team’s post-training, by contrast, explicitly in-                   IntentKV’s backbone-agnostic claim.
+cludes ReAct-style multi-turn traces, ToolLLaMA-
+                                                              H     Extended Algorithmic Details
+derived agentic data, and BrowseComp-adjacent
+research-style trajectories.                                  Compression event. Given request r, slot map
+   Notably, this gap is not a deficiency in the base          Sr [0:N), budget C and dead slot s† , IntentKV skips
+models’ language understanding: every failed can-             compression when N ≤ C. Otherwise it forms the
+didate passes BFCL or similar benchmarks with                 live-position set L = { j : Sr [ j] ̸= s† }, resolves the
+reasonable scores. The gap is in distribution-                decision query span, and splits L into forced posi-
+
+                                                         16
+tions F and candidate positions A . For query, the               3.1-8B-Instruct (Grattafiori et al., 2024) under
+scorer uses only the current Enc(qt ). For memory                the Llama 3.1 Community License Agreement;
+and learnable, the scorer first derives a session                Hermes-3-Llama-3.1-8B (NousResearch) inherits
+id, updates Mt , computes Equation (3), and option-              the same Llama 3.1 Community License; Mistral-
+ally adds the residual Equation (4). Tensor-parallel             Nemo-Instruct-2407 and Mistral-Small-3.2-24B-
+ranks all-reduce the resulting score vector. The                 Instruct-2506 under the Apache License 2.0; watt-
+kept set is K = F ∪ topk(A , max(0,C − |F |)).                   tool-8B under the Apache License 2.0 (its model
+The implementation persists a boolean valid mask,                card declares Apache-2.0; the upstream base model
+redirects newly dropped positions to s† , and leaves             is Llama-3.1-8B-Instruct, which itself carries the
+all kept slot ids unchanged.                                     Llama 3.1 Community License); gpt-oss-20b un-
+                                                                 der the Apache License 2.0; GLM-4-9B-Chat un-
+Prefix-safe free. For each newly dropped posi-                   der The glm-4-9b License (HF license tag glm-4).
+tion j, the old slot u = Sr [ j] is returned to the allo-        All models are used for inference-only evaluation;
+cator only if j is outside the radix-protected prefix,           the base weights are never updated. Our use is
+u ̸= s† , and u is absent from the final kept-slot               consistent with each model’s release statement of
+set {Sr [i] : i ∈ K }. This alias check is required              academic/research use.
+because a request may already contain redirected
+positions or shared prefix slots.                                Datasets and benchmarks. BrowseComp-
+                                                                 Plus (Chen et al., 2025), the primary evaluation
+Session id derivation. The session key is cho-                   suite, is released under the MIT License; we
+sen by the first available source: an explicit                   use the public 830-query split and the released
+session_id, then the token tuple in a designated                 document corpus without modification beyond the
+session span, then a hash of the first P input tokens.           per-query retrieval cache described in Section 4.1.
+If the request has no token ids, the implementation              FRAMES (Krishna et al., 2024) (Google) is
+uses a request-local key; this preserves correctness             released under the Apache License 2.0; we
+by avoiding accidental memory sharing across un-                 use its 824-query test split, gold answers, and
+related embedding-input requests.                                wikipedia_link URLs unchanged (Section C.1).
+Phase-2 training step. Per training row, the                     ToolBench (Qin et al., 2024) and its strict-cleaned
+trainer extracts post-RoPE K and query-span Q                    re-release StableToolBench (Guo et al., 2024) are
+from the frozen model, averages the Q rows to                    released under the Apache License 2.0 and used
+form Enc(qt ), and updates the same QueryMemory                  only for training the residual head (Section 3.5);
+used at inference. It then computes the rule score               no ToolBench content appears in the evaluation
+and residual features over the remaining candidate               distribution. The Wikipedia corpus constructed
+positions, builds the cross-attention memory from                in Section C.1 is retrieved from the official
+query-span K-vectors, obtains MLP logits, and ap-                MediaWiki API and is governed by the CC BY-SA
+plies Equation (8) (session replay order matches                 4.0 license; we redistribute only the URL list and
+Section 3.5).                                                    SHA-256 hashes of the cached extracts rather than
+                                                                 the article text itself.
+I   Artifact Licenses and Intended Use
+                                                                 Software and serving stacks. SGLang (Zheng
+We summarise the licenses, intended use, and our                 et al., 2024) and vLLM (Kwon et al., 2023), on
+use of every external artifact referenced in the main            which our compression substrate is implemented
+text and appendices. All artifacts are used in accor-            and evaluated, are released under the Apache
+dance with their original licenses and for research              License 2.0. The reference TRIM-KV check-
+purposes consistent with their stated intended use.              point ngocbh/TrimKV-Qwen3-8B-Math (Bui et al.,
+                                                                 2025) used in Section D is distributed by its authors
+Language models. Qwen3-8B (Yang et al.,                          on Hugging Face under the Apache License 2.0.
+2025) and Qwen2.5-14B (Qwen et al., 2025), used
+as the primary backbones, are released by Al-                    Released artifact. Our code and trained residual-
+ibaba under the Apache License 2.0; Qwen3-32B,                   head checkpoints will be released under a permis-
+used as the LLM-as-a-judge grader, is released un-               sive open-source license (MIT) consistent with our
+der the same license. The smoke-test models in                   upstream dependencies. The release contains only
+Section G carry the following licenses: Llama-                   model weights for the residual head (a 214,274-
+
+                                                            17
+parameter MLP) and integration code, with no re-
+distribution of the base LLM weights, ToolBench
+corpus, or BrowseComp-Plus content.
+
+J   AI Assistant Use Statement
+AI assistants were used for language polishing,
+checklist interpretation, and minor writing assis-
+tance. All technical claims, experimental results,
+code, and final submission content were reviewed
+and approved by the authors.
+
+
+
+
+                                                     18
+

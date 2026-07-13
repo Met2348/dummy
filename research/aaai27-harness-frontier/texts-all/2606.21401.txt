@@ -1,0 +1,974 @@
+                                         SwarmX: Agentic Scheduling for Low-Latency Agentic
+                                                             Systems
+                                                        Yeqi Huang                                 Yanwei Ye                                 Guomin Chen
+                                                  University of Edinburgh                   University of Edinburgh                             Tencent
+                                                     United Kingdom                            United Kingdom                                    China
+                                                   yeqi.huang@ed.ac.uk                       yanwei.ye@ed.ac.uk                        sarlmolchen@tencent.com
+
+                                                        Wenhao Su                                  Bin Gong                                     Jialian Li
+                                                          Tencent                                   Tencent                                       Tencent
+                                                           China                                     China                                         China
+
+
+
+
+arXiv:2606.21401v2 [cs.DC] 28 Jun 2026
+                                                    elonsu@tencent.com                       deargong@tencent.com                         jialianli@tencent.com
+
+                                                          Zhan Lu                              Yangshen Deng                                   Xuan Sun
+                                                  University of Edinburgh                    University of Edinburgh                     University of Edinburgh
+                                                     United Kingdom                             United Kingdom                              United Kingdom
+                                                    zhan.lu@ed.ac.uk                        yangshen.deng@ed.ac.uk                         xuan.sun@ed.ac.uk
+
+                                                                                Le Xu                                      Luo Mai
+                                                                       University of Edinburgh                     University of Edinburgh
+                                                                          United Kingdom                              United Kingdom
+                                                                           le.xu@ed.ac.uk                            luo.mai@ed.ac.uk
+                                         Abstract                                                             code generation [2, 24], synthetic data pipelines that co-
+                                         Agentic AI applications compose multiple model calls and             ordinate multiple complementary models [10, 19, 29, 34],
+                                         tool executions, creating new scheduling challenges for GPU–         and multimodal generative applications built around agentic
+                                         CPU clusters. Their inference time and model-call structure          workflows [8, 17]. These applications typically run on GPU–
+                                         often depend on prompt semantics, making conventional                CPU clusters, where each model is deployed as a replicated
+                                         scheduling approaches ineffective for low-latency serving.           service across GPUs or CPUs. A router, or request scheduler,
+                                         This paper presents SwarmX, a system that implements agen-           selects the replica that serves each request, while a scaler, or
+                                         tic scheduling for low-latency agentic applications. SwarmX          resource scheduler, decides how many replicas each model
+                                         uses scheduling-specific neural predictors to capture prompt,        should run. The goal is to minimize the end-to-end latency
+                                         device, runtime, and target-model features; exposes distri-          of composed multi-model inference while maintaining high
+                                         butional predictions to routers and scalers for tail-aware           GPU and CPU utilization.
+                                         decisions; and provides mechanisms for predictor training               Scaling agentic AI on GPU–CPU clusters is challenging
+                                         and online adaptation. These predictors and mechanisms are           because the workload behavior is both dynamic and prompt-
+                                         integrated into a scheduler-agent framework that provides            dependent. First, a single model call may require a long and
+                                         a common substrate for integration with existing schedul-            highly variable number of decoding steps, depending on
+                                         ing and model-serving infrastructure. We evaluate SwarmX             the semantics of the input prompt. We call this challenge
+                                         using production deployment (nearly one thousand GPUs                prompt-dependent variable inference time. Second, agentic
+                                         and one million CPU cores) and controlled experiments on a           applications often exhibit dynamic model-to-model calling
+                                         128-GPU testbed. Across multi-agent code generation, deep            patterns. The downstream model to invoke may be deter-
+                                         research, and multimodal agentic workflows, SwarmX re-               mined only at runtime, after an upstream model produces its
+                                         duces tail latency by up to 61.5% compared to state-of-the-art       output. We call this challenge prompt-dependent model-call
+                                         schedulers and sustains up to 2× the throughput of produc-           structure. Together, these two forms of dynamism make both
+                                         tion schedulers under the same SLO.                                  routing and scaling decisions difficult: the scheduler must
+                                                                                                              decide where to place a request and how much capacity to
+                                         Keywords: agentic applications, cluster scheduling, model            provision before fully knowing how long the request will
+                                         serving, predictive scheduling                                       run or which downstream models it will trigger.
+                                                                                                                 Existing schedulers fall short in addressing these chal-
+                                         1   Introduction                                                     lenges. De-facto AI cluster schedulers such as Ray [4] and
+                                         Agentic AI is emerging as a new paradigm for building AI             Kubernetes [3] often rely on simple policies, including round-
+                                         applications. Representative examples include multi-agent            robin, random scheduling, or power-of-two choices [22].
+                                                                                                          1
+                                                                                                                                                         Huang et al.
+
+
+These policies work well when QPS is high and requests are                         Coding Agent                         n8n                 Deep Research
+
+short, because poor decisions are quickly amortized. Agentic                                                                                                ...
+workloads violate this assumption: requests can run much                                               ...
+                                                                                                                                               ...
+longer through an agent harness, so poor routing or scaling                                                                           ...      Client Dispatch
+decisions persist and amplify tail latency. Predictor-based                             Model Service 1                         Model Service 2
+
+schedulers such as PSC [13] and Cilantro [6] use learned mod-
+                                                                                            Router                                  Router
+els, but typically rely on simple predictors, such as linear re-
+gression or random forests, which cannot accurately capture                  Model 1        Model 1          Model 1     Model 2    Model 2          Model 2
+                                                                             Instance       Instance         Instance    Instance   Instance         Instance
+prompt-dependent inference time or model-call structure. Re-
+cent agentic schedulers, including ORION [20], Pie [14], and                  GPU            CPU              GPU               GPU                   CPU
+Parrot [18], mainly target single-agent or single-workload                                                         Cluster
+settings. Murakkab [7] supports multi-model scheduling, but                                                        Scaler
+
+relies on average per-model estimates and ignores prompt               Figure 1. Overview of a typical agentic application cluster.
+semantics, leaving it vulnerable to poor latency performance.
+   In this paper, we explore a new approach to scheduling              router- and scaler-specific objectives, monitoring prediction
+agentic AI applications on GPU–CPU clusters. Our key in-               quality online, and retraining lightweight components when
+sight is that, because both inference time and model-call              workload shifts degrade accuracy.
+structure depend on prompt semantics, schedulers need                  (4) Scheduler-agent framework for integration.
+scheduling-specific neural predictors that combine prompt              SwarmX embeds neural prediction into existing sched-
+semantics with device, runtime, and target-model character-            ulers through a scheduler-agent framework. The framework
+istics. These predictors allow schedulers to estimate request          represents scheduling operations as bounded agent actions
+latency and downstream resource demand before making                   and manages the data used to train, monitor, and adapt
+routing and scaling decisions. However, using neural predic-           predictors as agent memory, enabling low-cost integration
+tors for scheduling is not simply a matter of adding a model.          with existing scheduling and model-serving infrastructure.
+A practical system must manage predictors online, keep pre-               We implement SwarmX as a scheduler plug-in for existing
+diction overhead low, translate distributional predictions             AI cluster infrastructure. The implementation is designed
+into concrete routing and scaling actions, and coordinate              for scalability, reliability, low overhead, and compatibility
+these actions across model services to optimize end-to-end             with existing programming interfaces. SwarmX has been
+latency and cluster-wide resource utilization.                         deployed in production clusters and used to support a range
+   We realize this insight in SwarmX, a system that imple-             of emerging agentic AI applications.
+ments agentic scheduling for serving agentic AI applications              We report deployment results from one of our production
+on GPU–CPU clusters. In SwarmX, routers and scalers be-                clusters, which contains several million CPU cores and nearly
+come lightweight scheduler agents: they observe prompt,                one thousand heterogeneous GPUs, and complement them
+target-model, device, and runtime state; use neural predic-            with controlled experiments on a 128-GPU testbed. Across
+tors to anticipate latency and model-call behavior; and take           important agentic workloads—multi-agent code generation
+bounded routing or scaling actions through existing sched-             (Coding Agent[1, 24], OpenClaw[25]), deep research[12],
+uler interfaces. This augments existing cluster managers               and multimodal agentic workflows such as text-to-video[8]
+with prediction-driven, uncertainty-aware control without              generation—SwarmX outperforms Ray [4], Murakkab [7],
+replacing their infrastructure.                                        Power-of-Two Choices [22], and our production schedulers.
+   SwarmX makes the following contributions.                           In production, SwarmX sustains up to 2× the throughput
+(1) Prompt-, device-, runtime-, and target-model-aware                 of the prior scheduler under the same SLO and reduces P99
+predictors. We design compact neural predictors for agen-              latency by 44–52%. On the controled testbed, it reduces end-
+tic AI scheduling. These predictors capture prompt seman-              to-end P95 latency up to 61.5% even on open-ended agentic
+tics, device characteristics, runtime state, and target-model          workloads whose call structure is decided entirely at runtime.
+properties to estimate inference latency and downstream
+model-call behavior with low deployment overhead.
+(2) Distribution-aware scheduling. SwarmX exposes dis-
+                                                                       2     Background and Motivation
+tributional predictions directly to routers and scalers instead
+of reducing them to point estimates. It composes these dis-            2.1   Agentic applications on GPU–CPU clusters
+tributions across sequential routing and scaling decisions,            An agentic application handles a user request by repeatedly
+allowing schedulers to preserve predictive uncertainty and             invoking AI models and tools in response to a prompt. Exam-
+control tail latency.                                                  ples include OpenClaw-style agent workloads, coding agents,
+(3) Training and adaptation of predictors. SwarmX pro-                 data-cleaning and synthetic-data generation pipelines, and
+vides mechanisms for training predictor components with                interactive media-generation workflows such as ComfyUI.
+                                                                   2
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+   A key property of these applications is that execution                 This creates a direct challenge for scalers. A scaler must
+spans multiple models, agents, or tool calls. As shown in              decide how many replicas to provision for each model, but
+Figure 1 top, a coding agent may alternate between planning,           the required capacity depends on model-call structures that
+code search, editing, testing, debugging, and summarization;           are revealed only at runtime. As a result, scalers may under-
+each stage may invoke different models, prompts, or tools.             provision downstream models, over-provision unused repli-
+Similarly, an OpenClaw-style workload may contain many                 cas, or react too late to shifting demand, all of which hurt
+coordinated agent steps whose dependencies are only par-               tail latency and resource utilization.
+tially known before execution. This makes the serving target
+fundamentally different from optimizing a single model.                2.3   Limitations of Existing Scheduling Approaches
+   Serving such applications often requires large GPU–CPU              To handle scheduling dynamism in agentic systems, one
+clusters. As shown in Figure 1 bottom, each model is typi-             could consider three categories of existing approaches.
+cally deployed as an independent service, such as a model-             (1) De-facto AI cluster scheduling. Ray and Kubernetes
+as-a-service endpoint or a Ray actor/task interface. To sus-           are widely used in AI clusters, but their scheduling decisions
+tain throughput, each service is backed by multiple replicas.          often rely on simple policies, such as round-robin, random
+Two scheduling components govern service performance:                  scheduling, or power-of-two choices [22]. These policies
+(i) routers, which dispatch requests to replicas to balance            work well when requests are short and QPS is high, because
+load and reduce latency, and (ii) scalers, which adjust replica        poor decisions are quickly amortized. Agentic workloads vi-
+counts and placements across GPUs and CPUs to avoid                    olate this assumption: requests can run much longer through
+under- or over-provisioning.                                           an agent harness, while QPS is often lower. As a result, a
+                                                                       poor routing or scaling decision can persist longer, causing
+2.2   Scheduling Challenges for Agentic Systems                        queue imbalance and amplifying tail latency.
+                                                                       (2) Scheduling with learned or statistical predictors.
+Agentic systems invoke large language models and multi-                Another approach is to predict request cost using learned or
+modal models whose requests may take seconds to minutes                statistical models. Systems such as PSC [13] and Cilantro [6]
+to complete. This makes each routing decision consequential            follow this direction. However, they typically rely on simple
+and requires scalers to provision replicas before queues build         predictors, such as linear regression or random forests, which
+up. Poor decisions, such as placing a long request behind              are insufficient for capturing prompt-dependent inference
+an already slow queue or failing to scale replicas in time,            time and model-call structure in agentic workloads. They
+can significantly increase tail latency and reduce resource            also do not address the system requirements of using more
+utilization. Agentic systems therefore require routers and             capable neural predictors, including dataset construction,
+scalers to make consistently high-quality decisions under              low-overhead deployment, online adaptation, and integra-
+two forms of prompt-dependent dynamism.                                tion with router and scaler decisions.
+(1) Prompt-dependent variable inference time. Infer-                   (3) Scheduling systems for agentic workloads. Recent
+ence time depends strongly on the input prompt. As shown               systems have begun to target agentic workloads directly.
+in Figure 2(a), three semantically similar prompts generate            ORION [20], Pie [14], and Parrot [18] are representative
+vastly different numbers of output tokens (194, 886, and 1569),        examples, but they primarily focus on single-agent or single-
+leading to substantially different inference times. This vari-         workload settings rather than the multi-agent, multi-model
+ability also differs across models within the same workload            workloads studied in this paper. Murakkab [7] supports
+(Figure 2(b)) and across workloads (Figure 2(c) vs. (b)).              multi-model scheduling, but estimates per-model inference
+   This creates a direct challenge for routers. When assign-           time using average values and remains unaware of prompt
+ing requests to model-replica queues, a router needs to esti-          semantics. Pythia [31] is a parallel effort that predicts work-
+mate how quickly each queue will drain. However, without               flow structure in multi-agent workflows, but does not model
+prompt-aware prediction, requests that appear similar may              prompt semantics. As a result, these systems can still make
+occupy replicas for very different lengths of time. This makes         poor tail-latency decisions when prompt-dependent infer-
+load balancing unreliable and tail latency difficult to protect.       ence time is highly variable, as shown in Figure 2.
+(2) Prompt-dependent model-call structure. Agentic
+applications issue multiple model calls through an agent
+harness, and both the number and structure of these calls
+                                                                       3     SwarmX Design
+depend on the prompt. As shown in Figure 3(a), prompts of              We design SwarmX around four goals:
+increasing complexity induce distinct execution structures: a          • G1: Making prediction aware of prompt, device, run-
+direct one-call answer (S1), a short chain (S2), and a complex           time, and target model. SwarmX should capture how
+DAG (S3). The number-of-calls distribution also differs across           prompt semantics, device characteristics, runtime condi-
+models within a workload (Figure 3(b)) and across workloads              tions, and target-model properties affect inference time
+(Figure 3(c) vs. (b)).                                                   and model-call structure.
+                                                                   3
+                                                                                                                                                                                                                                                                                   Huang et al.
+
+                                              Output Tokens                                                                                                                                           2.0
+
+             P1: Briefly describe the
+
+
+
+                                                                   Probability Density                                                                                          Probability Density
+                                                                                         0.04
+             process of human digestion.                  194                                                                                                                                         1.5
+                                                                                         0.03
+                                                                                                                                                                                                      1.0
+             P2: Clearly introduce the
+             process of human digestion.
+                                                          886                            0.02
+
+                                                                                                                                                                                                      0.5
+                                                                                         0.01
+
+             P3: Broadly analysis the
+             process of human digestion.                  1569                           0.00
+                                                                                                   0                         20          40            60           80
+                                                                                                                                                                                                      0.0
+                                                                                                                                                                                                                                  10−2         10−1          100         101           102
+                                                                                                                                    Inference Time (s)                                                                                              Inference Time (s)
+                                                                                                                              Model A (Plan)         Model B (Execute)                                                            Model A (Think, Summary)          Model B (Criteria, Query)
+
+
+
+             (a) Prompt and output tokens.                                                                                   (b) Coding Agent.                                                                                            (c) Deep Research.
+Figure 2. Inference time depends strongly on prompt semantics, and its distribution varies across both models and workloads.
+
+        P1: What is the capital    S1: Direct Reasoning                                                          120
+
+
+
+
+                                                                                            Number of Requests                                                                                              Number of Requests
+        city of Japan right now?                                                                                 100                                                                                                             80
+                                                          Answer
+                                                                                                                  80                                                                                                             60
+
+        P2: Compare the long-      S2: Few model call                                                             60
+                                                                                                                                                                                                                                 40
+        term benefits of                                  Answer                                                  40
+        renewable energy.                                                                                                                                                                                                        20
+                                                                                                                  20
+
+                                   S3: Complex Model Call                                                          0                                                                                                              0
+        P3: Analyze the global                                                                                         100            101               102              103                                                             5     10     15     20     25    30     35     40      45
+        impacts of supply chain                                                                                                         Number of Model Calls                                                                                          Number of Model Calls
+        failures.                                         Answer
+                                                                                                                                    Model A (Plan)          Model B (Execute)                                                            Model A (Think, Summary)         Model B (Criteria, Query)
+
+
+
+ (a) Prompt and its following model-call structure.                                                                               (b) Coding Agent.                                                                                            (c) Deep Research.
+Figure 3. The number and structure of model calls are prompt-dependent, and their distribution varies across both models
+and workloads.
+
+
+                                          4 Agent Framework                                 Existing
+                   Neural 1                                                                                                                    target-model, device, and runtime state; invokes neural pre-
+                                    Distribution                                            Systems
+                  Predictor                                                                                                                    dictors to estimate inference-time and model-call distribu-
+    Prompt                              Prediction-to-action 2                                                   Ray
+                                                                                                                                               tions; and translates these predictions into bounded routing
+                Train     Adapt           Router          Scaler                                                 K8S                           or scaling actions exposed by existing infrastructure, such
+                                          Action          Action
+             3 Management                                                                                         ...                          as Ray or Kubernetes. We call this design agentic scheduling.
+               Figure 4. SwarmX design overview.                                                                                                  SwarmX realizes agentic scheduling through four compo-
+                                                                                                                                               nents. A prompt-, device-, runtime-, and target-model-aware
+ • G2: Ensuring robust routing and scaling decisions                                                                                           predictor ( 1 , Section 3.1) estimates inference-time and model-
+   based on prediction distributions. SwarmX should                                                                                            call distributions. A distribution-aware prediction-to-action
+   translate the potentially complex distributions of pre-                                                                                     mechanism ( 2 , Section 3.2) converts these distributions into
+   dictions made by neural networks into concrete routing                                                                                      routing and scaling actions while preserving uncertainty.
+   and scaling actions, respecting the different objectives of                                                                                 Shared training and adaptation mechanisms ( 3 , Section 3.3)
+   routers and scalers and remaining general across sched-                                                                                     monitor prediction quality and retrain predictors under
+   uling scenarios.                                                                                                                            workload shifts. Finally, a scheduler-agent framework ( 4 ,
+                                                                                                                                               Section 3.4) wraps predictors, data, adaptation logic, and
+ • G3: Unifying training and adaptation management
+                                                                                                                                               action interfaces into a common substrate for integration
+   for predictors. SwarmX should provide common mecha-
+                                                                                                                                               with existing routers, scalers, and cluster managers.
+   nisms for training predictors, monitoring prediction qual-
+   ity, and triggering retraining when prediction quality de-
+   grades.                                                                                                                                     3.1            Predictor Design
+ • G4: Ensuring low-cost integration with existing in-                                                                                         SwarmX uses neural predictors that combine prompt seman-
+   frastructure. SwarmX should integrate with existing                                                                                         tics with device, runtime, and target-model information to
+   cluster infrastructure through clean interfaces for reading                                                                                 support routing and scaling decisions.
+   runtime and device state and invoking bounded schedul-                                                                                      Decouple neural components for different forms of
+   ing actions available to routers and scalers.                                                                                               awareness. A predictor must incorporate a wide range of
+Design idea and overview. Figure 4 shows the design of                                                                                         features that affect scheduling decisions. Prompt semantics
+SwarmX. The core idea is to turn routers and scalers into                                                                                      are especially challenging: interpreting a prompt typically
+lightweight scheduler agents. Each agent observes prompt,                                                                                      requires a language model, which can be expensive to train
+                                                                                                                                               and run. Our key observation is that prompt understanding
+                                                                                                                                               does not need to be learned from scratch. Smaller variants
+                                                                                                                                               of the target model, which we call isomorphic small variants,
+                                                                                                                                         4
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+                                                 Semantic               Job Completion Time     (a) Point-based   (b) Distribution-based
+        User Prompt       “Write a report ...”
+                                                  Model                  1
+                                                                                    Long Tail
+        Device Feature
+                                                                         2
+        Runtime Feature                            MLP
+                                                                         3
+                                                  Predict                                       Imbalanced Tail        Balanced Tail
+        Target Model Feature
+                                                     Estimate
+            Router/Scaler Features                  Distribution
+                                                                       Figure 6. Point-based composition can hide tail behavior;
+                                                                       distribution-based composition preserves tail awareness.
+    Figure 5. Design overview of the neural predictor.
+                                                                       semantic features can be extracted by a much smaller lan-
+already capture useful semantic signals about the difficulty           guage model. As a result, the predictor can run on CPUs or
+and likely structure of the response generated by the target           consume only a small fraction of GPU resources. This keeps
+model.                                                                 prediction overhead low, as confirmed by our evaluation and
+   Motivated by this observation, we decouple the predictor            production deployment experience.
+into two components, as shown in Figure 5.                             Searching for model size. We formulate model sizing
+ • A semantic model aligned with the target model being                as an accuracy–overhead search problem. The MLP is in-
+   predicted. It extracts semantic features from the prompt            tentionally small, typically with hundreds of thousands to
+   and can be initialized from an existing pre-trained lan-            at most a few million parameters. The semantic model is
+   guage model, reducing training cost. Architecturally, it            larger, but still several orders of magnitude smaller than the
+   is a smaller isomorphic variant of the target model, with           target model. For example, for an 8B-parameter Qwen target
+   fewer layers or fewer parameters per layer.                         model, we select a 35M-parameter semantic model. Our eval-
+ • A multi-layer perceptron (MLP) that combines semantic               uation shows that this size preserves prediction accuracy
+   features with device, runtime, and target-model features.           while keeping prediction overhead low.
+   The MLP produces a distributional prediction that can be
+   consumed by downstream routers and scalers.                         3.2   Prediction-Distribution-Aware Scheduling
+Router- and scaler-oriented prediction. The feature set                SwarmX turns neural predictions into routing and scaling
+depends on the scheduling objective and the information                decisions through distribution-aware scheduling.
+observable in the deployment environment.                              Insight: Prediction distributions preserve scheduling-
+   For router-oriented prediction, SwarmX uses four groups             relevant information that point estimates discard.
+of input features: (i) semantic features extracted from the            Conventional schedulers often act on a single predicted
+user prompt, which capture the likely difficulty and response          value, such as mean latency. This point estimate can hide
+structure of the request; (ii) device features, such as hard-          skewed, heavy-tailed, or multi-modal behavior, which is
+ware type, available compute cores, clock frequency, and               common in LLM serving because latency depends strongly
+theoretical FLOPS; (iii) runtime features, including utiliza-          on prompt semantics. As shown in Figure 6, compact and
+tion, active concurrency, inference runtime version, and               long-tailed distributions may have similar point estimates
+inference-engine parameters such as maximum batch size;                but very different tail risks. After composition, point es-
+and (iv) target-model features extracted from the model con-           timates also obscure how individual tails contribute to
+figuration, such as hidden size and number of layers. The              the final outcome. SwarmX therefore keeps predictions
+predictor outputs a latency distribution for the request, en-          distributional until the final scheduling decision, which is
+abling the router to make tail-aware placement decisions               especially important for low-QPS agentic workloads where
+rather than relying on a point estimate.                               one poor decision can dominate tail latency.
+   For scaler-oriented prediction, SwarmX uses a more com-             Represent uncertainty with quantiles. SwarmX repre-
+pact feature set: (i) the same semantic features used by the           sents both predicted distributions and maintained scheduling
+router, (ii) device features that describe the hardware types          state with quantile sketches. Quantiles preserve distribution
+in the current deployment, and (iii) runtime features that             shape and tail behavior while remaining cheap to store, com-
+describe the current replica list and each replica’s state. The        pose, and update online. This allows each new prediction to
+predictor outputs downstream model-call distributions.                 be combined incrementally with uncertainty already accu-
+Keep prediction overhead low. This decoupled design                    mulated in queues or demand states.
+keeps the predictor orders of magnitude smaller than the               Distribution-composition template. Scheduling deci-
+target models used by agentic applications. First, the relation-       sions are sequential: each routing or scaling action changes
+ship between device/runtime state and latency or demand                queue state or replica demand, which affects later decisions.
+can be captured by a lightweight MLP. Second, predicting               SwarmX therefore maintains a compact distributional state
+latency or downstream model-call structure is much sim-                S whose entries summarize committed work, such as per-
+pler than performing the target model’s reasoning task, so             queue completion sketches for routers or demand sketches
+                                                                       for scalers. For each candidate action 𝑎, SwarmX predicts the
+                                                                   5
+                                                                                                                                                  Huang et al.
+
+
+Algorithm 1 Distribution-Aware Request Routing                               Algorithm 2 Online Adaptation
+ 1: procedure Route(𝑟, 𝐺, Q)                                                  1: procedure Adapt(𝑝, 𝑔, 𝐷 𝑝 , ℓ)
+       Inputs: predictor 𝐹 ; device features 𝜏; runtime features 𝜎                  Inputs: windows 𝑊 ; capacity 𝑁 ;
+       Tail-cost evaluator Ctail ; queue sketches Q                                 threshold 𝜃 ; tail level 𝛼
+ 2:    for all 𝑔 ∈ 𝐺 do                                                       2:    𝑘 ← key(𝑝, 𝜏 (𝑔))                  ⊲ Prompt/device group
+ 3:         𝐷𝑔 ← 𝐹 (𝑟, 𝜏 (𝑔), 𝜎 (𝑔)) ⊲ Predicted latency distribution         3:    𝑒 ← 𝜌𝛼 ℓ − Q𝛼 (𝐷 𝑝 )                      ⊲ Tail pinball loss
+ 4:         Q[𝑔] ← Q[𝑔] ⊕ 𝐷𝑔                        ⊲ Update queue 𝑔          4:    Push(𝑊𝑘 , 𝑒, 𝑁 )                 ⊲ Maintain sliding window
+                                                                                    if |𝑊1 | 𝑒 ′ ∈𝑊𝑘 𝑒 ′ > 𝜃 then
+                                                                                            Í
+ 5:         𝑐𝑔 ← Ctail (Q)                    ⊲ Tail-cost distribution        5:
+                                                                                          𝑘
+ 6:    end for                                                                6:        RetrainMLP(𝑘)                       ⊲ Async retraining
+ 7:    S ← Sample({𝑐𝑔 })                  ⊲ Probability-aware subset          7:        𝑊𝑘 ← ∅
+ 8:    𝑐ˆ𝑔 ∼ 𝑐𝑔 (𝑔 ∈ S)                            ⊲ Sample tail costs        8:    end if
+ 9:    𝑔★ ← arg min𝑔∈ S 𝑐ˆ𝑔                                                   9: end procedure
+10:    Dispatch(𝑟, 𝑔★)              ⊲ Send request to selected queue
+11:    return 𝑔★                                                             or response-structure features:
+12: end procedure
+                                                                                                     1               ∑︁                      
+                                                                                        Lsem =                                    𝜌 𝑦ˆ𝑝,𝑚 , 𝑦 ,            (1)
+induced work distribution 𝐷𝑎 and constructs a hypothetical                                         |Dsem |
+                                                                                                               (𝑝, 𝑚, 𝑦) ∈ Dsem
+state S (𝑎) by composing 𝐷𝑎 only with the affected entry us-
+ing quantile-grid composition ⊕. The scheduler then applies                  where 𝑝 is the input prompt, 𝑚 is the target model, 𝑦 is
+a cost evaluator C to the whole candidate state, producing                   the observed target-model response property, 𝑦ˆ𝑝,𝑚 is the
+a distributional cost 𝑐 𝑎 = C(S (𝑎) ) for objectives such as P99             semantic model’s prediction, and 𝜌 (·, ·) is a configurable
+latency or throughput loss. Since 𝑐 𝑎 remains distributional,                per-sample loss, such as MSE, MAE, Huber, or pinball loss.
+SwarmX samples candidate actions from the distribution                          Second, the router MLP is trained to predict an inference-
+induced by {𝑐 𝑎 }, selects the best sampled candidate, and                   time distribution using weighted pinball loss over prescribed
+commits only the selected state update.                                      quantile levels:
+Instantiating the template in routers and scalers. Al-
+gorithm 1 instantiates the template for request routing. The                                                             𝐾
+                                                                                               1             ∑︁         ∑︁                         
+generic state S becomes a vector of queue sketches Q, and                      Lrouter =                                        𝑤𝑘 𝜌𝜏𝑘 𝑡 − 𝑞ˆ𝜏𝑘 (𝑥) , (2)
+                                                                                           |Drouter |
+each candidate action becomes a queue 𝑔 ∈ 𝐺. For each candi-                                            (𝑥, 𝑡 ) ∈ Drouter 𝑘=1
+date, SwarmX predicts the request-latency distribution from
+the request, device features, and runtime features (Line 3),                 where 𝑥 contains semantic, target-model, device, and run-
+and composes that distribution only into the queue-𝑔 sketch                  time features; 𝑡 is the observed inference time; 𝑞ˆ𝜏𝑘 (𝑥) is
+                                                                                                                        Í𝐾
+to form the candidate state (Line 4). The tail-cost evaluator                the predicted 𝜏𝑘 -quantile; 𝑤𝑘 > 0 and 𝑘=1      𝑤𝑘 = 1; and
+Ctail is then applied to the full queue state (Line 5), so a single-         𝜌𝜏 (𝑢) = max(𝜏𝑢, (𝜏 − 1)𝑢) is the standard pinball loss.
+entry update is still judged by its effect on the whole schedule                The scaler MLP uses the same weighted pinball-loss form,
+before the selected queue is dispatched (Lines 7–10).                        but applies it across the predicted downstream call-count
+   Scalers use the same instantiation pattern with demand                    distributions for all target models. This trains the scaler to
+sketches in place of queue sketches and candidate scaling                    preserve uncertainty over future model demand without
+decisions or target deployments in place of candidate queues.                introducing a separate objective.
+At each scaling interval, SwarmX scores hypothetical de-                        We construct the training dataset from logs collected
+mand states and commits the sampled best candidate; the                      during application execution. Each record contains the
+implementation also applies a deployment-change threshold                    prompt context, target-model information, device and
+to avoid reacting to small demand fluctuations.                              runtime features, prediction output, scheduling decision,
+                                                                             and observed outcome. We train each predictor component
+                                                                             until convergence using standard deep learning optimizers,
+                                                                             such as AdamW.
+3.3   Training and Adaptation of Predictors                                  Predictor online adaptation. Our adaptation method
+SwarmX trains its predictors from production traces and                      is guided by one key observation: most online drift comes
+adapts them when online prediction quality degrades.                         from changes in workload mix, system load, device utiliza-
+Training method design. The key design choice is the                         tion, or runtime behavior. These shifts affect the mapping
+loss function for each predictor component. SwarmX uses                      from semantic, target-model, device, and runtime features
+separate objectives for the semantic model and the MLPs                      to latency or demand, but usually do not change the target
+used by routers and scalers.                                                 model’s prompt-to-response behavior. In such cases, retrain-
+   First, the semantic model is trained to predict prompt-level              ing the lightweight MLP is sufficient. The semantic model is
+properties of the target model, such as output token length                  retrained only after target-model changes or updates.
+                                                                         6
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+                  Prediction                                                          example, when a scaler deploys or drains replicas, it pub-
+                  to Action
+                                   Invoke
+                                                    Neural                            lishes the updated replica set to affected routers; routers
+                Coordinator                       Predictor           Predict
+
+       Prompt   Store                                       Call                      then refresh candidate queues and local runtime state before
+                                    Read
+                                                            Scheduling OPs            making subsequent routing decisions. Routers therefore
+                                                  Runtime
+                                        time
+                Memory ...               ...
+                                                            Deploy Drain              make routing decisions without waiting for the scaler, but
+                 Runtime Feature   Prompt          State
+                                                             Dispatch       ...       still update their candidate queues promptly when replicas
+                Device Feature Request ID
+                 Target Model Feature       ...                    Action Set         are added or removed.
+      Figure 7. SwarmX scheduler-agent framework.
+                                                                                      4   SwarmX Implementation
+    Based on this observation, we design Algorithm 2, which
+defines how SwarmX monitors prediction quality and trig-                              SwarmX is implemented as a scheduler plug-in for exist-
+gers retraining under distribution shift. It treats a predictor                       ing AI cluster infrastructure. The implementation targets
+as out-of-distribution (OOD) when recent observed latencies                           scalability, low overhead, reliability, and compatibility with
+deviate from the predicted distribution beyond a threshold.                           existing workload and application interfaces.
+When a request completes, SwarmX groups it by prompt                                  System architecture. Worker servers execute AI and agen-
+class and device type, computes the tail pinball loss between                         tic models using inference engines such as SGLang[32] and
+the observed latency and the predicted tail quantile, and ap-                         vLLM[15], and report lightweight heartbeats to the control
+pends the error to the corresponding sliding window. If the                           plane. Workers are grouped by application to reduce per-
+average window error exceeds the configurable threshold                               formance interference. A cluster-wide resource coordinator
+𝜃 , Algorithm 2 asynchronously retrains the corresponding                             manages elasticity and cross-application resource arbitra-
+MLP using recent records from the same window. Online                                 tion.
+scheduling continues with the current predictor during re-                               Control servers manage workers and provide service dis-
+training. Once the retrained MLP passes validation, SwarmX                            covery, allowing clients to locate required model services
+installs it for subsequent scheduling.                                                dynamically. For each workflow, SwarmX deploys multiple
+                                                                                      control servers using a shared-state scheduling design [27],
+                                                                                      improving reliability and scalability without changing exist-
+3.4   Scheduler-Agent Framework as a Substrate                                        ing application interfaces.
+SwarmX introduces a scheduler-agent framework that inte-                              Deploying neural predictors. SwarmX triggers predictor
+grates neural predictors, prediction data, adaptation logic,                          training when a new target model is deployed. Instead of
+and scheduling actions into a common substrate. The frame-                            running all predictors on control servers, which can create
+work turns routers and scalers into lightweight scheduler                             a hotspot, SwarmX colocates predictors with the worker
+agents while preserving clean interfaces to existing schedul-                         servers that host the models they schedule. This makes pre-
+ing and model-serving infrastructure.                                                 diction capacity scale with the cluster and gives predictors
+   Figure 7 shows this boundary. Predictor, Coordinator,                              low-latency access to fresh prompt and runtime state.
+and Memory capture the reusable logic described in the                                   Predictors are lightweight relative to the agentic inference
+previous subsections: prediction, distribution-aware deci-                            tasks they support. For example, a 35M-parameter LLM pre-
+sion making, and online adaptation. The Action Set is                                 dictor takes about 30 ms on CPU and roughly 4 ms on GPU,
+the infrastructure-specific boundary, exposing only the                               while target LLMs with hundreds of billions of parameters
+runtime-state reads and scheduling operations that an agent                           often take seconds to minutes. Most predictors therefore run
+is allowed to use.                                                                    on CPUs. Larger predictors can run on GPUs with modest
+Clean interfaces to existing scheduling infrastructure.                               memory overhead because they are orders of magnitude
+The Action Set exposes two classes of primitives: runtime-                            smaller than the target models.
+state reads, such as GPU utilization and concurrency; and                                Predictor weights are distributed from control servers
+bounded scheduling operations, such as dispatching a                                  under eventual consistency. Temporary inconsistency may
+request (Dispatch), adding a model replica (Deploy), and                              cause short-lived accuracy drift, but prediction quality stabi-
+removing a model replica (Drain). The Coordinator can                                 lizes as updates propagate. For reliability, predictor weights
+act only through these primitives, so every agent action is                           and associated context are periodically checkpointed. Sensi-
+mediated by a controlled interface that preserves system                              tive prompt fields are protected through verified redaction
+safety and stability. Different agents can bind different                             before being stored or reused for adaptation.
+Action Sets while reusing the same predictor, adaptation,                             Handling high prediction traffic. Routers and scalers
+and distribution-aware decision logic.                                                can generate high prediction traffic. Router-side prediction
+Coordination between scheduler agents. Scheduler                                      scales naturally with existing service replication. Scaler-side
+agents coordinate by exchanging compact state-change                                  prediction is more challenging because one scaler may cover
+notifications rather than centralizing every decision. For                            many model services. To reduce this load, SwarmX delegates
+                                                                                  7
+                                                                                                                           Huang et al.
+
+
+heavy prompt parsing to upstream routers and lets the scaler           5.1   Experiment Setup
+use only the resulting prompt-aware representation with a              Baselines. We compare SwarmX against three request-
+lightweight MLP. This preserves prompt awareness while                 routing baselines, one calibration baseline in the controlled
+keeping scaler-side prediction overhead low.                           testbed, and one deployment baseline in production.
+Failure handling. SwarmX preserves the failure model                   • Murakkab [7] is the latest agentic workload scheduling
+of the underlying infrastructure. Predictors are colocated                 baseline (to appear in OSDI 26), in which it optimizes end-
+with existing worker and control components rather than                    to-end latency for compound AI systems. Its optimizer
+introduced as a separate critical service. On failure, predictor           relies on average latency estimates, representing global
+state is restored from checkpointed weights and context. If                schedulers that use point estimates while discarding pre-
+a predictor is temporarily unavailable, SwarmX falls back                  dictive uncertainty.
+to the underlying scheduler policy, ensuring that prediction           • Ray Core [4] is our production-default baseline. It is
+failures do not compromise service availability.                          widely used for complex AI workloads, and its round-
+                                                                           robin dispatcher is a common default in our deployments
+                                                                           under dynamic latency variation.
+                                                                       • Power-of-Two-Choices (PO2) [22] is our robust-heuristic
+5   Evaluation                                                             baseline. PO2 is low-overhead and competitive when ac-
+Our evaluation is organized around two complementary set-                  curate request-level prediction is unavailable, making it a
+tings. First, controlled testbed experiments isolate SwarmX’s              useful reference for evaluating whether SwarmX’s prompt-
+design choices and measure how much each scheduling                        aware predictions improve routing decisions.
+mechanism contributes. Second, large-scale production de-              • Random is a calibration baseline. It provides a lower-
+ployments evaluate whether these gains hold under real                     bound reference that separates the gains of informed
+workloads, heterogeneous resources, and operational con-                   scheduling from the gains of having any dispatch policy.
+straints. We answer four questions.                                    • Production scheduler is our deployment baseline. Pro-
+                                                                           duction experiments compare against the scheduler al-
+                                                                           ready serving each workload. This is a strong baseline: it
+• Do individual SwarmX components improve sched-                           has been heavily optimized to use device and runtime sig-
+  uling decisions in a controlled testbed? Section 5.2 iso-                nals for scheduling decisions. However, it is not prompt-
+  lates each scheduler component. SwarmX’s distribution-                   aware and reduces scheduling state to point estimates,
+  aware router reduces P95 latency by up to 18% on                         making it unable to exploit distribution-aware scheduling.
+  Text-to-Video and 28.3% on Deep Research over Ray. Its               Workloads. As shown in Table 1, we evaluate SwarmX on
+  distribution-aware scaler reduces latency by 7.8–13.7%               seven services across three categories of increasing sched-
+  on Text-to-Video and by nearly 50% on Deep Research over             uling difficulty, covering diverse execution patterns, input
+  static provisioning.                                                 sources, and both single- and dual-model modes. For struc-
+• Do coordinated routers and scalers improve end-to-                   tured LLM pipelines, Deep Research uses 20,000 samples
+  end performance? Section 5.3 evaluates SwarmX as a                   from DR Bench[12] and Text-to-Video uses 2,000 samples
+  full system on the controlled testbed. It shows that request-        from OpenVid-1M[23]; for open-ended agentic applications,
+  time routing and window-level scaling are complemen-                 OpenClaw runs on the full MCP Atlas dataset[5], and Cod-
+  tary: together, they reduce end-to-end P95 latency by up             ing Agent uses the dataclaw-peteromallet[26] trace of SWE-
+  to 61.5% on structured pipelines and by 11–32% on open-              bench Pro[11]. Production traffic include about 11 Millions
+  ended agentic workloads, including OpenClaw and Cod-                 (!) records captured from real-world serving. The same pre-
+  ing Agent.                                                           dictors and scheduling mechanisms extend SwarmX to other
+• Does SwarmX remain effective at production scale?                    services using the same served models.
+  Section 5.4 reports live deployments on production clus-             Testbed and implementation. Controlled experiments
+  ters with nearly one thousand heterogeneous GPUs and                 run on a GPU testbed with 128 NVIDIA H20 GPUs. Produc-
+  over one million CPU cores. SwarmX delivers up to 2×                 tion experiments run on clusters with 320 NVIDIA H20 GPUs
+  higher sustainable throughput under a fixed SLO and re-              and 560 NVIDIA L20 GPUs, and production CPU clusters
+  duces P99 latency by 44–52% over production schedulers.              with over one million (!) cores.
+                                                                           Models are served with vLLM 0.16.0, and SwarmX runs as
+• What are SwarmX’s overhead, cost, and robustness?
+  Section 5.5 evaluates predictor overhead, resource cost,             a scheduler plug-in over Ray, as described in Section 4. Each
+  and robustness to drift. It shows that predictor overhead            experiment reports its own deployment scale. Each SwarmX
+  is negligible relative to the seconds-to-minutes execution           predictor pairs a parameter-reduced isomorphic semantic
+  time of served models, and that SwarmX detects a severe              model with a lightweight MLP, trained from service traces
+  workload shift and recovers online within 100 s.
+                                                                   8
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+ Category                              Service                   Pipeline                                                                                   Input
+
+                                       Deep Research             Qwen3-32B (Plan/Summary); Two Qwen3-8B (Query)                                             DR Bench [12]
+ Structured LLM Pipelines
+                                       Text-to-Video             Qwen3-8B → Wan2.1-T2V-1.3B                                                                 OpenVid-1M [23]
+
+ Open-ended Agentic                    OpenClaw                  Dual-model setup: Qwen3-Next-80B-A3B + Qwen3-8B-VL;                                        MCP Atlas [5]
+ Applications                                                    Single-model setup: Qwen3-Next-80B-A3B
+                                       Coding Agent              Dual-model setup: Qwen3-Next-80B-A3B (Plan) Qwen3-8B (Act);                                SWE-bench Pro [11]
+                                                                 Single-model setup: Qwen3-Next-80B-A3B                                                     (trace [26])
+
+                                       Video OCR                Internal Model (Detect); Internal Model (Recognize); Internal Model (Match) Prod. traffic
+ Production Deployments                Video Transcode          Internal Model                                                              Prod. traffic
+                                       Entity Semantic Analysis Two Qwen3VL-8B (Recognization); Two Qwen3-omni-30B (Detection)              Prod. traffic
+
+                                                       Table 1. Evaluated workloads grouped by category.
+
+                       (a) Text to Video                 (b) Deep Research                                        (a) Text to Video                    (b) Deep Research
+                                                 800
+                                                                                                         1000                                  400
+
+
+
+  Latency (s)                                                                              Latency (s)
+                1000                             600
+
+                                                 400
+                                                                                                          500                                  200
+                 500
+                                                 200
+
+                   0                               0                                                        0                                    0
+                       P50           P95                 P50           P95                                      P50               P95                 P50               P95
+                        SwarmX        murakkab     Ray     PO2    random                                                              SwarmX         Ray
+
+
+Figure 8. Router-only microbenchmark: P50 and P95 latency                                Figure 9. Scaler-only microbenchmark: P50 and P95 latency
+for (a) Text-to-Video and (b) Deep Research.                                             for (a) Text-to-Video and (b) Deep Research.
+
+using the procedure in Section 3.3. Production results are                               a few long requests, leading to costly misrouting. SwarmX
+collected from live deployments.                                                         avoids this problem by preserving prediction distributions
+Metrics. Our primary metric is request latency. Single-                                  for more effective routing.
+component microbenchmarks (Section 5.2) report per-                                         For Deep Research (Figure 8(b)), SwarmX reduces P50/P95
+request latency for isolated scheduler components, while                                 latency by 29.0%/28.3% over Ray and by 20.3%/31.2%
+end-to-end and production experiments report full work-                                  over Murakkab. The gain is larger than in Text-to-Video
+flow latency. Because agentic workloads often run at low                                 because Deep Research is dominated by thinking and
+QPS with long and highly variable requests, a single poor                                summarize calls whose latency is highly prompt-dependent.
+scheduling decision can dominate the tail. We therefore                                  These semantic-dependent latency differences are captured
+report P95 and P99 latency alongside median latency. Where                               by SwarmX’s semantic model. This matches our design
+relevant, we report sustainable throughput under an SLO.                                 rationale: the wider the per-request latency spread, the more
+                                                                                         a distribution-aware router benefits over policies that ignore
+5.2               SwarmX’s Impact on Scheduler Components                                predictive uncertainty.
+We first isolate the two core scheduler components in                                    Scaler: structure-aware provisioning. We next isolate
+SwarmX: the router and the scaler. These microbenchmarks                                 the scaler while routing requests round-robin, so that the
+run on the 128-GPU H20 cluster. When one component is                                    measured gain comes only from provisioning decisions. The
+evaluated, the other uses its default policy—round-robin                                 baseline is static provisioning, with replica counts fixed from
+routing or static provisioning with offline-profiled replica                             offline profiling. For Text-to-Video (Figure 9(a)), SwarmX re-
+counts—so that the measured gain can be attributed to the                                duces latency by 7.8–13.7% over static provisioning. Variable
+component under test.                                                                    diffusion-iteration depth shifts aggregate demand over time,
+Router: distribution-aware dispatch. We isolate the                                      and proactive scaling tracks these changes better than a fixed
+router while holding instance allocation fixed at the offline-                           allocation.
+profiled replica counts. Figure 8(a) reports P50 and P95                                    For Deep Research (Figure 9(b)), the gain rises to approxi-
+workflow latency for Text-to-Video. SwarmX reduces P50/P95                               mately 50% across percentiles. Deep Research has stronger
+latency by 11.0%/18.0% over Ray. Murakkab, although also                                 structure dynamics: both fan-out degree and call depth vary
+prediction-based, performs worse than Ray by 18.0%/23.1%.                                with prompt semantics. Static provisioning is therefore fre-
+Its point-estimate latency model cannot represent the                                    quently misaligned with actual demand. SwarmX forecasts
+broad, multi-modal latency distribution caused by variable                               demand from predicted call structure and provisions ahead
+diffusion-iteration counts. As a result, it cannot reliably                              of queue buildup, rather than reacting only after queues have
+distinguish a queue with many short requests from one with                               formed.
+                                                                                     9
+                                                                                                                                                                 Huang et al.
+
+
+                       (a) Text to Video                     (b) Deep Research                 1.0                                         P99
+                                                                                                                                           P90
+                                                   800
+                                                                                               0.8
+
+
+
+
+  Latency (s)
+                1000                               600
+                                                                                               0.6
+                                                                                         CDF                                               P50
+                                                   400
+                                                                                               0.4
+                 500
+                                                   200
+                                                                                               0.2
+
+                   0                                 0
+                       P50            P95                    P50              P95              0.0
+                                                                                                        103         104          105
+                             SwarmX         SwarmX(Static)         murakkab                                Makespan (ms)
+                             Ray            PO2                    random                             Predict CPU         No Predict CPU
+
+
+Figure 10. End-to-end P50 and P95 latency for (a) Text-                                  Figure 13. End-to-end la-                               Figure 14. Select semantic
+to-Video and (b) Deep Research. SwarmX (Static) runs the                                 tency CDF for the Video OCR                             model based on accuracy–
+SwarmX router with the scaler disabled.                                                  service on a CPU cluster.                               size tradeoff.
+
+                       (a) Dual Model                        (b) Single Model
+                                                  100                                    pipeline varies in both fan-out and iteration depth, giving
+                100
+                                                   50
+                                                                                         joint control more to correct, whereas Text-to-Video’s single-
+
+  Latency (s)
+                 50
+                                                                                         stage diffusion exposes a narrower range of structure dy-
+                                                   20
+                                                                                         namics.
+                                                   10
+                 20                                                                         Coordinating both components, rather than running
+                                                     5
+                       P50            P95                    P50              P95
+                                                                                         either alone, is what produces these gains. The gap between
+                        SwarmX         murakkab      Ray       PO2       random          SwarmX and SwarmX (Static) in Figure 10 isolates the
+Figure 11. End-to-end P50 and P95 latency of OpenClaw for                                scaler’s effect: enabling the scaler on top of the SwarmX
+(a) dual-model setup and (b) single-model setup.                                         router reduces Text-to-Video P95 latency by a further 20.7%,
+                                                                                         and reduces Deep Research P95 latency by a further 43.8%.
+                       (a) Dual Model                        (b) Single Model            This shows that being request-time and structure-aware are
+                                                  500
+                500                                                                      complementary: each corrects a different source of latency,
+                                                  200
+                                                                                         and neither alone matches the full system.
+  Latency (s)
+                200                               100
+                                                   50
+                100                                                                         OpenClaw and Coding Agent test whether this result holds
+                                                   20
+                 50
+                                                   10
+                                                                                         beyond structured pipelines. Both are open-ended agentic
+                 20                                  5                                   workloads: model roles, latency distributions, and call struc-
+                       P50            P95                    P50              P95
+                                                                                         tures are decided at runtime rather than fixed by a stage
+                        SwarmX         murakkab      Ray       PO2       random
+                                                                                         graph, which makes parallelism harder to predict and sched-
+Figure 12. End-to-end P50 and P95 latency of Coding Agent                                uling decisions more challenging compared to the earlier
+for (a) dual-model setup and (b) single-model setup.                                     settings. Figure 11 and Figure 12 compare SwarmX against
+                                                                                         the same baselines in the dual-model and single-model de-
+Ablation study. We also ablated two design choices: the                                  ployments of Table 1.
+semantic model and distribution-aware scheduling. Due to                                    SwarmX retains strong gains. In the dual-model setup, it
+space constraints, we omit the detailed results. The main                                reduces P50/P95 latency by 25.9%/11.0% for Coding Agent
+findings are that the semantic model is critical for capturing                           and by 11.9%/19.8% for OpenClaw compared to Murakkab,
+prompt semantics, which the MLP alone cannot reliably infer,                             and by 40.8%/14.9% and 48.6%/32.4% compared to Ray, re-
+and that distribution-aware scheduling provides better tail-                             spectively. In the single-model setup, it reduces P50 latency
+latency control than point-estimate-based scheduling.                                    by 13.8% for Coding Agent and 12.8% for OpenClaw com-
+                                                                                         pared to Murakkab, and by 44.49% and 45.5% compared to
+5.3               SwarmX’s End-to-End Performance                                        Ray. For P95 latency, SwarmX reduces latency on OpenClaw
+                                                                                         by 5.8% compared to Murakkab and by 16.2% compared
+We now evaluate the full system, with the router and scaler
+                                                                                         to Ray, while maintaining similar performance on Coding
+running together through the coordinated control path of
+                                                                                         Agent, whose workload distribution is more homogeneous
+Section 3.4. Figure 10 reports end-to-end latency for the
+                                                                                         than that of OpenClaw.
+two structured pipelines, Text-to-Video and Deep Research,
+                                                                                            That SwarmX remains effective even when the call struc-
+against all baselines. It also includes SwarmX (Static)—the
+                                                                                         ture is determined entirely at runtime indicates that its pre-
+SwarmX router with the scaler disabled and replicas stat-
+                                                                                         dictors generalize beyond well-structured services.
+ically provisioned—so that the figure isolates the scaler’s
+contribution to end-to-end latency.
+   SwarmX achieves the lowest P50 and P95 latency on both                                5.4         Large-Scale Production Deployment
+pipelines. Against Ray Core, it reduces P50/P95 latency by                               We next evaluate whether SwarmX remains effective in pro-
+32.1%/34.9% for Text-to-Video and by 53.7%/61.5% for Deep                                duction, where clusters are larger, more heterogeneous, and
+Research. The gain is larger for Deep Research because its                               more volatile than our controlled testbed. We have deployed
+                                                                                    10
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+SwarmX on three high-traffic internal services—Video OCR,                                                                                                                 Change to
+
+
+
+
+                                                                     Request Count per Minute
+                                                                                                                                                                production scheduler
+                                                                                                80000
+Entity Semantic Analysis, and Video Transcode—spanning
+                                                                                                60000
+CPU clusters with over one million cores and heterogeneous                                                                                           Request volume dropped,
+                                                                                                40000                                                L20 released first                    Production scheduler
+GPU clusters with nearly one thousand devices. Across these                                                                                                                                fails to schedule
+                                                                                                                                                                                           by priority. Tasks
+deployments, SwarmX reduces tail latency by up to 52% or                                        20000
+                                                                                                                 Request volume increased,
+                                                                                                                                                                                           sent to both machine
+                                                                                                                                                                                           types, SLO more
+                                                                                                                 tasks shifted to L20                                                      likely violated.
+increases sustainable throughput by up to 2× over the pro-                                          0
+                                                                                                         01:15    01:30       01:45          02:00         02:15         02:30          02:45     03:00
+duction scheduler.                                                                                                                               Timestamp
+                                                                                                                                   H20 (High Priority)             L20 (Low Priority)
+Multiple models on large CPU clusters. Video OCR runs
+a three-stage detect–recognize–match pipeline on a CPU               Figure 15. Priority-aware routing on a heterogeneous clus-
+cluster with tens of thousands of cores. In this fragmented,         ter. SwarmX keeps load on the high-priority H20 pool and
+high-volume environment, SwarmX reduces P50 latency by               spills to L20 only under high volume; after the switch to
+59.6% and P99 latency by 48.38% relative to the production           the production scheduler (dashed line), work is sent to both
+scheduler (Figure 13). This result shows that SwarmX is not          pools regardless of priority.
+limited to GPU-centric serving: prediction-driven scheduling
+also benefits CPU services with input-dependent latency                                                                      Wan2.1-T2V-1.3B                              Qwen3-8B
+variation and multi-stage execution.                                   Served-model latency                                  17–137 s                                     0.7–100+ s
+Multiple models on heterogeneous GPU clusters. En-                     Prediction time                                       <1 ms                                        30 ms (CPU), ∼4 ms (GPU)
+tity Semantic Analysis runs on a heterogeneous GPU cluster             Memory                                                261 KB (66K parameters)                      ∼100 MB (35M parameters)
+
+with 320 NVIDIA H20 GPUs and 560 NVIDIA L20 GPUs. The                Table 2. SwarmX’s predictor overhead and footprint for two
+scheduler must balance hardware capability, request com-             representative target models.
+plexity, runtime load, and hardware priority. In a capacity
+                                                                     inside agentic workloads and observe consistent gains, but
+test—raising load until the SLO is first violated—SwarmX sus-
+                                                                     have to omit them due to page limit.
+tains approximately 2× the throughput of the prior produc-
+tion scheduler under the same SLO. It achieves this without
+hand-written hardware rules: GPU type is treated as a device         5.5                                System Overhead, Cost, and Robustness
+feature, and the predictor learns the H20/L20 performance            The gains reported so far are only useful if SwarmX is cheap
+gap from traces.                                                     to run and stays accurate as conditions change. This subsec-
+Priority-aware routing on heterogeneous GPUs. We                     tion answers two questions: is prediction cheap enough to
+further examine Entity Recognition, one stage of Entity Se-          sit on the online scheduling path, and can SwarmX recover
+mantic Analysis, to understand how SwarmX handles hard-              when the workload drifts away from what its predictors were
+ware preferences. Figure 15 traces request placement over            trained on?
+a production window. SwarmX keeps work on the higher-                Selecting a semantic model. Within the neural predictor,
+priority H20 pool and spills to the lower-priority L20 pool          the semantic model, dominates predictor cost while MLP
+only when H20 saturates; as load falls, it drains L20 first.         stays lightweight. Therefore, the semantic model’s size sets
+After switching back to the production scheduler, shown to           the overhead budget: it must stay small enough for the sched-
+the right of the dashed line, requests are spread across both        uling path while still capturing prompt semantics. We size it
+pools regardless of priority, and SLO violations increase.           with a sweep over the Qwen3 model family. We instantiate
+   In a separate fixed-load comparison on the same cluster at        several parameter-reduced isomorphic variants that preserve
+production traffic volume, SwarmX reduces P99 latency by             the Qwen3 architectural shape, replace the final layer with
+about 50% and increases throughput by about 40% under the            an output-length prediction head, train each with the same
+same SLO. This case study shows that SwarmX can incor-               pipeline as the serving model family (Section 3.3), and mea-
+porate deployment-specific device and runtime preferences            sure output-length prediction error. Figure 14 shows that er-
+through its feature and action interfaces, while preserving          ror drops sharply with size and then saturates, with the 35M
+the same predictor-driven scheduling framework.                      model already achieving a low error of 27.89, SwarmX there-
+CPU-intensive workloads: video transcode and tool                    fore selects the smallest variant past the knee, preserving
+calls. SwarmX’s gains are not limited to GPU-intensive               accuracy while avoiding unnecessary training and inference
+workloads. Video Transcode is a CPU-only production service          overhead.
+running on over one million cores. It is not AI-native and           Overhead and cost. Table 2 shows that SwarmX’s pre-
+exposes no multi-model workflow graph, yet its per-request           dictors are orders of magnitude cheaper than the models
+latency still varies strongly with input. On production traf-        they schedule. For the Wan2.1-T2V-1.3B diffusion model, a
+fic, SwarmX reduces P99 latency by 44–52%, showing that              66K-parameter predictor suffices: it runs in under 1 ms and
+prediction-driven scheduling applies to services with input-         occupies 261 KB. A language model’s output is more chal-
+dependent latency variation beyond agentic pipelines. We             lenging to predict than a diffusion model’s—it depends on
+also apply SwarmX to CPU-intensive tool-call services used           prompt semantics beyond frame count and resolution—so
+                                                                11
+                                                                                                                                                       Huang et al.
+
+
+                                      OOD Impact: With vs Without Recovery
+                             50             OOD         Recovery
+                                                                                                   launching multiple Ray clusters. This improved isolation
+                                            Start       (WR only)
+                                                                                                   and horizontal scalability, but resource allocation remained
+
+
+           P90 Latency (s)
+                             40
+
+                             30
+                                                                                                   coarse-grained, operating only at the cluster or actor level.
+                                                                                                   As applications became more agentic, their stages began to
+                             20
+                                                                                                   exhibit distinct resource demands, elasticity patterns, and
+                             10
+                                                                                                   bottlenecks. SwarmX therefore represents each application
+                              0
+                                  0        200        400       600         800        1000        as a set of roles, where each role has its own resource
+                                                    Elapsed Time (s)
+                                          With Recovery             Without Recovery
+                                                                                                   demand, scheduling policy, and elasticity constraints. This
+                                                                                                   representation allows prefill, decode, and CPU-intensive
+Figure 16. P90 latency through a 71% resource capacity loss.                                       tool execution to be managed independently.
+With OOD-triggered retraining, SwarmX recovers to near                                                At the same time, optimizing a single role may not re-
+pre-shift latency; without it, tail latency keeps rising.                                          duce end-to-end application latency if it only shifts pressure
+for Qwen3-8B SwarmX uses a larger 35M-parameter predic-                                            to another role. SwarmX therefore treats the application as
+tor, which runs in about 30 ms on CPU, roughly 4 ms on                                             the coordination boundary: an application-level controller
+GPU, and occupies under 100 MB. In both cases prediction                                           coordinates resources across roles, where each role may
+takes milliseconds while the target model takes seconds to                                         correspond to a model or a model stage such as prefill or de-
+minutes. As a result, the predictor can be colocated with                                          code; local routers and scalers make role-level decisions; and
+execution without becoming the bottleneck.                                                         SwarmX maintains an aggregate view of latency, resource
+Robustness under severe drift. SwarmX must also stay                                               usage, and cost across the full application.
+accurate when the runtime environment changes. We test                                             Heterogeneity support is critical for deployment.
+this on Deep Research with Qwen3-32B on an 80-GPU clus-                                            Agentic AI workloads combine GPU inference, CPU-side
+ter, injecting a severe shift by cutting each GPU’s available                                      processing, sandboxed tool execution, and external service
+resources for a 71% aggregate capacity loss. Figure 16 com-                                        calls. SwarmX avoids hand-written scheduling logic for each
+pares SwarmX with and without online adaptation. Without                                           CPU, GPU, or GPU type. Instead, it represents hardware
+retraining, the stale predictor misroutes requests and P90                                         and runtime properties as predictor features, allowing the
+latency climbs to more than 40 s. With OOD-triggered adap-                                         data-driven predictors to adapt across diverse hardware
+tation, SwarmX detects the shift, retrains the distribution                                        configurations and support unified CPU–GPU scheduling.
+predictor, and holds P90 latency below 20 s (Section 3.3); de-                                     Application teams particularly valued this capability because
+tection and retraining complete within 100 s, showing that                                         it enabled decisions that were previously difficult to realize,
+SwarmX can recover autonomously from severe environ-                                               such as using heterogeneous GPUs within a large workflow
+mental shift.                                                                                      or avoiding over-scaling GPU replicas when CPU-side work
+                                                                                                   was the actual bottleneck.
+
+6   Production and Operation Experience
+SwarmX has been deployed and evolved in production for                                             7   Related Work
+two years across large CPU clusters, heterogeneous GPU                                             Agent workflow frameworks. LangGraph [16], Auto-
+clusters, and hundreds of AI applications. We summarize the                                        Gen [21], and CrewAI [9] provide programming abstractions
+main lessons from operating it at scale.                                                           for chaining LLM calls, multi-agent collaboration, and tool
+Compatibility enables adoption; the agent framework                                                use. They define what an agentic workflow looks like, but
+sustains it. A production scheduler is difficult to adopt                                          leave where and when each call runs to the underlying infras-
+if application teams must rewrite serving code. SwarmX                                             tructure. SwarmX sits beneath these frameworks as a layer
+therefore preserves existing Ray and Kubernetes program-                                           that performs runtime routing and scaling.
+ming interfaces and runs as a plug-in. Compatibility alone,                                        LLM inference optimization. DistServe [33], Llum-
+however, is not sufficient. Teams also value SwarmX for pack-                                      nix [28], Orca [30], and vLLM [15] optimize inference within
+aging neural predictors and their management mechanisms                                            a model replica through techniques such as prefill/decode
+into a modular agent framework with clean interfaces to                                            disaggregation, iteration-level batching, and paged KV-
+the underlying cluster infrastructure. This design allows in-                                      cache management. SwarmX operates one level above these
+frastructure teams to embed neural predictors into existing                                        systems: it treats optimized replicas as scheduling targets
+systems with minimal modification. The framework further                                           and coordinates routing and scaling across multi-model
+decomposes key operations, such as prediction, monitoring,                                         agentic workflows. The two directions are complementary.
+and retraining, into asynchronous tasks, allowing SwarmX                                           Cluster and predictive scheduling. Ray [4], Kuber-
+to run efficiently on existing cluster engines such as Ray.                                        netes [3], and related cluster managers provide robust
+Schedule at role granularity, coordinate at application                                            deployment and scheduling interfaces for distributed ser-
+scope. Our initial deployment scaled applications by                                               vices. Predictive schedulers such as PSC [13] and Cilantro [6]
+                                                                                              12
+SwarmX: Agentic Scheduling for Low-Latency Agentic Systems
+
+
+show that learned or statistical models can improve schedul-                      [8] Comfy Org. 2026. ComfyUI: The Most Powerful and Modular Diffusion
+ing. SwarmX builds on this direction but targets agentic AI                           Model GUI, API and Backend with a Graph/Nodes Interface. https:
+serving, where scheduling depends on prompt semantics,                                //github.com/comfy-org/ComfyUI Accessed: 2026-05-15.
+                                                                                  [9] CrewAI. 2024. CrewAI: Framework for orchestrating role-playing,
+target-model behavior, device heterogeneity, and runtime                              autonomous AI agents. https://github.com/joaomdmoura/crewAI
+state. It also exposes distributional predictions to routers and                 [10] Cheng Cui, Ting Sun, Manhui Lin, Tingquan Gao, Yubo Zhang, Jiaxuan
+scalers rather than reducing predictions to point estimates.                          Liu, Xueqing Wang, Zelun Zhang, Changda Zhou, Hongen Liu, Yue
+Scheduling for compound and agentic AI. Recent sys-                                   Zhang, Wenyu Lv, Kui Huang, Yichao Zhang, Jing Zhang, Jun Zhang,
+tems such as ORION [20], Pie [14], Parrot [18], Murakkab [7],                         Yi Liu, Dianhai Yu, and Yanjun Ma. 2025. PaddleOCR 3.0 Technical
+                                                                                      Report. arXiv:2507.05595 [cs.CV] https://arxiv.org/abs/2507.05595
+and Pythia [31] study scheduling for compound or agentic                         [11] Xiang Deng, Jeff Da, Edwin Pan, Yannis Yiming He, Charles Ide, Kanak
+AI workloads. SwarmX differs by jointly addressing prompt-                            Garg, Niklas Lauffer, Andrew Park, Nitin Pasari, Chetan Rane, Karmini
+aware prediction, distribution-aware routing and scaling,                             Sampath, Maya Krishnan, Srivatsa Kundurthy, Sean Hendryx, Zifan
+online predictor adaptation, and infrastructure integration                           Wang, Vijay Bharadwaj, Jeff Holm, Raja Aluri, Chen Bo Calvin Zhang,
+through a scheduler-agent framework.                                                  Noah Jacobson, Bing Liu, and Brad Kenstler. 2025. SWE-Bench Pro:
+                                                                                      Can AI Agents Solve Long-Horizon Software Engineering Tasks?
+                                                                                      arXiv:2509.16941 [cs.SE] https://arxiv.org/abs/2509.16941
+8    Conclusion                                                                  [12] Mingxuan Du, Benfeng Xu, Chiwei Zhu, Xiaorui Wang, and Zhendong
+                                                                                      Mao. 2025. DeepResearch Bench: A Comprehensive Benchmark for
+This work establishes agentic scheduling as a practical foun-                         Deep Research Agents. arXiv:2506.11763 [cs.CL] https://arxiv.org/
+dation for serving large-scale agentic applications. SwarmX                           abs/2506.11763
+formulates routing and scaling as neural-prediction-driven                       [13] Abdullah Bin Faisal, Noah Martin, Hafiz Mohsin Bashir, Swaminathan
+scheduling problems, uses scheduling-specific predictors to                           Lamelas, and Fahad R Dogar. 2024. When will my {ML} Job finish?
+                                                                                      Toward providing Completion Time Estimates through {Predictability-
+improve router and scaler decisions, and manages these pre-                           Centric} Scheduling. In 18th USENIX Symposium on Operating Systems
+dictors through a scheduler-agent framework that integrates                           Design and Implementation (OSDI 24). 487–505.
+cleanly with existing scheduling and model-serving infras-                       [14] In Gim, Zhiyao Ma, Seung-seob Lee, and Lin Zhong. 2025. Pie: A
+tructure. Our results show that SwarmX significantly im-                              Programmable Serving System for Emerging LLM Applications. In
+proves latency across critical agentic AI applications where                          Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems
+                                                                                      Principles. 415–430.
+state-of-the-art schedulers fall short. More broadly, agen-                      [15] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+tic scheduling opens a new direction for AI-driven cluster                            Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica.
+scheduling, and the soon-to-be open-sourced SwarmX lays                               2023. Efficient Memory Management for Large Language Model
+the groundwork for a new generation of intelligent cluster                            Serving with PagedAttention. In Proceedings of the 29th Symposium
+schedulers.                                                                           on Operating Systems Principles (Koblenz, Germany) (SOSP ’23). As-
+                                                                                      sociation for Computing Machinery, New York, NY, USA, 611–626.
+                                                                                      doi:10.1145/3600006.3613165
+References                                                                       [16] LangChain. 2024. LangGraph: Build resilient language agents as
+                                                                                      graphs. https://github.com/langchain-ai/langgraph
+ [1] Anomaly. 2026. OpenCode: The Open Source Coding Agent. https:               [17] Yaniv Leviathan, Dani Valevski, Matan Kalman, Danny Lumen, Eyal Se-
+     //github.com/anomalyco/opencode Accessed: 2026-05-15.                            galis, Eyal Molad, Shlomi Pasternak, Vishnu Natchu, Valerie Nygaard,
+ [2] Anthropic. 2025. Claude Code: Anthropic’s agentic coding system.                 Srinivasan, Venkatachary, James Manyika, and Yossi Matias. 2026. Gen-
+     https://www.anthropic.com/product/claude-code Accessed: 2026-05-
+                                                                                      erative UI: LLMs are Effective UI Generators. arXiv:2604.09577 [cs.HC]
+     11.                                                                              https://arxiv.org/abs/2604.09577
+ [3] Kubernetes Authors. 2025. Production-Grade Container Orchestration.         [18] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan
+     https://kubernetes.io/                                                           Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient serving of
+ [4] Ray Authors. 2025. Ray. https://docs.ray.io/en/latest/ray-core/                  {LLM-based} applications with semantic variable. In 18th USENIX
+     walkthrough.html                                                                 Symposium on Operating Systems Design and Implementation (OSDI
+ [5] Chaithanya Bandi, Ben Hertzberg, Geobio Boo, Tejas Polakam, Jeff                 24). 929–945.
+     Da, Sami Hassaan, Manasi Sharma, Andrew Park, Ernesto Hernan-               [19] Weiwen Liu, Xu Huang, Xingshan Zeng, xinlong hao, Shuai Yu, Dexun
+     dez, Dan Rambado, Ivan Salazar, Rafael Cruz, Chetan Rane, Ben                    Li, Shuai Wang, Weinan Gan, Zhengying Liu, Yuanqing Yu, Zezhong
+     Levin, Brad Kenstler, and Bing Liu. 2026. MCP-Atlas: A Large-                    WANG, Yuxian Wang, Wu Ning, Yutai Hou, Bin Wang, Chuhan Wu,
+     Scale Benchmark for Tool-Use Competency with Real MCP Servers.                   Wang Xinzhi, Yong Liu, Yasheng Wang, Duyu Tang, Dandan Tu, Lifeng
+     arXiv:2602.00933 [cs.SE] https://arxiv.org/abs/2602.00933                        Shang, Xin Jiang, Ruiming Tang, Defu Lian, Qun Liu, and Enhong
+ [6] Romil Bhardwaj, Kirthevasan Kandasamy, Asim Biswal, Wenshuo Guo,                 Chen. 2025. ToolACE: Winning the Points of LLM Function Calling.
+     Benjamin Hindman, Joseph Gonzalez, Michael Jordan, and Ion Stoica.               In The Thirteenth International Conference on Learning Representations.
+     2023. Cilantro: Performance-Aware Resource Allocation for General                https://openreview.net/forum?id=8EB8k6DdCU
+     Objectives via Online Feedback. In 17th USENIX Symposium on Operat-         [20] Ashraf Mahgoub, Edgardo Barsallo Yi, Karthick Shankar, Sameh El-
+     ing Systems Design and Implementation (OSDI 23). USENIX Association,             nikety, Somali Chaterji, and Saurabh Bagchi. 2022. ORION and the
+     Boston, MA, 623–643. https://www.usenix.org/conference/osdi23/                   Three Rights: Sizing, Bundling, and Prewarming for Serverless DAGs.
+     presentation/bhardwaj                                                            In 16th USENIX Symposium on Operating Systems Design and Imple-
+ [7] Gohar Irfan Chaudhry, Esha Choukse, Haoran Qiu, Íñigo Goiri, Ro-                 mentation (OSDI 22). USENIX Association, Carlsbad, CA, 303–320.
+     drigo Fonseca, Adam Belay, and Ricardo Bianchini. 2025. Murakkab:                https://www.usenix.org/conference/osdi22/presentation/mahgoub
+     Resource-Efficient Agentic Workflow Orchestration in Cloud Plat-
+     forms. arXiv:2508.18298 [cs.MA] https://arxiv.org/abs/2508.18298
+                                                                            13
+                                                                                                                                               Huang et al.
+
+
+[21] Microsoft. 2024. AutoGen: Enabling Next-Gen LLM Applications via                 Transformer-Based Generative Models. In 16th USENIX Symposium on
+     Multi-Agent Conversation. https://github.com/microsoft/autogen                   Operating Systems Design and Implementation (OSDI 22). USENIX Asso-
+[22] M. Mitzenmacher. 2001. The power of two choices in randomized load               ciation, Carlsbad, CA, 521–538. https://www.usenix.org/conference/
+     balancing. IEEE Transactions on Parallel and Distributed Systems 12,             osdi22/presentation/yu
+     10 (2001), 1094–1104. doi:10.1109/71.963420                                 [31] Shan Yu, Junyi Shu, Yuanjiang Ni, Kun Qian, Xue Li, Yang Wang,
+[23] Kepan Nan, Rui Xie, Penghao Zhou, Tiehan Fan, Zhenheng Yang,                     Jinyuan Zhang, Ziyi Xu, Shuo Yang, Lingjun Zhu, Ennan Zhai, Qingda
+     Zhijie Chen, Xiang Li, Jian Yang, and Ying Tai. 2024. OpenVid-1M: A              Lu, Jiarong Xing, Youyou Lu, Xin Jin, Xuanzhe Liu, and Harry Xu. 2026.
+     Large-Scale High-Quality Dataset for Text-to-video Generation. arXiv             Pythia: Exploiting Workflow Predictability for Efficient Agent-Native
+     preprint arXiv:2407.02371 (2024).                                                LLM Serving. arXiv:2604.25899 [cs.MA] https://arxiv.org/abs/2604.
+[24] OpenAI. 2026. Codex: Lightweight Coding Agent that Runs in Your                  25899
+     Terminal. https://github.com/openai/codex Accessed: 2026-05-15.             [32] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff
+[25] OpenClaw Contributors. 2026. OpenClaw: Personal AI Assistant.                    Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica,
+     https://github.com/openclaw/openclaw Accessed: 2026-05-15.                       Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: effi-
+[26] Peter O’Malley. 2026. DataClaw PeterOMallet: Coding Agent Conver-                cient execution of structured language model programs. In Proceedings
+     sation Logs. https://huggingface.co/datasets/peteromallet/dataclaw-              of the 38th International Conference on Neural Information Processing
+     peteromallet MIT License, accessed 2026-05-15.                                   Systems (Vancouver, BC, Canada) (NIPS ’24). Curran Associates Inc.,
+[27] Malte Schwarzkopf, Andy Konwinski, Michael Abd-El-Malek, and                     Red Hook, NY, USA, Article 2000, 27 pages.
+     John Wilkes. 2013. Omega: flexible, scalable schedulers for large           [33] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-
+     compute clusters. In Proceedings of the 8th ACM European Confer-                 anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating
+     ence on Computer Systems (Prague, Czech Republic) (EuroSys ’13).                 Prefill and Decoding for Goodput-optimized Large Language Model
+     Association for Computing Machinery, New York, NY, USA, 351–364.                 Serving. In 18th USENIX Symposium on Operating Systems Design and
+     doi:10.1145/2465351.2465386                                                      Implementation (OSDI 24). USENIX Association, Santa Clara, CA, 193–
+[28] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang,                   210. https://www.usenix.org/conference/osdi24/presentation/zhong-
+     Yong Li, and Wei Lin. 2024. Llumnix: Dynamic Scheduling for Large                yinmin
+     Language Model Serving. In 18th USENIX Symposium on Operating               [34] Hang Zhou, Yehui Tang, Haochen Qin, Yujie Yang, Renren Jin, Deyi
+     Systems Design and Implementation (OSDI 24). USENIX Association,                 Xiong, Kai Han, and Yunhe Wang. 2024. Star-agents: automatic data
+     Santa Clara, CA, 173–191. https://www.usenix.org/conference/osdi24/              optimization with LLM agents for instruction tuning. In Proceedings
+     presentation/sun-biao                                                            of the 38th International Conference on Neural Information Processing
+[29] Haoran Wei, Yaofeng Sun, and Yukun Li. 2025. DeepSeek-OCR: Con-                  Systems (Vancouver, BC, Canada) (NIPS ’24). Curran Associates Inc.,
+     texts Optical Compression. arXiv preprint arXiv:2510.18234 (2025).               Red Hook, NY, USA, Article 149, 23 pages.
+[30] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and
+     Byung-Gon Chun. 2022. Orca: A Distributed Serving System for
+
+
+
+
+                                                                            14
+

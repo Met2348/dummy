@@ -1,0 +1,909 @@
+                                                      H ARBOR: Automated Harness Optimization
+                                                                A constrained-noisy-BO formulation, a reference algorithm, and a production case study
+
+
+                                                                                                  Biswa Sengupta             Jinhua Wang
+                                                                                           LLM Suite Team, JP Morgan Chase & Co.
+                                                                                      Email: {biswa.sengupta, jinhua.wang}@jpmorgan.com
+
+
+                                            Abstract—Long-horizon language-model agents are dominated,                     manage tool descriptions can squander up to 40% of its context
+                                         in lines of code and in operational complexity, not by their under-               window before processing a single user instruction [19]; the
+                                         lying model but by the harness that wraps it: context compaction,                 same harness must defend against context poisoning, where a
+                                         tool caching, semantic memory, trajectory reuse, speculative tool
+                                                                                                                           hallucinated variable becomes a self-reinforcing premise across
+
+
+
+
+arXiv:2604.20938v1 [cs.LG] 22 Apr 2026
+                                         prediction, and the glue that binds the model to a sandboxed
+                                         execution environment. We argue that harness design is a first-                   hundreds of turns.
+                                         class machine-learning problem and that automated configuration                      This paper is about the optimization problem that the har-
+                                         search dominates manual stacking once the flag space exceeds                      ness creates. Teams today tune harnesses by hand: they add a
+                                         a handful of bits. We defend this claim in two steps. First, we                   cache, run an ablation, read a few pass-rate tables, and ship
+                                         formalize automated harness optimization as constrained noisy
+                                         Bayesian optimization over a mixed-variable, cost-heterogeneous                   or revert. We report on doing exactly this in a real system—
+                                         configuration space with cold-start-corrected rewards and a pos-                  codex-py [40], a production Python port of the OpenAI
+                                         terior chance-constrained safety check, and give a reference                      Codex CLI that, on Terminal-Bench, reaches parity with its
+                                         solver, H ARBOR (Harness Axis-aligned Regularized Bayesian Op-                    648K-LOC Rust original in just 52K LOC and ships an en-
+                                         timization Routine), built from a block-additive SAAS surrogate,                  hancement layer of ≈ 30 flag-gated capabilities—over four
+                                         multi-fidelity cost-aware acquisition, and TuRBO trust regions.
+                                         Second, we instantiate the problem in a flag-gated harness over                   tuning rounds against Terminal-Bench 2 [38]. Each round (A,
+                                         a production coding agent and report a controlled four-round                      B, C, D) layers additional features on top of the ≈ 30 en-
+                                         manual-tuning case study against a fixed task suite and an end-                   hancements already present in the base codex-py harness;
+                                         to-end H ARBOR run. The formulation itself is task-class agnostic:                the flags we tune in A–D are strictly above and beyond that
+                                         the configuration space, reward correction, acquisition, and safety               baseline, drawn from the recent agent-optimization literature:
+                                         check apply to any agent harness with a bounded flag space and
+                                         a reproducible task suite.                                                        Reflexion-style failure-self-reflection [34]; PASTE (Predictive
+                                         Disclaimer: This paper was prepared for informational purposes by the LLM         Agent-Side Tool Execution) speculative tool execution [29];
+                                         Suite group of JP Morgan Chase and its affiliates (‘JPMC’) and is not a           ACON (Agent-Context Observation compressioN) gated ob-
+                                         product of the Research Department of JP Morgan. JP Morgan makes no
+                                         representation, warranty or undertaking whatsoever and disclaims all liability
+                                                                                                                           servation compression [2]; a Terminus-KIRA [39] inspired
+                                         for the completeness, accuracy or reliability of the information contained        self-evaluation gate; intent-canonicalized, content-addressable
+                                         herein. This document is not intended as investment research or investment        tool-result caching in the style of Liu et al. [32]; tiered conver-
+                                         advice, or a recommendation, offer or solicitation for the purchase or sale of
+                                         any security, financial instrument, financial product or service, or to be used
+                                                                                                                           sation compression backed by the T URBO Q UANT [43] vector
+                                         in any way for evaluating the merits of participating in any transaction, and     quantizer, which matches the Shannon distortion-rate lower
+                                         shall not constitute a solicitation under any jurisdiction or to any person, if   bound to within a small constant (≈ 2.7) and reaches absolute
+                                         such solicitation under such jurisdiction or to such person would be unlawful.
+                                                                                                                           quality neutrality at 3.5 bits per channel; a prompt-prefix-first
+                                                                                                                           context layout grounded in observed Claude Code reuse pat-
+                                                                    I. I NTRODUCTION
+                                                                                                                           terns [25]; and a cross-session experience library. Features are
+                                            The last eighteen months have seen a qualitative shift in how                  flag-gated so that the same model and the same task set can
+                                         large language models (LLMs) are deployed for long-horizon                        be run with each subset enabled.
+                                         work. The archetypal 2024 system—a prompt, a single model                            The results are sobering (§V). Of the four tuning rounds,
+                                         call, a returned string—has been displaced by “Agents 2.0” or                     only B cleanly beat the no-harness-extension baseline, scor-
+                                         Deep Agent stacks that decouple planning from execution, ex-                      ing 17/89 against an all-flags-off baseline of 15/89 and an
+                                         ternalize memory, and delegate to specialized sub-agents [3].                     Oracle (best-of-all-configurations union) of 81/89. Adding self-
+                                         In this regime most of the engineering is neither the model nor                   evaluation on top of B dropped the full-suite score to 13/89
+                                         the prompt: it is the harness, the deterministic code that stores,                (C, −4); adding the full ACON+Reflexion+PASTE bundle on
+                                         retrieves, and serves context to the model, enforces tool seman-                  top of that dropped it further to 12/89 (D, −5). The headline
+                                         tics on its outputs, and shields it from the failure modes that                   causes are cross-cutting and unsurprising in hindsight—low-
+                                         destroy long-horizon runs [19]. A systematic audit of Claude                      capability self-evaluators make worse not better outputs; the
+                                         Code [7] estimates that ≈98.4% of its codebase is harness—                        ACON observation gate corrupts the tool-result cache by stor-
+                                         permission gates, multi-stage context compaction pipelines,                       ing the compressed summary rather than the raw output, so
+                                         tool routing, failure recovery—and only ≈1.6% is the AI deci-                     later retrievals reason on truncated context; cold-start crippling
+                                         sion logic itself. A 100-tool agent that does not aggressively                    of cross-session features; and two silent integration bugs (cross-
+
+
+
+                                                                                            © 2026 JP Morgan Chase & Co. All rights reserved     1
+        Flag × fidelity
+                           SAAS        Cost-aware     Pareto      flag space and a reproducible task suite—retrieval-augmented
+                          surrogate    acquisition     front
+       (x, m) ∈ X ×M
+                          G(µ, σ 2 )   KG/c(m)       (µ, cost)    QA agents, customer-support copilots, web-browsing agents,
+                                                                  scientific tool-use agents, and so on. The coding setting is a
+                                                                  convenience for measurement; the method is for agent orches-
+                           Silent-flag                            tration in general. Figure 1 summarizes the mechanism the rest
+                    auto-exclusion (Axis-IV)
+                                                                  of the paper defines.
+Fig. 1: H ARBOR schematic. A flag-space×fidelity input (x, m)           a) The case for mechanics over stacking.: A structural
+is scored by a block-additive SAAS surrogate; a cost-aware lesson runs through our case study and its automated coun-
+acquisition selects the next batch; runtime telemetry (dashed) terpart: on any given (model, benchmark) pair, net-positive
+feeds Axis-IV silent-flag auto-exclusion, which prunes dimen- harness features are a small, class-specific subset of the pub-
+sions from the surrogate in place. The output is a Pareto front lished inventory, and the expected return from stacking more
+on (pass-rate, cost), from which a single deployment config- published techniques is negative once the effective flag space
+uration is picked subject to the posterior chance-constrained saturates the per-model signal-to-noise ratio. This is not a
+safety check.                                                     claim that a given published technique is wrong—Reflexion,
+                                                                  ACON, PASTE, Terminus-KIRA-style self-evaluation, and
+                                                                  intent-canonical caching each have strong empirical results
+trial reflection memory was not propagated between containers, at the scale and layer for which they were designed. It is a
+and PASTE’s next-tool predictor was never wired into the run- claim that (i) the per-class-architecture pick (flag-space com-
+ner). These are precisely the sort of causes that a manually position) is the load-bearing design decision, not the per-flag
+driven ablation loop is poorly equipped to find.                  ON/OFF switch; (ii) component-internal tuning—thresholds,
+   We take this as evidence that harness tuning has graduated fidelity ladders, retrieval top-k, cache-key canonicalization—is
+from a systems problem into a hyper-parameter optimization where most of the headline improvement lives; and (iii) the
+problem, and that it should be treated with the same rigor [17, optimizer’s job is to surface that structure mechanically, not to
+24, 36]. Our contributions are four:                              certify whether a technique is “good.” The rest of this paper
+• A characterization of our flag-gated codex-py harness as a
+                                                                  is organised accordingly: we define the mechanics, then show
+   high-dimensional flag-valued configuration space (§III,§IV),   what  they recover on a concrete suite, rather than arguing for
+   with a taxonomy of the six non-trivial interaction dimensions  or  against any individual published harness feature.
+   that make hand-tuning lossy.
+• A frankly negative case study showing how a well-motivated,
+                                                                                        II. R ELATED W ORK
+   literature-grounded manual tuning cadence over four rounds           a) Harness as first-class subject.: The industrialization
+   produces at most one statistically credible net win under a of LLM coding agents has pushed harness engineering into its
+   compute and time budget representative of industry practice own research stack [3, 19]. The “Agents 1.0 → Agents 2.0” /
+   (§V).                                                          Deep-Agents transition [3] reframes the harness as the com-
+• A formalization of Automated Harness Optimization               ponent responsible for decoupling planning from execution,
+   (AHO) as constrained noisy optimization over a structured, maintaining externalized memory, and delegating to special-
+   cost-heterogeneous configuration space, and a reference ized sub-agents. A frequently cited datum from a systematic
+   algorithm—H ARBOR (Harness Axis-aligned Regularized audit of Claude Code [7] places ≈98.4% of its codebase in the
+   Bayesian Optimization Routine)—that combines Bayesian deterministic harness (permission gates, context pipelines, tool
+   optimization over the flag bundle with a per-task-difficulty routing, failure recovery) and only ≈1.6% in model-facing deci-
+   meta-controller and a cold-start-aware evaluator (§VI).        sion logic. Adjacent work has begun to decompose this harness
+• End-to-end measurements against a fixed task suite (§VIII),     by layer: key–value (KV) cache disaggregation and hierarchi-
+   together with the harness-level telemetry counters that make cal memory (Pancake, Mem0, STITCH) [28]; prompt-prefix
+   the warm-start-aware evaluator (Eq. 3) computable in practice. caching as practiced in Claude Code [25]; five-stage context-
+   Concrete model/benchmark identities are deferred to §VII. compaction pipelines [19]; and AI gateways (Kong, Bifrost,
+   We emphasize that our claims are empirical and “in the Portkey, LiteLLM) with their own token-bucket rate-limiting
+small”; a single-benchmark, single-agent ablation is the and PII-masking guardrails. Our paper treats a subset of this
+right grain for the engineering loop, but not for conference- surface—the high-level harness feature flag space on top of a
+grade claims of universality. Our purpose is to motivate single API gateway—as an explicit optimization problem, not
+automation, not to declare any single configuration optimal. as an architectural one.
+Although we use a coding benchmark (Terminal-Bench 2) as                b) Automated harness engineering.: The closest prior
+a concrete reference and codex-py as the harness under test, work to ours is Meta-Harness [26], an outer-loop system
+nothing in the formulation of §VI is specific to code: the same in which an LLM proposer reads the source code, logs, and
+flag-valued configuration space, cold-start-corrected reward, benchmark scores of previously evaluated candidate harnesses
+cost-aware acquisition, and posterior chance-constrained safety and writes a new one. Meta-Harness reports +7.7 absolute
+check apply to any agent-orchestration harness with a bounded accuracy points on LawBench with 4× fewer context tokens
+
+
+
+                                             © 2026 JP Morgan Chase & Co. All rights reserved   2
+against hand-engineered baselines, and establishes the credit- LOC) and is organized into six architectural layers: an
+assignment shift from model weights to harness code that agent layer (turn loop, tool orchestration, guardian approval,
+our paper then formalizes. Complementary efforts include AC- multi-agent coordination, memory); a security layer (Seat-
+CLAIM [1], which couples an LLM agent with a compiler to belt/Bubblewrap/seccomp sandboxing and execution-policy
+iterate on generated code using hardware profiling feedback; evaluation); a protocol layer (wire types, approval workflows,
+and Datadog’s BitsEvolve [5], which builds “harness-first” ob- model abstractions); an integration layer (Model Context Pro-
+servability loops so that failing outputs are automatically routed tocol client/server, OAuth authentication, backend API); a pre-
+back to the agent for correction. These systems evolve harness sentation layer (terminal UI and application server); and an
+code; our AHO framework searches the harness configuration infrastructure layer (persistent state, configuration, telemetry,
+surface with cost-aware Bayesian optimization, and the two feature flags). The harness ships 34 tool handlers— including
+are complementary.                                                 shell execution, a unified file-patch tool, directory listing, and
+      c) Agent benchmarks.: Terminal-Bench [38] and SWE- a Model Context Protocol delegate—plus a layered three-stage
+bench Verified [21] have become the two standard targets approval pipeline (policy check, guardian LLM risk assessment,
+for long-horizon coding agents. Both are deliberately task- interactive prompt) [40]. From a configuration standpoint, we
+independent, which we show (§V) amplifies the cold-start group the harness surface exposed to our ablations into five
+penalty for any harness feature that is designed to accumulate layers:
+cross-task state. The EleutherAI LM Evaluation Harness [16] • Runtime. A stateful turn loop owns dispatch, tool invocation,
+provides a widely-used tokenization-agnostic interface for           and exit conditions; it is the single integration point for all
+running such benchmarks reproducibly. The Terminus-KIRA              harness extensions and emits typed events consumed by the
+team [39] has reported 10-percentage-point improvements from         presentation and telemetry layers.
+harness-only changes on these benchmarks; our B result is • Tool handlers. A set of file tools (read, grep, glob, write,
+consistent with the lower end of their estimates.                    edit) plus shell and apply-patch, each with a read/write
+      d) Harness components.: The five core harness features         and concurrency declaration that the harness respects when
+we evaluate map onto an existing literature: tool-result caching     parallelizing tool calls.
+and fuzzy retrieval [22]; Reflexion failure-reflection [34]; re-
+                                                                   • Context management. A multi-phase compactor applies
+cursive memory trees [31]; speculative tool execution [29];
+                                                                     microcompaction (inline stale-output stripping), snip com-
+ACON gated observation compression [2]; and tiered embed-
+                                                                     paction (token-threshold pruning), and full LLM-driven sum-
+ding compression via the T URBO Q UANT quantizer [43]. Binary-
+                                                                     marization, with post-compact file restoration and ghost snap-
+embedding and Matryoshka-style two-stage retrieval [20, 23]
+                                                                     shots [40]. A flag-gated family of compaction policies—an
+are natural next steps on top of the current single-stage seman-
+                                                                     ACON-style gate, T URBO Q UANT-based tail compression, an
+tic cache but are not implemented in the harness evaluated
+                                                                     incremental strategy, an intent anchor, and a forked variant—
+here; we include them only in the forward-looking discussion
+                                                                     sit on top of this substrate.
+(§IX). Semantic caching at the gateway layer has its own sub-
+                                                                   • Cross-session memory. Two storage backends—a T UR -
+stantial theory: the mismatch-cost framework of Liu et al. [32]
+                                                                     BO Q UANT -compressed index of (task embedding, hint)
+proves that the oracle setting is NP-hard and solves a Reverse
+                                                                     pairs and a trajectory-based experience library—persist com-
+Greedy relaxation, with a CUCB-SC (Combinatorial Upper
+                                                                     pressed embeddings across sessions and retrieve few-shot
+Confidence Bound for Semantic Caching) offline learner for
+                                                                     hints when a new task embeds close to historical ones.
+the partial-information regime and a CLCB-SC-LS (Combi-
+                                                                   • Resilience / self-evaluation. A categorized-retry resilience
+natorial Lower Confidence Bound for Semantic Caching with
+List-Swap updates) online adaptive variant; these are the nat-       family is complemented by a self-evaluation gate in the
+ural algorithmic cousins of the acquisition function in §VI.         runtime layer that fires a checklist-driven review before
+Dynamic model routing [6, 18, 35] completes the layer cake.          submission, in the style of Terminus-KIRA [39].
+Each of these components has independently justified empirical        Feature selection is unified by a four-tier flag-resolution
+benefits; our observation is that stacking them is not additive. scheme (runtime override > build-time compile flag > envi-
+      e) Hyper-parameter optimization.: Bayesian optimiza- ronment variable > default); this follows the enhancement-layer
+tion for expensive black boxes has been studied for more design principle of keeping every addition strictly opt-in, so that
+than a decade [36, 37]; multi-fidelity [24] and combined “all enhancement flags off” reproduces the Rust-parity baseline
+BO+bandit [17] approaches handle heterogeneous evaluation exactly [40]. The production port exposes ≈35 enhancement
+cost. We borrow directly from this literature in §VI and are, to flags across multi-agent orchestration, safety (guardian), tool
+our knowledge, the first to apply it to harness configuration (as extensions, memory, context management, productivity, session
+opposed to harness code, à la Meta-Harness) for LLM agents. coherence, IDE integration, and observability. For this paper
+                                                                   the nine relevant flags, all defaulting off, are five native harness
+                III. T HE C O D E X - P Y H ARNESS                 feature flags (semantic tool-result cache, cross-session mem-
+   codex-py is a production Python port of the OpenAI ory index, tiered conversation compressor, trajectory-replay
+Codex CLI [40]. The port is a 12.3× code reduction from experience library, speculative tool-prediction learner), plus the
+the Rust original (≈52K Python LOC versus ≈649K Rust self-evaluation gate, the ACON observation-compression gate,
+
+
+
+                                          © 2026 JP Morgan Chase & Co. All rights reserved   3
+the Reflexion reflections module, and the PASTE next-tool           3) Tiered conversation compressor. Keeps recent turns at
+predictor.                                                              full precision and T URBO Q UANT-compresses the tail; re-
+                                                                        trieval sits behind a fixed-token compaction trigger. The
+  IV. T HE H ARNESS F EATURE L AYER OVER C O D E X - P Y                tiered decomposition mirrors T URBO Q UANT’s own two-
+                                                                        stage quantization—coarse compression of stale content,
+   The harness we evaluate packages five flag-gated exten-              fine retrieval over a recent window.
+sions on top of codex-py. Two of these extensions (the
+                                                                    4) Trajectory-replay experience library. Records success-
+cross-session memory index and the tiered conversation com-
+                                                                        ful and failing trajectories with [OK] / [FAIL] markers
+pressor) use T URBO Q UANT as a vector-compression primitive;
+                                                                        and injects them as few-shot hints when the current task
+the remaining three (semantic tool-result cache, trajectory-
+                                                                        embedding exceeds a similarity threshold against past tasks.
+replay experience library, speculative tool-prediction learner)
+are T URBO Q UANT-free. Because the quantizer is shared by             A fifth native flag, the speculative tool-prediction learner
+the compression-heavy extensions, we describe it first, but         (PASTE), is not TQ-backed: it is a pure pattern-matching pre-
+we emphasize that the harness is a collection of flag-gated         dictor that learns explicit tuples of the form (context, next
+mechanisms, not a T URBO Q UANT-derived system. T URBO -            tool, argument-derivation function, probability) from trajecto-
+Q UANT [43] is, in its original form, an online data-oblivious      ries and speculatively fires the predicted tool when the tuple’s
+vector quantizer that achieves near-optimal distortion rates for    probability crosses a threshold, following PASTE [29]. The
+both mean-squared error and inner-product error. Its core is        online path performs zero embedding or LLM calls; predic-
+a two-stage construction: first a random rotation of the in-        tion is a dict lookup on (tool, status) n-grams over recent
+put vector induces a concentrated Beta distribution on each         history. We include it in the enhancement layer because, like
+coordinate, on which a per-coordinate Lloyd–Max quantizer—          the TQ-backed components, it exploits cheap structural signals
+obtained by solving a continuous k-means problem—is MSE-            to reduce model calls on the hot path—but the compression
+optimal; second, a one-bit Quantized Johnson–Lindenstrauss          primitive it relies on is discrete tuple-counting, not quantized
+(QJL) transform is applied to the residual, yielding an unbiased    inner products.
+inner-product estimator [43]. The resulting quantizer provably         Beyond these five native flags we also evaluate three
+matches the information-theoretic distortion–rate lower bound       published-technique flags introduced in later rounds: the self-
+up to a small (≈ 2.7) constant, and on KV-cache quantization        evaluation gate, which interposes a second critic-style model
+achieves absolute quality neutrality at 3.5 bits per channel and    call between the agent’s draft answer and final submission
+marginal degradation at 2.5 bits [43]. Two properties make it a     and either confirms or rewrites it, in the style of Terminus-
+natural primitive for agent harnesses: it is (i) data-oblivious, so KIRA [39]; the ACON observation-compression gate, which
+no codebook fitting is required when embeddings drift across        detects large, redundant tool outputs (long logs, directory list-
+sessions, and (ii) accelerator-friendly (the quantizer is a compo-  ings, JSON blobs) and substitutes a learned compressed sum-
+sition of a rotation, a scalar look-up table (LUT), and a bitwise   mary in place of the raw observation in the next model turn [2];
+reduction), so it can sit on the tool-result hot path without       and the Reflexion reflections module, which after a failed task
+dominating latency.                                                 writes a short natural-language “lesson” into the cross-session
+                                                                    memory index keyed by task embedding, to be retrieved on
+   In our harness, T URBO Q UANT provides the compression
+                                                                    subsequent runs of similar tasks [34].
+primitive underneath four extensions:
+                                                                       A single session-scoped coordinator reads the flags at ini-
+1) Semantic tool-result cache (PolarCache). A tool-result           tialization and wires itself into the pre-tool-call, post-tool-
+    cache keyed both exactly and by compressed-inner-product        call, session-start, session-end, and context-hint pathways of
+    similarity. Cache keys include the target file’s POSIX modi-    the runtime layer. Lazy-init failures in any single extension
+    fication time (mtime) as a secondary component, so that a       are caught and demoted to a disabled state while the origi-
+    stale entry is structurally unreachable after the underlying    nally requested flag is preserved in the telemetry record. This
+    file changes—rather than relying on a separate invalidation     graceful-degradation policy serves two distinct purposes: (i) a
+    pass. An intent-canonical hash on the primary component         broken extension (for example, a missing dependency or a mal-
+    maps surface-form variants of a file-read (e.g. print-file,     formed threshold) cannot cascade into a full-suite failure, so
+    head, tail, pager, and structured read) onto a single canoni-   one corrupted feature does not invalidate a 89-task sweep; and
+    cal tuple. The design follows the intent-canonicalization line  (ii) the divergence between requested flag and realized flag is
+    of work that directly diagnoses the ≤40% hit-rate ceiling       itself observable—a write-side counter without a corresponding
+    of string-level agent caches [32].                              consumer-side counter is the textbook signature of the exact
+2) Cross-session memory index (PolarMemoryIndex). A                 integration bug the D round missed, and the preserved flag
+    cross-session index of (task embedding, hint text) pairs        record is what an observability layer can flag as an invariant
+    with a memory-type facet used to segregate Reflexion-style      violation (§IX).
+    reflections [34] from trajectory hints. The structure follows
+    the Zettelkasten-style agentic memory line of work that                  V. C ASE S TUDY: M ANUAL T UNING , A–D
+    attaches LLM-generated keywords and contextual descrip-           Four tuning rounds were performed by a dedicated human–
+    tions to each stored note.                                      agent pair. Each round (i) selected 2–4 published improvements,
+
+
+
+                                         © 2026 JP Morgan Chase & Co. All rights reserved   4
+(ii) implemented them behind new flags, (iii) ran the standard latent integration bugs compounded it and the manual loop
+7-way ablation (see Table I), and (iv) produced a Markdown surfaced neither: the Reflexion-retrieval counter was identi-
+report. We reproduce the essential numbers in Table II and cally zero (the cross-session memory store was not propagated
+discuss them.                                                     between container trials, so reflections written by one con-
+      a) A → B: the one clean win.: Round B landed four tainer were invisible to the next), and the PASTE-prediction
+changes: closing the compression retrieval loop at the full- counter was identically zero (the predictor’s entry-point was
+compaction boundary; cache-key normalization with mtime- never actually invoked by the agent runner, so speculative-tool
+indexed secondary keys—cache keys of the form (canonical- execution never fired).
+tuple, mtime) where the POSIX modification time is folded              d) What the four rounds teach us.: Six structural facts
+into the key so that any write to the underlying file struc- about manual harness tuning: (i) each round adds code but
+turally invalidates the entry, rather than relying on a separate produces a worse full-suite pass rate than B from strictly less
+timestamp-comparison pass; a failure-aware trajectory library code; (ii) configuration space is evaluated once (Oracle = 81/89
+with [OK]/[FAIL] markers in the spirit of Reflexion [34]; and vs. B peak = 17/89 shows 64 tasks are passable by some config
+an adaptive hint-injection threshold (raised from 0.30 to 0.85 but not by the best single one); (iii) feature interactions are not
+for memory and from 0.50 to 0.80 for trajectory, with k=1). additive—Tier-2 on top of B actively corrupts upstream state;
+The cache hit rate moved from ∼1% (A) to 3.7% session- (iv) cross-session features are cold-start-bound and in D two
+weighted and ∼12% intra-session weighted, and the full-suite consumer counters were identically zero from integration bugs
+sweep improved from 15/89 (all-flags-off baseline) to 17/89; the manual loop missed; (v) literature lift for one model does
+zero errors introduced. B—the five native extensions with all not transfer to another (T1-3 on gpt-5.4-nano vs. KIRA
+Tier-1/Tier-2 published-technique flags off—remains the peak on Claude Sonnet); (vi) full-suite sweeps are expensive (§VIII)
+of the manual search.                                             but are the only evidence level at which small per-flag effects
+      b) B → C: the literature bites back.: Round C added clear noise.
+three Tier-1 improvements sourced from published work: intent-
+canonicalization for the tool-result cache (T1-1), motivated               VI. AUTOMATED H ARNESS O PTIMIZATION
+by the agent-caching diagnosis of Liu et al. [32]; a prompt-        We now formalize what the A–D loop was approximating and
+prefix-first context layout for automatic prompt caching (T1-2), describe how we would replace it. Let the harness configuration
+motivated by the Claude Code reuse patterns analyzed in LM- space be a product
+                                                                                                  F
+Cache [25]; and a Terminus-KIRA [39] style self-evaluation                                       Y
+gate (T1-3) with the self-evaluation gate bundled into the de-                              C =       Ci ,                     (1)
+fault configuration. The full-suite sweep dropped from 17/89                                     i=1
+
+(B) to 13/89 (C, ∆= − 4).                                         where each Ci is either a Boolean flag, a numeric threshold, or
+   Post-mortem forensics localized the regression to T1-3: the a discrete preset (e.g. “cache.similarity∈ {0.75, 0.80, 0.85}”).
+self-evaluation gate fired on every turn it was consulted, and For the codebase in this paper, F ≈ 40 with |C| far exceed-
+the majority of its revisions corrected a passing answer into a ing 240 . In practice only a handful of these dimensions carry
+failing one. Under a stronger model (Claude Sonnet, as used signal on any given (model, benchmark): our Axis-IV detec-
+by the original KIRA report) this step is reported a net win; tor (§VII-0g) auto-excludes silent flags at runtime, typically
+under gpt-5.4-nano it is net negative. Canonicalization collapsing the effective flag count to Feff ≈ 5. The optimizer’s
+(T1-1) produced zero canonical cache hits across the full-suite per-iteration work is dominated by Feff , not by F ; the full
+sweep—the hand-written rewrite rules for file-read, text-search, F ≈ 40 is the nominal ambient dimension the SAAS prior is
+and directory-listing aliases did not match the specific tool- designed to tolerate.
+call shape gpt-5.4-nano chose to emit. Prompt-prefix-first          Let T be the task suite and R(c, t) ∈ {0, 1} the pass outcome
+(T1-2) saved tokens but could not be separately credited at the of configuration c on task t; at fixed t, R is Bernoulli with
+aggregate pass-rate level.                                        execution noise from LLM sampling and the network. In our
+      c) C → D: the bundle makes it worse.: Round D re- case study T is the fixed 89-task TB 2 suite, so the outer
+tired the self-evaluation gate as default-off, added ACON [2] expectation is a uniform sum over 89 tasks and the stochasticity
+gated observation compression (T2-2), Reflexion [34] style in R(c, ·) is execution noise at fixed task identity; a Wilson
+reflections (T2-1), and a PASTE [29] speculative-execution score interval [42] on the total pass count—the standard small-
+learner (T2-3). The full-suite sweep returned 12/89, below sample binomial confidence interval, obtained by inverting the
+C and five tasks below B. Against B, D gained two tasks score test for a Bernoulli proportion and preferred over the
+(git-leak-recovery, portfolio-optimization) normal-approximation interval at low p—is therefore valid.
+and regained three C had lost, but lost nine others. Root cause: Per-evaluation cost cost(c, t) is itself configuration-dependent.
+the ACON gate fired 171 times and elided ∼501 KB, but the           We define Automated Harness Optimization as the follow-
+gate was wired upstream of the tool-result cache, so cached ing ground-truth constrained optimization, parameterized by
+entries stored the compressed summary rather than the raw a deployment budget Bdep —an expected per-task cost ceiling
+output; tasks needing line-level detail (grep hit positions, diff (measured in compute-seconds or API dollars) that the returned
+hunks) then reasoned on a truncated view and failed. Two configuration c⋆ must respect at inference time, averaged over
+
+
+
+                                         © 2026 JP Morgan Chase & Co. All rights reserved   5
+TABLE I: Ablation configurations used across A–D. Each column corresponds to one harness feature, toggled on or off at
+agent launch. Column abbreviations: PC semantic tool-result cache; PM cross-session memory index; TC tiered conversation
+compressor; TR trajectory-replay experience library; SP speculative tool-prediction learner; SE self-evaluation gate; AC ACON
+observation-compression gate; RF Reflexion reflections module; PT PASTE next-tool predictor. “all-on” and “B-config” are
+nested; D adds Tier-2 features on top of the B flag set and keeps the self-evaluation gate off after its C regression.
+
+                                                                    Harness feature flags
+                                   Config        PC    PM      TC       TR     SP     SE      AC    RF    PT
+                                   baseline      .      .      .        .      .      .       .     .     .
+                                   all-on        ✓      ✓      ✓        ✓      ✓      ✓       .     .     .
+                                   B-config      ✓      ✓      ✓        ✓      ✓      .       .     .     .
+                                   cache         ✓      .      .        .      .      .       .     .     .
+                                   memory        .      ✓      .        .      .      .       .     .     .
+                                   compress      .      .      ✓        .      .      .       .     .     .
+                                   trajectory    .      .      .        ✓      .      ✓       .     .     .
+                                   predict       .      .      .        .      ✓      .       .     .     .
+                                   D-all-on      ✓      ✓      ✓        ✓      ✓      .       ✓     ✓     ✓
+
+TABLE II: Full-suite Terminal-Bench 2 pass counts (N =89) across A–D on gpt-5.4-nano via the OpenAI Responses API.
+Baseline is the harness with every extension flag off. Oracle is the union of tasks passed by any configuration. B is the only
+round that cleanly beat the all-flags-off baseline; C and D regressed from it.
+
+                                      Round                                         Pass count     ∆ vs. B
+                                      Baseline (all flags off)                        15/89          −2
+                                      B (5 native flags)                              17/89          —
+                                      C (B + self-eval gate)                          13/89          −4
+                                      D (B + Tier-2: ACON,Refl,PASTE)                 12/89          −5
+                                      Oracle (union over all configs)                 81/89          —
+
+TABLE III: Published-technique flag glossary used throughout                measured all-flags-off baseline pass rate R0 :
+§V. Tier-1 (T1-·) flags are low-risk token-saving changes; Tier-
+2 (T2-·) flags are research-literature features that introduce new                   c⋆ = arg max µ(c) with µ(c) ≡ Et [R(c, t)]              (2)
+                                                                                                   c∈C
+inference-time behavior.
+                                                                                       s.t. Et [cost(c, t)] ≤ Bdep ,
+Tag    Name                      Short description                                          µ(c) ≥ R0 − δ.
+T1-1   Intent-canonicalization   Hash normalization of surface-
+                                 form variants of a tool invocation         This is the ground-truth problem: µ and the cost are unob-
+                                 so that semantically identical calls       servable populations, so any solver must enforce the safety
+                                 collide in the cache.                      constraint algorithmically. We do this with
+T1-2   Prompt-prefix-first       Stable system-prompt ordering for                                                         a posterior chance-
+                                                                            constraint [33], Prpost µ(c) ≥ R0 − δ ≥ 1 − η, evaluated
+                                 automatic provider-side prompt
+                                 caching (e.g. Claude’s prefix              under the surrogate’s posterior at each candidate—this is a
+                                 cache).                                    property of the optimizer’s beliefs, not of µ. The solver is addi-
+T1-3   Self-eval gate            LLM-as-judge self-evaluation of a          tionally constrained by an outer-loop search budget Bsea —the
+                                 tool output before acceptance.             total compute or dollars available to the optimizer across all
+T2-1   Reflexion                 Verbal self-reflection appended af-
+                                                                            noisy evaluations during the outer loop, i.e. a cap on the cumu-
+                                 ter failure, in the style of Shinn
+                                 et al. [34].                               P evaluation history H rather than on any single evaluation:
+                                                                            lative
+T2-2   ACON                      Observation-compression gate that             (ci ,ti )∈H cost(ci , ti ) ≤ Bsea . This constraint terminates the
+                                 emits a compressed summary of              while-loop in Algorithm 2 rather than entering the argmax over
+                                 long tool outputs [2].                     c. The two budgets are distinct and play different roles: Bsea
+T2-3   PASTE                     Speculative-execution learner that
+                                                                            is an amortised one-time cost paid during optimisation, while
+                                 predicts the next tool call from
+                                 short n-gram history [29].                 Bdep constrains the deployed configuration forever after. Three
+                                                                            properties differentiate AHO from standard hyper-parameter
+                                                                            optimization.
+                                                                                  a) Property I: Cold-start-corrected reward (mixture
+                                                                            model).: Cross-session features require state that is empty
+                                                                            on the first session and partially primed on later ones, so short
+                                                                            sweeps underestimate fully-warm performance. Let n be the
+the task distribution—and a safety margin δ relative to the                 number of prior primed sessions and let pbase ≡ pbase (ccold ) be
+
+
+
+                                            © 2026 JP Morgan Chase & Co. All rights reserved        6
+the pass rate of the all-flags-off baseline—i.e. the configuration          on TB 2 with gpt-5.4-nano, the B peak sits only 0.022
+ccold with every warm-state-dependent flag disabled (directly               above pbase , so Eq. 3 is well-specified but tells us honestly
+measured; Table IV, pbase = 15/89 on gpt-5.4-nano). We                      that warm-start effects are not separable from noise on this
+treat pbase as a scalar rather than a function of c: the non-warm           suite.
+flags we vary (caching thresholds, compaction sizes, etc.) have                   b) Property II: Mixed-input, block-additive surrogate with
+negligible effect on a run in which all warm-state-dependent                residual interactions.: Not all flags matter, and flags cluster
+features are disabled by construction, so pbase (c) ≈ pbase on              by layer (caching, memory, compaction, prediction, evaluation
+the support of the solver’s queries at w=0. The mixture model               gate). Since ∼35 of the F ≈40 dimensions are Boolean or cat-
+                                                                           egorical, we embed them using the mixed-variable treatment
+   E[R(c, t) | n] = w(c, n) p∞ (c) + 1−w(c, n) pbase , (3)
+                                                                            of Daulton et al. [11] (Booleans {0, 1} 7→ {−1, +1}; categori-
+with w(c, n) ∈ [0, 1] the warm-up fraction after n primed                   cal presets via the latent-relaxation of Garrido-Merchán and
+sessions; inverting gives                                                   Hernández-Lobato [12]) so that the Matérn-5/2 kernel is well-
+                                                                           defined on each block. Let Π = {πℓ }L ℓ=1 partition the F dimen-
+               p̂∞ = p̂obs − (1−ŵ) p̂base /ŵ,        (4)                  sions into L layer blocks, and for each configuration c let cπℓ be
+                                                                                                                                M5/2
+which—unlike a bare multiplicative correction—reduces to                    its projection onto block ℓ. Writing Kℓ (c, c′ ) ≡ kθℓ (cπℓ , c′πℓ )
+p̂obs at ŵ=1, stays in [0, 1] in expectation under the mix-                for the per-block Matérn-5/2 kernel, we form the surrogate
+ture model, and is clipped to [0, 1] whenever finite-sample                 kernel from per-block main effects and pairwise tensor-product
+noise pushes the raw estimate outside. At the clip boundary                 cross-block interactions in the Duvenaud-additive style [14]:
+we inflate the observation-term contribution of Eq. 5 to its                               L
+worst-case Bernoulli value ŵi−2 /4 (an upper bound on the
+                                                                                          X                         X
+                                                                                   ′                      ′
+  2
+                                                                            k(c, c   )  =     αℓ
+                                                                                                2
+                                                                                                  Kℓ (c, c  ) + α×
+                                                                                                                  2
+                                                                                                                         Kℓ (c, c′ ) Kℓ′ (c, c′ ). (6)
+σ̂obs /ŵi2 summand only—the σ̂base     2
+                                            and σ̂w 2
+                                                       summands are re-                   ℓ=1                       ℓ<ℓ′
+tained on top of it, not replaced by it). At ŵ=0 the target
+p∞ is unidentified from a single p̂obs : we degrade the point Each summand is a product of PSD kernels and is there-
+to zero-precision evidence (σi2 → ∞ floored at the prior vari- fore itself PSD by the Schur product theorem, so k is PSD
+ance) and rely on the GP to ignore it. We compose w per by construction—no Gram-matrix projection is required, and
+flag with a pessimistic min-rule w(c, n) = minf ∈cwarm wf (n). subtraction-style “residual” constructions (which are                   P not PSD
+This is a lower bound on the system-level warm fraction un- for Matérn kernels in general, since k
+                                                                                                                      M5/2
+                                                                                                                             (c, c′ ) − ℓ Kℓ (c, c)
+der a conjunctive-cascade reading—the system is only as is negative on the diagonal whenever L > 1) are avoided.
+warm as its least-primed feature—and trades bias (under- An axis-aligned                     −2
+                                                                                                SAAS (Sparse Axis-aligned Subspace) half-
+correction of warm benefit) for robustness to unknown cross- Cauchy prior θℓ,d ∼ τℓ HC(1) (where HC(1) denotes the stan-
+flag coupling. Principled alternatives (product rule under in- dard half-Cauchy distribution) [10] contracts irrelevant per-layer
+dependence, saturating logistic composition) correspond to dimensions, and a half-Cauchy prior on α× tightly concentrated
+stronger parametric assumptions about how partially primed near zero (scale τ× ≪ minℓ τℓ ) softly identifies the cross-block
+                                                                                       2
+features combine, and remain fit-time options. Each wf (n) is fit scale: α× is pulled to zero unless evidence demands a pair-
+from logged cross-session counter trajectories (§VII). Letting wise interaction such as the ACON↔cache coupling surfaced
+θ(p̂obs , p̂base , ŵ) = (p̂obs − (1 − ŵ)p̂base )/ŵ, the delta-method by round D, which a strictly additive kernel would forbid by
+variance of p̂∞ in terms of the independent noise of the three construction. Eq. 6 is a hybrid of the Duvenaud-additive ker-
+estimators is                                                              nel with a per-block main-effect scale αℓ2 (to accommodate
+             2                                                             SAAS-style per-block sparsity) and a single cross-block scale
+           σ̂obs,i     (1−ŵi )2 σ̂base
+                                   2       (p̂obs,i −p̂base )2 σ̂w,i
+                                                                 2
+                                                                             2
+   σi2 ≈            +                    +                           , (5) α×  shared across all pairs (so the number of hyper-parameters
+             ŵi2            ŵi2                     ŵi4                 grows linearly in L rather than quadratically). Higher-order
+passed to the GP as a heteroscedastic diagonal so that cold- (three-way and above) cross-block interactions are excluded
+start points (ŵ ↓ 0) are not spuriously confident. A calibration by this truncation, a deliberate model choice that trades the
+requirement, learned the hard way in our own runs: p̂base must ability to detect three-way couplings for identification robust-
+be measured at the same fidelity m=N as the acquisition, ness. Under arbitrary input measures the αℓ2 and α×                              2
+                                                                                                                                              are not
+and on the same no-warm-state configuration, or else every strictly orthogonal Sobol/Hoeffding variance components, but
+first-order coefficient αℓ2 picks up a systematic negative bias. are weakly identified by the τ× ≪ τℓ prior and remain coarsely
+A cheap-fidelity proxy (m=10) we initially used inflated p̂base interpretable as “per-block” vs. “cross-block” sensitivity.
+relative to the true m=89 value of 15/89, and the inversion of                  c) Property III: Multi-fidelity, cost-aware, safe acquisi-
+Eq. 4 then returned a raw p̂∞ outside the unit interval (i.e., the tion.: A single full-suite evaluation takes ∼2 h of wall-clock
+point estimate of the warm-fraction-inverted mixture fell below at concurrency 4 but consumes a non-trivial fraction of the
+zero before clipping) for almost every candidate, collapsing daily LLM API quota; exhaustive search over F ≈40 Boolean
+                                                                        2
+the additive part of the surrogate; the cross-block residual α×            flags is not wall-clock-bound but API-cost-bound, and even
+absorbed the signal only weakly. The fix is to anchor p̂base at the observed wall-clock the fixed daily token budget lim-
+to a single direct measurement at the full fidelity and treat it its full-suite acquisitions to ∼10 per week in practice. The
+as a scalar rather than a surrogate-estimated quantity. Caveat: arithmetic is immediate: at the observed ≈1.5 M-token-per-full-
+
+
+
+                                               © 2026 JP Morgan Chase & Co. All rights reserved     7
+suite-evaluation cost for gpt-5.4-nano on TB 2 (89 tasks                   Algorithm 1: H ARBOR — Harness Axis-aligned Regularized Bayesian
+× median 17K tokens per trajectory) and a fixed organizational             Optimization Routine.
+budget of ≈2.2 M tokens per business day on this account, the              Input: search budget Bsea , deploy budget Bdep , task suite T , prior
+                                                                           model G0 , safety margin δ, risk level η, block-freeze count nmin .
+daily ceiling is ⌊2.2M/1.5M⌋ = 1 full-suite evaluation per day             Output: Pareto set of safe, budget-feasible configurations on (µ, cost).
+on weekdays, giving ≈ 5–10 full-suite evaluations per seven-
+day calendar week after accounting for queue backoff and
+                                                                            1. initialize GP G ← G0 with
+re-runs for flaky tasks. Concretely, at Bsea fixed to one calen-                kernel Eq. 6
+dar week, the optimizer cannot afford more than ∼10 full-suite              2. D0 ← Sobol(32) at fidelity m = 8;
+samples; everything else must be spent at a cheaper fidelity.                   evaluate and refit G
+                                                                            3. place M trust regions {TRk } at the
+We therefore index the acquisition by a task-subset fidelity                    top-M posterior-mean incumbents
+m ∈ {8, 22, 44, 89}, where Tm ⊂ T is a stratified subset with               4. while history cost < Bsea do
+|Tm | = m drawn once and fixed, and use the fidelity-aware                  5.      for each trust region TR do
+                                                                            6.          pick batch (c1:q , m) maximizing
+qNEHVI (q-batch Noisy Expected Hypervolume Improvement)                                   qNEHVIm (c1:q )
+of Balandat et al. [4], Daulton  et al. [11] over theP  two objectives                     Cost(c1:q , m)
+                                                   1
+                          
+  µ̂(c; Tm ), −Ĉ(c; Tm ) with µ̂(c; Tm ) = m              t∈Tm R(c, t)                  subject to ci ∈ TR and
+                      1
+                         P                                                               per-ci safety constraint:
+and Ĉ(c; Tm ) = m               cost(c,  t). Because      each R(c, t)
+                            t∈Tm                                                         µ(ci )−Φ−1 (1−η) σ(ci ) ≥ R0 −δ
+is Bernoulli, µ̂(c; Tm ) is a mean of Bernoullis with intrin-               7.          evaluate batch on subset Tm
+sic variance µ(c)(1 − µ(c))/m that depends on the input; we                 8.          invert warm-start (Eq. 4);
+pass this heteroscedasticity through the GP as an observation-                           attach σi2 (Eq. 5); clip
+                                                                            9.          refit G by NUTS (No-U-Turn
+noise diagonal together with Eq. 5, treating the Gaussian-                               Sampler) on the SAAS prior;
+likelihood surrogate as the standard BO approximation to a                               recompute {α2ℓ , α2× }
+Binomial-likelihood observation model. The acquisition trades              10.          update TR by the TuRBO success rule
+                                                                           11.          if α2ℓ collapses and
+information-per-dollar across fidelities with a multi-fidelity cost                      nℓ ≥ nmin then freeze block ℓ
+denominator in the style of Wu et al. [13]. The ratio form is              12. return Pareto front on (µ, cost) under
+provably cost-rational only within the Knowledge-Gradient                       the
+                                                                                 GP posterior, restricted to
+                                                                                  c : Et [cost(c, t)] ≤ Bdep
+family of acquisition functions; applied to qNEHVI it is an en-
+                                                                                  and safety constraint holds
+gineering heuristic with the right scaling behavior rather than
+a theorem.                                                                Fig. 2: Reference H ARBOR solver for harness configuration.
+                                                                          µ(c), σ(c) denote GP posterior mean and standard deviation;
+                                                         
+                                  qNEHVIm c1:q ; G
+                 a(c1:q , m) =                             ,       (7)    Tm is the fidelity-m task subset; αℓ2 is the per-block kernel
+                                     Cost(c1:q , m)
+                                   q X                                    scale of Eq. 6; nℓ is the number of distinct block-ℓ projections
+                                                                          seen in history H.
+                                  X
+              Cost(c1:q , m) ≡               cost(ci , t).
+                                  i=1 t∈Tm
+
+Here qNEHVIm is evaluated against the Pareto frontier of
+subsample-consistent fidelity-m estimates, so incumbents from             signal—the rest are either silent (Axis-IV detector, §VII-0g) or
+different fidelities are not mixed. Cost enters in two distinct           dominated by telemetry-level integration failures. SAAS con-
+roles without redundancy: as a negated objective, it drives               centrates a half-Cauchy prior on per-dimension lengthscales
+Pareto-frontier exploration over configurations (the solver can           near zero with a heavy tail, so the posterior contracts irrelevant
+trade pass-rate for dollars on the returned c⋆ ); as the denomi-          axes aggressively while leaving a handful of active dimensions
+nator, it weights per-dollar information gain and selects the             free—exactly the shape we expect. Algorithm 2 couples this
+cheapest fidelity m at which the acquisition is justified. The            SAAS block-additive surrogate with cross-block residual (P2),
+first is a property of the returned solution, the second is a prop-       the multi-fidelity cost-aware constrained batch acquisition (P3),
+erty of the acquisition policy. The safety constraint is applied          a trust-region local-move subroutine (TuRBO, Trust-Region
+per candidate in the batch: each ci in the qNEHVI batch must              Bayesian Optimization; 9) for high-dimensional search, and the
+satisfy the posterior chance constraint of Schreiter et al. [33],         mixture-based warm-start correction (P1). It is warm-started
+Prpost (µ(ci )≥R0 −δ) ≥ 1−η, equivalent under a Gaussian sur-             from a meta-learned posterior when a prior harness genera-
+rogate posterior to µ(ci ) − Φ−1 (1−η) σ(ci ) ≥ R0 − δ—i.e.,              tion’s log is available (15, 30), otherwise from a Sobol design
+candidates whose lower credible bound regresses the all-flags-            at the cheapest fidelity.
+off baseline by more than δ are rejected, structurally blocking              Four design choices distinguish H ARBOR from vanilla GP-
+the C-style “literature bites back” failure mode.                         EI (Gaussian-Process Expected Improvement). (i) Sparsity-by-
+       d) Reference algorithm: H ARBOR.: The Sparse Axis-                 prior (SAAS) at F ≈40 [10]; (ii) TuRBO locality for high-
+aligned Subspace (SAAS) prior of Eriksson and Jankowiak                   dimensional sample efficiency; (iii) multi-fidelity task subsets
+[10] is the natural choice for this problem class: the flag space C       amortize early exploration on cheap m and escalate only when
+is nominally high-dimensional (F ≈ 40 in our harness, 2F cor-             posterior variance reduction justifies it; (iv) posterior chance-
+ners), yet on any given (model, benchmark) pair few flags carry           constrained safety blocks C-style regressions, with a minimum-
+
+
+
+                                             © 2026 JP Morgan Chase & Co. All rights reserved     8
+observation guard nℓ ≥ nmin preventing premature freezing. TABLE IV: gpt-5.4-nano full-suite pass counts on
+The self-evaluation gate and other model-quality-dependent Terminal-Bench 2. Baseline is the harness with every native
+flags are treated as surrogate context variables from a capability- extension flag off; B is the manual peak (5 native flags); D is
+conditioned table rather than searched.                             the all-on manual stack (8 flags); H ARBOR is the automated
+                                                                    solver’s returned configuration; Oracle is the best-of-any-config
+                   VII. E XPERIMENTAL S ETUP                        union.
+      a) Benchmark.: Terminal-Bench 2.0 (TB 2) comprises 89
+                                                                              Configuration                        89-task pass count
+terminal tasks spanning shell scripting, systems administration,
+cryptography, COBOL modernization, scientific-Python porting,                 Baseline (no T URBO Q UANT)                15 / 89
+                                                                              B (5 native flags)                         17 / 89
+and adversarial diagnostics. Each task runs in its own Docker                 D (all-on, 8 flags)                        12 / 89
+container; a task is counted as passed iff the container’s verifier           H ARBOR (2 flags)                          17 / 89
+awards reward = 1.0. All headline numbers in this paper                       Oracle (union over configs)                81 / 89
+are reported against the full 89-task suite.
+      b) Models.: All headline numbers in this paper are mea-
+sured with gpt-5.4-nano served through the OpenAI Re- fast task (configure-git-webserver) whose purpose
+sponses API. The same flag-gated harness is used throughout, is not to measure pass-rate but to verify that every on-flag
+and the benchmark task specifications are unchanged across produces non-zero telemetry. Flags carry heterogeneous firing
+rounds.                                                             thresholds—tiered compression requires ≥ 5 turns to trigger,
+      c) Harness.: The harness at the D snapshot, running on        ACON      ≥ 3, cache ≥ 2—so the check is turn-count aware: a
+codex-py. Harness extensions are toggled at agent launch by         counter    of zero is downgraded from RED to YELLOW when
+a bundle of feature-flag settings resolved through the four-tier    the  smoke    trajectory was too short for the firing threshold to be
+flag-resolution scheme described in §III.                           reached.    Configurations      with any remaining RED flag are ve-
+      d) Metric.: Unless otherwise noted, the headline metric       toed   and  the  next   Pareto   candidate is proposed. This pre-flight
+is pass rate (passed tasks / total tasks). We additionally report   gate   turns  the   commit    criterion   from “posterior argmax” into
+a small set of per-session harness telemetry counters—cache         “posterior    argmax      conditional    on  every on-flag being struc-
+hits, canonical cache hits, compressed turns, estimated tokens      turally   live,”   which    in  practice   was  the difference between
+saved, ACON bytes elided, reflections written and retrieved, and    picking    silent  configurations    and   committing    only runs whose
+PASTE predictions fired—averaged per configuration. These           telemetry     will  exist.
+counters are emitted by the harness as structured events at                g) Silent-flag auto-exclusion.: H ARBOR extends the
+session end; they are the same counters that feed the warm-         SELF_EVAL          “context-variable” treatment of §V to any flag
+start estimator (Eq. 3).                                            that  is empirically    silent on the current (model, benchmark) pair.
+      e) Implementation.: The H ARBOR implementation evalu-         After   each   evaluation    an analyzer screens every on-observation
+ated in this paper is pure-Python and substitutes three pieces      of flag   f  for  its  warm    counter n̄f ; if n̄f < ε across ≥ nsilent
+of the Bayesian scaffolding from §VI with closed-form ana-          on-observations       (default  3), f is marked silent and pruned from
+                                                2   2
+logues. (i) A weighted ridge regression on {αℓ , α× } with fixed    the  search   space    for subsequent    acquisitions. This is the mech-
+penalties αcross ≫ αmain replaces SAAS-prior+NUTS sam-              anism    by   which    the  paper’s   diagnosis   of isolated integration
+pling; this preserves the τ× ≪ τℓ contraction behaviour of the      bugs    becomes     a  standing   search-space    pruner.
+surrogate but not the full posterior over kernel scales. (ii) A
+                                                                                                  VIII. R ESULTS
+linear tensor-product kernel on ±1-valued Booleans replaces
+the Matérn-5/2 kernel; the two are equivalent on binary inputs             a) Baselines.: Table IV shows the all-flags-off baseline
+up to a rescaling, since the Matérn-5/2 kernel on {−1, +1}d (every native extension flag off) on the full 89-task suite for
+reduces to an affine function of the Hamming distance. (iii) A gpt-5.4-nano, the B peak (the five native flags with ev-
+per-candidate Monte-Carlo EHVI with a greedy diversity term ery Tier-1/Tier-2 flag off; see Table I), and the Oracle upper
+replaces the joint qNEHVI batch; this is tight at the operating bound (union of tasks passed by any configuration we ran).
+batch size q=1 used throughout and an approximation at q>1. Both models share the same codex-py runtime, tool han-
+The stratified task subset Tm is realised as a seeded-prefix shuf- dlers, and sandbox; the harness switches between providers
+fle drawn once and held fixed. All other correctness-critical through a single configuration toggle, so nothing but the model
+elements of §VI—Eqs. 3–7, the posterior chance constraint, changes. The A–D ablation rounds were all executed with
+the warm-start variance inflation (including the term-1-only in- gpt-5.4-nano because only its API quota was compatible
+flation at the clip boundary), and the per-block freeze rule—are with running the entire sweep at the required concurrency. The
+implemented literally. We flag these substitutions up-front so gap between B (17) and Oracle (81) is the actionable AHO
+that the reference specification in §VI is not confused with the signal: most tasks are passable by some configuration, but the
+evaluated artifact.                                                 best single configuration we found captures only 21% of that
+      f) Preflight smoke verification.: Before committing com- union.
+pute to any m=89 evaluation, each H ARBOR-proposed con-                    b) Feature-level deltas.: Telemetry collapsed across B–D
+figuration is subjected to a ∼4-minute smoke on a single shows three points: (i) B cache-key normalization (collapsing
+
+
+
+                                            © 2026 JP Morgan Chase & Co. All rights reserved   9
+numeric read-offset and read-length arguments onto a single          MEMORY _ RETRIEVALS =0—the same integration-bug signa-
+key) was the real cache win; C canonicalization added zero ad-       ture as D’s zero reflection-retrieval counter—so the effective
+ditional hits. (ii) D ACON fired 171 times and elided ∼501 KB,       configuration reduces to compression-only, which is precisely
+but the gate was wired upstream of the tool-result cache, so         the strongest positive-coefficient single flag recovered by the
+the cache stored the compressed summary rather than the raw          block-additive surrogate. Eleven tasks crashed or timed out, so
+output—tasks needing line-level detail then reasoned on a            the non-errored denominator gives 17/78 = 21.8%. Across
+truncated view. (iii) Two D counters were hard-zero: the cross-      all five m=89 evaluations of H ARBOR-proposed configura-
+session memory store was never propagated between container          tions we observe {17, 14, 15, 19, 18}/89, giving a mean of
+trials (reflections written but never retrieved), and the PASTE      n̄H =16.6/89 (18.65%) against the manual D-all-on anchor
+predictor’s entry-point was never invoked (speculative predic-       of 12/89 (13.48%) and the all-flags-off baseline of 15/89
+tions computed but never executed). Both bugs would have             (16.85%). The five picks span five distinct two-flag bun-
+been caught by a counter-driven gating policy (§IX); the man-        dles     (memory+compression,            compression+trajectory,
+ual loop missed them because the write-side counters looked          prediction+trajectory,           memory+trajectory,           and
+healthy.                                                             cache+compression). Runs #3 and #4 were proposed
+      c) Pass-rate deltas, A–D.: Only the baseline→B jump            before the silent-flag auto-exclusion mechanism (§VII-0g)
+(15 → 17) is positive; B→C (−4) and B→D (−5) are nega-               was in place; their on-flags fired zero telemetry at the
+tive, dominated by a single root-cause feature each (the self-       89-task scale, so their scores are effectively draws from
+evaluation gate and the ACON-cache coupling respectively).           the flagless-baseline distribution, and the run-#4 peak of
+The per-config Wilson 90% half-width on p≈0.18 at N =89 is           19/89 is a lucky Bernoulli draw rather than an attribution
+±3 passes; the B–D gap of −5 sits at the edge of that noise          to its nominal bundle. Run #5 (cache+compression) is the
+floor but is repeatable across independent sweeps.                   first m=89 evaluation where cache telemetry fires at scale:
+      d) Model choice and harness behavior.: The C regression        194 canonical-semantic cache hits across 4,533 cacheable
+is the clearest per-model effect: flipping from gpt-5.4-nano         queries, a 4.3% hit rate confirming the cache is wired but
+to a stronger model would change the sign of the self-evaluation-    empirically weak on gpt-5.4-nano. The run #2 score of
+gate contribution. An AHO solver that treats model identity as a     14/89 slots cleanly between the all-flags-off baseline and the
+context variable would not propose enabling the self-evaluation      compression-only peak, reinforcing the surrogate’s attribution
+gate for gpt-5.4-nano after a handful of evaluations; the            that the net-positive signal on gpt-5.4-nano is carried by
+manual loop took an entire round.                                    tiered compression; trajectory-replay added on top neither
+      e) Wall-clock budget accounting.: One full 89-task sweep       helps nor hurts past the Wilson noise floor, consistent with the
+takes ∼2 hours of wall-clock at concurrency 4 (121.9 min             B-round observation that trajectory-replay couples weakly with
+for the all-flags-off baseline, 139.8 min for the D-all-on stack;    other native flags on this model. Three specific behaviors of
+measured from the Terminal-Bench job logs), dominated at             the solver are worth calling out. (i) H ARBOR correctly held the
+that concurrency by per-task container setup and package in-         self-evaluation gate and the ACON+Reflexion+PASTE bun-
+stallation rather than by model latency. The binding constraint      dle off on gpt-5.4-nano: the posterior chance constraint
+on iteration speed is therefore not wall-clock but the per-day       of Eq. 7 pruned configurations whose lower credible bound
+LLM API token quota. Across A–D the aggregate compute                fell below R0 − δ, structurally blocking the C- and D-style
+spent on ablations produced a net movement of +2 passes over         regressions. (ii) The returned configuration is sparser than
+all-flags-off baseline (B only) and negative net movement at         any manual incumbent—two flags vs. eight in D—consistent
+C and D, which we view as untenable for any active tuning            with SAAS axis-aligned contraction on a regime where most
+loop of realistic scale and is a central motivation for the AHO      per-layer coefficients collapse. (iii) The solver’s anomaly detec-
+formulation.                                                         tor flagged the silent memory gate from the write-side=zero
+      f) H ARBOR validation.: We ran H ARBOR (Algorithm 2)           pattern on MEMORY _ RETRIEVALS, closing the observability
+end-to-end on the same 89-task suite with gpt-5.4-nano,              loop that §IX argues is required to prevent C/D-class bugs. The
+warm-starting the solver from the A–D evaluation log as a            case-study headline—manual stacking of literature-grade fea-
+meta-learned posterior [15, 30] and terminating at a search          tures on a small model produces negative net movement—now
+budget of ∼3.5 full-suite-equivalent units. The returned             has its counterfactual: an automated search over the same
+Pareto-optimal configuration at the deployment-cost tier match-      flag-space without manual stacking produces a +5-pass im-
+ing the D stack is a two-flag bundle—cross-session memory            provement over D and matches the B peak from a cold start
+index + tiered conversation compressor, with every other na-         on the meta-log.
+tive extension and every published-technique flag off. On the              g) Container-persistence remediation.: The cross-session
+full suite this configuration scored 17/89 (19.10%) at concur-       memory signature in D—write counters healthy, retrieval coun-
+rency 4 in 122 min, a +5-pass improvement (+5.6pp) over              ters identically zero—is a direct consequence of Terminal-
+the manual D all-on anchor (12/89, 13.48%) and a match of            Bench’s per-task container recycling: the on-disk trajectory
+the manual B peak with a quarter of B’s flag count. Telemetry        and memory stores written at the end of trial t are destroyed
+confirms a pattern the manual loop took four rounds to sur-          before trial t+1 mounts its fresh container. We remediate in
+face: the cross-session memory gate fired at the flag level but      three layers: (i) a CODEX_TQ_STATE_DIR environment vari-
+
+
+
+                                         © 2026 JP Morgan Chase & Co. All rights reserved   10
+able redirects all three store-path resolvers (memory, trajectory,        c) Prompt-prefix stability and token accounting.: T1-2
+paste) to a harness-controlled mount point; (ii) a Harbor-level (prompt-prefix-first) saves ∼80% of prefix tokens on a 58 KB
+upload-eval-download sync pattern in the Terminal-Bench agent system prompt—matching the 92–97% Claude-Code prefix-
+materialises the shared state inside the container before each reuse rates [25]—but manifests in wall-clock, invisible to a pass-
+trial and serialises the delta back to the host on exit; (iii) rate-only objective. Eq. 2 folds wall-clock into the constraint.
+fcntl.flock protects concurrent sync-back at concurrency                  d) Observability and feedback loops.: H ARBOR presumes
+4. At the end of the five-run sweep above, the host-side shared- structured telemetry—the role of OpenTelemetry GenAI [27]
+state directory had accumulated 98 trajectory files plus a lock and observability systems like BitsEvolve [5]. Observability
+file—empirical confirmation that the infrastructure fix propa- also catches the class of bugs the D manual round missed: write-
+gates end-to-end. Absent this patch, any future run involving side counters with zero consumer counters (rw=80, rr=0)
+POLAR_MEMORY or TRAJECTORY_REPLAY would repro- are a textbook integration-bug signature, and the ACON-cache
+duce the D silent-gate signature regardless of how the solver coupling is an invariant violation (cache byte-size ≪ raw tool
+prices those flags.                                                  output) that property-check frameworks [41] catch without a
+      h) Token-savings accounting.: The harness telemetry logs full benchmark.
+an ESTIMATED _ TOKENS _ SAVED counter (bytes elided by the                e) What the real-harness trace contributes.: The repre-
+tiered compressor, divided by four) that is directly compara- sentative H ARBOR trace reported in Appendix A is the first
+ble across the 89-task runs. The all-flags-off baseline saves 0 end-to-end execution of Algorithm 2 on the production harness,
+tokens by construction—no compression flag is lit. D-all-on distinct from the single-pick selections of §VIII. Three behav-
+(8 flags) elides 108,004 compressor tokens across 592 com- iors hold on real data: (i) TuRBO’s shrink path fires in the
+pressed turns and, separately, 927,306 bytes via ACON sum- regime the search actually explores—two of four trust regions
+maries written into the tool-result cache; the latter is the channel killed by iteration 3; (ii) the cost-aware acquisition concen-
+that corrupted downstream reads and drove the −3-pass C→D trates at mmin under the observed signal-to-noise ratio; (iii) the
+regression, so its “savings” are load-bearing only in the nega- silent-flag auto-exclusion mechanism of §VII-0g fires on real
+tive direction. The H ARBOR two-flag pick (POLAR memory data with the same six-flag signature it reports in small-scale
++ tiered compression) elides 104,731 tokens over 574 com- sweeps. The 0/8 baseline drift observed on T8 during that run
+pressed turns—96.97% of D’s compressor volume—with a is a concrete instantiation of the coverage failure mode induced
+quarter of D’s flag count and a +5-pass improvement. The when p̂base estimated at cheap fidelity m0 is reused at full
+neighbouring pareto candidate (tiered compression + trajectory fidelity m1 ̸= m0 : the bias is (1 − ŵ(m1 ))∆(m0 , m1 ), and
+replay) elides 97,054 tokens. The compute-savings headline ranking is preserved (the shift is x-constant) so the acquisition
+therefore survives automation: the sparser configurations recov- argmax is uncorrupted. The fix is stratified Tm .
+ered by H ARBOR retain the compressor’s throughput benefit                f) Production cost structure: AHO runs a few times, not
+while shedding the features that caused the manual-round re- continuously.: Any modification to the task distribution (here
+gressions.                                                           fixed by TB-2), the underlying agent, or the available model
+      i) Bug-catching as a first-class deliverable.: The har- requires a net-new optimizer run: the posterior densities over
+ness telemetry layer caught two silent integration bugs the β and the fidelity weights ŵ(m) are conditional on the (agent,
+manual A–D loop missed in four rounds: (i) the cross-trial task, model) triple. Deployment cost tiers themselves drift as
+reflection store (write counter healthy, retrieval counter iden- models are swapped and the pace-of-innovation reprices wall-
+tically zero), surfaced on the solver’s first m=89 evaluation clock vs. pass-rate. The implication for Eq. 2 is that AHO is
+via a read/write-asymmetry signature; (ii) the PASTE next-tool amortized over a few invocations per (agent, task-suite, model)
+predictor (prediction-write nonzero, speculative-execution iden- epoch—not a continuously running controller. This is why cost-
+tically zero), caught by the same mechanism on a later iteration. aware acquisition (Eq. 7) and the posterior chance constraint
+Both are invisible to pass-rate inspection—the configurations are first-class: each run must return a ship-safe configuration
+scored at the baseline floor, so manual review mistook them under a tight search budget.
+for features that “didn’t help.” A mechanics-aware optimizer              g) Repeated invocation compounds.: The surrogate is
+doubles as a bug-detector for the engineering loop.                  cold-started from a meta-learned posterior [15, 30]; every prior
+                                                                     run on a related triple contributes to density estimation for β,
+                        IX. D ISCUSSION                              the per-block SAAS scales αℓ2 , and ŵ(m). The block-ANOVA
+      a) Why harness engineering is not a systems problem.:          decomposition reported in Appendix A already exhibits the
+Treating the harness as infrastructure misses the C lesson: a SAAS signature (few blocks dominating) at T =19; additional
+feature can be perfectly implemented and still be a net loss runs tighten those scales monotonically—information accumu-
+because its behavior depends on a latent variable—the self- lates even across epochs where the flag space drifts, provided
+evaluator’s capability—invisible to systems-level observations. the block structure is preserved.
+      b) Cold-start features are not free.: Five native harness           h) Scope: empirical, in-the-small.: Our claims are empiri-
+features are cross-session; every session on a task-independent cal and scoped to a single (agent, benchmark) pair: one harness
+benchmark starts empty. AHO needs a warm-start-aware eval- (codex-py), one suite (TB-2), two models (gpt-5.4-nano
+uator (Eq. 3).                                                       and a stronger reference), a flag space of ≈ 10 candidates on top
+
+
+
+                                          © 2026 JP Morgan Chase & Co. All rights reserved   11
+of the base ≈ 30 enhancements, and ≤ 10 full-suite-equivalent         • TuRBO trust-region dynamics exercised the shrink path for
+search units. We do not claim asymptotic consistency of β̂,             the first time on real data: iter 1 initialised three regions at
+regret upper bounds against an oracle, or transfer across agent         radius 2, all alive; iter 2 held radii at 2; iter 3 expanded to
+families. A single-benchmark, single-agent ablation is the cor-         four regions, killed two (alive=False), and shrunk two
+rect grain for the engineering loop it instruments: the loop            others to radius 1.
+decides one configuration per (agent, task, model) epoch, and         • Cost-aware fidelity selector chose m=mmin =8 for every
+the evidence required is first-order — a positive pass-rate delta       evaluation, consistent with KG/c concentrating at mmin
+against the manual incumbent under a fixed deployment-cost              when cheap-fidelity SNR suffices for ranking.
+tier — which we report.                                               • Block-ANOVA decomposition of the main-effect vari-
+      i) Prior art, limits, and closing.: Watershed’s property-         ances gave αcache2
+                                                                                               =0.143, αpred2
+                                                                                                                =0.106, αeval2
+                                                                                                                                =0.085,
+vs-correctness split [41] slots into the constraint of Eq. 2;             2              2                2
+                                                                        αtraj =0.048, αcomp =0.026, αmem =0.001, and cross-block
+Meta-Harness [26] rewrites harness source code via an LLM,              α×2
+                                                                            =0.009—consistent with the SAAS-style sparsity
+orthogonal to our fixed-harness configuration search. One agent,        assumption that few per-block scales dominate.
+one benchmark, two models, four manual rounds gave one
+                                                                      • Block freeze of Property I was not triggered: the per-block
+validated win (B, +2) and two regressions; the B–Oracle gap
+                                                                        sample count nℓ never reached threshold with only 19 eval-
+(17 vs. 81) quantifies the configuration-search problem we
+                                                                        uations spread across six blocks.
+name Automated Harness Optimization. A single end-to-end
+run of H ARBOR over the same flag-space returns a two-flag            • Anomaly detector surfaced six distinct silent-gate signa-
+
+configuration at 17/89 that matches the manual B peak and               tures (TRAJECTORY _ REPLAY, SPECULATIVE _ PREDICTION,
+beats the manual D all-on stack by +5 passes at ∼3.5 full-suite         REFLEXION ,        PASTE _ V 2,       POLAR _ MEMORY ,       BI -
+units of search cost—first-order evidence that the problem is           NARY _ PREFILTER ),       corresponding exactly to the
+tractable with the ingredients assembled here (SAAS sparsity,           search-space pruning of §VII-0g.
+TuRBO locality, multi-fidelity cost-aware acquisition, posterior      • Chance-constraint safety rejected zero picks at evaluation
+safety).                                                                time; every chosen candidate had posterior lower credible
+                                                                        bound ≥ R0 −δ under the scalar baseline in force.
+                          A PPENDIX A
+A R EPRESENTATIVE H ARBOR RUN ON THE R EAL H ARNESS
+                                                                     C. Three findings
+   We report a single, complete execution of Algorithm 2 on
+the real gpt-5.4-nano×TB-2 harness, taken as a typical                  Three observations from the run speak directly to the as-
+trajectory rather than a cherry-picked best. The run consumed        sumptions of the reference algorithm.
+19 function evaluations and 9.826 of a nominal Bsea =10 full-              a) The stratified-Tm assumption is load-bearing.: On this
+suite-equivalent search budget over ∼10–11 hours of wall             seed the seeded-prefix shuffle for T8 drew a hard subset of the
+clock.                                                               89-task suite: the baseline Sobol-init point scored 0/8, so the
+                                                                                                                            (m=8)
+A. Trajectory and final artefact                                     empirical flagless base rate at m=8 collapsed to p̂base =0.0.
+                                                                     This is the small-m sampling artefact that drives the bias
+                                                                     (1 − ŵ(m1 ))∆(m0 , m1 ) when p̂base is queried away from its
+    Phase                    # evals   Fidelity   Wall clock
+                                                                     estimation fidelity; ranking is preserved since the shift is x-
+    Sobol init (1+12)          13       m=8        ∼7–8 h            constant. The seeded-shuffle implementation of Tm (§VII) does
+    3 iterations × 2-batch      6       m=8        ∼3–4 h
+                                                                     not enforce stratification across task categories; the assumption
+    Total                      19      all m=8    ∼10–11 h           that the reference algorithm relies on is load-bearing at small
+                                                                     m and was violated here.
+TABLE V: Search-cost accounting for a single end-to-end
+H ARBOR run on the real harness. Every evaluation landed at                b) Bernoulli noise dominates the signal at m=8.: The
+the cheapest fidelity m=8, exhausting 9.826 of 10.0 search-          best observed pass of 2/8 (25%) was attained three times
+budget units.                                                        by configurations #1, #5 and #10 with entirely different
+                                                                     flag combinations. At p≈0.15 and n=8 the Bernoulli standard
+   The returned artefact c⋆ was the five-flag bundle PASTE _ V 2,    error is σ≈13%, so the observed spread {0/8, 1/8, 2/8} lies
+POLAR _ CACHE, REFLEXION, SPECULATIVE _ PREDICTION, and              inside one σ. On this run m=8 was sufficient for ranking
+TRAJECTORY _ REPLAY, scoring 2/8 at m=8 with deployment              only in a very weak sense; a clean argmax at this fidelity is
+cost c(c⋆ )=0.433. The Pareto frontier restricted to c ≤ Bdep =3     indistinguishable from a lucky draw, which is why the algorithm
+contained three points: the flagless baseline (0/8 at c=0.338),      correctly deferred a costly m=89 recheck.
+a three-flag midpoint (1/8 at c=0.367), and c⋆ .                           c) Cost-aware escalation held the budget.: The solver
+                                                                     never escalated to m=89, because doing so would have
+B. Algorithmic-machinery checklist                                   forced truncation of Sobol coverage below the 12-point
+  Every component of Algorithm 2 fired as specified.                 minimum recommended by space-filling-design literature.
+• Sobol 12 at m=8—space-filling exploration that included            This is the intended behaviour of Eq. 7’s denominator:
+   flag combinations absent from the manual case study of §V.        when the ratio KG(x, m=89)/c(m=89) fails to exceed
+
+
+
+                                         © 2026 JP Morgan Chase & Co. All rights reserved   12
+KG(x, m=8)/c(m=8) by enough to recover the space-filling                   [22] Khot, T., Trivedi, H., Finlayson, M., Fu, Y., Richardson, K.,
+budget loss, the solver declines the escalation.                                Clark, P., and Sabharwal, A. Decomposed Prompting: A Modular
+                                                                                Approach for Solving Complex Tasks. ICLR, 2023.
+                                                                           [23] Kusupati, A., Bhatt, G., Rege, A., Wallingford, M., Sinha, A., Ra-
+                                                                                manujan, V., Howard-Snyder, W., Chen, K., Kakade, S., Jain, P.,
+                           R EFERENCES                                          and Farhadi, A. Matryoshka Representation Learning. NeurIPS,
+                                                                                2022.
+ [1] Mikek, B., Vashchilenko, D., Lu, B., and Xu, P. Agentic Code          [24] Li, L., Jamieson, K., DeSalvo, G., Rostamizadeh, A., and Tal-
+     Optimization via Compiler-LLM Cooperation. arXiv preprint                  walkar, A. Hyperband: A Novel Bandit-Based Approach to
+     arXiv:2604.04238, 2026.                                                    Hyperparameter Optimization. JMLR, 18(185):1–52, 2018.
+ [2] Kang, M., Chen, W.-N., Han, D., Inan, H. A., Wutschitz, L.,           [25] LMCache Team. Context Engineering Reuse Patterns: Under
+     Chen, Y., Sim, R., and Rajmohan, S. ACON: Optimizing Context               the Hood of Claude Code. LMCache Engineering Blog, 2025.
+     Compression for Long-horizon LLM Agents. arXiv preprint               [26] Lee, Y., Nair, R., Zhang, Q., Lee, K., Khattab, O., and Finn, C.
+     arXiv:2510.00615, 2025.                                                    Meta-Harness: End-to-End Optimization of Model Harnesses.
+ [3] Gupta, A. 2025 Was Agents. 2026 Is Agent Harnesses. Medium,                arXiv preprint arXiv:2603.28052, 2026.
+     2026.                                                                 [27] OpenTelemetry Specification Working Group. Semantic Con-
+ [4] Balandat, M., Karrer, B., Jiang, D. R., Daulton, S., Letham,               ventions for Generative AI Systems (v1.37). OpenTelemetry
+     B., Wilson, A. G., and Bakshy, E. BoTorch: A Framework for                 Specification, 2026.
+     Efficient Monte-Carlo Bayesian Optimization. NeurIPS, 2020.           [28] Hu, Z., Pan, Z., Kaur, P., Murthy, V., Yu, Z., Guan, Y., Wang,
+ [5] Datadog Engineering.           Closing the Verification Loop:              Z., Swanson, S., and Ding, Y. Pancake: Hierarchical Mem-
+     Observability-Driven Harnesses for Building with Agents (Bit-              ory System for Multi-Agent LLM Serving. arXiv preprint
+     sEvolve). Datadog Engineering Blog, 2026.                                  arXiv:2602.21477, 2026.
+ [6] Su, J., Lan, Q., Xia, Y., Sun, L., Tian, W., Shi, T., Song, X., He,   [29] Sui, Y., Zhao, H., Ma, R., He, Z., Wang, H., Li, J., and
+     L., and Jingsong, Y. Difficulty-Aware Agentic Orchestration                Yang, Y. Act While Thinking: Accelerating LLM Agents
+     for Query-Specific Multi-Agent Workflows. arXiv preprint                   via Pattern-Aware Speculative Tool Execution. arXiv preprint
+     arXiv:2509.11079, 2025.                                                    arXiv:2603.18897, 2026.
+ [7] Liu, J., Zhao, X., Shang, X., and Shen, Z. Dive into Claude Code:     [30] Ram, S., Zhang, S., Gong, J., and Roth, D. On the Optimality
+     The Design Space of Today’s and Future AI Agent Systems.                   Gap of Warm-Started Hyperparameter Optimization. Transac-
+     arXiv preprint arXiv:2604.14228, 2026.                                     tions on Machine Learning Research (TMLR), 2022.
+ [8] Atlan Engineering. RAGAS, TruLens, DeepEval: LLM Evalua-              [31] Sarthi, P., Abdullah, S., Tuli, A., Khanna, S., Goldie, A., and
+     tion Frameworks Compared. Atlan Engineering Blog, 2026.                    Manning, C. D. RAPTOR: Recursive Abstractive Processing
+ [9] Eriksson, D., Pearce, M., Gardner, J. R., Turner, R. D., and               for Tree-Organized Retrieval. ICLR, 2024.
+     Poloczek, M. Scalable Global Optimization via Local Bayesian          [32] Liu, X., Atalar, B., Dai, X., Zuo, J., Wang, S., Lui, J. C. S.,
+     Optimization. NeurIPS, 2019.                                               Chen, W., and Joe-Wong, C. Semantic Caching for Low-Cost
+[10] Eriksson, D. and Jankowiak, M. High-Dimensional Bayesian                   LLM Serving: From Offline Learning to Online Adaptation.
+     Optimization with Sparse Axis-Aligned Subspaces. UAI, 2021.                Proceedings of INFOCOM, 2026.
+[11] Daulton, S., Wan, X., Eriksson, D., Balandat, M., Osborne,            [33] Schreiter, J., Nguyen-Tuong, D., and Toussaint, M. Safe Risk-
+     M. A., and Bakshy, E. Bayesian Optimization over Discrete and              Averse Bayesian Optimization for Controller Tuning. arXiv
+     Mixed Spaces via Probabilistic Reparameterization. NeurIPS,                preprint arXiv:2306.13479, 2023.
+     2022.                                                                 [34] Shinn, N., Cassano, F., Gopinath, A., Narasimhan, K., and Yao,
+[12] Garrido-Merchán, E. C. and Hernández-Lobato, D. Dealing                    S. Reflexion: Language Agents with Verbal Reinforcement
+     with Categorical and Integer-Valued Variables in Bayesian Opti-            Learning. NeurIPS, 2023.
+     mization with Gaussian Processes. Neurocomputing, 380:20–35,          [35] Wang, H., Feng, Y., Cao, Y., Xie, X., and Zhou, S. K.
+     2020.                                                                      SkewRoute: Training-Free LLM Routing for Knowledge Graph
+[13] Wu, J., Toscano-Palmerin, S., Frazier, P. I., and Wilson, A. G.            Retrieval-Augmented Generation via Score Skewness of Re-
+     Practical Multi-fidelity Bayesian Optimization for Hyperparam-             trieved Context. arXiv preprint arXiv:2505.23841, 2025.
+     eter Tuning. UAI, 2020.                                               [36] Snoek, J., Larochelle, H., and Adams, R. P. Practical Bayesian
+[14] Duvenaud, D., Nickisch, H., and Rasmussen, C. E. Additive                  Optimization of Machine Learning Algorithms. NeurIPS, 2012.
+     Gaussian Processes. NIPS, 2011.                                       [37] Swersky, K., Snoek, J., and Adams, R. P. Freeze-Thaw Bayesian
+[15] Golovin, D., Solnik, B., Moitra, S., Kochanski, G., Karro, J.,             Optimization. arXiv preprint arXiv:1406.3896, 2014.
+     and Sculley, D. Google Vizier: A Service for Black-Box Opti-          [38] Laude Institute and Stanford University. Terminal-Bench 2.0: A
+     mization. KDD, 2017.                                                       Benchmark for Agents in Terminal Environments. Open-source
+[16] EleutherAI. LM Evaluation Harness. GitHub, EleutherAI/lm-                  benchmark; https:// www.tbench.ai/ , 2026.
+     evaluation-harness, 2024.                                             [39] Krafton AI Research. How We Reached 74.8% on Terminal-
+[17] Falkner, S., Klein, A., and Hutter, F. BOHB: Robust and Efficient          Bench with Terminus-KIRA: Harness Fixes That Matter. Engi-
+     Hyperparameter Optimization at Scale. ICML, 2018.                          neering Blog, 2026.
+[18] Ding, D., Mallick, A., Wang, C., Sim, R., Mukherjee, S., Rühle,       [40] Wang, J. and Sengupta, B. From Translation to Superset:
+     V., Lakshmanan, L. V. S., and Awadallah, A. H. Hybrid LLM:                 Benchmark-Driven Evolution of a Production AI Agent from
+     Cost-Efficient and Quality-Aware Query Routing. ICLR, 2024.                Rust to Python. arXiv preprint arXiv:2604.11518, 2026.
+[19] Lopopolo, R. Harness Engineering: Leveraging Codex in an              [41] Watershed Engineering. A Practical Framework for LLM System
+     Agent-First World. OpenAI Research Blog, 2026.                             Evaluations for Multi-Step Processes. Watershed Engineering
+[20] Shakir, A., Aarsen, T., and Lee, S. Binary and Scalar Embedding            Blog, 2026.
+     Quantization for Significantly Faster and Cheaper Retrieval.          [42] Wilson, E. B. Probable Inference, the Law of Succession,
+     Hugging Face Blog, 2024.                                                   and Statistical Inference. Journal of the American Statistical
+[21] Jimenez, C., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., and        Association, 22(158):209–212, 1927.
+     Narasimhan, K. SWE-bench: Can Language Models Resolve                 [43] Zandieh, A., Daliri, M., Hadian, M., and Mirrokni, V. Turbo-
+     Real-World GitHub Issues? ICLR, 2024.                                      Quant: Online Vector Quantization with Near-Optimal Distortion
+
+
+
+                                             © 2026 JP Morgan Chase & Co. All rights reserved    13
+Rate. arXiv preprint arXiv:2504.19874, 2025.
+
+
+
+
+                                    © 2026 JP Morgan Chase & Co. All rights reserved   14
+

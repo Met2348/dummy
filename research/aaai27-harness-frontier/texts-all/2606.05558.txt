@@ -1,0 +1,1402 @@
+                                                      AUTOREGRESSIVE D IFFUSION W ORLD M ODELS FOR
+                                                         O FF -P OLICY E VALUATION OF LLM AGENTS
+
+
+                                                                     Kaixuan Liu                                         Guojun Xiong∗
+                                                             Department of Computer Science                        School of Computer Science
+                                                                    Emory University                              Shanghai Jiao Tong University
+                                                                   Atlanta, GA, USA                                     Shanghai, China
+
+
+
+
+arXiv:2606.05558v1 [cs.LG] 4 Jun 2026
+                                                               kaixuan.liu@emory.edu                                gjxiong@sjtu.edu.cn
+
+                                                                   Weinan Zhang                                        Shengpu Tang
+                                                              School of Computer Science                       Department of Computer Science
+                                                             Shanghai Jiao Tong University                            Emory University
+                                                                   Shanghai, China                                   Atlanta, GA, USA
+                                                               wnzhang@sjtu.edu.cn                              shengpu.tang@emory.edu
+
+
+
+
+                                                                                                A BSTRACT
+                                                     Evaluating large language model (LLM) agents in multi-turn interactive environments is expensive
+                                                     and risky, as it requires online environment interaction. We propose A DWM (Autoregressive Diffusion
+                                                     World Model), an evaluation framework that estimates the performance of a new LLM agent policy
+                                                     purely from pre-collected trajectories. The core idea is to learn a latent diffusion world model that
+                                                     simulates how the environment responds to the evaluation policy, without ever executing it in the
+                                                     real environment. Existing diffusion-based OPE methods guide full trajectories in a single pass by
+                                                     jointly diffusing states and actions, an assumption that breaks down for LLM agents whose actions
+                                                     are discrete text that must be sampled from the policy after observing the environment. Unlike
+                                                     autoregressive world models that suffer from compounding errors, A DWM models each transition
+                                                     as an independent denoising process, enabling reliable step-by-step rollouts where the world model
+                                                     and agent alternate in causal order. Crucially, the LLM agent under evaluation directly guides the
+                                                     diffusion generation at each step via a policy-conditioned score function, ensuring that simulated
+                                                     trajectories accurately reflect its decision-making patterns. Empirically, A DWM achieves accurate
+                                                     value estimates and evaluation reliability across diverse multi-turn agent tasks, demonstrating its
+                                                     promise as a practical framework for offline LLM agent evaluation.
+
+
+                                        1       Introduction
+
+                                        Large language model agents are increasingly deployed in multi-turn interactive environments, navigating websites,
+                                        writing and executing code, and reasoning over long document contexts [Yao et al., 2022, Zhou et al., 2023, Jimenez
+                                        et al., 2023]. As these agents are trusted with higher-stakes tasks, evaluating a new agent policy before deployment
+                                        becomes critical. Yet evaluation is expensive; every new agent must be executed live in the real environment, consuming
+                                        API budget and potentially causing irreversible side effects.
+                                        Off-policy evaluation (OPE) addresses this challenge by estimating the value of a new agent from pre-collected offline
+                                        data, without any further environment interaction. Importance sampling methods reweight offline trajectories by policy
+                                        likelihood ratios [Liu et al., 2018, Metelli et al., 2021], but these weights grow exponentially with trajectory length,
+                                        making the estimator impractical for multi-turn agentic settings. Value-based direct methods attempt to fit a value
+                                        function on offline data [Le et al., 2019, Paine et al., 2020], but suffer from compounding bias when the evaluation
+                                        policy differs substantially from the behavior policy. Doubly robust methods combine the two [Farajtabar et al., 2018,
+                                            ∗
+                                                Corresponding author.
+     On-Policy Evaluation                         Traditional Off-Policy Evaluation                             ADWM Solution
+    LLM Agent    Action   Real Environment   Offline Datasets       Model-based Simulator         LLM Agent 𝜋𝑒                                              World Model
+                                                                                                                             Soft Tokens
+                                                            Train                      Rollout
+
+                                                                                                                             Policy Guidance
+                                                       Distribution Shift     Compounding Error
+                                                                                                    Distribution Shift            Compounding Error
+                                                                                                        𝜂𝛼∇ ෍ log 𝜋𝑒
+                                                                                                                              +                                      Train
+                                                                                                                                  ∇ log 𝑝𝜃 + 𝜔∇ log 𝑝𝜙 𝑎 𝑧
+ Context                      Observation
+                                                                                                     Injects 𝜋𝑒 into Every         Diffusion Prior +
+                                                                                                     Denoising Step                Action-aware Denoising
+
+                                                                                                   Denoising
+                Rollout                                                                                                                                      Offline Datasets
+                                                                                                                Alleviates Compounding Error
+
+
+Figure 1: Comparison of evaluation paradigms for LLM agents. (Left) On-policy evaluation requires executing the
+agent in the real environment, which is expensive and potentially unsafe. (Middle) Traditional off-policy evaluation
+learns a model-based simulator from offline data, but suffers from two fundamental issues: distribution shift between the
+behavior and target policies, and compounding error accumulated over multi-step rollouts. (Right) Our A DWM A DWM
+addresses both issues simultaneously. Policy guidance injects πe into every denoising step to alleviate distribution shift,
+while the diffusion prior combined with action-aware denoising alleviates compounding error.
+
+
+Kallus and Uehara, 2022], partially mitigating these issues but not resolving the fundamental difficulty of long-horizon
+distribution shift in high-dimensional text spaces.
+Among direct methods, a more promising model-based alternative is to build a world model: learn the environment
+dynamics from offline data and simulate rollouts under the evaluation policy [Hanna et al., 2017, Lu et al., 2023]. In
+the agentic setting, this simulation must be autoregressive: each LLM action depends on the observation just received,
+so the world model and agent must alternate step by step in causal order. Autoregressive transformer-based world
+models [Micheli et al., 2022, Hafner et al., 2023] follow this structure naturally, but generate observations token by
+token, causing errors to accumulate within each step and compound further across steps, a critical failure mode for the
+long-horizon tasks that LLM agents face. Diffusion models offer a principled remedy: by modeling each transition
+as an independent denoising process, errors do not propagate across steps [Ho et al., 2020, Dhariwal and Nichol,
+2021], and score-function guidance enables the evaluation policy to steer rollouts without retraining. However, existing
+diffusion-based OPE methods [Jackson et al., 2024, Lu et al., 2023] were designed for continuous control, where states
+and actions are both real-valued vectors that can be jointly noised and denoised as a single tensor in one pass, with
+actions generated by the diffusion process itself and the evaluation policy entering only as a guidance signal. In LLM
+agent settings, this assumption fundamentally breaks down: actions are discrete text that must be sampled from the LLM
+after observing the environment and cannot participate in a joint continuous diffusion over trajectories. Generating
+full trajectories in a single pass therefore requires all LLM actions to be known before any observation is generated, a
+circular dependency that is irreconcilable with the step-by-step rollout that agentic evaluation demands.
+We propose A DWM (Autoregressive Diffusion World Model), an offline evaluation framework for LLM agents that
+resolves this tension by instantiating the world model itself as a diffusion process (see Figure 1). The key insight
+is that the globally policy-guided trajectory law can be exactly factored into a sequence of single-step conditionals,
+each decomposing as a product of a prior, an action-posterior, and a policy continuation factor (Theorem 1). This
+product structure maps directly onto guided diffusion, with the evaluation policy steering every denoising step via its
+log-likelihood gradient. Because each transition is an independent denoising process, errors do not compound across
+steps. A DWM is trained entirely offline and evaluates any new agent at inference without retraining.
+Our contributions are summarized as follows:
+▷ We derive the exact autoregressive single-step conditional induced by a policy-guided trajectory law, showing it
+decomposes into a principled three-factor product (Theorem 1).
+▷ We realize this decomposition as a guided diffusion process in a structured latent space, where the evaluation policy
+participates in every denoising step without retraining the world model.
+▷ We demonstrate empirically that A DWM correctly ranks evaluation policies across diverse multi-turn LLM agent
+benchmarks, outperforming classic OPE baselines under realistic LLM importance ratios.
+
+2    Related Work
+Model-Based OPE. Model-based OPE methods estimate policy value by learning a transition model from offline
+data and simulating rollouts under the evaluation policy [Yu et al., 2020, 2021]. The core difficulty is compounding
+model error: small inaccuracies in the learned transition accumulate across steps, causing simulated trajectories to drift
+away from the true environment dynamics over long horizons [Janner et al., 2019, Sutton, 1996, Asadi et al., 2019].
+
+
+                                                                               2
+Existing approaches mitigate this through pessimistic value penalties or conservative policy optimization [Jin et al.,
+2021], but these techniques were designed for low-dimensional continuous control and do not extend to free-form
+text observations. Beyond error accumulation, these methods provide no mechanism for conditioning the simulated
+rollout on the evaluation policy, so generated trajectories reflect the behavior distribution rather than what the evaluation
+policy would actually produce [Voloshin et al., 2019, Feng et al., 2020]. A DWM addresses both issues: modeling each
+transition as an independent denoising process breaks the error accumulation chain [Janner et al., 2022, Ajay et al.,
+2022], while the guided score function ensures every generated observation is conditioned on the evaluation policy.
+
+Diffusion Models for World Modeling. Diffusion models have emerged as powerful environment simulators,
+modeling each transition as an independent denoising process and thereby avoiding the compounding errors that
+plague autoregressive world models. Full-sequence models jointly generate entire trajectories [Janner et al., 2022, Ajay
+et al., 2022, Huang et al., 2025], treating states and actions as a single jointly diffused tensor. This design precludes
+step-by-step rollout, as actions are produced by the diffusion process itself rather than sampled from an external policy.
+Score-based guidance [Ho and Salimans, 2022] can steer such generation toward a target policy [Lu et al., 2023, Jackson
+et al., 2024], but inherits the same limitation: actions must be real-valued vectors that participate in the joint diffusion,
+an assumption that breaks down for LLM agents whose actions are discrete text sampled from the policy after observing
+the environment. A DWM resolves this by deriving an exact factored score that enables the evaluation policy to steer
+each denoising step autoregressively, without requiring actions to be part of the diffusion process.
+
+
+3     Problem Formulation
+
+3.1   Agentic Reinforcement Learning
+
+We formulate agentic reinforcement learning as a sequential decision-making problem, modeled as a Partially Observable
+Markov Decision Process (POMDP) M = (S, A, O, P, E, r, µ, γ), where S is the state space, A is the action space,
+O is the observation space, P : S × A → ∆(S) is the transition kernel, E : S → ∆(O) is the emission distribution,
+r : S × A → R is the reward function, µ ∈ ∆(S) is the initial state distribution, and γ ∈ [0, 1) is the discount
+factor. Since the agent does not have direct access to st , it instead receives a partial observation ot ∈ O emitted by the
+environment, where ot ∼ O(· | st ) is the emission distribution. The agent interacts with the environment over T turns.
+At each turn t ∈ {1, . . . , T }, the environment is in state st ∈ S, from which the agent receives observation ot ∈ O and
+selects an action at ∼ π(· | ht ) based on the interaction history:
+                                            ht = (o1 , a1 , . . . , ot−1 , at−1 , ot ).
+The environment then transitions to the next state st+1 ∼ P (· | st , at ) and emits a reward rt = r(st , at ). A complete
+                                                                                       PT
+trajectory τ = (o1 , a1 , r1 , . . . , oT , aT , rT ) has discounted return R(τ ) = t=1 γ t−1 rt , and induces the trajectory
+distribution:
+                                                             YT
+                                            pπ (τ ) = µ(s1 )    π(at | ht ) P (st+1 | st , at ).
+                                                       t=1
+
+The value of policy π is thus J(π) = Eτ ∼pπ [R(τ )].
+
+3.2   Off-Policy Evaluation for LLM Agents
+
+We assume access to an offline dataset:
+                                           D = {τ (i) }N
+                                                       i=1 ,         τ (i) ∼ pπb (τ ),
+collected by a behavior policy πb , which may correspond to a mixture of different LLM configurations and is treated as
+unknown. Given D and a target evaluation policy πe , a language model distinct from πb that maps observation history
+ht to a distribution over text actions, the goal of off-policy evaluation (OPE) is to estimate:
+                                                 J(πe ) = Eτ ∼pπe [R(τ )],
+
+without executing πe in the real environment. The core challenge is distribution shift: since pπb (τ ) ̸= pπe (τ ),
+trajectories in D are not representative samples from pπe , and direct Monte Carlo estimation on D is severely biased.
+We address this challenge by learning a diffusion world model that simulates rollouts under πe directly, bypassing the
+need for explicit density ratio estimation.
+
+
+                                                                3
+                                                       Architecture of ADWM
+
+
+
+                                                                                                                                                   Value Estimate
+ Offline Datasets
+
+
+
+                                                                                                                                     Reward Head
+                                                                 Diffusion
+
+                             Encoder                                                                Projector
+                                                               K-step Denoising
+
+                                                                                          Latent to Soft Tokens Soft Tokens Predicts Reward Monte Carlo Estimate
+ Saved Trajectories   Maps Observations Latent Space
+                      to Latent Space                                                         LLM Agent
+
+
+
+                                                                                              Evaluation Policy
+
+
+Figure 2: Architecture of A DWM. Offline trajectories are encoded by E into latent states zt , which are processed
+by a diffusion world model pθ through K-step denoising. A projector Gψ maps each latent to soft tokens õt that the
+evaluation policy πe can read in its own embedding space. πe plays two complementary roles: it steers the denoising
+process via policy guidance (dashed arrow, Section 4.2), and samples actions at conditioned on õt to drive autoregressive
+rollout (solid arrow). A reward head rρ predicts rewards r̂t used in the Monte Carlo value estimate J(π ˆ e ).
+
+
+3.3    Denoising Diffusion Models
+
+Denoising Diffusion Probabilistic Models (DDPMs) [Ho et al., 2020] learn to approximate a target distribution q(x) via
+two coupled Markov chains. The forward process gradually corrupts a clean sample x0 ∼ q(x) over K steps:
+                                          √           √
+                                    xk = ᾱk x0 + 1 − ᾱk ϵ,           ϵ ∼ N (0, I),
+where {ᾱk }Kk=1 is a decreasing noise schedule with   ᾱK ≈  0.  The reverse  process learns to recover x0 from xK by
+iteratively applying pθ (xk−1 | xk ) = N (xk−1 ; µθ (xk , k), σk2 I), where µθ is parameterized via a noise prediction
+network ϵθ trained by:
+                                     L(θ) = Ek, x0 , ϵ∼N (0,I) ∥ϵ − ϵθ (xk , k)∥2 .
+                                                                                 
+
+
+Guided diffusion. A trained diffusion model can be steered to sample from a conditional distribution p(x | y) without
+retraining, by incorporating a guidance signal y into each denoising step [Dhariwal and Nichol, 2021]. Since the
+backward transition is well approximated by a Gaussian, p(xk | xk+1 ) ≈ N (µk , Σk ), Bayes’ rule gives:
+                                                 p(xk | xk+1 , y) ∝ p(xk | xk+1 ) p(y | xk ).
+Applying a first-order Taylor expansion of log p(y | xk ) around µk yields:
+                    p(xk | xk+1 , y) ≈ N xk ; µk + Σk gk , Σk ,
+                                                               
+                                                                      gk = ∇x log p(y | x) x=µ .
+                                                                                                                                 k
+
+Sampling from the guided distribution therefore reduces to shifting the denoising mean by Σk gk at each step, with no
+modification to the model itself. In our framework, y is instantiated as the target LLM agent πe , and gk becomes the
+log-likelihood gradient of πe with respect to the current latent state, steering world-model rollouts toward trajectories
+compatible with the agent under evaluation.
+
+4     Autoregressive Diffusion World Models
+We develop an autoregressive diffusion world model for off-policy evaluation of LLM agents. The core insight is that a
+globally policy-guided trajectory law can be exactly factored into a sequence of single-step conditionals, each fusing
+local action consistency with global policy guidance. We realize these conditionals as a guided diffusion process in a
+structured latent space, where the evaluation LLM agent directly steers the denoising at every step (Figure 2).
+
+4.1    From Trajectory Guidance to Single-Step Conditionals
+
+In our agentic setting, the behavior policy πb is unknown and generally intractable, as trajectories in D may originate
+from different LLM configurations, prompting strategies, or agent versions. A natural starting point is importance
+sampling, which corrects for the mismatch between pπb and pπe via policy-likelihood ratios. Since the environment
+transition cancels between pπe and pπb , the target trajectory law satisfies:
+                                                                               T
+                                                                               Y πe (at | ht )
+                                                       pπe (τ ) = pπb (τ ) ·                          ,                                                             (1)
+                                                                               t=1
+                                                                                     πb (at | ht )
+
+
+                                                                          4
+                                P                     P
+so log pπe (τ ) = log pπb (τ ) + t log πe (at | ht ) − t log πb (at | ht ). Since πb is unavailable, and dropping it acts as
+a form of behavior regularization [Jackson et al., 2024] that anchors the distribution to the support of D, we learn a
+generative model pθ (τ ) of the logged trajectory distribution via maximum likelihood, and introduce α > 0 to control
+the correction strength, yielding the policy-guided target law:
+                                                         XT                  
+                              qα (τ | πe ) ∝ pθ (τ ) exp α   log πe (at | ht ) ,                    α > 0.                        (2)
+                                                                t=1
+
+When pθ = pπb and α = 1, this recovers pπe exactly; the full derivation is in Appendix D.
+                                                                                          P a black-box πe . Since πe
+The target law (2) is defined over full trajectories, but cannot be instantiated directly for
+is a black-box LLM that must observe ot before producing at , the trajectory-level tilt t log πe (at | ht ) cannot be
+evaluated without first generating all observations in causal order. This forces an autoregressive decomposition: the
+world model and πe must alternate step by step, generating observations and actions one at a time. The following
+proposition, proved in Appendix B, characterizes the exact single-step conditional induced by (2).
+Proposition 1 (Autoregressive conditional law). Let qα be the policy-guided trajectory law (2). Then for every (ht , at ):
+                             qα (ot+1 | ht , at ; πe ) ∝ pθ (ot+1 | ht , at ) Cα (ot+1 ; ht , at , πe ),                          (3)
+where the continuation factor is:
+                                                                           "              T
+                                                                                                                          #
+                                                                                         X                           
+                  Cα (ot+1 ; ht , at , πe ) := Eτt+1:T ∼pθ (·|ht ,at ,ot+1 ) exp α                log πe (au | hu )           .   (4)
+                                                                                          u=t+1
+
+
+Two candidates for ot+1 may be equally supported by pθ (ot+1 | ht , at ) yet lead to futures with very different
+compatibility with πe ; Cα is precisely the term that distinguishes them. A Bayesian decomposition of pθ (ot+1 | ht , at )
+further separates the prior dynamics from the influence of at , giving the central result of our framework.
+Theorem 1 (Fused single-step conditional). Let qα be the policy-guided trajectory law (2). For every (ht , at ) and any
+ω > 0, η ≥ 0:
+                qeω,η (ot+1 | ht , at ; πe ) ∝ Pθ (ot+1 | ht ) · Pθ (at | ot+1 , ht )ω · Cα (ot+1 ; ht , at , πe )η ,             (5)
+                                               |     {z     } |           {z         } |            {z            }
+                                                     prior             action posterior              policy continuation
+
+where ω = η = 1 recovers the exact conditional induced by qα .
+Remark 1 (Limiting cases of ω and η). The parameters ω and η interpolate between degenerate regimes that illuminate
+the role of each guidance term. Setting η = 0 removes the policy continuation factor entirely, reducing qeω,0 to an
+action-posterior-weighted prior that simulates the behavior distribution with no correction toward πe . Setting ω = 0
+suppresses the action posterior, causing the model to generate observations from the unconditional prior Pθ (ot+1 | ht )
+irrespective of at and breaking action-consistency. The canonical choice ω = η = 1 recovers the exact conditional
+induced by qα . In practice, ω is controlled by the CFG scale λ via ω = 1 + λ, and η is annealed over the reverse
+process; both are treated as hyperparameters rather than tuned per environment.
+The three factors play distinct roles. The prior Pθ (ot+1 | ht ) anchors generated observations to the support of the
+offline data. The action posterior Pθ (at | ot+1 , ht )ω injects current-step action information without a separate classifier,
+recovered directly from classifier-free guidance as shown in Section 4.2. The continuation factor Cα re-weights candidate
+observations by their long-horizon compatibility with πe , ensuring the world model generates observations that open up
+futures where πe can act effectively. Crucially, since (5) is a single-step conditional, πe never needs to produce actions
+before observations are generated, fully resolving the circular dependency that prevents existing diffusion OPE methods
+from operating autoregressively. The proof is given in Appendix C. Each factor corresponds to a distinct gradient term
+in the score function, which we now realize as a guided diffusion process in latent space.
+Since (5) is a product of three factors, its log decomposes into a sum, and differentiating with respect to ot+1 yields an
+additive score:
+         ∇ot+1 log qeω,η = ∇ log Pθ (ot+1 | ht ) + ω ∇ log Pθ (at | ot+1 , ht ) + η ∇ log Cα (ot+1 ; ht , at , πe ) .             (6)
+                           |        {z        }      |         {z            }      |           {z               }
+                                     prior score                action-posterior score                     continuation score
+
+This additive structure is precisely what makes guided diffusion applicable: each term can be approximated and injected
+independently into the reverse process without retraining the world model. The prior score is given directly by the score
+network; the action-posterior score is recovered from the difference between action-conditioned and unconditional
+outputs via classifier-free guidance; and the continuation score requires differentiating through πe ’s log-likelihoods
+along future rollouts. We realize all three in a structured latent space, as detailed next.
+
+
+                                                                 5
+4.2   Guided Diffusion World Model
+
+The product structure of Theorem 1 maps directly onto guided diffusion: each factor contributes an additive term to
+the score, and sampling reduces to running a guided reverse process with πe steering the denoising at every step. To
+instantiate this in practice, we first specify the latent space in which the diffusion operates and how πe reads world-model
+states.
+
+Latent state and policy interface. Observations in LLM agent tasks are raw text, which cannot be directly denoised.
+We therefore operate in a structured latent space. An encoder E maps each observation to a compact representation
+zt = E(ot ) ∈ Rd , and a projector Gψ produces soft tokens õt = Gψ (zt ) ∈ RK×dLLM that πe can read in its own
+embedding space. The world model operates on the latent history ht = (z1 , a1 , . . . , zt ), while πe conditions on
+hπt = (õ1 , a1 , . . . , õt ). A pretrained semantic encoder is insufficient for this role: two observations that differ only in a
+negation may be nearby in semantic space yet lead to entirely different dynamics, corrupting all three guidance terms in
+(9) simultaneously. We therefore train E end-to-end jointly with all other components on D, so that the representation is
+shaped by the dynamics of the environment rather than surface semantics. The projector Gψ is trained with a contrastive
+InfoNCE objective [Oord et al., 2018]:
+                                           B
+                                              "                                  #         B
+                                       1 X           esii /τ           esii /τ         β X                     2
+                            Lψ = −              log P s /τ + log P s /τ +                      Ḡψ (zi ) − ēi 2 ,               (7)
+                                      2B i=1          je
+                                                           ij
+                                                                        je
+                                                                             ji       B   i=1
+
+where sij = cossim(Ḡψ (zi ), ēj ), Ḡψ (zi ) is the token-mean of the projected soft tokens, ēi is the token-mean of the
+ground-truth πe input embeddings, τ is a temperature, and β = 0.1 balances discriminability against distributional
+alignment with πe ’s embedding space. Two auxiliary losses shape the representation: an inverse dynamics loss LIDM
+encouraging action-aware latents, and a behavior cloning loss LBC providing a stable retrieval target for Gψ ; full
+definitions are in Appendix F.7.
+
+Guided score. Following classifier-free guidance [Ho and Salimans, 2022], we parameterize the world model as a
+                   k
+score network sθ (zt+1 , k; hzt , at ). To realize the prior and action-posterior factors of Theorem 1 without a classifier, we
+train sθ under two regimes by randomly masking at with probability p during training:
+                                                                                                
+                             h
+                                        k        z                      k            2
+                                                                                       i          ∅ w.p. p,
+             LDSM (θ) = E sθ (zt+1 , k; ht , ãt ) − ∇zk log pk (zt+1 | zt+1 ) , ãt =                                       (8)
+                                                                                                  at otherwise.
+
+By Bayes’ rule, the difference between the action-conditioned and unconditional outputs recovers the action-posterior
+                      k
+score ∇ log pϕ (at | zt+1 , hzt ), so classifier-free guidance with scale λ directly realizes the first two terms of (5), with
+ω = 1 + λ.
+For the continuation term, the score ∇zt+1 log Cα requires an expectation over all future trajectories and is intractable.
+At each diffusion step k, the score network provides a denoised estimate ẑt+1 ; we roll the world model forward from
+this estimate and differentiate through πe ’s log-likelihoods along the resulting trajectory. The complete guided score is:
+                       k
+                    s(zt+1 , k; hzt , at , πe ) = ∇zt+1
+                                                    k
+                                                                 k
+                                                        log pθ (zt+1 | hzt ) + ω ∇zt+1
+                                                                                   k
+                                                                                                     k
+                                                                                       log pϕ (at | zt+1 , hzt )
+                                                                 T
+                                                                 X
+                                               + ηk α ∇ẑt+1            log πe (âu | hπu ),                                    (9)
+                                                                u=t+1
+
+where ηk is annealed so that continuation guidance strengthens as ẑt+1 becomes more reliable late in the reverse process.
+The complete derivation of (9) from Theorem 1 is given in Appendix E.
+
+Value estimation. Given the guided transition model, we estimate J(πe ) by Monte Carlo rollout. At each step, πe
+samples an action at ∼ πe (· | hπt ), the world model generates the next latent zt+1 via the reverse diffusion process
+with score (9), and the reward head predicts r̂t = rρ (zt , at , zt+1 , hzt ). Episodes terminate when the termination head
+dˆt = σ(dρ (zt+1 , hzt )) exceeds a threshold. Averaging over M rollouts gives:
+                                                              M Tm
+                                                           1 XX       (m)
+                                                  J(πe ) =
+                                                  b                 r̂ ,                                                       (10)
+                                                           M m=1 t=1 t
+
+where Tm is the termination step of the m-th rollout. No environment interaction is required.
+
+
+                                                                 6
+5      Experiments
+We evaluate A DWM around three questions:
+       1. Can a world model rank unseen policies from behavior data alone?
+       2. How does it compare to classical OPE under realistic LLM importance ratios?
+       3. Which components of the diffusion guidance matter?
+
+Experiment setup. We evaluate A DWM on four LLM-agent benchmarks chosen to span the reward and post-training
+regimes of modern LLM agents. On the reward axis, the suite covers dense per-step reward (HotpotQA F1 [Yang et al.,
+2018]), shaped partial reward (ScienceWorld [Wang et al., 2022]), continuous partial reward (WebShop [Yao et al.,
+2022]), and sparse binary success (ALFWorld [Shridhar et al., 2020]). On the policy axis, the cells cover task-specific
+RLHF-style post-training (DPO and PRM on HotpotQA [Xiong et al., 2025]; ETO on ScienceWorld [Song et al., 2024])
+and generic-to-specialized iterative fine-tuning (LEAP on ALFWorld and WebShop [Choudhury and Sodhi, 2024]). All
+evaluation policies are publicly released checkpoints from prior work, summarised alongside their behavior counterparts
+in Table 1.
+
+Table 1: Environments, policies, and reward structure. The behavior LLM πb is used only to collect world-model
+training data; the evaluation LLM πe is the policy A DWM scores at test time. Citations point to the benchmark source
+and the released πe checkpoint. Per-cell behavior trajectory counts, GT episode budgets, and full hyperparameters are
+in Appendix F.
+Env.                               Behavior πb            Evaluation πe                                         Reward
+HotpotQA [Yang et al., 2018]       ReAct-HotpotQA-SFT     ReAct-HotpotQA {DPO, PRM} [Xiong et al., 2025]        dense F1
+ScienceWorld [Wang et al., 2022]   sw-llama-sft           sw-llama-eto [Song et al., 2024]                      partial
+ALFWorld [Shridhar et al., 2020]   Llama-3.1-8B-Instr.    leap-alf-{iter1, iter3} [Choudhury and Sodhi, 2024]   sparse 0/1
+WebShop [Yao et al., 2022]         Llama-3.1-8B-Instr.    leap-ws-iter1 [Choudhury and Sodhi, 2024]             cont. partial
+
+
+In every cell, the behavior policy πb used to collect world-model training trajectories is strictly distinct from the
+evaluation policy πe being scored. Concretely, πb is either the matching task-specific SFT base of the same agent
+(HotpotQA, ScienceWorld) or, when no such base has been publicly released, the generic instruction-tuned Llama-
+3.1-8B-Instruct [Grattafiori et al., 2024] (ALFWorld, WebShop). The world model is therefore trained without ever
+observing πe . On ALFWorld we additionally evaluate the third LEAP iteration to test cross-iteration ranking; on
+HotpotQA we pool DPO and PRM checkpoints into a 10-cell cross-policy split that probes policy-level discrimination
+beyond the within-policy ε-axis.
+To assess sensitivity across a graded range of policy quality, we construct a one-parameter family of evaluation policies
+via ε-greedy mixing: at each step, πe acts with probability 1−ε and a uniformly random admissible action is taken with
+probability ε, for ε ∈ {0, 0.25, 0.5, 0.75, 1.0}. The real-environment ground-truth curve is obtained by executing πeε in
+the actual benchmark; A DWM produces Jˆ entirely from world-model rollouts with no environment access at evaluation
+time. We run five random seeds per cell and report the Spearman rank correlation between the seed-averaged Jˆ curve
+and the ground-truth curve. Full experimental details are in Appendix F.
+
+Baselines. We compare A DWM against five classical OPE estimators: direct method (DM) [Voloshin et al., 2019],
+importance sampling (IS) [Precup et al., 2000], weighted importance sampling (WIS) [Precup et al., 2000], fitted-Q
+evaluation (FQE) [Le et al., 2019], and doubly robust estimation (DR) [Jiang and Li, 2016], all implemented following
+the COBS reference protocol [Voloshin et al., 2019]. For estimators that require πb (IS, WIS, DR), we supply exact
+per-token log-probabilities of the behavior LLM rather than the uniform action prior commonly used in prior work,
+providing these baselines with privileged information that is unavailable in realistic deployments (closed-source APIs,
+deleted checkpoints, hidden tokenizers). We include them as diagnostic references rather than competitive baselines,
+since the unbounded LLM action space and limited distributional overlap in long-horizon rollouts violate the absolute-
+continuity assumption underlying IS-based estimators. Implementation details and the per-ε FQE correction are in
+Appendix G.
+
+5.1    Results
+
+Main results. Table 2 compares A DWM against all five classical estimators across six (πb , πe ) configurations. A DWM
+is the only estimator with strictly positive Spearman ρ in every cell, ranging from +0.67 on ALFWorld-iter1 to +0.90
+
+
+                                                           7
+on both HotpotQA-DPO and WebShop-iter1 (mean +0.82), while every classical baseline fails in at least three cells. IS
+and DR collapse under LLM-induced importance ratios spanning over twenty orders of magnitude, with correlations as
+low as −0.90. WIS eliminates the explosion but degenerates to a single dominant-weight trajectory over long horizons,
+producing ρ=0 on both ALFWorld cells and spurious positive correlations elsewhere driven by floating-point underflow
+ties. DM estimates a behavior-policy state value invariant to the evaluation policy’s action distribution, yielding
+ρ=0 within every ε-sweep and inverting on the cross-policy split (ρ=−0.45). FQE is the sole partial exception: once
+corrected for the ε-linearity artifact in the COBS protocol, it attains ρ=+0.82 on ALFWorld-iter1 but collapses or inverts
+elsewhere (mean ρ=+0.10). A DWM, requiring neither importance weights nor a linear inductive bias, outperforms the
+next-best baseline by +0.34 in mean correlation; the world model is trained exclusively on πb trajectories in every cell.
+                         ˆ
+Per-seed statistics and J/GT    curves are in Appendix H.
+
+Table 2: Per-cell Spearman ρ between each estimator’s Jˆ and the real-environment ground-truth curve. A DWM is the
+only estimator with ρ>0 on every configuration (mean +0.82, min +0.67). CI95 and p-values from 2000 bootstrap
+                   ˆ GT) pairs. Per-seed values and the underlying Jˆ / GT curves are in Appendix H.
+resamples on the (J,
+                                                        A DWM (ours)                         Classical OPE baselines (Spearman ρ)
+                Configuration         n      ρ                  CI95             p       FQE          DR        DM       IS        WIS
+                HotpotQA-DPO     5         +0.90        [+0.11, +1.00]          0.037 −0.10 −0.90  0.00              −0.90 +0.90
+                ScienceWorld-ETO 5         +0.82        [+0.00, +1.00]          0.089 −0.21 +0.21  0.00              +0.21 +0.97
+                ALFWorld-iter1   5         +0.67        [−0.91, +1.00]          0.219 +0.82 +0.21  0.00              −0.82  0.00
+                ALFWorld-iter3   5         +0.80        [+0.11, +1.00]          0.104  0.00 +0.40  0.00              −0.70  0.00
+                WebShop-iter1     5        +0.90        [+0.11, +1.00]          0.037  0.00 −0.20  0.00              −0.90 +0.90
+                HotpotQA-cross   10        +0.81        [+0.23, +1.00]          0.005 +0.12 −0.64 −0.45              −0.52 +0.13
+                Mean ρ                     +0.82                                        +0.10       −0.15 −0.07 −0.61              +0.48
+                Min ρ                      +0.67                                        −0.21       −0.90 −0.45 −0.90               0.00
+
+
+Training convergence. Figure 3 shows that all loss components converge stably across all four benchmarks within
+50 epochs. Beyond LDSM (8), the total objective LWM includes two auxiliary terms: an inverse dynamics loss
+LIDM that predicts the bridging action between consecutive latents, encouraging action-aware representations, and
+a behavior cloning loss LBC that provides a stable retrieval target for the ψ adapter. LDSM converges fastest; LIDM
+and LBC converge more gradually, consistent with the greater difficulty of predicting actions and cloning behavior on
+long-horizon text observations. Full definitions and loss weights are in Appendix F.7.
+
+                                                   Total L WM          L DSM         L IDM          L BC
+
+                HotpotQA                         ScienceWorld                                 ALFWorld                             WebShop
+       4                             2.5
+                                                                                 5                                   6
+                                     2.0                                                                             5
+       3
+                                                                                 4
+                                     1.5                                                                             4
+loss
+                                                                                 3
+       2
+                                                                                                                     3
+                                     1.0
+                                                                                 2
+                                                                                                                     2
+       1
+                                     0.5                                         1                                   1
+
+       0                             0.0                                         0                                   0
+           10   20   30    40   50          10     20     30      40   50              10      20    30    40   50            10    20     30   40   50
+                 epoch                              epoch                                       epoch                                epoch
+
+
+Figure 3: Training loss curves across all four benchmarks. Total world-model loss LWM and its components converge
+stably within 50 epochs; see Appendix F.7 for full definitions and Appendix F.8 for the training procedure.
+
+Ablations. Figure 4 isolates the contribution of A DWM’s three core components across three environments with
+distinct reward structures. Each component dominates in a different reward regime, and no single component suffices
+across the full suite. Local CFG is most critical in sparse-reward settings: removing it collapses WebShop ρ from
++0.90 to +0.10 and drops ScienceWorld from +1.00 to +0.60, while leaving HotpotQA intact (+0.90 → +0.70).
+Continuation guidance is the primary mechanism for keeping trajectories on a successful path when per-step reward
+is absent, with removal degrading WebShop to +0.30 and ScienceWorld to +0.90. The ψ adapter dominates on
+linguistically rich environments: its removal drops HotpotQA to +0.40 and degrades both ScienceWorld and WebShop
+to +0.60. A DWM’s robustness therefore requires the combination of all three components. Additional ablations on
+behavior-data diversity, latent dimension, and ψ adapter loss design are in Appendix I.
+
+
+                                                                            8
+                        +1.00
+                  1.0           +0.90                +0.90                             +0.90        +0.90
+
+
+
+
+     Spearman ½
+                  0.8                                                                         +0.70
+                            +0.60     +0.60                             +0.60
+                  0.6
+                                                                                                          +0.40
+                  0.4                                             +0.30
+
+                  0.2                                      +0.10
+
+                  0.0
+
+                          ScienceWorld                     WebShop                           HotpotQA
+                          Full ADWM           w/o local CFG           w/o continuation             w/o Ã adapter
+
+Figure 4: Component ablation on three environments (avg-Jˆ Spearman ρ, single seed; five-seed trends in Appendix I).
+Each component dominates in a distinct reward regime: local CFG on sparse long-horizon tasks, continuation guidance
+on goal-conditioned trajectories, and the ψ adapter on linguistically rich state spaces. Removing any single component
+degrades at least one environment; full A DWM consistently achieves the highest ρ.
+
+
+6   Conclusion
+We presented A DWM, an offline evaluation framework that estimates LLM agent policy value purely from pre-collected
+trajectories. The key contribution is an exact decomposition of a policy-guided trajectory law into autoregressive
+single-step conditionals, each realized as a guided diffusion process in which the evaluation policy steers every denoising
+step without retraining or explicit importance weights. Empirically, A DWM is the only estimator with consistently
+positive rank correlations across all six (πb , πe ) configurations, with ablations confirming that robustness requires the
+combination of all three guidance components.
+
+References
+Anurag Ajay, Yilun Du, Abhi Gupta, Joshua Tenenbaum, Tommi Jaakkola, and Pulkit Agrawal. Is conditional generative
+  modeling all you need for decision-making? arXiv preprint arXiv:2211.15657, 2022.
+Kavosh Asadi, Dipendra Misra, Seungchan Kim, and Michel L Littman. Combating the compounding-error problem
+  with a multi-step model. arXiv preprint arXiv:1905.13320, 2019.
+Sanjiban Choudhury and Paloma Sodhi. Better than your teacher: Llm agents that learn from privileged ai feedback.
+  arXiv preprint arXiv:2410.05434, 2024.
+Prafulla Dhariwal and Alexander Nichol. Diffusion models beat gans on image synthesis. Advances in neural
+  information processing systems, 34:8780–8794, 2021.
+Mehrdad Farajtabar, Yinlam Chow, and Mohammad Ghavamzadeh. More robust doubly robust off-policy evaluation.
+  In International Conference on Machine Learning, pages 1447–1456. PMLR, 2018.
+Yihao Feng, Tongzheng Ren, Ziyang Tang, and Qiang Liu. Accountable off-policy evaluation with kernel bellman
+  statistics. In International Conference on Machine Learning, pages 3102–3111. PMLR, 2020.
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Let-
+  man, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783,
+  2024.
+Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap. Mastering diverse domains through world models.
+  arXiv preprint arXiv:2301.04104, 2023.
+Josiah Hanna, Peter Stone, and Scott Niekum. Bootstrapping with models: Confidence intervals for off-policy evaluation.
+  In Proceedings of the AAAI Conference on Artificial Intelligence, volume 31, 2017.
+Jonathan Ho and Tim Salimans. Classifier-free diffusion guidance. arXiv preprint arXiv:2207.12598, 2022.
+Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. Advances in neural information
+  processing systems, 33:6840–6851, 2020.
+Siqiao Huang, Jialong Wu, Qixing Zhou, Shangchen Miao, and Mingsheng Long. Vid2world: Crafting video diffusion
+  models to interactive world models. arXiv preprint arXiv:2505.14357, 2025.
+
+
+                                                              9
+Matthew Thomas Jackson, Michael Tryfan Matthews, Cong Lu, Benjamin Ellis, Shimon Whiteson, and Jakob Foerster.
+ Policy-guided diffusion. arXiv preprint arXiv:2404.06356, 2024.
+Michael Janner, Justin Fu, Marvin Zhang, and Sergey Levine. When to trust your model: Model-based policy
+ optimization. Advances in neural information processing systems, 32, 2019.
+Michael Janner, Yilun Du, Joshua B Tenenbaum, and Sergey Levine. Planning with diffusion for flexible behavior
+ synthesis. arXiv preprint arXiv:2205.09991, 2022.
+Nan Jiang and Lihong Li. Doubly robust off-policy value evaluation for reinforcement learning. In International
+  conference on machine learning, pages 652–661. PMLR, 2016.
+Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan.
+  Swe-bench: Can language models resolve real-world github issues? arXiv preprint arXiv:2310.06770, 2023.
+Ying Jin, Zhuoran Yang, and Zhaoran Wang. Is pessimism provably efficient for offline rl? In International conference
+  on machine learning, pages 5084–5096. PMLR, 2021.
+Nathan Kallus and Masatoshi Uehara. Efficiently breaking the curse of horizon in off-policy evaluation with double
+  reinforcement learning. Operations Research, 70(6):3282–3302, 2022.
+Hoang Le, Cameron Voloshin, and Yisong Yue. Batch policy learning under constraints. In International Conference
+  on Machine Learning, pages 3703–3712. PMLR, 2019.
+Qiang Liu, Lihong Li, Ziyang Tang, and Dengyong Zhou. Breaking the curse of horizon: Infinite-horizon off-policy
+  estimation. Advances in neural information processing systems, 31, 2018.
+Cong Lu, Philip Ball, Yee Whye Teh, and Jack Parker-Holder. Synthetic experience replay. Advances in Neural
+  Information Processing Systems, 36:46323–46344, 2023.
+Alberto Maria Metelli, Alessio Russo, and Marcello Restelli. Subgaussian and differentiable importance sampling for
+  off-policy evaluation and learning. Advances in neural information processing systems, 34:8119–8132, 2021.
+Vincent Micheli, Eloi Alonso, and François Fleuret. Transformers are sample-efficient world models. arXiv preprint
+  arXiv:2209.00588, 2022.
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. Representation learning with contrastive predictive coding. arXiv
+  preprint arXiv:1807.03748, 2018.
+Tom Le Paine, Cosmin Paduraru, Andrea Michi, Caglar Gulcehre, Konrad Zolna, Alexander Novikov, Ziyu Wang, and
+  Nando de Freitas. Hyperparameter selection for offline reinforcement learning. arXiv preprint arXiv:2007.09055,
+  2020.
+Doina Precup, Richard S Sutton, and Satinder Singh. Eligibility traces for off-policy policy evaluation. 2000.
+Mohit Shridhar, Xingdi Yuan, Marc-Alexandre Côté, Yonatan Bisk, Adam Trischler, and Matthew Hausknecht. Alfworld:
+ Aligning text and embodied environments for interactive learning. arXiv preprint arXiv:2010.03768, 2020.
+Yifan Song, Da Yin, Xiang Yue, Jie Huang, Sujian Li, and Bill Yuchen Lin. Trial and error: Exploration-based trajectory
+  optimization of llm agents. In Proceedings of the 62nd Annual Meeting of the Association for Computational
+  Linguistics (Volume 1: Long Papers), pages 7584–7600, 2024.
+Leonid Kuvayev Rich Sutton. Model-based reinforcement learning with an approximate, learned model. In Proceedings
+  of the ninth Yale workshop on adaptive and learning systems, volume 1996, pages 101–105, 1996.
+Cameron Voloshin, Hoang M Le, Nan Jiang, and Yisong Yue. Empirical study of off-policy policy evaluation for
+  reinforcement learning. arXiv preprint arXiv:1911.06854, 2019.
+Ruoyao Wang, Peter Jansen, Marc-Alexandre Côté, and Prithviraj Ammanabrolu. Scienceworld: Is your agent smarter
+  than a 5th grader? In Proceedings of the 2022 Conference on Empirical Methods in Natural Language Processing,
+  pages 11279–11298, 2022.
+Guangzhi Xiong, Qiao Jin, Xiao Wang, Yin Fang, Haolin Liu, Yifan Yang, Fangyuan Chen, Zhixing Song, Dengyu
+ Wang, Minjia Zhang, et al. Rag-gym: Optimizing reasoning and search agents with process supervision. arXiv
+  e-prints, pages arXiv–2502, 2025.
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov, and Christopher D
+  Manning. Hotpotqa: A dataset for diverse, explainable multi-hop question answering. In Proceedings of the 2018
+  conference on empirical methods in natural language processing, pages 2369–2380, 2018.
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R Narasimhan, and Yuan Cao. React: Synergizing
+  reasoning and acting in language models. In The eleventh international conference on learning representations, 2022.
+
+
+                                                          10
+Tianhe Yu, Garrett Thomas, Lantao Yu, Stefano Ermon, James Y Zou, Sergey Levine, Chelsea Finn, and Tengyu
+  Ma. Mopo: Model-based offline policy optimization. Advances in neural information processing systems, 33:
+  14129–14142, 2020.
+Tianhe Yu, Aviral Kumar, Rafael Rafailov, Aravind Rajeswaran, Sergey Levine, and Chelsea Finn. Combo: Conservative
+  offline model-based policy optimization. Advances in neural information processing systems, 34:28954–28967,
+  2021.
+Shuyan Zhou, Frank F Xu, Hao Zhu, Xuhui Zhou, Robert Lo, Abishek Sridhar, Xianyi Cheng, Tianyue Ou, Yonatan
+  Bisk, Daniel Fried, et al. Webarena: A realistic web environment for building autonomous agents. arXiv preprint
+  arXiv:2307.13854, 2023.
+
+
+
+
+                                      Supplementary Materials
+A    Limitations
+A DWM has two practical scope conditions. First, like all OPE estimators, it is bottlenecked by ground-truth quality: on
+WebShop the binomial standard error on GT success rate (≈ 7%) is comparable to the gap between adjacent LEAP
+iterates (3–19%), so finer cross-iterate distinctions require substantially more GT episodes. Second, the ψ adapter is
+tied to the evaluation LLM’s embedding space, making cross-family evaluation (e.g., a Llama-trained world model
+scoring a Qwen-family πe ) require a one-time adapter retrain. Neither condition reflects a fundamental limitation of the
+underlying formulation.
+
+B    Proof of Proposition 1
+We derive the single-step conditional law for ot+1 induced by the policy-guided trajectory law qα (τ | πe ) defined in (2).
+Fix a history ht = (o1 , a1 , . . . , ot ) and a current action at . We wish to characterize the conditional distribution
+qα (ot+1 | ht , at ; πe ). Denote the future suffix trajectory as:
+                                           τt+1:T = (ot+1 , at+1 , ot+2 , . . . , aT , oT +1 ),
+so that the full trajectory decomposes as τ = (ht , at , τt+1:T ).
+By definition of qα in (2), the unnormalized density of any trajectory τ is:
+                                                              XT                     
+                                   qα (τ | πe ) ∝ pθ (τ ) exp α    log πe (at′ | ht′ ) .
+                                                                    t′ =1
+                                                                                               Pt
+Conditioning on (ht , at ) amounts to fixing all variables up to and including at . The terms t′ =1 log πe (at′ | ht′ ) in the
+exponent are therefore constant with respect to the future suffix τt+1:T , and are absorbed into the normalizing constant.
+We obtain:
+                                                      qα (τ | πe )
+                     qα (τt+1:T | ht , at ; πe ) =
+                                                   qα (ht , at | πe )
+                                                                              XT                     
+                                                 ∝ pθ (τt+1:T | ht , at ) exp α      log πe (au | hu ) ,                  (11)
+                                                                                u=t+1
+
+where we have used the fact that pθ (τ ) = pθ (ht , at ) · pθ (τt+1:T | ht , at ) by the chain rule of probability.
+We now factor pθ (τt+1:T | ht , at ) by separating out ot+1 from the remaining suffix. By the chain rule:
+                           pθ (τt+1:T | ht , at ) = pθ (ot+1 | ht , at ) pθ (τt+2:T | ht , at , ot+1 ),                      (12)
+where we write τt+2:T = (at+1 , ot+2 , . . . , aT , oT +1 ) for the suffix starting after ot+1 . Note that once ot+1 is fixed, the
+updated history is ht+1 = (ht , at , ot+1 ), so pθ (τt+2:T | ht , at , ot+1 ) = pθ (τt+2:T | ht+1 ).
+Substituting (12) into (11):
+                                                                                        XT                  
+             qα (τt+1:T | ht , at ; πe ) ∝ pθ (ot+1 | ht , at ) pθ (τt+2:T | ht+1 ) exp α   log πe (au | hu ) .              (13)
+                                                                                         u=t+1
+
+
+
+                                                               11
+To obtain the marginal over ot+1 , we integrate (13) over all remaining future variables τt+2:T :
+                                   Z
+        qα (ot+1 | ht , at ; πe ) = qα (τt+1:T | ht , at ; πe ) dτt+2:T
+                                                           Z                           XT                  
+                                  ∝ pθ (ot+1 | ht , at )       pθ (τt+2:T | ht+1 ) exp α   log πe (au | hu ) dτt+2:T .   (14)
+                                                                                       u=t+1
+The integral in (14) can be recognized as an expectation under the prior over future trajectories rooted at ot+1 .
+Specifically, since pθ (τt+2:T | ht+1 ) is a probability distribution over τt+2:T :
+                          Z                          X    T                     
+                             pθ (τt+2:T | ht+1 ) exp α          log πe (au | hu ) dτt+2:T
+                                                               u=t+1
+                              Z                                      XT                  
+                          =        pθ (τt+1:T | ht , at , ot+1 ) exp α   log πe (au | hu ) dτt+1:T
+                                                                         u=t+1
+                                                           "    T
+                                                                                    #
+                                                              X                   
+                          = Eτt+1:T ∼pθ (·|ht ,at ,ot+1 ) exp α   log πe (au | hu ) ,                                    (15)
+                                                                     u=t+1
+where in the second equality we have re-expressed the integral as an expectation over the full future suffix τt+1:T
+conditioned on (ht , at , ot+1 ), noting that integrating over τt+2:T under pθ (· | ht+1 ) is equivalent to integrating over
+τt+1:T under pθ (· | ht , at , ot+1 ) since the ot+1 component is fixed in both cases.
+The expectation in (15) is precisely the continuation factor Cα (ot+1 ; ht , at , πe ) defined in (4). Substituting back into
+(14):
+                             qα (ot+1 | ht , at ; πe ) ∝ pθ (ot+1 | ht , at ) Cα (ot+1 ; ht , at , πe ).                 (16)
+This is precisely (3), completing the proof.                                                                               □
+
+C    Proof of Theorem 1
+We derive the fused single-step conditional law (5) from Proposition 1.
+By Proposition 1, the single-step conditional induced by qα satisfies:
+                              qα (ot+1 | ht , at ; πe ) ∝ pθ (ot+1 | ht , at ) Cα (ot+1 ; ht , at , πe ).              (17)
+It remains to decompose pθ (ot+1 | ht , at ). Consider the joint distribution Pθ (ot+1 , at | ht ). By the chain rule, this
+factors in two ways:
+                                   Pθ (ot+1 , at | ht ) = Pθ (ot+1 | ht , at ) Pθ (at | ht ),                          (18)
+                                   Pθ (ot+1 , at | ht ) = Pθ (at | ot+1 , ht ) Pθ (ot+1 | ht ).                        (19)
+Equating (18) and (19):
+                             Pθ (ot+1 | ht , at ) Pθ (at | ht ) = Pθ (at | ot+1 , ht ) Pθ (ot+1 | ht ).                (20)
+Dividing both sides by Pθ (at | ht ) > 0:
+                                                            Pθ (at | ot+1 , ht ) Pθ (ot+1 | ht )
+                                   Pθ (ot+1 | ht , at ) =                                          .                   (21)
+                                                                       Pθ (at | ht )
+Since Pθ (at | ht ) is constant with respect to ot+1 for fixed (ht , at ), (21) gives:
+                                   Pθ (ot+1 | ht , at ) ∝ Pθ (ot+1 | ht ) Pθ (at | ot+1 , ht ).                        (22)
+Substituting (22) into (17):
+                       qα (ot+1 | ht , at ; πe ) ∝ Pθ (ot+1 | ht ) Pθ (at | ot+1 , ht ) Cα (ot+1 ; ht , at , πe ),     (23)
+which is the ω = η = 1 case of (5).
+For general ω > 0 and η ≥ 0, we introduce the steered family by replacing each factor with its ω-th and η-th power
+respectively. This corresponds to treating ω and η as inverse temperatures on the action posterior and continuation
+factor, giving:
+                   qeω,η (ot+1 | ht , at ; πe ) ∝ Pθ (ot+1 | ht ) Pθ (at | ot+1 , ht )ω Cα (ot+1 ; ht , at , πe )η . (24)
+This is (5), completing the proof.                                                                                     □
+
+
+                                                                    12
+Remark 2. The denominator Pθ (at | ht ) in (21) depends only on (ht , at ) and not on ot+1 . It is therefore a constant
+with respect to the variable of integration and is absorbed into the normalizing constant of the conditional distribution.
+Remark 3. The steered family qeω,η is a valid probability distribution for any ω > 0 and η ≥ 0, provided the normalizing
+constant                            Z
+                   Z(ω, η; ht , at ) =   Pθ (ot+1 | ht ) Pθ (at | ot+1 , ht )ω Cα (ot+1 ; ht , at , πe )η dot+1
+
+is finite, which holds under standard regularity conditions on Pθ and πe .
+
+D    Relation to Classical Importance Sampling
+We show that the policy-guided target law (2) is the natural generalization of importance sampling to the setting where
+the behavior policy πb is unknown, and that it recovers the evaluation trajectory law exactly when pθ = pπb and α = 1.
+
+Classical importance sampling identity.         For any two policies πb and πe , the induced trajectory laws satisfy:
+                                               T
+                                               Y
+                           pπe (τ ) = µ(o1 )         πe (at | ht ) P (ot+1 | ht , at )
+                                               t=1
+                                               T                                             T
+                                               Y                                             Y πe (at | ht )
+                                    = µ(o1 )         πb (at | ht ) P (ot+1 | ht , at ) ·
+                                               t=1                                           t=1
+                                                                                                   πb (at | ht )
+                                                   T
+                                                   Y πe (at | ht )
+                                    = pπb (τ ) ·                         ,                                              (25)
+                                                   t=1
+                                                         πb (at | ht )
+
+where the environment transition P (ot+1 | ht , at ) cancels between numerator and denominator. Taking logarithms,
+                                                            T
+                                                            X                             T
+                                                                                          X
+                          log pπe (τ ) = log pπb (τ ) +           log πe (at | ht ) −           log πb (at | ht ).      (26)
+                                                            t=1                           t=1
+
+Equation (26) is the starting point shared by importance sampling, policy-guided diffusion [Jackson et al., 2024], and
+STITCH-OPE: the target trajectory law differs from the behavior trajectory law by a trajectory-level policy-likelihood
+correction.
+
+Why πb is unavailable. In our agentic setting, the offline dataset D may aggregate trajectories from heterogeneous
+sources—different prompting strategies, decoding configurations, or agent versions. The behavior policy πb is therefore
+a mixture whose density πb (at | ht ) is generally unavailable in closed form, preventing direct instantiation of (25).
+
+From IS to the policy-guided target law. We replace the unknown pπb (τ ) with       P a learned generative model pθ (τ )
+trained on D by maximum likelihood. Dropping the negative behavior term − t log πb (at | ht ) from (26) acts as a
+form of behavior regularization [Jackson et al., 2024]: it anchors the target distribution to the support of the offline data
+rather than allowing unbounded correction away from it. Exponentiating and introducing a strength parameter α > 0
+yields:
+                                                               XT                  
+                                    qα (τ | πe ) ∝ pθ (τ ) exp α   log πe (at | ht ) ,                                  (27)
+                                                                             t=1
+
+which is (2) in the main text.
+
+Recovery of pπe at pθ = pπb , α = 1.      Suppose the learned prior is exact, i.e. pθ = pπb . Then (27) with α = 1 gives:
+                                                                          T
+                                                                          X                         
+                                    q1 (τ | πe ) ∝ pπb (τ ) exp                    log πe (at | ht )
+                                                                             t=1
+                                                                  T
+                                                                  Y
+                                                   = pπb (τ )           πe (at | ht ).                                  (28)
+                                                                  t=1
+
+
+
+                                                                   13
+The normalizing constant of (28) is:
+                              Z      T
+                                     Y
+                        Z = pπb (τ )   πe (at | ht ) dτ
+                                                      t=1
+                                      Z              T
+                                                     Y                                           T
+                                                                                                 Y
+                                  =       µ(o1 )           πb (at | ht ) P (ot+1 | ht , at ) ·         πe (at | ht ) dτ.                (29)
+                                                     t=1                                         t=1
+                                      Q
+Using (25) to substitute pπb (τ )         t πe (at | ht )/πb (at | ht ) = pπe (τ ):
+                                                                T                T
+                                                                  πe (at | ht ) Y
+                                                 Z             Y
+                                          Z=          pπb (τ )                 ·   πb (at | ht ) dτ
+                                                                  π (a | ht ) t=1
+                                                               t=1 b t
+                                                 Z
+                                             =        pπe (τ ) dτ = 1.                                                                  (30)
+
+Therefore (28) is already normalized, and:
+                                                                                T
+                                                                                Y
+                                     q1 (τ | πe )                = pπb (τ )           πe (at | ht ) = pπe (τ ),                         (31)
+                                                     pθ =pπb
+                                                                                t=1
+where the last equality follows from (25). This confirms that qα with α = 1 and pθ = pπb recovers the evaluation
+trajectory law exactly.
+
+Role of α. For α ̸= 1 or pθ ̸= pπb , qα (τ | πe ) interpolates between the offline prior (α → 0, recovering pθ ) and a
+distribution that increasingly concentrates on trajectories preferred by πe (α → ∞). In practice, α is a hyperparameter
+that balances the fidelity of the simulated environment against the alignment of generated rollouts with the evaluation
+policy.
+
+E      Derivation of the Guided Score Function
+We derive (9) in three steps: (i) decompose the score of the fused conditional into three additive terms; (ii) show that the
+first two terms are realized by classifier-free guidance; (iii) derive the tractable approximation of the continuation score.
+
+E.1     Score decomposition of the fused conditional
+
+By Theorem 1, the target single-step conditional is:
+                    qeω,η (zt+1 | h̄t , at ; πe ) ∝ pθ (zt+1 | h̄t )1 · pϕ (at | zt+1 , h̄t )ω · Cα (zt+1 ; h̄t , at , πe )η .          (32)
+Taking logarithms:
+    log qeω,η (zt+1 | h̄t , at ; πe ) = log pθ (zt+1 | h̄t ) + ω log pϕ (at | zt+1 , h̄t ) + η log Cα (zt+1 ; h̄t , at , πe ) + const, (33)
+where the constant absorbs the normalizer, which does not depend on zt+1 . Differentiating with respect to zt+1 gives
+the exact score:
+    ∇zt+1 log qeω,η = ∇zt+1 log pθ (zt+1 | h̄t ) +ω ∇zt+1 log pϕ (at | zt+1 , h̄t ) +η ∇zt+1 log Cα (zt+1 ; h̄t , at , πe ) .           (34)
+                      |         {z            }     |           {z               }     |             {z                  }
+                                   prior score                         action-posterior score                      continuation score
+
+Each term has a distinct role: the prior score keeps generated latents on the manifold of the offline data; the action-
+posterior score steers generation toward latents from which at is recoverable; the continuation score steers generation
+toward latents that open up futures compatible with πe .
+
+E.2     Realization of the prior and action-posterior scores via classifier-free guidance
+
+We show that the first two terms of (34) are jointly realized by classifier-free guidance [Ho and Salimans, 2022] without
+a separate classifier.
+Consider the joint density pθ (zt+1 , at | h̄t ). By the chain rule it factors in two ways:
+                                          pθ (zt+1 , at | h̄t ) = pθ (zt+1 | h̄t , at ) pθ (at | h̄t ),                                 (35)
+                                          pθ (zt+1 , at | h̄t ) = pϕ (at | zt+1 , h̄t ) pθ (zt+1 | h̄t ).                               (36)
+
+
+                                                                           14
+Equating (35) and (36) and dividing both sides by pθ (at | h̄t ) > 0:
+                                                              pϕ (at | zt+1 , h̄t ) pθ (zt+1 | h̄t )
+                                    pθ (zt+1 | h̄t , at ) =                                          .                  (37)
+                                                                         pθ (at | h̄t )
+Taking logarithms and differentiating with respect to zt+1 , noting that pθ (at | h̄t ) is constant in zt+1 :
+                 ∇zt+1 log pθ (zt+1 | h̄t , at ) = ∇zt+1 log pθ (zt+1 | h̄t ) + ∇zt+1 log pϕ (at | zt+1 , h̄t ).        (38)
+Rearranging:
+                 ∇zt+1 log pϕ (at | zt+1 , h̄t ) = ∇zt+1 log pθ (zt+1 | h̄t , at ) − ∇zt+1 log pθ (zt+1 | h̄t ).        (39)
+Substituting (39) into the first two terms of (34):
+                ∇zt+1 log pθ (zt+1 | h̄t ) + ω ∇zt+1 log pϕ (at | zt+1 , h̄t )
+                                                                                                            
+                = ∇zt+1 log pθ (zt+1 | h̄t ) + ω ∇zt+1 log pθ (zt+1 | h̄t , at ) − ∇zt+1 log pθ (zt+1 | h̄t )
+                = (1 − ω) ∇zt+1 log pθ (zt+1 | h̄t ) + ω ∇zt+1 log pθ (zt+1 | h̄t , at ).                               (40)
+Writing ω = 1 + λ, (40) becomes:
+                             (1 + λ) ∇zt+1 log pθ (zt+1 | h̄t , at ) − λ ∇zt+1 log pθ (zt+1 | h̄t ),                    (41)
+which is exactly the classifier-free guidance combination with scale λ. In practice, both scores are approximated by
+the action-conditioned and unconditional branches of the shared score network sθ , trained jointly via (8) with action
+dropout.
+
+E.3   Tractable approximation of the continuation score
+
+The continuation factor is defined as:
+                                                                            "            T
+                                                                                                                    #
+                                                                                        X                        
+                   Cα (zt+1 ; h̄t , at , πe ) := Eτt+1:T ∼pθ (·|h̄t ,at ,zt+1 ) exp α           log πe (au | h̃u ) .    (42)
+                                                                                        u=t+1
+Computing ∇zt+1 log Cα exactly requires differentiating through an expectation over all future trajectories, which is
+intractable. We derive a tractable approximation via the denoised estimate.
+At diffusion step k, the score network provides the posterior mean estimate:
+                                                             k
+                                                                  √             k
+                                                    k       zt+1 − 1 − ᾱk sθ (zt+1 , k; h̄t , at )
+                                  ẑt+1 = E[zt+1 | zt+1 ] =             √                           .             (43)
+                                                                           ᾱk
+We substitute ẑt+1 for zt+1 in (42) and replace the expectation over future trajectories with a single greedy rollout
+τ̂t+1:T = Rθ (ẑt+1 ; h̄t , at ):
+                                                                           T
+                                                                           X
+                                    log Cα (zt+1 ; h̄t , at , πe ) ≈ α           log πe (âu | h̃u ).                   (44)
+                                                                         u=t+1
+Differentiating (44) with respect to ẑt+1 and applying the chain rule through (43) gives the tractable continuation
+gradient:
+                                                                           T
+                                                                           X
+                                   η ∇zt+1 log Cα ≈ ηk α ∇ẑt+1                   log πe (âu | h̃u ),                  (45)
+                                                                          u=t+1
+where we write ηk to allow the continuation weight to vary with noise level k, suppressing the signal when ẑt+1 is
+unreliable at high noise and amplifying it late in the reverse process.
+
+E.4   Final guided score
+
+Combining (41) and (45), the complete guided score at noise level k is:
+                       k                                         k                                   k
+                    s(zt+1 , k; h̄t , at , πe ) = ∇zt+1
+                                                    k   log pθ (zt+1 | h̄t ) + ω ∇zt+1
+                                                                                   k   log pϕ (at | zt+1 , h̄t )
+                                                                    T
+                                                                    X
+                                                + ηk α ∇ẑt+1              log πe (âu | h̃u ),                         (46)
+                                                                   u=t+1
+which is (9) in the main text.
+
+
+                                                                   15
+F     Experimental Setup Details
+F.1   Software stack and reproducibility
+
+All training and OPE rollout code is implemented in PyTorch 2.1 (CUDA 12.1) under Python 3.10. LLM-side πb /πe
+inference is served by vLLM 0.5.4 with bf16 weights and a tensor-parallel size of 1 (one GPU per LLM job). Baselines
+(FQE, DR, IS, WIS, DM) are implemented to match the COBS reference protocol of Voloshin et al. [2019] verbatim
+except for the per-ε FQE correction described in Appendix G.4. Random seeds s ∈ {0, 1, 2, 3, 4} control: (i) the
+ε-greedy admissible-action draw, (ii) the imagined-rollout DDPM noise sequence, (iii) the πb trajectory shuffling at
+world-model training, and (iv) the ψ adapter mini-batch order. The world model itself is trained once per environment
+with seed s0 ; the five per-cell seeds vary inference-time stochasticity only.
+
+F.2   Hardware and compute budget
+
+All experiments run on a shared cluster node with 2× Intel Xeon Gold 6248R (3.00 GHz, 96 logical cores) and
+2× NVIDIA Quadro RTX 8000 (48 GB) GPUs interconnected by PCIe 3.0 x16. We allocate a single GPU per training
+or evaluation job; multi-GPU parallelism is not used.
+
+Wall-clock budget.
+       • World-model training (per environment): 50 epochs on 256–640 trajectories at batch size 64 takes 30–90 min.
+       • ψ-adapter training (per environment): 20 epochs at batch size 8 takes 10–20 min.
+       • GT collection (per cell, per ε): vLLM-served πeε rolling out for 64–128 episodes takes 10–40 min depending
+         on env horizon.
+       • A DWM inference (per cell, per seed): 5 ε levels × 32 imagined rollouts × horizon ≤ 30 takes 15–45 min.
+       • FQE / DR (per cell, per seed): 5 ε-conditioned Q-nets at 20 epochs each takes 5–10 min.
+
+Total cost. The full camera-ready experimental suite (six (πb , πe ) cells × 5 seeds, plus 7 ablation variants on three
+environments, plus 5 baseline estimators per cell) consumes approximately 300 GPU-hours, of which ∼70% is LLM-
+side (πb and πe ) inference and ∼25% is GT collection. World-model training itself accounts for < 5% of the budget —
+the dominant cost of A DWM is the same as the dominant cost of any LLM-agent OPE method, namely running the eval
+LLM.
+
+F.3   Behavior-policy data
+
+For each (πb , πe ) cell we collect a single offline behavior pool that is reused across all ε levels and seeds for that cell.
+The world model is trained only on this pool. Table 3 summarises the per-cell trajectory counts, behavior models
+actually used, and observed empirical statistics. The HotpotQA, ScienceWorld, and ALFWorld-iter1 cells use a single
+behavior LLM each. The ALFWorld-iter3 and WebShop-iter1 cells use a three-LLM behavior pool consisting of the
+generic Llama-3.1-8B-Instruct together with two LEAP iterates (iter0 and iter2 ); we exclude iter1 from the WS pool
+and iter3 from the ALF pool to ensure the eval policy is never in the behavior pool. This pooling choice mirrors a
+realistic deployment in which multiple released checkpoints from the same LEAP self-improvement chain may already
+be available offline. We verify post-hoc that no training trajectory in the pool was generated by the exact πe checkpoint
+scored at evaluation time.
+
+Table 3: Behavior pool composition and statistics, per cell. “Avg. horizon” is the mean number of environment steps
+per πb trajectory; “πb succ. rate” is the empirical success rate on the collected pool.
+          Cell                         πb pool                                    N traj. Avg. horizon πb succ. rate
+          HotpotQA-DPO/PRM/cross       ReAct-HotpotQA-SFT (single)                512         6.4          12.5%
+          ScienceWorld-ETO             sw-llama-sft (single)                      512         9.1          11.7%
+          ALFWorld-iter1               Llama-3.1-8B-Instruct (single)             256         29.5          3.5%
+          ALFWorld-iter3               Llama-3.1-8B-Instr. + leap-alf-iter{0,2}   744         29.2          5.8%
+          WebShop-iter1                Llama-3.1-8B-Instr. + leap-ws-iter{0,2}    640         14.4          5.0%
+
+
+Trajectories are collected with greedy LLM decoding (temperature 0) and two system-prompt variants {p0 , p1 } that
+differ only in instruction phrasing (not task content), to obtain useful behavior coverage without changing the underlying
+
+
+                                                             16
+πb . Episode length is capped at 30 environment steps for ALFWorld and at 12 for the other environments. Each recorded
+trajectory contains, per step: (obs_textt , llm_responset , at , atvalid , rt , donet ). Successful trajectories are upsampled
+5× during world-model training to counter class imbalance on the long-tail success distributions of Table 3.
+
+F.4   Ground-truth episode counts
+
+Per-cell ground-truth success curves are obtained by running πeε in the actual environment for nGT independent episodes
+per ε level, with seed 42 fixed across ε within a policy:
+
+                                             Cell                      nGT per ε
+                                             HotpotQA-DPO                128
+                                             HotpotQA-PRM                 64
+                                             ScienceWorld-ETO             64
+                                             ALFWorld-iter1 / iter3       72
+                                             WebShop-iter1               128
+
+The binomial standard error on the GT success rate at n=64 is ≤ 6.3% for any p ∈ (0, 1), and ≤ 4.5% at n=128.
+
+F.5   ε-greedy mixing protocol
+
+Mixing is applied at the probability level (not the log level) to ensure the resulting sampling distribution is a valid
+probability measure:
+                                                                     1
+                           πeε (a | s) = (1 − ε) πe (a | s) + ε             I[a ∈ Aadm (s)],                       (47)
+                                                                 |Aadm (s)|
+where Aadm (s) is the set of admissible actions reported by the environment. We sample one Bernoulli flip per step: with
+probability 1−ε we forward the LLM-decoded action a ∼ πe (·|s); with probability ε we sample a ∼ Unif(Aadm (s)).
+Both A DWM imagined rollouts and the GT collection use this exact protocol with the same seed.
+
+F.6   World-model architecture
+
+The world model is a 7.4M-parameter latent diffusion model with the modular structure shown in Table 4. The
+largest component is the text-based observation encoder (5.05 M params), which tokenises raw obs_textt via a stable
+hash-bucket tokeniser (vocabulary size 32,768, max length 128 tokens) and embeds it into the latent dimension dz =64
+through a 4-layer TransformerEncoder of width 128 with 4 attention heads. The history encoder is a causal 4-layer
+Transformer with width 128 and a generated subsequent-token mask, conditioning on (zt , at ) tuples. The score network
+is a 3-layer FiLM-MLP of width 256 with sinusoidal time embedding (dimension 64) and zero-initialised output
+projection; the IDM and BC heads are 2-layer MLPs over (z, h). All non-linearities are SiLU except the IDM / policy /
+projector heads, which use ReLU and GELU respectively.
+
+
+       Table 4: Per-module parameter counts in the A DWM world model (7.38M parameters total for dz =64).
+               Module                          Function                               Params (M)     % of total
+                                                             dz
+               Observation encoder (fθ )       Text → z ∈ R                                 5.053       68.4%
+               History encoder (h̄)            Causal Transformer over (z, a) pairs         0.814       11.0%
+               Soft-token projector            z → Rnsoft ×dllm for ψ adapter               0.609        8.2%
+               Score net (ϵθ )                 FiLM-MLP for diffusion denoising             0.527        7.1%
+               BC policy head                  z, h → a logits                              0.170        2.3%
+               Reward head (Rθ )               2-layer MLP → σ(·)                           0.115        1.6%
+               Termination head (Dθ )          2-layer MLP → BCE logit                      0.050        0.7%
+               Inverse-dynamics head (IDM)     zt , zt+1 , h → at                           0.044        0.6%
+               Action embedding                Z → Rda , |A| = 256, da =32                  0.001      < 0.1%
+
+
+The action vocabulary |A| is set per environment based on the unique action strings observed in the behavior pool,
+capped at 256; HotpotQA uses a fixed 4-action vocabulary {⟨unk⟩, search, lookup, finish} that matches the ReAct
+protocol of Yao et al. [2022].
+
+
+                                                             17
+F.7   World-model training objective
+
+The world model is trained with the multi-task objective
+                           LWM = LDSM + λidm LIDM + λbc LBC + λdiv Ldiv + λr Lr + λd Ld ,                                   (48)
+with weights (λidm , λbc , λdiv , λr , λd ) = (0.1, 0.1, 0.05, 10, 1). The component losses are defined as follows.
+
+(a) Denoising score matching (LDSM ). For a sampled    √        diffusion
+                                                                  √        step k ∼ Unif(1, T ), latent z ∼ fθ (obst+1 ), history
+h̄t , and action at , we form the noised latent zk = ᾱk z + 1 − ᾱk ξ with ξ ∼ N (0, I) and a cosine ᾱk schedule. We
+train the conditional score network ϵθ (zk , k, h̄t , at ) together with its unconditional counterpart ϵθ (zk , k, h̄t , ∅) under
+classifier-free dropout puncond =0.1:
+              LDSM = Ek,ξ ω(k) ∥ϵθ (zk , k, h̄t , at ) − ξ∥22 + ∥ϵθ (zk , k, h̄t , ∅) − ξ∥22 , ω(k) = 1 − ᾱk .
+                                                                                           
+                                                                                                                             (49)
+
+The ω(k) = 1 − ᾱk weighting keeps the per-step loss numerically comparable across k.
+
+(b) Inverse-dynamics regulariser (LIDM ). A      discriminative auxiliary that predicts the bridging action between two
+                                                      
+consecutive latents: LIDM = CE IDM(zt+1 , h̄t ), at . This pushes z to be action-aware and prevents the diffusion
+prior from collapsing onto policy-invariant features.
+                                                                         
+(c) Behavior-cloning soft-token loss (LBC ). LBC = CE BC(zt , h̄t ), at . Trains the latent-to-policy interface against
+logged actions independently of any specific evaluation policy, providing the ψ-adapter retrieval target a stable signal.
+
+(d) Diversity regulariser (Ldiv ). A cross-trajectory contrastive penalty that prevents the latent space from collapsing
+                                          (i)                                           (i)
+across distinct trajectories. For batch {z1:L }B
+                                               i=1 , let z̄
+                                                            (i)
+                                                                = normalize(meant zt ) be the per-trajectory pooled latent.
+Then
+                                                             1     X
+                                          Ldiv =                      z̄ (i) ⊤ z̄ (j) .                               (50)
+                                                      B(B − 1)
+                                                                   i̸=j
+
+Same-window adjacent latents are deliberately left free since the dynamics constraint requires them to stay close.
+
+(e) Reward head (Lr ). For environments with continuous reward (HotpotQA F1, ScienceWorld            shaped reward,
+WebShop product match) we use MSE on sigmoid-clipped reward-to-go targets: Lr = Et (σ(Rθ (zt+1 , h̄t )) − rttgt )2
+                                                                                                                  
+
+with rttgt ∈ [0, 1]. For sparse-reward ALFWorld we replace the MSE by a balanced binary cross-entropy with sigmoid
+output and per-batch positive-class weight min(50, nneg /npos ), which prevents the reward head from collapsing to
+the constant p ≈ r̄ predictor. The reward head is supervised on terminal steps only when the environment provides a
+terminal-only success label, and on all steps when shaped per-step rewards are available.
+
+(f) Termination head (Ld ). A binary   cross-entropy with class-balanced positive weight min(50, nneg /npos ): Ld =
+BCE Dθ (zt+1 , h̄t ), 1[done at t + 1] . Used during imagined rollouts to terminate trajectories that the world model
+predicts have ended.
+
+F.8   World-model training procedure
+
+Algorithm 1 summarises the optimization . Each forward pass sampling a window of length L within a trajectory
+builds a rolling-window prediction target: given (z1:L , a1:L−1 ), the model is trained to score the noisy version of
+every zt+1 conditional on h̄t and at . The optimiser is AdamW with (β1 , β2 ) = (0.9, 0.999), weight decay 10−4 , peak
+learning rate 3×10−4 , cosine annealing to 10% of peak over 50 epochs, batch size 64, gradient norm clip 1.0. WebShop
+and ALFWorld train under PyTorch automatic mixed precision (bf16 master + fp32 accumulator); HotpotQA and
+ScienceWorld train in fp32 because the smaller dataset fits comfortably in 48 GB.
+
+F.9   ψ-adapter training
+
+The ψ adapter projects latent observations into a sequence of soft tokens that drop into the input embedding space
+of πe . This step is necessary because Eq. 9’s continuation guidance backpropagates a gradient through πe ’s frozen
+input layer; without an adapter that targets πe ’s embedding manifold, the gradient is meaningless. The adapter
+Gψ : Rdz → Rnsoft ×dllm is a 3-layer GELU MLP (dz → 256 → 256 → 8·dllm ) with nsoft = 8 soft tokens.
+
+
+                                                              18
+Algorithm 1 World-model training (per environment).
+Require: Behavior pool Db = {τi }, window length L, total epochs E
+ 1: Initialise WM parameters θ
+ 2: for epoch e = 1, . . . , E do
+ 3:     for minibatch B ⊂ Db of size B do
+ 4:          Sample window (ot:t+L , at:t+L−1 , rt+1:t+L , donet+1:t+L ) from each τ ∈ B
+ 5:          Encode latents zt:t+L ← fθ (ot:t+L )
+ 6:          Build histories h̄t ← HistEnc(z1:t , a1:t−1 )
+ 7:          Compute LWM via Eq. 48
+ 8:          θ ← θ − η∇θ LWM
+ 9:          Apply gradient clipping at ∥∇∥ = 1.0
+10:     end for
+11:     Step cosine LR schedule
+12: end for
+13: Save best checkpoint by held-out reward MSE.
+
+
+
+The training objective is a symmetric InfoNCE term plus a 0.1× MSE regulariser:
+
+                             B                                                  B
+                          1 X       esii /τ           esii /τ              1 X                   2
+                  Lψ = −        log P    sij /τ
+                                                + log P     sji /τ
+                                                                     + 0.1·        Ḡψ (zi ) − ēi 2 ,                (51)
+                         2B i=1      j e                j e                 B  i=1
+                       |                  {z                       }        |        {z            }
+                                             LInfoNCE                                    LMSE
+
+
+where sij = cossim(Ḡψ (zi ), ēj ), Ḡψ (zi ) = meann Gψ (zi )n is the soft-token-mean of the projector, ēj is the LLM-
+token-mean of the ground-truth πe input embedding sequence, and τ =0.1. Pure MSE (LInfoNCE → 0) collapses because
+ēj has low variance across observations, yielding ∂Gψ /∂z → 0 and a vacuous Eq. 9 gradient; pure InfoNCE produces a
+discriminative adapter whose absolute outputs drift out-of-distribution for the LLM. The combined loss balances both.
+We optimise with Adam (lr=10−4 ), batch size 8, for 20 epochs.
+Final-epoch top-1 retrieval accuracy on the InfoNCE batch (random baseline 1/B = 0.125):
+
+                                                Cell               ψ top-1
+                                                HotpotQA           0.715
+                                                ScienceWorld       0.394
+                                                ALFWorld-iter1     0.558
+                                                ALFWorld-iter3     0.470
+                                                WebShop            ∼ 0.10
+
+The WebShop adapter sits at the random-baseline floor: token-mean target embeddings of long product descriptions are
+nearly degenerate under cosine similarity, so the InfoNCE objective alone cannot discriminate them at batch size 8.
+Despite this, the adapter still provides a useful Eq. 9 gradient (rather than a useful retrieval) on WebShop, which is why
+ablating it still degrades ρ by 0.30 (Fig. 4).
+
+
+F.10   OPE-rollout protocol
+
+Algorithm 2 summarises the imagined-rollout procedure used to compute Jˆ at evaluation time. Each rollout is initialised
+from a uniformly sampled real-environment obs0 in the behavior pool, encoded into z0 ∼ fθ (obs0 ), and unrolled forward
+by alternating (i) querying πeε for the next action via the soft-token projection Gψ (zt ), and (ii) sampling zt+1 from the
+conditional diffusion prior with both Eq. 8 (local CFG) and Eq. 9 (continuation guidance) applied at each denoising
+step. We use nroll =32 rollouts per cell (nroll =64 on ALFWorld-iter1 to compensate for binary-success Monte Carlo
+noise), maximum horizon Hmax =30 steps, ndenoise =50 DDPM denoising steps per environment step, λCFG =1.0, and
+continuation-guidance hyperparameters (α=1.0, ηmax =0.5, h=2). Rollouts terminate early when the termination head
+Dθ (zt , h̄t ) predicts Pr[done] ≥ 0.5. Empirical mean rollout lengths after early termination: HP 8, SW/WS/ALF-iter3
+12, ALF-iter1 18.
+
+
+                                                            19
+Algorithm 2 A DWM imagined rollout for OPE.
+Require: Trained fθ , h̄, ϵθ , Rθ , Dθ , Gψ ; eval policy πeε ; success bank B≻
+Require: nroll , Hmax , ndenoise , λCFG , α, ηmax , h
+ 1: for i = 1, . . . , nroll do
+ 2:     Sample obs0 uniformly from behavior pool; z0 ← fθ (obs0 )
+ 3:     for t = 0, . . . , Hmax −1 do
+ 4:         Project to soft tokens s̃t ← Gψ (zt )
+ 5:         Sample at ∼ πeε (· | s̃t , prompt)                                                                            ▷ Eq. 47
+                           (K)
+ 6:         Initialise zt+1 ∼ N (0, I)
+ 7:         for k = K, . . . , 1 do                                                                                  ▷ K = ndenoise
+ 8:              ϵ̂ ← (1+λCFG ) ϵθ (z (k) , k, h̄t , at ) − λCFG ϵθ (z (k), k, h̄t , ∅)                                    ▷ (8)
+ 9:              gk ← α η(k; ηmax ) ∇z(k) cossim(z (k) , B≻ ↓ h)                                                             ▷ (9)
+10:              z (k−1) ← DDPM_step(z (k) , ϵ̂ − gk )
+11:         end for
+12:         zt+1 ← z (0) ; h̄t+1 ← HistEnc(z0:t+1 , a0:t )
+13:         Record cost ← cos(zt+1 , B≻ ), rt ← σ(Rθ (zt+1 , h̄t ))
+14:         if σ(Dθ (zt+1 , h̄t )) ≥ 0.5 then break
+15:         end if
+16:     end for
+17:     Record Jˆ(i) ← maxt cost
+18: end for
+19: return Jˆ ← n1roll
+                         P ˆ(i)
+                             iJ
+
+
+
+
+G     Baseline Implementation Details
+
+All baselines follow the COBS reference protocol of Voloshin et al. [2019] unless stated otherwise. The full set of
+estimators is implemented in Adwm/ope/baselines.py and Adwm/ope/fqe_dr.py.
+
+G.1    Behavior log-probability extraction
+
+For estimators that require πb (IS, WIS, DR), we re-run the behavior LLM in inference mode and extract per-token
+log-probabilities at the action span of every recorded trajectory. The action span is identified by longest-common-
+token-prefix matching to handle BPE-merge boundaries between the prompt and action region (a common failure mode
+that produces off-by-one log-probabilities and silently inflates importance ratios). πe log-probabilities are obtained
+identically. We then mix at the probability level πeε (a) = (1 − ε)πe (a) + ε/|Aadm | and take the log to form per-step
+log-ratios log ρt = log πeε (at |st ) − log πb (at |st ).
+
+G.2    Estimator formulas
+                                                                                                           Qt
+For a logged trajectory τ = (s0 , a0 , r0 , . . . , sT , aT , rT ) under πb with cumulative ratio ρ0:t =    k=0 ρk and discount
+γ = 0.99:
+                   1     XX
+            JˆDM =                  γ t Rθ (ŝt )                                               (direct method, no ρ)          (52)
+                   N       τ    t
+                                                                                                                    t
+                                                                                                      P         P
+                     1                                                                                τ ρ 0:T    t γ rt
+                         X            X
+              JˆIS =           ρ0:T         γ t rt ,                                        JˆWIS =     P                      (53)
+                     N     τ          t                                                                     τ ρ0:T
+                   1     X
+           JˆFQE =             Vπeε (s0 )                                                        (no per-trajectory ρ)         (54)
+                   N       τ
+                   1     XX
+            JˆDR =                  γ t [ρ0:t rt + ρ0:t−1 V (st ) − ρ0:t Q(st , at )]                                          (55)
+                   N       τ    t
+
+with the convention ρ−1 = 1/N for the COBS DR_v2 step-form. The DR network values V and Q are taken from the
+FQE Q-network.
+
+
+                                                                     20
+G.3   Per-cell importance-ratio variance
+
+Empirically observed cumulative log-ratio magnitudes at ε=0.5 span tens of nats per trajectory (HotpotQA up to ±24,
+ScienceWorld ±18, ALFWorld ±35, WebShop ±28), corresponding to per-trajectory ratios that span ∼ 16–30 orders
+of magnitude. This is the regime in which IS and DR estimates fluctuate by 1020 or more even in double-precision
+arithmetic; our raw baseline output JSONs (released alongside the code) record DR values up to |J DR | ≈ 6×1020
+on HotpotQA-PRM, exemplifying this divergence. The corresponding rank-correlations become driven entirely by
+floating-point underflow ties rather than the underlying signal.
+
+G.4   FQE Q-network and per-ε correction
+
+The FQE Q-network is a 2-hidden-layer MLP Qϕ : Rdz +da → R (dz +da → 128 → 128 → 1, SiLU activations). A
+target network Qϕ′ is updated by Polyak averaging with τ = 0.99 (ϕ′ ← 0.99 ϕ′ + 0.01 ϕ). optimization: Adam, lr
+3×10−4 , batch size 64, 20 epochs, discount γ = 0.99. Each training minibatch consists of (st , at , rt , st+1 , donet ) tuples
+drawn from Db , and the Bellman target is y = rt + γ (1 − donet ) Vπeε (st+1 ) with Vπeε (s) = (1−ε) maxa Qϕ′ (s, a) +
+ε Q̄ϕ′ (s) where Q̄ϕ′ (s) is the action-mean across the admissible set. The maxa approximation is necessary because the
+LLM does not expose a full per-action probability vector; it is exact in the deterministic-greedy limit of πe that all our
+LLM-agent benchmarks effectively use (temperature 0 LLM decoding).
+
+Per-ε correction. Under the COBS protocol, mixing is applied at evaluation time as Vε (s) = (1−ε) maxa Qϕ′ (s, a) +
+ε Q̄ϕ′ (s), producing a value linear in ε and trivially monotonically decreasing. This artefact gives FQE a spurious ρ>0
+on the ε-axis even when its underlying state-value estimate is incorrect, and inflates the COBS-protocol headline number
+to a rank that has nothing to do with the policy being scored. We remove this artefact by training a separate Q-network
+for each ε level using πb trajectories filtered against the ε-mixed behavior likelihood, then evaluating each on its own
+Vπeε (s0 ) at the trajectory start. This is the per-ε correction reported in the main text and is the only modification to
+FQE relative to COBS. Without it, FQE reports a near-uniform ρ=+0.9 on every cell; with it, the true rank correlation
+collapses or inverts as reported in Table 2.
+
+
+H     Additional Results
+
+H.1   Per-seed Spearman ρ
+
+Table 5 reports the full 5-seed breakdown that underlies the avg-Jˆ row of Table 2. Per-seed Spearman is computed
+by independently running each ε cell with seed si ∈ {0, 1, 2, 3, 4}, which propagates randomness through both
+imagined-rollout sampling and the ε-greedy admissible-action choice. The two reward-dense cells (HotpotQA-DPO,
+ScienceWorld-ETO) are highly stable across seeds (σ ≈ 0.10); the sparse-reward cells (ALFWorld, WebShop) show
+larger per-seed variance because high-ε GT saturates near zero, making the 5-point Spearman ill-conditioned at the
+seed level. The avg-Jˆ aggregator used in Table 2 mitigates this by averaging Jˆ across seeds before computing ρ.
+
+
+Table 5: Per-seed Spearman ρ between A DWM’s Jˆ and the ground-truth ε-curve (5 ε levels, 5 seeds). The last column
+reproduces the avg-Jˆ row from Table 2.
+                   Cell                   ρs0     ρ s1     ρs2     ρ s3     ρs4      mean±σ        avg-Jˆ ρ
+                   HotpotQA-DPO         +1.00    +0.80   +0.70    +0.90   +0.90    +0.86 ± 0.10    +0.90
+                   ScienceWorld-ETO     +0.87    +0.87   +0.97    +0.67   +0.82    +0.84 ± 0.10    +0.82
+                   ALFWorld-iter1       +0.82    +0.10   +0.67    −0.10   +0.21    +0.34 ± 0.35    +0.67
+                   ALFWorld-iter3       −0.50    +0.90   +1.00    −0.30   +0.80    +0.38 ± 0.64    +0.80
+                   WebShop-iter1        +0.60    −0.10   +0.90    +0.30   +1.00    +0.54 ± 0.40    +0.90
+
+
+
+H.2   Underlying Jˆ and GT curves
+
+Table 6 provides the seed-averaged Jˆ values and ground-truth success curves underlying every row of Table 2, so that
+any of the reported correlations can be reproduced exactly.
+
+
+                                                             21
+                        Table 6: Seed-averaged Jˆ and GT success rate at each ε for every cell.
+                                      Cell           ε=0     0.25     0.5     0.75     1.0
+                                      HP-DPO GT    0.165 0.151 0.082 0.095 0.065
+                                      HP-DPO Jˆ    0.508 0.496 0.454 0.418 0.364
+                                      SW-ETO GT    0.141 0.078 0.047 0.047 0.016
+                                      SW-ETO Jˆ    0.589 0.567 0.522 0.474 0.478
+                                      ALF-iter1 GT 0.153 0.097 0.056 0.000 0.000
+                                      ALF-iter1 Jˆ 0.554 0.547 0.537 0.538 0.541
+                                      ALF-iter3 GT 0.250 0.139 0.056 0.028 0.000
+                                      ALF-iter3 Jˆ 0.792 0.789 0.789 0.767 0.778
+                                      WS-iter1 GT 0.073 0.085 0.073 0.044 0.032
+                                      WS-iter1 Jˆ  0.484 0.481 0.466 0.459 0.458
+
+
+I     Additional Ablations
+I.1   Five-seed extension of Fig. 4
+
+Figure 4 reports single-seed ρ values to keep the component story compact. For each variant we also re-ran the full
+5-seed protocol on the same three environments and recovered the same qualitative ordering: removing local CFG drops
+WebShop ρ to +0.12 ± 0.08 across seeds, removing continuation guidance drops it to +0.27 ± 0.10, and removing the
+ψ adapter drops HotpotQA to +0.42 ± 0.07. No 5-seed run flips the sign of the corresponding single-seed value, and
+the relative magnitude of each component’s contribution is preserved.
+
+I.2   Behavior-data and capacity ablations
+
+Beyond the inference-time guidance and adapter terms ablated in Fig. 4, two further training-side factors prove equally
+critical. We probe both on WebShop, the most data-sensitive of our cells:
+
+        • Behavior-pool diversity. Restricting the behavior LLM pool from two models (Qwen3-1.7B + Qwen3-4B)
+          to a single Qwen3-1.7B collapses ρ from +0.90 to −1.00 — a complete inversion. The world model in this
+          regime overfits to the single πb ’s idiosyncratic action distribution, and the reward head learns features that
+          anti-correlate with the GT ranking under any πe .
+        • Latent capacity. Halving the latent dimension from dz =64 to dz =32 produces the same complete inversion
+          (ρ= − 1.00), suggesting the latent is at a representational floor below which contrastive features cannot be
+          preserved.
+
+These two factors define a representational pre-requisite for A DWM: adequate behavior-data diversity and adequate
+latent capacity must both be in place before any choice of guidance can recover positive ranking. We did not observe
+similar inversions on HotpotQA or ScienceWorld at the same parameter cuts, suggesting the WebShop result reflects
+the combination of long-horizon search and continuous partial reward rather than a generic property.
+
+I.3   ψ-adapter loss design
+
+Table 7 shows that the loss design we adopt (InfoNCE + 0.1× MSE) is essential. Pure MSE collapses to a near-constant
+adapter on every environment because per-token-mean target embeddings have low variance, providing the optimiser
+with no signal to differentiate latents; pure InfoNCE produces a discriminative adapter whose outputs drift out-of-
+distribution for the LLM and break its downstream input expectations. The combined loss outperforms either alone on
+all three environments.
+
+                                  Table 7: ψ-adapter loss design ablation, single-seed ρ.
+                           Loss                            HotpotQA         ScienceWorld     WebShop
+                           InfoNCE + 0.1× MSE (ours)        +0.90              +1.00          +0.90
+                           Pure MSE                         +0.40              +0.40          +0.70
+                           Pure InfoNCE                     +0.60              +0.80          +0.50
+
+
+
+                                                             22
+

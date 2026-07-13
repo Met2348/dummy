@@ -1,0 +1,1887 @@
+                                        Self-Evolving Agents with Anytime-Valid Certificates
+
+
+                                                                                   Biswa Sengupta
+                                                                        LLM Suite Team, JPMorgan Chase & Co.
+                                                                          biswa.sengupta@jpmorgan.com
+
+
+
+                                                                                          Abstract
+
+
+
+
+arXiv:2607.00871v1 [cs.AI] 1 Jul 2026
+                                                 Self-evolving agents violate the assumption behind most learning-theoretic guar-
+                                                 antees: the data, evaluator, components, and hypothesis space are produced by
+                                                 the policy being updated. We present SEA, an architecture that confines self-
+                                                 modification to a small steering adapter and a versioned harness around a frozen
+                                                 base model and admits each modification only through an anytime-valid gate that
+                                                 emits an auditable certificate against a fixed error budget. Five loop controllers
+                                                 compose published guarantees; because such gates can only select among behaviors
+                                                 the frozen base already produces, five verifier-in-the-loop mechanisms—best-of-N ,
+                                                 micro-step search, self-authored reproduction oracles, search-layer control, and
+                                                 self-repair—supply the dense, grader-free signal the gates require, computed from
+                                                 the issue text alone. On a 52-instance SWE-bench Verified subset across four base
+                                                 models, base capability is the dominant, confound-free effect, and on two strong
+                                                 base models a deliberate no-op-composite control isolates the suite’s contribution
+                                                 at +4 and +5 (G LM 5.2 24 → 28; G PT 29 → 34, the 65% best), with event logs
+                                                 confirming that its mechanisms fire and prevent regressions. Results are single-run
+                                                 on expensive evaluations; confirming run-to-run variance and adapting the per-task
+                                                 algorithm mix are future work.
+
+                                            Disclaimer: This paper was prepared for informational purposes by the LLM Suite group of JP Morgan
+                                            Chase and its affiliates (‘JPMC’) and is not a product of the Research Department of JP Morgan. JP
+                                            Morgan makes no representation, warranty or undertaking whatsoever and disclaims all liability for
+                                            the completeness, accuracy or reliability of the information contained herein. This document is not
+                                            intended as investment research or investment advice, or a recommendation, offer or solicitation for the
+                                            purchase or sale of any security, financial instrument, financial product or service, or to be used in any
+                                            way for evaluating the merits of participating in any transaction, and shall not constitute a solicitation
+                                            under any jurisdiction or to any person, if such solicitation under such jurisdiction or to such person
+                                            would be unlawful.
+
+                                        1   Introduction
+                                        A self-evolving agent improves its own future behavior using data, evaluations, components, and a
+                                        hypothesis space that it itself produces—rewriting prompts and tools, distilling its outputs, learning
+                                        its reward models, growing skill libraries. The guarantees one would invoke for such systems,
+                                        however, were proven for exogenous environments: continual-learning forgetting bounds [Farajtabar
+                                        et al., 2020, Chugg et al., 2023], convergence of preference optimization [Tiapkin et al., 2025,
+                                        Wang et al., 2025], unbiasedness of policy-gradient estimators [Meulemans et al., 2023], safe policy
+                                        improvement [Thomas et al., 2015], and library-learning optimality [Bowers et al., 2023] each assume
+                                        a task stream, evaluator, MDP, or program library fixed independently of the learner. We call the
+                                        violation the endogenous-loop failure mode: the evolving policy generates the data it trains on,
+                                        the evaluator it is judged by, the components it is built from, and the hypothesis space it searches.
+                                        The name is a shorthand, not a precise mathematical category, and taken literally it overstates the
+                                        problem: violating a theorem’s hypotheses voids its certificate but does not negate its conclusion. The
+
+                                        Preprint. Under review.
+                                        2026 JP Morgan Chase & Co. All rights reserved
+guarantee simply ceases to be certified—the bound may still hold, may degrade gracefully, or may
+break, depending on the problem—and performative-prediction theory shows the loop can in fact still
+contract when the policy-induced distribution shift is small enough [Perdomo et al., 2020]. We use
+the term to mark where classical guarantees stop applying, not to claim that learning provably fails.
+This paper develops an architecture and a set of concrete algorithms for this setting, together with
+an executable reference implementation from which all pseudo-code in this paper is distilled. Two
+principles organize the design. First, every self-modification passes through an anytime-valid gate:
+each classical seed result is wrapped in exactly the machinery required for its guarantee to survive the
+closed loop—performative stability [Perdomo et al., 2020], anytime-valid inference [Ramdas et al.,
+2023, Howard et al., 2021], dynamic-regret online learning [Cutkosky, 2020, Baby and Wang, 2022],
+and two-timescale stochastic approximation [Borkar, 2008]. Second, gates can only select among
+behaviors the frozen base model already produces; when a base model’s failure is systematic rather
+than stochastic, and the reward arrives only at the end of an episode, there is nothing for a gate to
+select. We therefore make the task verifier an active in-loop control signal (§5)—inside the episode,
+across attempts, over the action space, and inside credit assignment—so that the controllers have both
+the signal and the variation they need to act on.
+
+
+Contributions.
+1. A four-layer reference architecture (§3) that decomposes a self-evolving LLM agent into a
+   frozen base model L0 , a small steering adapter L1 (steered online; not weight-fine-tuned in any
+   reported run), a mutable, versioned harness L2 , and a loop controller L3 (Figure 1). Because
+   L0 is frozen and L1 is low-dimensional, policy deltas ∥πt − πt−1 ∥ are measurable and can be
+   trust-regioned, which is what renders the performative-sensitivity machinery applicable at all.
+
+2. Five loop controllers (§4), one per failure mode of the endogenous loop: stability–plasticity,
+   self-referential collapse, credit assignment, verifiable self-modification, and hypothesis-space
+   expansion. Each is given as a precise problem statement, an algorithmic solution with pseudo-
+   code (Algorithms 1–5), and an explicit account of which published results it builds on and which
+   guarantees remain open conjectures in the endogenous setting.
+
+3. Verifier-in-the-loop mechanisms and a two-loop design (§5): a graded verifier (Eq. 9), closed-
+   loop test execution, an explore→edit budget, process-level reward, and a verifier-gated refinement
+   hill-climb (Alg. 6), building to a verified micro-step search (Alg. 7) and a search-then-distill
+   two-loop design [Zelikman et al., 2022, Gulcehre et al., 2023] into which the five controllers are
+   re-aimed (Table 2; four on the search layer, Alg. 9, validated by offline gate simulations).
+
+4. A self-authored in-loop verifier (§5.2, Algorithm 8): the search is steered by a reproduction-
+   oracle suite the model writes from the issue alone, admitted by a single rule (an oracle must fail
+   on the unpatched base), while the held-out grader is reserved for terminal measurement. Where
+   an oracle suite is admitted the search runs grader-free, and the held-out tests never steer it.
+
+5. Verified self-repair of the harness (§5.4, Algorithm 10): a repertoire of harness-repair primitives
+   that the loop selects by measured fix-rate against the real environment, not by human judgment—
+   the same propose-and-gate discipline as A LG 4, applied to the agent’s own failure modes.
+
+6. A reusable anytime-valid statistical core (§6): normal-mixture confidence sequences, Hoeffd-
+   ing e-processes with predictable plug-in betting, a horizon-free, normalized confirm-triggered
+   harmonic spending schedule, time-uniform PAC-Bayes penalties, parameter-free coin-betting
+   oracles with drift-triggered restarts, exact 1-D Wasserstein computation, wild-bootstrap trend
+   tests, MAP-Elites archives, and Stitch-style MDL compression by antiunification with sound
+   dominance pruning.
+We are deliberate about epistemic status. Every mathematical statement in this paper is drawn from
+a published result, cited at the point of use; we do not derive new bounds or rates here. Where a
+classical guarantee is invoked, we state precisely what its source proves and treat its survival under
+the endogenous loop as an open conjecture, without positing a proof. Likewise, whether any given
+mechanism lifts a given base model is not argued from anecdote: the protocol of §8 is designed to
+answer it, and we defer that discussion to the results.
+
+
+                                                       2
+                                2026 JP Morgan Chase & Co. All rights reserved
+                                                                                                L3 — loop controllers (composite two-timescale scheduler)
+                                               (t)      (t)
+                deployed policy πt = L0 ◦ L1         ◦ L2
+                                                                               edit (slow)       A LG 4 SGM-CS: gated harness edits (CS +
+                                                                                                 εW1 + CTHS)
+        L2 — harness: prompt · tools · budgets · library
+                                                                         grow (slow)             A LG 5 SDC-QD: grows the abstraction library
+    L1 — steering adapter θ (online-steered; not fine-tuned)                                     (MDL + QD)
+                                                                                 train (fast)
+                                                                           protect (fast)        A LG 3 PA-COCOA: counterfactual credit → θ
+                     L0 — frozen base model
+                                                                                                 A LG 1 PPB-CL: forgetting gate + trust region on
+                                                                                                 θ
+
+                                                                                                 A LG 2 PNMP-A: anchors the learned reward
+                                                                                                 model q
+                                                                     rollouts · rewards
+           deploy / act                              obs. + test feedback
+
+
+
+                                                                                                           e-value drift gate
+
+                      environment + verifier                                                         reward                        certificate ledger
+              tasks · test execution · rewards R, R̃ ∈ [0, 1]           scores rollouts              model q                    ACCEPT/ HOLD/ NSF · δ-spend
+
+
+
+
+Figure 1: How the four layers and the five controllers interact. The deployed policy πt = L0 ◦
+  (t)   (t)
+L1 ◦ L2 composes a frozen base model L0 , a small steering adapter L1 , and a mutable harness L2 ;
+the fourth layer—the L3 loop controllers—sits outside this forward pass. Deployments induce the
+performative distribution D(πt ) and the verifier returns bounded terminal and process rewards; the L3
+controllers consume these and act on their own layers through anytime-valid gates—A LG 3/A LG 1
+update and protect L1 each round (fast timescale), A LG 4/A LG 5 edit and grow L2 every K rounds
+(slow timescale), and A LG 2 guards any learned reward model with an e-value drift gate. Every
+decision is logged in the certificate ledger against the error budget δ0 . In all reported runs L1 is
+steered—its distribution over discrete directives updated online by A LG 1/A LG 3—never weight-fine-
+tuned; weight-level adapter training by the slow-loop distillation of §5.3 is designed but not run here.
+
+
+2    Related Work
+
+SEA introduces no new learning theory; it reuses guarantees proved for exogenous settings and asks
+what each needs in order to survive a loop the learner closes on itself. The prior work accordingly
+plays two roles. A shared lens (performativity) and a shared gate (anytime-valid inference) cut across
+all five controllers; four classical literatures then each supply the seed result for one controller, and a
+fifth thread—verifier-guided search—is the engine that feeds the gates rather than a controller in its
+own right.
+
+Performativity is the lens. The common difficulty is that an agent’s own updates move the
+distribution it is then judged on. Performative prediction makes this precise: Perdomo et al. [2020]
+define decision-dependent distributions D(π) through the sensitivity condition W1 (D(π), D(π ′ )) ≤
+ε∥π − π ′ ∥ (their Def. 3.1) and show that for β-smooth, γ-strongly-convex losses repeated retraining
+contracts to a performatively stable point at a linear rate when ε < γ/β (their Thm. 3.5), a threshold
+shown tight in their Prop. 3.6. Mandal et al. [2023] carry this into reinforcement learning, where
+reward and transition kernels are (εr , εp )-sensitive in the occupancy measure and convergence is
+restored by sufficiently strong regularization (their Thm. 1)—so under performativity, trust regions
+and regularization are necessary rather than optional. We adopt this lens throughout: the deployed
+configuration is our performative variable, and ε enters both as a trust-region coefficient (A LG 1) and
+as a confidence-radius inflation (A LG 4).
+
+Anytime-valid inference is the gate. Because a self-evolving agent inspects its own statistics
+every round, any test it relies on must stay valid under continuous peeking—fixed-n inference is
+invalid by construction. E-values, e-processes, and time-uniform confidence sequences supply exactly
+this license for optional stopping [Ramdas et al., 2023, Howard et al., 2021, Ville, 1939]. The
+
+
+                                                                          3
+                                          2026 JP Morgan Chase & Co. All rights reserved
+Statistical Gödel Machine [Wu et al., 2025], a statistical descendant of Schmidhuber’s proof-based
+Gödel machine [Schmidhuber, 2003], applies the idea to self-modification: it gates each self-edit
+with an e-value and, because an accepted edit is an irreversible commit, controls familywise (not
+false-discovery) error under a harmonic spending schedule. A LG 4 builds directly on this gate,
+adding a performative correction and a non-stationarity test [Chandak et al., 2020] and inheriting
+the abstention semantics of high-confidence, Seldonian policy improvement [Thomas et al., 2015,
+2019]—the source of our “no solution found” output.
+
+
+
+Four endogenous failure modes, four seeds. Each remaining controller takes a guarantee proved
+in an exogenous world and asks it to hold once the agent supplies its own data. Continual learning.
+Orthogonal gradient descent leaves earlier-task predictions unchanged [Farajtabar et al., 2020], but
+its no-forgetting guarantee is an NTK-regime result that needs unbounded Jacobian memory [Abbana
+Bennani et al., 2020, Thm. 2], while the time-uniform PAC-Bayes forgetting certificates of Friedman
+and Meir [2025, Thm. 3.1] and Chugg et al. [2023, Thm. 3.1] require a data-independent prior; both
+assumptions break when the agent reuses its own evolving policy on a stream it generates, which
+A LG 1 confronts with a finite direction buffer inside a performative trust region. Self-consuming loops
+and preference games. Pure self-training collapses—tails vanish and variance shrinks [Shumailov
+et al., 2024]—unless real data is retained: accumulating rather than replacing data bounds the error
+independently of iteration count [Gerstgrasser et al., 2024], and a constant real-data fraction α
+caps the cumulative shift at 2M (1 − (1 − α)t )α−1 dTV (n) [Fu et al., 2025, Thm. 1]. In parallel,
+preference optimization converges only in the last iterate and only for a fixed game—magnetic
+mirror descent reaches the regularized Nash equilibrium and recovers the true one by refreshing its
+magnet [Wang et al., 2025], and proximal-point self-play contracts geometrically up to a gradient-
+residual floor [Tiapkin
+                    √ et al., 2025]—while a learned reward model over-optimizes, its proxy–gold
+gap growing with KL [Gao et al., 2023]. A LG 2 couples a real-data anchor against collapse with
+last-iterate self-play, separated onto two timescales [Borkar, 2008]. Credit assignment. Hindsight
+credit assignment reweights each reward by how much the action could have influenced it, dropping
+rewards it could not [Harutyunyan et al., 2019]; COCOA generalizes the conditioning from future
+states to rewarding outcomes and is unbiased under a fully-predictive encoding with ground-truth
+contribution coefficients (their Def. 2 and Thm. 1)—but only in a fixed MDP [Meulemans et al.,
+2023]. A LG 3 folds the deploying policy into the outcome encoding and drives the update with
+parameter-free, strongly-adaptive online learning [Cutkosky, 2020, Orabona and Pál, 2016, Baby
+and Wang, 2022], whose dynamic-regret rates are stated against a drifting comparator. Library
+learning. DreamCoder grows a program library by wake-sleep MDL learning [Ellis et al., 2021] and
+Stitch makes the abstraction step exact via corpus-guided top-down synthesis with sound dominance
+pruning [Bowers et al., 2023], but neither has a convergence or no-collapse guarantee when the
+corpus is generated under the very library being learned; A LG 5 therefore keeps a MAP-Elites archive
+over behaviors [Mouret and Clune, 2015, Cully and Demiris, 2018] rather than a single library, and
+certifies held-out description length in the spirit of PAC-Bayes lifelong learning [Pentina and Lampert,
+2014].
+
+
+
+Verifier-guided search is the engine. Because the controllers can only select among behaviors
+the frozen base already produces, a separate line of work supplies the variation and the dense signal
+they act on. Coverage under repeated sampling grows along an approximate exponentiated power
+law, yet only an automatic verifier turns that coverage into solved instances—majority vote and
+reward-model selection plateau as samples grow [Brown et al., 2024]. Closing the loop with the
+model’s own judgment, as Self-Refine [Madaan et al., 2023] and Reflexion [Shinn et al., 2023] do,
+stalls exactly where self-assessment fails. Our search (§5) departs on two axes. First, the feedback is
+executed verification rather than opinion: best-of-N keeps the candidate an executable verifier scores
+highest, and refinement is a strict verifier-scored hill-climb with backtracking. Second, the operators
+are wired into the certificate-gated controllers—best-of-N is A LG 4’s accept-gate pointed at patches,
+and process rewards feed A LG 3’s credit assignment. Where model-generated tests have been used
+for selection and self-debugging [Chen et al., 2023, 2024], our verifier (§5.2) keeps a strict firewall
+between the self-authored oracle that steers the search and the held-out grader that only measures it,
+admitting an oracle only if it fails on the unpatched base.
+
+
+                                                       4
+                                2026 JP Morgan Chase & Co. All rights reserved
+3     Architecture: Four Layers Around a Frozen Model
+The deployed agent at round t is the composition
+                                                       (t)    (t)
+                                       πt = L0 ◦ L1 ◦ L2 ,                                          (1)
+where the four layers, and the channels through which the five controllers act on them, are summarized
+in Figure 1:
+L0 — Base model. A frozen pre-trained LLM, accessed as a function LLM(prompt) → text, op-
+   tionally returning token log-probabilities. Never updated.
+L1 — Adapter. The trainable policy parameter θ. With open weights this would be a low-rank
+   adapter [Hu et al., 2022], prefix [Li and Liang, 2021], or soft prompt [Lester et al., 2021]; the
+   provider-agnostic realization is a steering adapter: a stochastic policy over a finite set of k
+   steering directives, parameterized by logits θ ∈ Rk with p = softmax(θ) (§3.1).
+L2 — Harness. Mutable orchestration: system prompt, tool definitions, step and exploration budgets,
+   memory, the grown abstraction library, and a repair pipeline of adopted self-repair primitives
+   (§5.4). Edited by A LG 4; grown by A LG 5; self-repaired online. Every structural edit changes the
+   harness’s identity, so the policy version is well defined at all times.
+L3 — Loop controller. One of the five algorithms (or their composite). Holds certificates, gates,
+   budgets, and archives; never part of the agent’s forward pass.
+The performative distribution D(πt ) [Perdomo et al., 2020] is the distribution of (prompt, tool-call,
+environment-response) tuples the agent generates in deployment. Each round the controller emits a
+certificate—a structured audit record carrying the round’s decision (ACCEPT/HOLD/REJECT/NSF),
+the error budget spent, and algorithm-specific metrics. Certificates form the unified ledger by which a
+run can be audited after the fact.
+
+3.1   The policy substrate
+
+The pseudo-code in this paper is written against the following concrete objects.
+
+Steering adapter (L1 ). The only trainable parameters are logits θ ∈ Rk over k steering directives—
+short natural-language strategy instructions appended to the system prompt. Each round the agent
+samples one directive, i ∼ softmax(θ), so the distribution over directives is an explicit softmax
+whose log-probability is known exactly on any backend. We never differentiate through the frozen
+model. The only gradient any controller uses is the closed-form score-function (REINFORCE)
+gradient of this softmax,
+                                  ∇θ log pθ (i) = 1i − softmax(θ),                               (2)
+which needs only the sampled index i and a softmax—no backpropagation, no model internals—and
+is therefore exact even on a text-only API. This is the gradient A LG 1 and A LG 3 consume. For the
+forgetting gate the same θ is read as a diagonal-Gaussian PAC-Bayes posterior Qθ = N (θ, diag ev )
+with fixed log-variance v, so KL(Qθ ∥Q0 ) is just a scaled squared distance to the prior mean; the
+same vector supplies the ℓ2 distance and ball projection the trust region needs. No model Jacobian
+is ever formed: the “Jacobian memory” of orthogonal-gradient continual learning is approximated
+by a finite FIFO buffer of past closed-form gradients (2) (A LG 1), and true open-weights Jacobian
+buffers, though supported, are used in no reported run. Every committed policy is thus identifiable
+and auditable after the fact.
+
+Policy identity and distance. A policy’s version is determined by (L1 , L2 ); L0 is fixed. Policy
+distance is ∥θ − θ′ ∥2 plus a unit structural step if the harnesses differ—harness edits are discrete, and
+their performative effect is estimated from deployment rewards rather than from a norm.
+
+Deployment. D EPLOY(π, tasks) runs all tasks concurrently and returns one rollout per task: the
+directive index used, the action, the tool trajectory, and a bounded reward R ∈ [0, 1] from the
+environment. Two paths exist behind one interface: a single-call path (one LLM generation per task),
+and an actor path in which a multi-step tool-using agent (§7) produces the final action. An attempt
+index varies the sampling seed and the working directory, so independent attempts of the same (policy,
+task) pair are diverse and isolated—the substrate for best-of-N and refinement search (§5). Rollouts
+are appended to a persistent replay buffer, which A LG 3 and A LG 4 consume off-policy.
+
+
+                                                        5
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Table 1: The implementation’s ten numbered algorithms. A LG 1–A LG 5 are the scheduled L3
+controllers of this section; A LG 6–A LG 10 are the verifier-in-the-loop and actor-side mechanisms of
+§5–§5.4. The five controllers remain the contribution; A LG 6–A LG 10 are the engine that feeds them.
+A LG 4 is omitted from the live SWE stack for wall-clock cost (§7) and best-of-2 (A LG 6) is removed
+from it (§9.1); both remain in the catalog.
+
+      Flag    Mechanism                                                         Where           Acts on
+      alg1    PPB-CL: forgetting-gated continual learning                       §4.1, Alg. 1    L1
+      alg2    PNMP-A: anchored preference learning                              §4.2, Alg. 2    reward q
+      alg3    PA-COCOA: counterfactual credit assignment                        §4.3, Alg. 3    L1
+      alg4    SGM-CS: confidence-gated harness edits                            §4.4, Alg. 4    L2
+      alg5    SDC-QD: MDL+QD library growth                                     §4.5, Alg. 5    L2
+      alg6    verifier-gated best-of-N + refinement                             §5, Alg. 6      search
+      alg7    verified micro-step search (fast loop)                            §5.1, Alg. 7    search
+      alg8    self-authored reproduction oracles                                §5.2, Alg. 8    verifier
+      alg9    search-layer controllers (A LG 1/A LG 3/A LG 4/A LG 5 re-aimed)   §5.3, Alg. 9    search
+      alg10   verified self-repair of the harness                               §5.4, Alg. 10   L2
+
+
+Access levels. What a provider exposes determines what is implementable. API-text (text only)
+already suffices for every controller, because the trainable policy is the L1 softmax and its gradient (2)
+needs only sampled directive indices: A LG 1, A LG 2, and A LG 3 run even on local text-only servers,
+and A LG 4 and A LG 5 edit only L2 . API-logprob adds sequence-level importance ratios; open weights
+would additionally allow gradients through the model itself and true Jacobian memory—neither of
+which is used here.
+
+4      The Five Loop Controllers
+Throughout, πt is the deployed configuration at round t; D(π) the induced data distribution; ε the
+performative sensitivity (W1 (D(π), D(π ′ )) ≤ ε∥π − π ′ ∥); L the loss’s smoothness-to-curvature
+ratio (the condition number β/γ of Thm. 3.5 of Perdomo et al. [2020], so the contraction regime is
+εL < 1); δ0 a global error budget; and NSF (“no solution found”) the safe abstention output [Thomas
+et al., 2015, 2019]. All rewards are bounded in [0, 1]; the per-rollout loss is ℓ = 1 − R.
+
+Two tiers, ten algorithms. The five controllers in this section (A LG 1–A LG 5) are the conceptual
+core. The reference implementation pairs them with five verifier-in-the-loop / actor-side mechanisms
+(A LG 6–A LG 10, §5–§5.4) that supply the signal and variation the controllers act on: gates can only
+select among existing behaviors, so the engine that generates and verifies those behaviors carries
+its own numbering. Table 1 is the full inventory. Pseudocode for all algorithms is collected in
+Appendix A.
+
+4.1     A LG 1: Performative PAC-Bayes Continual Learning (PPB-CL)
+
+Problem. The agent must acquire new skills without catastrophically forgetting old ones, on a stream
+it generates itself. The two natural seed results do not cover this setting: OGD’s forgetting guarantee
+assumes an exogenously indexed task sequence in the infinite-width regime [Farajtabar et al., 2020,
+Abbana Bennani et al., 2020], and time-uniform PAC-Bayes forgetting certificates [Chugg et al.,
+2023, Friedman and Meir, 2025] require a data-independent prior—which fails the moment the agent
+reuses its own evolving policy as a prior. The stream, the loss, and the prior are all endogenous here.
+Solution (Algorithm 1). Intuition. Damp each update by how much it would degrade a small anchor
+set of past tasks, and cap its size by the remaining forgetting budget. Concretely, keep the PAC-Bayes
+object small and the prior frozen—the posterior is a mean-parameterized diagonal Gaussian Qθ
+over the steering adapter, with a frozen data-independent prior Q0 . Each round, a performative
+batch is deployed and a REINFORCE gradient of the expected loss is formed from the sampled
+directive indices, with the baseline pooled over the recent replay window (a within-round baseline is
+identically zero at batch size one). The gradient is projected orthogonally off a FIFO buffer of the
+last m committed update directions (the OGD guard), and a candidate adapter is proposed by a single
+descent step. The candidate must pass three gates in sequence. (i) Forgetting gate: the candidate is
+
+
+                                                          6
+                                  2026 JP Morgan Chase & Co. All rights reserved
+deployed on a small anchor set of past tasks, each stored with its best historical reward Rj∗ (with M =1
+for rewards in [0, 1]; until anchors accumulate the gate passes vacuously); the empirical backward
+               1                           ∗
+                   P
+         bt = |A|
+transfer b            j [(1 − Rj ) − (1 − Rj )] enters the Donsker–Varadhan bound
+                                                                   √
+                                           KL(Qθ ∥Q0 ) + log(2 t/δ) λM 2
+                      Bfgt (θ) = bt(θ) +
+                                    b                                      +        ,                 (3)
+                                                          λ                   8|A|
+an instance of the anytime PAC-Bayes recipe of Chugg et al. [2023, Thm. 3.1]—which holds for
+precisely the adapted posterior sequences a self-evolving agent p produces—via Ville’s inequality;
+                                                            ∗
+the temperature is set per evaluation to its optimizer    λ   =   8|A|At with At = KL(Qθ ∥Q0 ) +
+      √                                              p
+log(2 t/δ), collapsing the last two terms of (3) to At /(2|A|) (a fixed λ left the bound an order of
+magnitude above any usable threshold). If Bfgt > τforget , the step is damped geodesically toward the
+incumbent by factor ρ and re-tested, up to five times. (ii) Performative trust region: the surviving
+slack τforget − Bfgt , divided by ε, caps the adapter step in ℓ2 ; a violating candidate is projected
+onto the ball and the bound re-evaluated. This is what keeps the induced shift inside the contraction
+regime of Perdomo et al. [2020]. (iii) Commit gate: the candidate commits only if Bfgt ≤ τforget
+and εL < 1; on commit, the projected gradient joins the buffer and the anchors absorb the round’s
+tasks
+q with their √  best rewards. The certificate reports the empirical risk, KL, the time-uniform penalty
+   (KL + log(2 t/δ))/2nt and risk bound, the forgetting bound, trust radius, and damping count.
+The pieces are published; their composition is an empirical construct we do not prove correct under
+the endogenous loop. Each ingredient is sound on its own—the time-uniform PAC-Bayes penalty
+of Chugg et al. [2023, Thm. 3.1], the Donsker–Varadhan backward-transfer forgetting bound of
+Friedman and Meir [2025, Thm. 3.1], and the performative contraction regime ε < γ/β of Perdomo
+et al. [2020, Thm. 3.5]—but whether they combine into an anytime-valid forgetting guarantee that
+survives the loop is a conjecture, not a theorem we establish. The capped direction buffer in particular
+forfeits the exact no-forgetting property of Abbana Bennani et al. [2020, Thm. 2], which assumes
+unbounded Jacobian memory; and the anytime floor of (3) grows with t, so τforget must sit above it
+or the gate freezes the learner.
+
+4.2   A LG 2: Performative Nash-MP with Real-Data Anchoring (PNMP-A)
+
+Problem. Recursive self-training and self-rewarding loops drift to degenerate fixed points: the
+policy exploits the reward model’s over-predictions, and the reward model is retrained on the policy’s
+own outputs [Gao et al., 2023, Shumailov et al., 2024]. The seeds each cover half the problem:
+constant-fraction real-data anchoring prevents data collapse [Fu et al., 2025] but says nothing about
+reward-model drift, while last-iterate Nash convergence [Tiapkin et al., 2025, Wang et al., 2025]
+assumes a fixed preference game. The loop must be protected against both simultaneously.
+Solution (Algorithm 2). Intuition. Mix a fixed reference anchor into every reward-model up-
+date and gate any update that drifts from it, while letting the policy chase the reward model on a
+slower timescale than the model settles. Two ideas do the work: separate the two risks onto two
+timescales [Borkar, 2008], and gate the slow one. The preference model is a Bradley–Terry score
+vector q ∈ Rk over directives, P (i ≻ j) = σ(qi − qj ), with a frozen anchor qreal (absent a held-out
+real-preference set the anchor defaults to the neutral zero vector, so in the SWE runs it prevents drift
+from neutrality rather than from human preferences). Synthetic preference pairs come from directives
+pooled over the recent replay window, the higher-mean directive winning. The slow timescale blends
+the synthetic Bradley–Terry gradient with a pull toward the anchor,
+          qcand = q + aslow                                                aslow = 21 (t+1)−1 ,
+                                                                 
+                         t    α (qreal − q) + (1 − α) ∇q LbBT (q) ,         t                       (4)
+and is adopted only if it clears a drift gate: the per-pair deviations from the anchor, Xij = |σ(qicand −
+qjcand ) − σ(qireal − qjreal )|, feed a Hoeffding e-process testing H0 : E[X] ≤ τ , and rejection at the
+round’s CTHS level δk keeps the last safe model. The fast timescale moves the policy by a regularized
+Nash mirror-prox (extragradient) step on the logits,
+                     θt = θt−1 + afast
+                                  t    (θMP − θt−1 ),         afast
+                                                                t   = 12 (t+1)−0.7 ,                  (5)
+                                                             P
+whose game gradient is the self-play advantage advi (p) = j pj σ(qi − qj ) and whose prox operator
+folds in the KL to the previous iterate and β times the KL to the reference policy (the two extragradient
+
+
+                                                        7
+                                 2026 JP Morgan Chase & Co. All rights reserved
+half-steps are spelled out in Algorithm 2). Because aslow
+                                                     t    /afast
+                                                            t    → 0, the model settles faster than the
+policy chases it—the required timescale separation. A magnet z is refreshed every K rounds and
+KL(πt ∥z) reported on the certificate; once the budget δ0 is spent the preference model freezes and
+only policy updates continue.
+Here too the components are published and the combination is an unproven, empirical construct. We
+borrow the constant-α bound on cumulative distribution shift in self-consuming training of Fu et al.
+[2025, Thm. 1], the geometric last-iterate self-play contraction (up to a residual floor) of Tiapkin
+et al. [2025, Prop. 1], and the anytime-valid familywise control of e-processes under harmonic
+spending [Ramdas et al., 2023, Wu et al., 2025]. Whether their two-timescale coupling converges to
+a performative equilibrium without collapse is a conjecture, not a result we prove; we claim no rate,
+and note that performative equilibria need not be unique and that the shift bound degrades as α → 0.
+
+4.3   A LG 3: Performative-Aware COCOA (PA-COCOA)
+
+Problem. Long-horizon, sparse outcomes must be attributed across a multi-component agent
+stack while the transition and reward kernels move with the deployed policy [Mandal et al., 2023].
+COCOA’s unbiasedness [Meulemans et al., 2023] holds under a fully-predictive outcome encoding—
+pπ (Rk =r | S0 , A0 , Uk =u) = pπ (R=r | U =u) for all k (their Def. 2)—with ground-truth contribu-
+tion coefficients (their Thm. 1), in a fixed MDP; under endogenous drift the policy-induced shift is
+a hidden confounder, and the high-variance importance ratios of REINFORCE compound over the
+horizon.
+Solution (Algorithm 3). Intuition. Replace “reward × log-prob” with a counterfactual per-action
+contribution, condition on the deploying policy so policy drift stops confounding, and feed the result
+to a parameter-free learner that restarts on detected drift. Two moves realize this. First, augment the
+outcome encoding with the deploying policy, Ũ = (U, πt ), so the shift enters the conditioning set
+and stops confounding; concretely, every replay rollout carries its policy version and directive index,
+and the contribution model is estimated per directive over a recency-weighted replay window, with
+the policy-induced drift absorbed by the recency weighting rather than by explicit conditioning on
+the version (a deliberate simplification of the full (U, πt ) encoder). The contribution model is thus a
+recency-weighted per-directive mean of episode rewards over the recent window (half-life h; weight
+2−age/h ; default 12 for unseen directives)—where the episode reward is the process reward R̃ of §5
+when available, i.e. the best verifier state the episode reached rather than only its terminal submit.
+The augmented COCOA gradient then sums counterfactual contributions over all actions, eliminating
+the importance ratio; for the softmax steering adapter it has the closed form
+                     X
+                         w(a′ ) ∇θ pθ (a′ ) = w
+                                                       
+             g =          b                     b ⊙ p − p⟨b    w, p⟩,     p = softmax(θ),            (6)
+                    a′
+a simplified instance of the COCOA estimator in which credit attaches to the episode outcome rather
+than to per-step rewards. A mean-reverting exploration floor adds φ (1/k −p) to the gradient, keeping
+every directive sampled so its credit estimate stays fresh instead of collapsing onto one arm of an
+inflated signal. Second, hand the update to a learner that needs no learning rate and tracks drift: per-
+coordinate Krichevsky–Trofimov coin betting [Orabona and Pál, 2016] (the iterate is x = x0 + βt Wt
+with clipped betting fraction βt and per-coordinate wealth Wt ), wrapped with drift-triggered restarts.
+A seeded wild-bootstrap trend test (§6) on the mean-reward stream signals non-stationarity and the
+bettor re-anchors at the current iterate—a restart-based surrogate for the strongly-adaptive guarantees
+                                         √
+that yield path-length dynamic regret O(e T VT ) on every interval [Cutkosky, 2020], and the optimal
+           2/3
+O(T 1/3 VT ) rate for strongly convex losses [Baby and Wang, 2022].
+ e
+As before, every component is published and the composition is empirical, with no correctness proof
+in the performative setting. The unbiasedness of the counterfactual-contribution estimator under
+a fully-predictive encoding is Meulemans et al. [2023, Thm. 1], and Proposition 5 there already
+shows the hindsight model is invariant to conditioning on the policy logits within a deployment; the
+                                                                           √
+parameter-free dynamic-regret rates are Cutkosky [2020] (path-length O( e T VT ) on every interval,
+                                                                             2/3
+with VT the comparator path length) and Baby and Wang [2022] ( e  O(T 1/3 VT ) for strongly convex
+losses). Whether unbiasedness and these rates carry to the performative MDP [Mandal et al., 2023]
+across rounds is a conjecture we do not prove: a fully-predictive Ũ must be learnable, the recency-
+weighted contribution estimate reintroduces a bias their theorem does not cover, and the regret
+statement is vacuous once path variation VT grows linearly.
+
+
+                                                       8
+                                2026 JP Morgan Chase & Co. All rights reserved
+4.4   A LG 4: SGM Gated by Anytime-Valid Confidence Sequences (SGM-CS)
+
+Problem. A self-modification must be admitted only if it statistically improves the agent, with
+risk bounded across an unbounded sequence of self-proposed edits, where the proposal process is
+endogenous (it may exploit residual statistical slack) and a deployed edit changes the very distribution
+in which it is judged.
+Solution (Algorithm 4). Intuition. Admit a self-edit only through a sequential, peek-safe paired test
+that spends a shrinking per-edit slice of a global error budget—so familywise error stays bounded
+over an unbounded edit stream—and correct that test for the distribution shift the edit itself induces;
+abstain when in doubt. A LG 4 runs on API-text access, edits only L2 , and is the governance layer to
+deploy first. The proposer is the frozen LLM acting on its own harness, cycling the three knobs of
+the explore/edit economy (§5): the forced-edit threshold, the step budget, and the strategy guidance.
+Baseline πt−1 and candidate πcand are deployed concurrently on the same task batch under common
+random numbers (aligned per-task seeds, isolated working copies), and the decision is a lower bound
+on the paired process-reward (Eq. 10) gain, corrected for performativity:
+      LCB = CSlower
+                                       
+                  δk   Rcand − Rbase − ε · W1 (Rcand , Rbase ),        admit iff LCB ≥ −ϵtol . (7)
+The paired-difference confidence sequence is taken at the round’s CTHS level δk =
+δ0 /(Z k log2 (k+1)) (§6); the W1 term, computed exactly in 1-D from the samples, inflates the
+bound by the shift the edit induces; and per-version normal-mixture sequences [Howard et al., 2021]
+accumulate value evidence across rounds. Three details keep the test honest and cheap. (i) Two free
+guards spend nothing: an exhausted budget or a no-op proposal simply holds. (ii) A pre-gate pilot on
+the round’s best-evidenced (known-passable) task rejects (NSF) a candidate that shows no promise
+there, while an uninformative zero-reward pilot falls through to the full evaluation; the remaining
+tasks are then ranked so the comparison falls where evidence is weakest. (iii) A seeded wild-bootstrap
+trend test [Chandak et al., 2020], fed only by rounds that actually re-evaluated the baseline, widens
+the bound by one radius when the baseline-value stream is non-stationary. Otherwise the round
+returns NSF and the baseline is kept.
+The statistical components are published; their composition under an endogenous proposer is an
+empirical construct we do not prove safe. We reuse anytime-valid e-processes with familywise
+control under Ville’s inequality [Ramdas et al., 2023], the confirm-triggered harmonic spending of
+the Statistical Gödel Machine [Wu et al., 2025], the time-uniform confidence sequence of Howard
+et al. [2021], and the abstention semantics of safe policy improvement [Thomas et al., 2015, 2019].
+Whether familywise safety survives the endogenous proposal process and the edit-induced distribution
+shift is open: the performative correction rests on a knowable bound for ε, and the wild-bootstrap
+widening [Chandak et al., 2020] was derived for exogenous non-stationarity, so under the endogenous
+loop it is a conservative heuristic. By construction the protocol favors safety over progress—it may
+rationally abstain (NSF) indefinitely. So that this conservatism never discards a good solution (as
+opposed to a good harness edit), the SWE instantiation keeps a shadow-best: the highest-reward
+candidate patch seen across rounds is retained even when the harness-edit gate abstains, decoupling
+“which harness to deploy” (gated) from “which patch to submit” (best-so-far); and a rejected harness
+that nonetheless produced a strong patch is requeued for a later round, with eligibility keyed on an
+absolute reward threshold and a bounded per-harness retry count, and replayed only in a round whose
+active repositories include its own.
+
+4.5   A LG 5: Stitch-in-DreamCoder with Quality-Diversity Acceptance (SDC-QD)
+
+Problem. The agent must grow its own hypothesis space—invent reusable abstractions—while
+the corpus those abstractions are mined from is generated under the very library being learned.
+DreamCoder’s endogenous loop has no convergence or no-collapse theorem [Ellis et al., 2021];
+Stitch’s MDL-optimal abstraction step is one-shot [Bowers et al., 2023]. A single converging library
+is the wrong target when corpus generation is endogenous.
+Solution (Algorithm 5). Intuition. Keep a quality-diversity archive of behaviorally distinct libraries
+rather than one “best” library, and add an abstraction only when it both reduces description length
+and occupies a new niche; each addition is the exact most-compressive one on the current corpus.
+Concretely, replace the single library with an archive over a frontier, and make each growth step exact.
+Programs are S-expressions with description lengthP     |ρ| equal to the node count, and the objective
+is the node-count MDL surrogate J(L; C) = |L| + ρ∈C |ρ| of DreamCoder’s description-length
+
+
+                                                       9
+                                 2026 JP Morgan Chase & Co. All rights reserved
+posterior over libraries [Ellis et al., 2021]. Each round, a wake phase asks the frozen LLM to
+synthesize one program per task under the current library (shown in the prompt; output is parsed
+defensively, since LLM output may be prose); programs whose environment score reaches the solve
+threshold join the corpus. The sleep phase runs Stitch-style compression: candidate patterns are
+all corpus subtrees plus all pairwise antiunifications of structurally compatible subtrees (differing
+positions become numbered holes), and the net utility of a pattern with body size b, arity a, and m
+non-overlapping matches is u = m (b − 1 − a) − b (each match is rewritten as an application of size
+1 + a; the definition is paid once). Candidates are scanned in descending order of utility with an
+early dominance break, so the maximizer over the candidate set is exact (the soundness argument
+behind Stitch’s dominance pruning, Lemma 1 of Bowers et al. [2023]). The best abstraction A∗ is
+accepted only if (i) ∆J = u(A∗ ) ≥ umin , the minimum-utility bar (so a marginally compressive
+pattern does not enter the library), and (ii) the resulting library is novel or improving in a MAP-Elites
+archive keyed by the behavior descriptor ϕ = (library size, mean solved-program size) with fitness
+the post-compression MDL—so the run illuminates a (compression, coverage) frontier rather than
+converging to one point [Mouret and Clune, 2015, Cully and Demiris, 2018]. Accepted abstractions
+are surfaced as L2 harness entries the agent can call. A Hoeffding-type per-task description-length
+certificate, in the spirit of the PAC-Bayes lifelong-learning bound of Pentina and Lampert [2014],
+bounds expected per-task description length on held-out tasks:
+                                                                     s
+                                              J(Lt ; Ct ) |Lt |         log(1/δ)
+                           Enew task [DL] ≤               +        +              .                   (8)
+                                                 |Ct |       |Ct |        2|Ct |
+
+On the SWE agent (§7), the wake phase is replaced by the agent’s own behavior: successful
+trajectories, encoded as (tool, target) operation sequences, become the corpus, and the mined macros
+become callable harness entries.
+The per-round compression step is exact and published; the loop around it is an empirical construct
+without a convergence proof. The single step is exact in the published sense: Lemma 1 of Bowers et al.
+[2023] shows that dominance pruning never discards the optimal abstraction, so the accepted macro
+is the most-compressive one on the current corpus (over the implemented candidate set), and MDL is
+monotone non-increasing under a fixed corpus. The held-out description-length certificate (Eq. 8) is
+Hoeffding/Occam-type—it carries no KL term and so is not itself a PAC-Bayes bound, but shares
+the Hoeffding-lemma core of the lifelong PAC-Bayes bound of Pentina and Lampert [2014]—and
+assumes an exchangeable task distribution that endogenous generation may violate. Convergence of
+the quality-diversity archive to a meaningful frontier is not a published result—no QD framework,
+including Cully and Demiris [2018], proves it—so we make no such claim; it is at most a conjecture,
+and the global limit need not be meaningful when corpus generation is endogenous. Every abstraction
+is a composition within a fixed typed λ-calculus; expanding the type system is beyond this algorithm.
+
+
+5   The Verifier as an In-Loop Control Signal
+
+Problem. The five controllers gate, select, and reshape: they act on the distribution of behaviors the
+frozen base model already produces. On hard agentic tasks that distribution offers a passive learner
+little. (i) The natural reward is terminal and binary—an instance is resolved or it is not—so a base
+that never fully resolves yields an identically zero signal and the loop has no gradient. (ii) Some
+failures are systematic, not stochastic: on certain instances a base re-runs the same attempt under
+temperature, returning identical partial patches and never the occasional good one, so selection over
+samples has no variance to exploit (an instance-level phenomenon, not a property of a whole model).
+(iii) Yet the same base is reliable at the micro-step—it can localize and emit an applying one-line
+edit—even when it gets the whole-patch content wrong; reliability lives at a finer granularity than the
+unit the loop scores. (iv) The interventions that helped were control-flow, not capability: forcing an
+edit after an exploration budget changes what the model does next, whereas coaxing latent quality
+does not. (v) The verifier—the one component that knows ground truth—was consulted once, after
+the episode, when nothing could be done about what it reported; this is exactly the regime in which
+selection, not generation, is the bottleneck [Brown et al., 2024]. The problem is to convert the verifier
+from a passive end-of-episode score into a control signal that acts inside the episode, across attempts,
+over the action space, and inside credit assignment, and to relocate both the search and the reward to
+the micro-step granularity where the base is reliable—without ever leaking gold labels.
+
+
+                                                       10
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Solution. A graded verifier and a family of search operators, all derived from test execution alone
+and all composable with every controller through the actor interface (the attempt-indexed deployment
+substrate of §3.1), building up to a verified micro-step search (§5.1).
+
+Graded verifier. A shaped milestone reward first decomposes the path to a resolve into rungs
+derived only from test execution: 0 for no parseable diff, 0.2 for a diff that does not apply, and
+0.4 + 0.6 · fracf2p once tests run (halved and capped at 0.55 when pass-to-pass regressions appear),
+capped at 1. Because a whole batch of edits can sit at the same rung (every one applies but none
+passes a test), this is still too coarse to climb; the graded verifier adds two finer signals on top of the
+milestone score sshaped :
+           (
+             1                                                                           resolved
+    V =                                                                                                (9)
+             min 0.99, sshaped + ⊮[sshaped ≥ 0.4] (wp ⊮[progressed] + wj j) otherwise,
+where the bonuses apply only once a patch has cleared the apply-and-run rung (sshaped ≥ 0.4),
+progressed is true when the test’s failure signature moves (the last pytest error line, with volatile
+numbers and addresses masked, differs from the seed’s—so the edit got further before failing),
+j ∈ [0, 1] is an auxiliary LLM judge, and the bonuses wp , wj are kept small (0.08 each) so an
+actual sub-test pass always outranks the heuristics and a non-resolved patch never reaches 1. Error-
+progression is the key addition: it turns a plateau of equally-applying patches into a gradient. The
+fail-to-pass fraction fracf2p here is computed from each instance’s held-out gold tests, so this graded
+score is reserved for terminal measurement (and offline development), exactly as a test set should be—
+never to steer the search. The dense signal the search actually climbs is supplied by a self-authored
+verifier that reads only the issue (§5.2).
+
+Closed-loop test execution. A run_tests tool lets the agent run the real target tests on its current
+edits mid-episode and read back actionable feedback: pass counts and the tail of the failure log.
+A short, typed repair instruction keyed to the failure class (a name or import error, an assertion
+mismatch, a syntax error, or a no-patch episode each map to a specific corrective hint) is injected
+into the guidance of the next refinement attempt (Algorithm 6), pairing each recorded failure with a
+concrete next step. The tool is stateful (its result depends on the current edits), so it is exempt from
+the agent’s duplicate-action guard. This changes the task from one-shot patch guessing to closed-loop
+debugging—the agent can edit, test, read a failure paired with a concrete next step, and iterate before
+submitting.
+
+Process reward. With the verifier callable mid-episode, credit assignment need not wait for the
+terminal submit. The process reward of an episode is the best verifier state it reached,
+                                                                
+                                R̃ = max Rterminal , max sj ,                              (10)
+                                                               j
+
+where sj is the shaped score at the agent’s j-th run_tests call. A trajectory that reached a good
+state and then regressed still carries credit; A LG 3’s contribution model (Algorithm 3) consumes R̃ in
+place of the terminal reward.
+
+A LG 6: Verifier-gated best-of-N and refinement search (Algorithm 6). Across attempts, two
+search operators sit on top of any actor. B EST O F N runs n independent, diverse attempts (the attempt
+index varies the sampling seed and the working directory) and keeps the one the verifier scores highest:
+under independent attempts, a per-attempt resolve probability p becomes 1 − (1 − p)n —a strict
+lift whenever p > 0. Empirically, coverage under repeated sampling grows along an approximate
+exponentiated power law in n, and a ground-truth verifier is exactly the selector that converts coverage
+into solved instances [Brown et al., 2024]. R EFINE is a sequential hill-climb: each attempt after
+the first is seeded with the best patch so far and the verifier’s explanation of why it failed, the new
+candidate is scored on the original task, and it replaces the incumbent only if strictly better—otherwise
+the search backtracks to the best known patch. Refinement stops early on a full resolve. We removed
+best-of-2 from the live stack: the run logs show it never produced a second attempt (the attempt
+count stays 1) and, run in isolation, degraded the apply-rate, so it is reported here as a designed
+operator rather than a live component (§9.1). Selecting by the verifier is A LG 4’s accept-gate pointed
+at patches; keeping the best over diverse samples is the selection principle of A LG 5—here applied at
+test time, within a single task.
+
+
+                                                        11
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Enforced explore→edit budget. Over the action space, the harness gains a tunable threshold
+bexplore : once the agent has spent bexplore read-only steps (search/read/list) without landing an
+edit, it is first warned to edit and then, after a short grace window of a few further explores under
+escalating pressure, the exploration tools are disabled until an edit is made. The grace window
+is not cosmetic: a hard cap with no grace deadlocked a mid-localization agent into a no-op read
+loop that produced an empty patch, whereas the graded pressure let the same agent land its edit (in
+one live case turning an empty patch into a correctly localized fix). This converts the diagnosed
+over-exploration failure from a property of the model into a property of the harness—and the harness
+is governed: bexplore is a knob in A LG 4’s proposer cycle (Algorithm 4), so tightening it must survive
+the confidence-sequence gate like any other self-edit.
+
+5.1   A LG 7: Verified micro-step search (the fast loop)
+
+Best-of-N and refinement search over whole patches, where a weak base is unreliable and near-
+deterministic. The fast loop (Algorithm 7) instead searches over verified micro-steps: from the current
+best patch and the verifier’s failure feedback, a reasoning-first generator (first name the root cause,
+class, and method; then emit edits) proposes k materially different one-line hypotheses, diversity
+forced by the prompt against a working memory of past failures rather than by sampling temperature.
+Each hypothesis is composed onto the current best and scored only if it applies. Three components
+keep the search efficient: a beam of width b over verified partial patches; the working memory
+of tried edits and distinct failure signatures, rendered into the prompt to suppress repeats; and a
+cheap-to-expensive verification cascade (a parse/apply check, then the native fail-to-pass run only on
+survivors) that confines the minute-long test run to compiling patches. The search halts on a pass and
+gives up when a full round of fresh hypotheses moves nothing. Hypotheses may be pooled across
+several base models into one verified beam.
+
+5.2   A LG 8: The in-loop verifier — self-authored reproduction oracles
+
+Problem. The search needs a dense, per-candidate signal to climb, but the held-out gold tests must
+be reserved for unbiased terminal measurement—a learner that is allowed to consult its own test set
+will report progress that does not generalize. So the in-loop verifier must be computable from the
+issue alone, using no information from the gold tests, the test patch, or the fail-to-pass/pass-to-pass
+lists, while still being informative enough to tell a real fix from a near-miss.
+Solution (Algorithm 8). Intuition. Reproducing a described bug is easier than fixing it, so the model
+writes tests from the issue, keeps only those that fail on the unpatched code, and debugs against them;
+the held-out tests are touched only at the end, to report whether the self-authored verifier was right.
+Concretely, a verifier model reads only the issue text (and, optionally, repository source) and writes
+minimal scripts that assert the correct expected behavior, so each script should fail on the buggy
+code and pass once the bug is fixed. The leverage is asymmetric: reproducing a described bug is a
+higher-success task than fixing it—the issue states the symptom, the model need only encode it—so a
+model unreliable at fixing can still author a usable verifier.
+Admission. An oracle is kept only if it fails on the unpatched base (a check that already passes
+on the buggy code captures nothing), with two cheap rejections: timeouts, and failures that are
+unambiguously the script’s own fault, i.e. a syntax or indentation error. An import or name error
+is deliberately not auto-rejected—a bug whose very symptom is a broken import must remain
+admissible—and a symptom judge then demotes any oracle whose base failure does not match the
+issue’s stated symptom. To improve recall (whether a usable oracle gets built at all), oracles are
+pooled across an ensemble of verifier models, so a verifier exists whenever any model authors one;
+this only trades precision in a safe direction, since a spurious oracle can make the score under-claim
+(a correct patch fails to flip an over-strict check) but can never mark a wrong patch correct.
+Extracting the signal. Let A be the admitted oracle suite. A candidate patch ρ is run once (prepared
+a single time, then every oracle executed against it), and its scalar score is the fraction of admitted
+oracles it flips from failing to passing, voided if any previously-passing check regresses:
+                { o ∈ A : o fails on base, o passes on ρ }
+ Vself (ρ) =                                                  if no green check regresses, else 0. (11)
+                                     |A|
+A patch is promising (we never say “resolved”) when every admitted oracle flips and nothing regresses.
+Here Vself is the flip fraction (the regression-voiding term is optional), and the held-out grader runs
+
+
+                                                      12
+                                2026 JP Morgan Chase & Co. All rights reserved
+the fail-to-pass directives, so “the grader agrees” means the gold target tests flip. The searcher is
+the multi-step tool-using agent, whose run_tests tool returns Vself rather than the grader, so it
+debugs against a signal it authored; a robust search-and-replace applier (an edit’s anchor must match
+exactly once, with a unique whitespace-normalized fuzzy fallback and a nearest-match hint on a
+miss) turns the model’s edits into a clean diff so even a weak solver emits applying patches without
+silent wrong-site edits. The held-out grader is invoked only once, on the finalized patch, to measure
+whether Vself was right. Around the single admission rule the implementation adds three safeguards:
+rejected oracles are refined for a bounded number of rounds (each re-prompt carries the reason for
+rejection, stopping at the first admission); a quality gate demotes weak oracles whose assertions are
+negative-only; and oracle code must ground itself in symbols actually extracted from the issue text,
+with a stoplist rejecting generic tokens.
+
+The no-oracle path. When no oracle is admitted, the only gold-free evidence is that related pre-
+existing tests still pass—necessary, not sufficient. This path is hardened in three ways. A fully green
+but unverified verdict is capped at 0.9 with an explicit “nothing verified the issue itself is fixed”
+note, so best-of-N , refinement, verify-react, and the cross-round memory stay armed exactly where
+verification signal is weakest. Candidates that tie at the cap are split by a gold-free issue-fidelity judge
+(issue text plus the two patches, one-token verdict). A regression veto keyed on the failing phrase
+prevents an oracle pass from masking a broken pre-existing test, and a collection-error parser closes
+the remaining false-green channel (a test run that dies during collection no longer reads as green).
+Why measurement stays honest. Because Vself is a function only of the issue text and the repository’s
+own behavior, the held-out tests play no role in steering the search; their single terminal call measures
+the result without having shaped it. The price is that Vself is fallible—it can call a patch promising that
+the grader rejects, or miss a fix its oracles did not cover—which is exactly why a patch is reported as
+“promising,” never “resolved,” and why agreement between the self-oracle verdict and the independent
+terminal grader (§9) is the quantity we report.
+
+5.3   From search to weights: the slow loop and re-aimed controllers
+
+The fast loop raises quality at test time; a slow loop would amortize it into weights by collecting
+verified micro-step trajectories (label-free positive data—they passed the tests) and distilling them
+into a low-rank adapter by reject sampling [Zelikman et al., 2022, Gulcehre et al., 2023]. The slow
+loop is designed but not trained in any reported run (§10). The five controllers are re-aimed from the
+single-pass actor onto this scaffold (Table 2); four act on the search layer, reuse the primitives of §6,
+wrap the beam search of Algorithm 7 and the continual stream of Algorithm 9, and are validated only
+by deterministic offline gate simulations, not live:
+ • A LG 4 becomes a compute-allocation controller: an anytime-valid confidence sequence on the
+   per-round marginal graded gain stops a branch once even its optimistic bound clears no further
+   expected gain (a rigorous campaign-level allocator that bounds false-abandonment, plus a cheap
+   per-instance plateau fast-path), reclaiming the expensive verifier budget for productive instances.
+ • A LG 5 becomes the branch diversity generator: a MAP-Elites archive over a behavior descriptor
+   keeps one elite per behavior cell, so the beam spends its width on behaviorally distinct partial
+   patches rather than b minor variants of one edit—the direct cure for the no-variance failure.
+ • A LG 3 becomes step-level credit: a recency-weighted mean of verified reward per branch class
+   (the edited file) orders which step macro to try first, so the search stops re-discovering the same
+   productive edit shape on every problem.
+ • A LG 1 becomes an anchored forgetting gate: an update to the evolved search/distilled policy is
+   accepted only if a re-evaluation of frozen earlier-repo tasks does not regress.
+The fifth, A LG 2, guards the slow loop: it is the mode-collapse defense for the distillation step (an
+e-value drift gate on trajectory diversity), and is realized only once the slow loop trains—which the
+present system does not yet do, so A LG 2 at the search layer remains design.
+
+5.4   A LG 10: Verified self-repair of the harness
+
+Problem. A search is only as good as its operators. In the fast loop, a recurring harness failure—
+roughly half of the pooled ensemble’s candidate edits failed to apply, because the model copied
+
+
+                                                        13
+                                  2026 JP Morgan Chase & Co. All rights reserved
+Table 2: The five controllers re-aimed from the single-pass actor onto the two-loop (search-then-distill)
+scaffold. Four are built on the search layer and validated by deterministic offline gate simulations; the
+slow-loop anti-collapse guard awaits the distillation training step.
+
+Controller            Acts on      Re-aimed role in the two-loop scaffold                Status
+A LG 4 SGM-CS         fast loop    anytime-valid compute-allocation stopping: halt a     built, gate-sim
+                                   branch/instance when the confidence sequence on
+                                   marginal progress shows no expected gain
+A LG 5 SDC-QD         fast loop    quality-diversity archive as the branch diversity     built, gate-sim
+                                   generator; mine step-level macros from verified
+                                   sub-sequences
+A LG 3 PA-COCOA       fast loop    step-level credit over branch / hypothesis classes,   built, gate-sim
+                                   off-policy from the verified-trace buffer
+A LG 1 PPB-CL         slow loop    anchored forgetting gate: accept a policy update      built, gate-sim
+                                   only if earlier-repo scores hold
+A LG 2 PNMP-A         slow loop    guard the distillation loop against mode-collapse     design (awaits training)
+                                   (e-value drift gate on trajectory diversity)
+
+
+search text from the issue’s diff (lines marked +/−) rather than from the current file—starves the
+search of valid candidates. This is exactly the kind of systematic failure a self-evolving agent should
+fix itself. The tempting response is a human hand-patch (“strip the diff markers from search”); but a
+hand-patch is an unverified belief about the failure’s cause, and acting on it is precisely the trust the
+rest of the paper forbids.
+Solution (Algorithm 10). The harness carries an evolvable repair pipeline—a list of adopted repair
+primitives, an L2 component like A LG 5’s grown library—applied to every hypothesis before it is
+composed. Providing a repertoire of small, composable primitives (de-marking a diff into verbatim
+search/replace, stripping code fences, whitespace-fuzzy matching against the actual file) is not hand-
+patching: the loop selects and verifies which to activate. The gate (P ROPOSE R EPAIRS) takes the
+candidates that just failed to compose and, for each library primitive, measures the fraction it makes
+actually apply against the real composer, adopting only those clearing a threshold, best-first; a repair is
+credited only when it genuinely changes the hypothesis, so an inert primitive earns nothing. A second,
+generation-level gate verifies prompt-suffix repairs by re-generating and re-composing, adopting a
+suffix only if it beats the un-amended apply-rate by a margin. Both gates ground adoption in execution,
+never in a prior. The grown repertoire is the natural target of A LG 5 (which can add primitives) and
+the per-instance selection is the natural target of A LG 4’s confidence-gated acceptance.
+The mechanism earned its keep by refusing a fix: run over the real recorded failures, the diff-de-
+marking primitive cleared the gate on 0 of 34 candidates—the dominant failure was not naive diff
+prefixes but search text targeting code the seed patch had already replaced, which no text rewrite can
+recover—so the verification gate rejected the hand-patch a human would have shipped, and instead
+adopted a generation-level repair where re-generation raised the measured apply-rate (33% → 50%
+on one anchor) and declined it where re-measurement showed no gain (83% → 83% on another).
+These are single-instance observations, not a controlled evaluation.
+Whether each mechanism lifts a given base model—and which failures are stochastic (where best-
+of-N and refinement have variation to exploit) versus systematic (where the budget enforcement,
+micro-step relocation, and self-repair bind)—is what the protocol of §8 measures; §9 reports the
+study that has concluded.
+
+6   The Anytime-Valid Statistical Core
+Every controller monitors its own running statistics and may stop, accept, or restart at any round. The
+shared danger is therefore the same throughout: a fixed-sample test is invalid the moment a controller
+peeks at its own numbers. The primitives below are the standard tools that stay valid under such
+continuous peeking; we lead each with what it buys the loop, then give the formula.
+
+Normal-mixture confidence sequences—an error bar valid at every round. A confidence
+sequence is an interval that holds for all n at once, so a controller can read it after every round
+without inflating its error rate. For σ-sub-Gaussian increments with partial sum Sn and intrinsic time
+
+
+                                                         14
+                                  2026 JP Morgan Chase & Co. All rights reserved
+                                                   p
+Vn = nσ 2 , the mixture supermartingale Mn = ρ/(ρ + Vn ) exp{Sn2 /2(ρ + Vn )} gives, through
+Ville’s inequality, the time-uniform radius
+                          r
+             |Sn |      1                                 
+                    ≤       (ρ + Vn ) 2 log α2 + log ρ+V
+                                                       ρ
+                                                         n
+                                                             simultaneously for all n,   (12)
+              n         n
+with ρ tuned to tighten the boundary near a target sample size [Howard et al., 2021]. (The 2 log(2/α)
+is a conservative union of two one-sided boundaries; the exact two-sided boundary of Howard et al.
+[2021, Eq. 14] carries 2 log(1/α).) This is the value evidence A LG 4 accumulates per policy version.
+
+Hoeffding e-processes—a bankroll that detects drift. An e-process is a wealth process that grows
+in expectation only when the null is false, so a controller can bet againstQ
+                                                                           “no drift” and call drift the
+moment the wealth crosses 1/δ, safely at any stopping time. Concretely, i exp(λi Xi − λ2i /8) with
+predictable λi is an e-process and rejection at Et ≥ 1/δ is anytime-valid [Ramdas et al., 2023]; the
+bet is a GROW-style plug-in that tilts λ toward the observed mean excess using only past data, so it
+grows fast when drift is real. This is A LG 2’s reward-model drift gate.
+
+Horizon-free confirm-triggered harmonic spending (CTHS)—one error budget split over un-
+boundedly many edits. To keep familywise error below δ0 across an open-ended stream of     Paccepted
+edits, the per-edit budgets must sum to δ0 . The SGM schedule δt = δ0 /(t HB ), HB = i≤B 1/i,
+achieves this but pre-commits a finite horizon B [Wu et al., 2025], which a self-evolving agent lacks.
+A horizon-free Pschedule must stay summable on its own: the obvious choice δ0 /(2k log2 (k + 1)) in
+fact over-spends ( k ≈ 1.69 δ0 ), silently breaking validity, so the k-th confirmation instead spends
+                                  δ0                   X         1
+                    δk =                    ,     Z=                     ≈ 3.39,              (13)
+                           Z k log2 (k + 1)            j≥1
+                                                                 2
+                                                           j log (j + 1)
+                                                       P
+with Z evaluated by an analytic tail correction so that k δk = δ0 exactly—familywise validity with
+no horizon.
+
+Parameter-free coin betting with restarts—an optimizer with no learning rate. A LG 3 must
+track a moving optimum without a tuned step size, so it casts each update as a betting game. PA per-
+coordinate KT bettor [Orabona and Pál, 2016] keeps wealth Wt and betting fraction βt = 1t i<t ci
+(clipped to ± 12 ) with normalized reward direction ci = −gi /Gi (Gi a running Lipschitz estimate),
+                                                                   √
+playing xt = x0 + βt Wt ; this gives comparator-adaptive O(∥u∥ T log T ) regret with no learning
+rate to set. Drift re-anchors x0 at the current iterate—a restart surrogate for the strongly-adaptive
+methods that attain path-length dynamic regret on every interval [Cutkosky, 2020] and the optimal
+           2/3
+O(T 1/3 VT ) rate for strongly convex losses [Baby and Wang, 2022].
+ e
+
+Exact 1-D Wasserstein and sensitivity estimation—how far an edit moved the distribution.
+The performative correction (A LG 4) needs the distance between the reward distributions before and
+after an edit; in one dimension this W1 is exact, computed by integrating the gap between empirical
+CDFs over the merged support. The sensitivity ε is then the non-negative through-origin slope of W1
+shifts against adapter-norm deltas on probe pairs, and the contraction check εbL < 1 is exposed to the
+controllers.
+
+Wild-bootstrap trend test—is the baseline drifting under us? Before trusting a logged value
+stream, the loop tests it for a trend by re-signing the OLS residuals (around a no-trend fit) with
+Rademacher ±1 multipliers [Chandak et al., 2020]; the test is robust to heteroskedasticity and heavy
+tails and is seeded for reproducibility. A LG 3 restarts and A LG 4 widens its bound when it fires.
+
+Weighted importance sampling—reusing old rollouts. To value a new policy from rollouts logged
+under older ones, self-normalized weighted IS with clipped log-ratios and an effective-sample-size
+diagnostic reweights the history, and per-trajectory IS-weighted returns are shaped so a confidence
+sequence wraps them directly.
+
+MDL compression and QD archives. Finally, A LG 5 draws on Stitch-style antiunification com-
+pression (§4.5) and a MAP-Elites grid archive with coverage, best-elite, and Pareto-frontier queries.
+
+
+                                                      15
+                                 2026 JP Morgan Chase & Co. All rights reserved
+7   Composite Two-Timescale Control and the Self-Evolving SWE Agent
+Actor protocol. The controllers are written against a single-deployment interface; an actor protocol
+lets the same controllers drive a multi-step, tool-using agent: the actor turns (policy, task, attempt)
+into a final action plus the full tool trajectory and the episode’s process reward, recording which L1
+strategy directive was sampled (controllers may force a fixed directive—A LG 4 compares harnesses
+under directive 0—or let the actor sample on-policy, as A LG 3 requires). Every controller then
+works unchanged with the multi-step agent, and the search operators of §5 wrap any actor without
+modification.
+
+The SWE agent. The evolvable actor is a multi-step, tool-using agent (ReAct-style [Yao et al.,
+2023]) over a structured action vocabulary (Appendix E): list, search, read, edit (unique search-
+and-replace with a whitespace-fuzzy fallback), run_tests, submit, executed against a working
+copy at the pre-fix revision with capped observations. Accumulated edits form the candidate patch,
+so it applies by construction. It reads strategy guidance, the grown macro library, step budget, and
+exploration threshold from the harness, with the sampled L1 directive composed into the system
+prompt; each attempt’s working copy and best-result archive are keyed by (policy version, directive,
+attempt), so A LG 4’s concurrent baseline/candidate arms and best-of-N attempts stay isolated.
+
+Composite controller (Algorithm 11). A scheduler runs any subset of the five over one shared
+evolving policy: each sub-controller is wrapped as (name, controller, period) and runs when t mod
+period = 0; period 0 disables it—the ablation mechanism. Before a sub-controller steps, it receives
+the current shared policy; after, its (possibly edited) policy is propagated to the next. Each algorithm
+edits only its own layer through operations that preserve the other layer, so the edits compose. Sub-
+certificates are merged into one ledger row: metrics are prefixed per algorithm, error spends are
+summed, and the round’s decision is the highest-precedence sub-decision (ACCEPT ≻ NSF ≻ REJECT
+≻ HOLD). Default periods realize the two-timescale split: L1 controllers (A LG 3 or A LG 1) every
+round; L2 controllers (A LG 4, A LG 5) every 2 rounds; A LG 2 every 3. A LG 1 and A LG 3 both train
+L1 , so enabling both together is discouraged. An optional cost-aware mode makes the scheduler
+itself a compute allocator: it tracks a per-controller no-gain counter, reset only on committed output
+(an accepted edit, a shadow-accepted patch, a committed macro, or mined anti-macros—raw activity
+such as solve counts or uncommitted compression gain never trips it), and temporarily skips a slow
+L2 controller that has shown no committed gain for a few consecutive rounds. A skipped controller
+is left one round short of the threshold, so a dead controller settles into a probe/skip alternation—a
+scheduler-level echo of A LG 4’s per-search compute-allocation stop.
+
+Division of labor. On the SWE agent the controllers specialize. A LG 4 proposes and gates harness
+edits (force-edit threshold, step budget, strategy guidance) against the paired process reward (Eq. 10)
+at CTHS levels, with the pre-gate pilot, common-random-number pairing, and shadow requeue of
+§4.4. A LG 5 mines recurring (tool, target) sub-sequences from high-reward trajectories into macros
+(and failure signatures into anti-macros), admitting a macro only if it clears a downstream-utility
+gate—positive newer-vs-older reward lift on its context—not merely an MDL gain; the library is
+capped per (repository, status) context and self-prunes by a trailing-window retirement pass, so the
+certificate reports compression gain only for committed macros. A LG 3 performs counterfactual
+credit assignment over rollouts to steer the directive adapter (directives such as explore broadly,
+localize and edit early, smallest diff ), weighting credit per active repository family and excluding
+A LG 4’s rejected-candidate arms. A LG 1 protects the adapter with the forgetting gate; A LG 2 anchors
+any preference model. The cost-aware skip (above) matters here because a scheduled A LG 4 round
+costs ∼90 vs. ∼7 min for the rest of the composite combined (three concurrent multi-step deploys).
+
+8   Experimental Setup
+Benchmark and grading. SWE-bench Verified—the 500-instance human-validated subset [Chowd-
+hury et al., 2024] of SWE-bench [Jiménez et al., 2024]—evaluated with the official execution-based
+harness: for each instance the repository is restored to the state preceding the fix, the candidate patch
+is applied, and the project’s real test suite is run. Resolved requires every fail-to-pass test to pass and
+every pass-to-pass test to keep passing. The working sample is a seeded random draw of 52 instances
+(24 Django, 27 Matplotlib, 1 Flask).
+
+
+                                                        16
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Table 3: Model × stack on a fixed 52-instance SWE-bench Verified subset (identical harness, official
+execution-based grader; resolved counts). The full stack improves every base. For the first four
+models “off” is the single-pass baseline, so the on−off ∆ also includes a small scaffolding/directive
+effect (a no-op control on G PT isolates the algorithm contribution at +5, §9.1); for G LM 5.2 the “off”
+cell is that no-op control (its single-pass baseline was not run), so its +4 is already scaffolding-free.
+
+                  Base model                                  off   Alg.–A    ∆ (on−off)
+                   G EMMA (gemma4:31b-mlx, ∼31B q.) 18               22           +4
+                   Q WEN (qwen3.6:27b, ∼27B)                 24      25           +1
+                   G PT- MINI (gpt-5.4-mini)                 25      29           +4
+                   G PT (gpt-5.5)                            28      34           +6
+                   G LM (GLM 5.2) ⋆                          24      28           +4
+                      ⋆
+                        G LM 5.2 “off” = no-op control (scaffolding on, algorithms off).
+
+
+Rewards. Three bounded rewards are available to the loop. Proxy: file-overlap F1 between
+predicted and gold patches (inner-loop development only, never for claims). Native: real test
+execution, the fraction of fail-to-pass tests passing. Shaped: the dense milestone reward of §5. The
+signal live runs actually climb is the self-authored verifier of §5.2; the gold tests are reserved for
+terminal grading.
+
+Base models and backends. The study crosses four frozen base models, accessed only as L0 ; none
+is fine-tuned. Two are open-weight checkpoints served locally with their separate reasoning channel
+disabled for structured output: G EMMA (gemma4:31b-mlx, a ∼31B model at nvfp4 quantization)
+and Q WEN (qwen3.6:27b, ∼27B). Two are frontier reasoning models behind the same interface:
+G PT- MINI (gpt-5.4-mini, low reasoning effort) and G PT (gpt-5.5, reasoning disabled—the
+strongest base in the set), each with a 4k-token completion cap. A fifth model, G LM 5.2, is run with
+the no-op control and the full suite (Table 3); its single-pass baseline was not run, so its “off” cell is
+the control. Adapter log-probabilities are exact on every backend because the steered policy is the L1
+directive layer.
+
+The 4 × 2: four models × algorithms off/on. Each base model is run with the algorithm
+stack off and on, on all 52 instances, under the identical harness and the same official execution-
+based grader—eight cells, one grading protocol. No algorithms is the bare multi-step actor of
+§7 alone—no controllers, no search, no in-loop test runner—one episode per instance under a
+10-step budget. Algorithms–A (the full composite) enables eight of the ten algorithms of Table 1:
+A LG 1/A LG 2/A LG 3/A LG 5 scheduled as certificate controllers and the verifier-tier mechanisms
+A LG 7–A LG 10 active—verified micro-step search (A LG 7), the self-authored oracles of §5.2 at
+two samples (A LG 8) with the unverified-green cap and tie-break judge, search-layer step-credit
+(A LG 9), and verified self-repair (A LG 10)—with A LG 4 disabled for wall-clock cost (§7) and
+best-of-2 (A LG 6) removed (§9.1). Each instance is solved once (re-touches return the cached result).
+The harness, sample, step budget, and grader are held fixed across all eight cells, so the only varying
+factors are the base model and the stack.
+
+9     Results and Discussion
+Two results stand out. First, base capability is a large, confound-free effect: single-pass baselines on
+the identical harness scale cleanly—G EMMA 18 < Q WEN 24 < G PT- MINI 25 < G PT 28 (Table 3)—
+and the ordering is preserved with the full stack (22, 25, 29, 34). Second, the full stack improves
+every base (on−off +1 to +6), and where we deconfounded it with a no-op control on two strong
+models the suite’s contribution is +5 (G PT) and +4 (G LM 5.2)—attributable to the algorithms, not to
+scaffolding (§9.1); the best configuration is G PT+Algorithms–A at 34/52 (65%).
+
+9.1   Deconfounded single-base ablation
+
+To separate the algorithms from the scaffolding they run inside, we ran a deliberate no-op composite
+control on G PT—the full composite scaffolding with strategy directives on but every algorithm
+disabled. It scores 29 against the single-pass baseline 28, so the directive/scaffolding effect is only
+
+
+                                                         17
+                                  2026 JP Morgan Chase & Co. All rights reserved
+                 40       off                   Algorithms–A
+                                                                                                       +6
+                                                                                                       34
+                                                                                  +4
+                                                                                                                       +4
+                 30                                                               29
+                                                         +1                                    28                      28
+                                 +4                      25                25                                               50%
+                                                  24                                                              24
+
+
+ resolved / 52
+                                 22
+                 20
+                            18
+
+
+
+                 10
+
+
+
+
+                  0
+                            G EMMA                 Q WEN                   G PT- MINI               G PT           G LM
+
+
+
+Figure 2: Across models. Resolved instances (of 52) per base model with the stack off (grey) and
+on (green); models ordered by baseline. Absolute resolution scales with base capability in both
+conditions. The on−off difference (annotated +N ) includes a small scaffolding/directive effect,
+except for G LM 5.2 whose “off” bar is the no-op control (§9.1), making its +4 already scaffolding-
+free.
+
+Table 4: G PT (gpt-5.5) single-algorithm ablation, one run per cell, same 52 instances and grader.
+The no-op composite (directives on, all algorithms off) is the deconfounded control; the full suite
+reaches 34, +5 over it. A LG 4’s 36 is not an algorithm effect—its gate accepted 0 edits, so it ran the
+control configuration (caught by the event log).
+
+                 Config                        resolved / 52   note
+                 single-pass baseline               28         no strategy directive
+                 no-op composite (control)          29         directives on, algorithms off
+                 A LG 1                             30
+                 A LG 2                             34         directive learner (+5 over control)
+                 A LG 3                             31
+                 A LG 4                             36         0 accepts — ran control config
+                 A LG 5                             28         ≈ 0 accepts
+                 A LG 6                             26         best-of-2; never fired, apply failures — removed
+                 A LG 7                             32         micro-step search
+                 A LG 8                             32         self-oracles
+                 A LG 9                             29
+                 A LG 10                            30
+                 full suite                         34         +5 over control
+
+
+
++1; the full suite reaches 34, a +5 gain over the proper control, attributable to the algorithms
+themselves. A second strong model, G LM 5.2, gives the same picture (Table 3, Fig. 2): 24 with the
+algorithms off and 28 with them on, a +4 gain. The deconfounded contribution of the suite is thus
+positive on both models we controlled (+5 and +4)—a single run per cell, but a consistent direction
+across two models.
+Decomposing the G PT suite into single-algorithm runs (Table 4, Fig. 3) localizes the contribution.
+Re-anchored to the 29 control, several algorithms contribute alone: A LG 2 +5 (the strategy-directive
+learner), A LG 7/A LG 8 +3 (micro-step search, self-oracles), A LG 3 +2; the full suite reaches the
+best single component, consistent with overlapping rather than additive gains. Two honest reads:
+A LG 6 (best-of-2) is net-negative (26) and, per the run logs, never produced a second attempt while
+adding patch-apply failures, so we remove it from the live stack; and A LG 4’s 36 is not an algorithm
+effect—its confidence-sequence gate accepted zero edits, so it ran the control configuration and the
+count is a high draw, which the event-log attribution (not the raw count) caught. These are single-run
+figures (§10 collects the limitations and next steps).
+
+
+                                                                      18
+                                             2026 JP Morgan Chase & Co. All rights reserved
+                                                                        control 29
+
+
+            baseline                                                       28
+
+             control                                                            29
+
+             A LG 1                                                                  30
+
+             A LG 2                                                                                 34
+
+             A LG 3                                                                       31
+
+             A LG 4                                                                                      36
+
+             A LG 5                                                        28
+
+             A LG 6                                                   26
+
+             A LG 7                                                                            32
+
+             A LG 8                                                                            32
+
+             A LG 9                                                             29
+
+            A LG 10                                                                  30
+
+                full                                                                                34
+
+                       0              10                    20                  30
+                                                 resolved / 52
+
+
+Figure 3: Single-base ablation (G PT, gpt-5.5). Resolved instances for each single-algorithm
+config, the no-op composite control (29, dashed), the single-pass baseline (28), and the full suite
+(34); one run per cell (Table 4). Most configs sit near the control; the full suite and A LG 2 are
+highest (green). A LG 4’s 36 is an artifact—its gate accepted 0 edits, so it ran the control—and A LG 6
+(best-of-2, removed) is below the control (both red). Single runs on expensive evaluations; per-cell
+deltas are not separated from run-to-run variance.
+
+
+9.2   What the mechanisms verifiably do
+
+The variance-immune evidence is in the event logs (decisions, accepts, oracle admissions, veto and
+react/refine firings), which pass-count noise does not touch. Log analysis suggests the measurable
+lever inside the stack is more closed-loop debugging, driven by the self-oracle (A LG 8) and reflected
+in the full suite: relative to the control, run_tests calls rise by ∼50% and mean episode length by
+∼1.3 steps—the agent iterates against its self-authored tests rather than guessing once. Among the
+certificate controllers, the ones that fire every round are the directive learners A LG 2 and A LG 3 (52
+policy updates each; A LG 2 is the top single-algorithm cell at 34); the gated, library, and forgetting
+controllers A LG 4, A LG 5, A LG 1 contribute less. On this evidence the suite’s live value is carried by
+A LG 2/A LG 3 (directive shaping) and A LG 7/A LG 8 (verified search and self-oracle). Consistent
+with selection-not-creation, the stack does not destabilize a base—added regressions are few (full
+suite 4 p2p-flagged instances vs. 3 for the control)—and a consensus-flip analysis separates signal
+from noise: a robust subset of G PT instances flips under several distinct configs while single-config
+flips are noise-like; 17/52 are solved by every config and 10 by none.
+Position. Two levers move the metric, and they are not interchangeable. Within a fixed base the lever
+is the algorithm suite, whose deconfounded gain is carried by A LG 2/A LG 3 (directive shaping) and
+A LG 7/A LG 8 (verified search and self-oracle). For absolute resolution the lever is a stronger base:
+the 10 instances solved by no configuration—mostly Matplotlib—are a capability/harness wall that
+more search does not move.
+
+
+10    Limitations
+
+The endogenous-loop guarantees remain open conjectures: each controller’s statistical primitives are
+individually published and sound, but their compositions—the two-timescale coupling in A LG 2,
+the backward-transfer reduction in A LG 1, the performative corrections in A LG 1 and A LG 4—are
+not proven here, and several rest on assumptions the endogenous loop itself erodes (a stationary
+held-out real set for A LG 2; a learnable fully-predictive augmented outcome and bounded comparator
+
+
+                                                        19
+                                 2026 JP Morgan Chase & Co. All rights reserved
+path variation for A LG 3; exchangeable task generation for A LG 5). The performative sensitivity ε
+is a behavioral constant taken as a hyperparameter; it is not estimable online with its own validity
+guarantee, and the contraction condition εL < 1 may fail at LLM scale. The anytime-validity
+that makes the gates sound also makes them conservative: PAC-Bayes terms grow vacuous for
+high-dimensional posteriors, the DV forgetting floor rises with t, and A LG 4 guarantees safety, not
+progress. A boundary we state up front: controllers and verifier-guided search select, gate, and
+reshape the behavior of the frozen base; they cannot manufacture capability it lacks. This bounds
+the absolute ceiling, which the base sets; within that ceiling the suite’s gains (§9.1, §9.2) are real but
+measured as single runs on expensive evaluations, so we report magnitudes rather than significance.
+The self-oracle is fallible by design—it can under-claim (an over-strict oracle fails to flip a correct
+patch) and over-claim (a false-green pass)—so a patch is reported as “promising,” never “resolved,”
+the terminal grader being authoritative. A proper ablation across diverse harnesses and base models is
+also outstanding and, we think, the most informative next step: with one harness and a single sample
+per cell we can say the suite as a whole helps, but not which algorithm is advantageous for which
+type of problem—the matching of controllers to problem structure (stochastic vs. systematic failures,
+short vs. long horizons, repository families) can only be settled by a factorial study that varies harness
+and model together. Finally, each cell is a single run (no per-controller multi-seed isolation) and the
+slow-loop distillation is designed but not trained; repeated runs, a stronger-base confirmation, the
+per-task algorithm–problem ablation, and the distillation step are the remaining experiments.
+
+
+11    Conclusion
+
+SEA confines self-evolution of an LLM agent to a frozen base plus a small steering adapter and a
+versioned harness, and admits each self-modification through an anytime-valid gate that certifies it
+against a budgeted error ledger. Five controllers compose published guarantees, and five verifier-
+in-the-loop mechanisms—including a self-authored reproduction-oracle verifier computed from the
+issue alone—supply the dense, grader-free signal those gates need. On a 52-instance SWE-bench
+Verified subset across four bases, base capability is the dominant, confound-free effect, and on two
+strong base models a deliberate no-op-composite control isolates the suite’s contribution at +5 and
++4 (G PT 29 → 34, 65%; G LM 5.2 24 → 28), with the event logs verifying that its mechanisms fire
+and prevent regressions. Because these single-run evaluations are expensive, confirming run-to-run
+variance and adapting the per-task algorithm mix—then the distillation step that turns verified traces
+into weights—are the outstanding work.
+
+
+References
+Mehdi Abbana Bennani, Thang Doan, and Masashi Sugiyama. Generalisation guarantees for continual
+ learning with orthogonal gradient descent. In 4th Lifelong Machine Learning Workshop at ICML,
+ 2020. arXiv:2006.11942.
+
+Dheeraj Baby and Yu-Xiang Wang. Optimal dynamic regret in proper online learning with strongly
+  convex losses and beyond. In Proceedings of the 25th International Conference on Artificial Intelli-
+  gence and Statistics (AISTATS), volume 151 of PMLR, pages 1805–1845, 2022. arXiv:2201.08905.
+
+Vivek S. Borkar. Stochastic Approximation: A Dynamical Systems Viewpoint. Cambridge University
+  Press, 2008.
+
+Matthew Bowers, Theo X. Olausson, Lionel Wong, Gabriel Grand, Joshua B. Tenenbaum, Kevin
+ Ellis, and Armando Solar-Lezama. Top-down synthesis for library learning. Proceedings of the
+ ACM on Programming Languages, 7(POPL):41:1–41:32, 2023. arXiv:2211.16605.
+
+Bradley Brown, Jordan Juravsky, Ryan Ehrlich, Ronald Clark, Quoc V. Le, Christopher Ré, and
+  Azalia Mirhoseini. Large language monkeys: Scaling inference compute with repeated sampling.
+  arXiv preprint arXiv:2407.21787, 2024.
+
+Yash Chandak, Scott M. Jordan, Georgios Theocharous, Martha White, and Philip S. Thomas.
+  Towards safe policy improvement for non-stationary MDPs. In Advances in Neural Information
+  Processing Systems (NeurIPS), 2020. arXiv:2010.12645.
+
+
+                                                       20
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Bei Chen, Fengji Zhang, Anh Nguyen, Daoguang Zan, Zeqi Lin, Jian-Guang Lou, and Weizhu
+  Chen. CodeT: Code generation with generated tests. In International Conference on Learning
+  Representations (ICLR), 2023. arXiv:2207.10397.
+Xinyun Chen, Maxwell Lin, Nathanael Schärli, and Denny Zhou. Teaching large language mod-
+  els to self-debug. In International Conference on Learning Representations (ICLR), 2024.
+  arXiv:2304.05128.
+Neil Chowdhury, James Aung, Chan Jun Shern, Oliver Jaffe, Dane Sherburn, Giulio Starace, Evan
+  Mays, Rachel Dias, Marwan Aljubeh, Mia Glaese, Carlos E. Jimenez, John Yang, Kevin Liu, and
+  Aleksander Madry. Introducing SWE-bench Verified. OpenAI, 2024. URL https://openai.
+  com/index/introducing-swe-bench-verified/.
+Ben Chugg, Hongjian Wang, and Aaditya Ramdas. A unified recipe for deriving (time-uniform) PAC-
+  Bayes bounds. Journal of Machine Learning Research, 24(372):1–61, 2023. arXiv:2302.03421.
+Antoine Cully and Yiannis Demiris. Quality and diversity optimization: A unifying modular
+  framework. IEEE Transactions on Evolutionary Computation, 22(2):245–259, 2018.
+Ashok Cutkosky. Parameter-free, dynamic, and strongly-adaptive online learning. In Proceedings of
+  the 37th International Conference on Machine Learning (ICML), volume 119 of PMLR, 2020.
+Kevin Ellis, Catherine Wong, Maxwell Nye, Mathias Sablé-Meyer, Lucas Morales, Luke Hewitt,
+  Luc Cary, Armando Solar-Lezama, and Joshua B. Tenenbaum. DreamCoder: Bootstrapping
+  inductive program synthesis with wake-sleep library learning. In Proceedings of the 42nd ACM
+  SIGPLAN Conference on Programming Language Design and Implementation (PLDI), 2021.
+  arXiv:2006.08381.
+Mehrdad Farajtabar, Navid Azizan, Alex Mott, and Ang Li. Orthogonal gradient descent for continual
+ learning. In Proceedings of the 23rd International Conference on Artificial Intelligence and
+ Statistics (AISTATS), volume 108 of PMLR, pages 3762–3773, 2020. arXiv:1910.07104.
+Lior Friedman and Ron Meir. Data-dependent and oracle bounds on forgetting in continual learning.
+  In Conference on Lifelong Learning Agents (CoLLAs), 2025. arXiv:2406.09370.
+Shi Fu, Yingjie Wang, Yuzhu Chen, Xinmei Tian, and Dacheng Tao. A theoretical perspective:
+  How to prevent model collapse in self-consuming training loops. In International Conference on
+  Learning Representations (ICLR), 2025. arXiv:2502.18865.
+Leo Gao, John Schulman, and Jacob Hilton. Scaling laws for reward model overoptimization. In
+  Proceedings of the 40th International Conference on Machine Learning (ICML), volume 202 of
+  PMLR, pages 10835–10866, 2023. arXiv:2210.10760.
+Matthias Gerstgrasser, Rylan Schaeffer, Apratim Dey, Rafael Rafailov, et al. Is model collapse
+ inevitable? breaking the curse of recursion by accumulating real and synthetic data. In Conference
+ on Language Modeling (COLM), 2024. arXiv:2404.01413.
+Caglar Gulcehre, Tom Le Paine, Srivatsan Srinivasan, et al. Reinforced self-training (ReST) for
+  language modeling. arXiv preprint arXiv:2308.08998, 2023.
+Anna Harutyunyan, Will Dabney, Thomas Mesnard, Mohammad Gheshlaghi Azar, Bilal Piot, Nicolas
+  Heess, Hado van Hasselt, Greg Wayne, Satinder Singh, Doina Precup, and Rémi Munos. Hindsight
+  credit assignment. In Advances in Neural Information Processing Systems (NeurIPS), 2019.
+Steven R. Howard, Aaditya Ramdas, Jon McAuliffe, and Jasjeet Sekhon. Time-uniform, nonparamet-
+  ric, nonasymptotic confidence sequences. The Annals of Statistics, 49(2):1055–1080, 2021.
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang,
+  and Weizhu Chen. LoRA: Low-rank adaptation of large language models. In International
+  Conference on Learning Representations (ICLR), 2022. arXiv:2106.09685.
+Carlos E. Jiménez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik
+  Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In International
+  Conference on Learning Representations (ICLR), 2024. arXiv:2310.06770.
+
+
+                                                    21
+                               2026 JP Morgan Chase & Co. All rights reserved
+Brian Lester, Rami Al-Rfou, and Noah Constant. The power of scale for parameter-efficient prompt
+  tuning. In Proceedings of the 2021 Conference on Empirical Methods in Natural Language
+  Processing (EMNLP), 2021. arXiv:2104.08691.
+Xiang Lisa Li and Percy Liang. Prefix-tuning: Optimizing continuous prompts for generation. In
+  Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics (ACL),
+  2021. arXiv:2101.00190.
+Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, et al. Self-refine: Iterative refinement
+ with self-feedback. In Advances in Neural Information Processing Systems (NeurIPS), 2023.
+Debmalya Mandal, Stelios Triantafyllou, and Goran Radanovic. Performative reinforcement learning.
+  In Proceedings of the 40th International Conference on Machine Learning (ICML), volume 202 of
+  PMLR, pages 23642–23680, 2023.
+Alexander Meulemans, Simon Schug, Seijin Kobayashi, Nathaniel Daw, and Greg Wayne. Would I
+  have gotten that reward? long-term credit assignment by counterfactual contribution analysis. In
+  Advances in Neural Information Processing Systems (NeurIPS), 2023.
+Jean-Baptiste Mouret and Jeff Clune. Illuminating search spaces by mapping elites. arXiv preprint
+  arXiv:1504.04909, 2015.
+Francesco Orabona and Dávid Pál. Coin betting and parameter-free online learning. In Advances in
+  Neural Information Processing Systems (NeurIPS), 2016.
+Anastasia Pentina and Christoph H. Lampert. A PAC-Bayesian bound for lifelong learning. In
+ Proceedings of the 31st International Conference on Machine Learning (ICML), volume 32 of
+ PMLR, pages 991–999, 2014.
+Juan C. Perdomo, Tijana Zrnic, Celestine Mendler-Dünner, and Moritz Hardt. Performative prediction.
+  In Proceedings of the 37th International Conference on Machine Learning (ICML), volume 119 of
+  PMLR, pages 7599–7609, 2020. arXiv:2002.06673.
+Aaditya Ramdas, Peter Grünwald, Vladimir Vovk, and Glenn Shafer. Game-theoretic statistics and
+  safe anytime-valid inference. Statistical Science, 38(4):576–601, 2023. arXiv:2210.01948.
+Jürgen Schmidhuber. Gödel machines: Self-referential universal problem solvers making provably
+  optimal self-improvements. arXiv preprint cs/0309048, 2003.
+Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. Reflexion:
+  Language agents with verbal reinforcement learning. In Advances in Neural Information Processing
+  Systems (NeurIPS), 2023.
+Ilia Shumailov, Zakhar Shumaylov, Yiren Zhao, Nicolas Papernot, Ross Anderson, and Yarin Gal. AI
+   models collapse when trained on recursively generated data. Nature, 631(8022):755–759, 2024.
+Philip S. Thomas, Georgios Theocharous, and Mohammad Ghavamzadeh. High confidence policy
+  improvement. In Proceedings of the 32nd International Conference on Machine Learning (ICML),
+  volume 37 of PMLR, pages 2380–2388, 2015.
+Philip S. Thomas, Bruno Castro da Silva, Andrew G. Barto, Stephen Giguere, Yuriy Brun, and Emma
+  Brunskill. Preventing undesirable behavior of intelligent machines. Science, 366(6468):999–1004,
+  2019.
+Daniil Tiapkin, Daniele Calandriello, Denis Belomestny, Eric Moulines, Alexey Naumov, Kashif
+  Rasul, Michal Valko, and Pierre Ménard. Proximal point nash learning from human feedback.
+  arXiv preprint arXiv:2505.19731, 2025. v1 titled “Accelerating Nash Learning from Human
+  Feedback via Mirror Prox (Nash-MP)”.
+Jean Ville. Étude critique de la notion de collectif. Gauthier-Villars, Paris, 1939.
+Mingzhi Wang, Chengdong Ma, Qizhi Chen, Linjian Meng, Yang Han, Jiancong Xiao, Zhaowei
+ Zhang, Jing Huo, Weijie J. Su, and Yaodong Yang. Magnetic preference optimization: Achieving
+ last-iterate convergence for language model alignment. In International Conference on Learning
+ Representations (ICLR), 2025. arXiv:2410.16714.
+
+
+                                                      22
+                                2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 1 PPB-CL: forgetting-gated, trust-regioned continual adapter learning
+ 1: init frozen prior Q0 = N (θ0 , diag ev ); update-direction buffer B ← ∅ (FIFO, cap m); anchors
+    A ← ∅ (cap A, each task with best historical reward)
+ 2: for t = 1, 2, . . . do
+ 3:     rollouts ← D EPLOY(πt−1 , nt tasks); record rewards Ri , directive indices ai               ▷
+    St ∼ D(πt−1    )
+        ĝ ← n1t i ℓi − ℓ̄pool ∇θ log pθ (ai ), ℓi = 1 − Ri
+                 P                 
+ 4:                                                                 ▷ baseline pooled over the recent
+    replay window
+                      P      ⟨ĝ,J⟩
+ 5:     ĝ⊥ ← ĝ − J∈B ⟨J,J⟩        J                         ▷ OGD projection off stored directions
+ 6:     θcand ← θt−1 − η ĝ⊥ ; Bfgt ← DVB OUND(θcand , t)                                   ▷ Eq. (3)
+ 7:     d←0
+ 8:     while Bfgt > τforget and d < 5 do                                           ▷ damped re-test
+ 9:         θcand ← θt−1 + ρ (θcand − θt−1 ); Bfgt ← DVB OUND(θcand , t); d ← d + 1
+10:     end while
+11:     r ← max(τforget − Bfgt , 0)/ε                                     ▷ performative trust region
+12:     if ∥θcand − θt−1 ∥2 > r then
+13:         θcand ← ΠB(θt−1 ,r) (θcand ); recompute Bfgt and r
+14:     end if
+15:     if Bfgt ≤ τforget and εL < 1 then                                                  ▷ ACCEPT
+16:         θt ← θcand ; B ← (B ∪ {ĝ⊥ })[−m:]; update A with this round’s tasks/best rewards
+17:     else θt ← θt−1                                                                       ▷ HOLD
+18:     end if
+19:     emit certificate (t, Bfgt , r, KL(Qθt ∥Q0 ), PAC-Bayes penalty, d)
+20: end for
+
+21: function DVB OUND(θ, t)                     ▷ anytime-valid backward transfer, Eq. (3)
+                                    b ← 1 P (1 − Rj ) − (1 − R∗ )
+                                                                 
+22:    deploy π(θ) on anchor tasks; bt  |A| j                  j
+                                                                     √          p
+23:            b + At /λ∗ + λ∗ /(8|A|)
+       return bt                                    ▷ At = KL + log(2 t/δ); λ∗ = 8|A|At , the
+    DV-optimal temperature
+24: end function
+
+
+Xuening Wu, Shenqin Yin, Yanlan Kang, Xinhang Zhang, Qianya Xu, Zeping Chen, and Wenqiang
+  Zhang. SGM: A statistical Gödel machine for risk-controlled recursive self-modification. arXiv
+  preprint arXiv:2510.10232, 2025.
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao.
+  ReAct: Synergizing reasoning and acting in language models. In International Conference on
+  Learning Representations (ICLR), 2023.
+Eric Zelikman, Yuhuai Wu, Jesse Mu, and Noah D. Goodman. STaR: Bootstrapping reason-
+  ing with reasoning. In Advances in Neural Information Processing Systems (NeurIPS), 2022.
+  arXiv:2203.14465.
+
+
+A     Algorithm Pseudocode
+This appendix collects the pseudocode for every algorithm in Table 1; each box is referenced from
+the main text.
+
+B     The Full Self-Evolution Loop: How A LG 6–A LG 10 Plug In
+Figure 1 shows the four layers and the five scheduled controllers (A LG 1–A LG 5), which can only
+select among behaviors the frozen base already produces. Figure 4 extends it with the verifier-tier
+mechanisms A LG 6–A LG 10 (Table 1) that generate and verify those behaviors, supplying the
+variation and the dense, grader-free signal the controllers consume. The framework is one closed loop
+                                                                   (t)    (t)
+over three stages. (1) Policy. The deployed policy πt = L0 ◦ L1 ◦ L2 is rolled out. (2) Engine
+
+
+                                                     23
+                                2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 2 PNMP-A: two-timescale anchored preference learning with an e-value drift gate
+ 1: init q ← 0; frozen anchor qreal ; magnet z ← θ0 ; reference log πref ← log softmax(θ0 ); CTHS
+    budget(δ0 ); rates aslow
+                         t    = 21 (t+1)−1 , afast
+                                              t    = 21 (t+1)−0.7
+ 2: for t = 1, 2, . . . do
+ 3:     rollouts ← D EPLOY(πt−1 ); pairs ← {(i, j, winner) : winner has higher mean reward over
+    the recent replay window}
+ 4:     if not budget.exhausted then
+                                                             slow
+                                                                   ▷ SLOW: anchored preference update
+ 5:          gsynth ← ∇q LBT (q; pairs); qcand ← q + at
+                            b                                      α (qreal − q) + (1 − α) gsynth
+ 6:          X ← |σ(qicand −qjcand ) − σ(qireal −qjreal )| i<j          ▷ per-pair drift vs. frozen anchor
+ 7:          E ← EP ROCESS(X; H0 : E[X] ≤ τ ) 
+ 8:          k ← k + 1; δk ← δ0 / Z k log2 (k+1)                              ▷ normalized CTHS spend
+ 9:          if E ≥ 1/δk then reject: keep q                    ▷ anytime-valid evidence of unsafe drift
+10:          else q ← qcand                                                                      ▷ ACCEPT
+11:          end if
+12:     end if
+        advi (p) ← j pj σ(qi − qj ); prox(g) ← softmax log pt−1 +ηg+β            log πref 
+                       P
+13:                                                                         1+β                     ▷ FAST
+                                                                                                 
+14:     θ1/2 ← log prox adv(softmax(θt−1 )) ; θMP ← log prox adv(softmax(θ1/2 ))
+15:     θt ← θt−1 + afastt   (θMP − θt−1 )                                            ▷ extragradient step
+16:     if t mod K = 0 then z ← θt                                                        ▷ magnet refresh
+17:     end if
+18:     emit certificate (t, ACCEPT/HOLD, δk , E, KL(πt ∥z), pref. drift)
+19: end for
+
+
+Algorithm 3 PA-COCOA: counterfactual credit assignment driving a coin-betting oracle
+ 1: init oracle O ← per-coordinate KT coin betting (dim k); θ0 ← O.P REDICT(); reward stream
+    V ← [ ]; VT ← 0
+ 2: for t = 1, 2, . . . do
+ 3:     rollouts ← D EPLOY(πt )                       ▷ actor samples directive a ∼ softmax(θt ) per task
+ 4:     append masked mean process reward to V (environment-errored rollouts zeroed); extend
+    replay buffer                                            ▷ augmented outcome: rollouts carry (a, πt )
+ 5:     for each directive a ∈ {1..k} do                        ▷ contribution model, off-policy on replay
+                                                   −age(r)/h
+                        P
+                                              ω
+                           r∈recent(4h): ar =a r 2           R̃ r
+ 6:         w(a) ←
+             b                 P               −age(r)/h
+                                                                    (default 12 if no data)  ▷ R̃: process
+                                           ω
+                                  r: ar =a r  2
+    reward, Eq. (10); ωr folds in the env-error mask and repo-family weight, and rejected-candidate
+    rollouts are skipped
+ 7:     end for
+ 8:     p ← softmax(θt ); g ← (w         b ⊙ p) − p ⟨ b
+                                                     w, p⟩ + φ (1/k − p) ▷ Eq. (6) + exploration floor;
+    no importance ratio
+ 9:     drift ← W ILD B OOTSTRAP T REND(V ; α=0.01) if |V | ≥ 12 else false
+10:     if drift then O.R ESTART()                                    ▷ anchor a new comparator segment
+11:     θt+1 ← O.U PDATE(−g)                                             ▷ oracle minimizes loss; feed −g
+12:     VT ← VT + ∥θt+1 − θt ∥2
+13:     emit certificate (t, ∥g∥, ∥θt+1 − θt ∥, VT , #restarts, maxa w     b − mina b  w)
+14: end for
+
+
+
+(A LG 6–A LG 10). An actor-and-search engine manufactures diverse candidate patches and scores
+them against a self-authored verifier: best-of-N /refinement varies attempts (A LG 6), micro-step
+search relocates the search to one-line edits where even a weak base is reliable (A LG 7), self-authored
+reproduction oracles supply the in-loop reward Vself without touching the held-out grader (A LG 8),
+the search-layer controllers govern that search (A LG 9), and verified self-repair fixes the harness’s
+own edit/compose operators (A LG 10). (3) Controllers (A LG 1–A LG 5). The verified rollouts and
+process rewards the engine emits feed the L3 controllers, which gate every self-modification, write
+the certificate ledger, and update πt for the next round. The held-out grader sits outside the loop: it
+measures the finalized patch once and never steers the search. The division of labor is the figure’s
+
+
+                                                        24
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 4 SGM-CS: self-edit admission with anytime familywise risk control
+ 1: init deployed policy π0 ; confirmation count k ← 0; CTHS budget(δ0 ); per-version CS map
+ 2: for t = 1, 2, . . . do
+ 3:     if budget.exhausted then emit HOLD; continue                                   ▷ harness frozen
+ 4:     πcand ← pop a requeued promising same-family harness (its repo among the round’s), else
+    P ROPOSE E DIT(πt−1 , t)                         ▷ shadow requeue / force-edit / budget / guidance
+ 5:     if version(πcand ) = version(πt−1 ) then emit HOLD; continue             ▷ no-op edit; no spend
+ 6:     tasks ← rank batch by weak recent evidence (unseen / low-reward first); move the best-
+    evidenced task to the front as pilot                                 ▷ higher-signal, index-aligned
+    pairing
+ 7:     pre-gate: run πcand on the pilot; if best pilot reward < PREGATE M IN and pilot task is known
+    passable then spend δk (k++); requeue a promoted shadow; emit NSF; continue                       ▷
+    evidence-gated; cold start falls through
+ 8:     deploy πt−1 and πcand concurrently on the same task batch (isolated working copies; common
+    random numbers—aligned per-task seeds)
+ 9:     if no learnable pairing survives (e.g. every rollout env-errored) then emit HOLD; continue ▷
+    no spend
+        k ← k + 1; δk ← δ0 / Z k log2 (k + 1)
+                                                    
+10:                                                          ▷ normalized CTHS spend, committed on
+    decision
+11:     update per-version CSs [Howard et al., 2021] with Rbase , Rcand
+12:     LCB ← CSlower  δk   Rcand − Rbase − ε · W1 (Rcand , Rbase ) ▷ performative correction, exact
+    1-D W1
+13:     if wild-bootstrap trend test rejects stationarity of the vbase stream from baseline-evaluated
+    rounds then
+14:         LCB ← LCB − radius                                          ▷ widen; Chandak et al. [2020]
+15:     end if
+16:     if LCB ≥ −ϵtol then
+17:         πt ← πcand                                                                       ▷ ACCEPT
+18:     else πt ← πt−1 ; if πcand produced a strong patch then requeue it (bounded retries per
+    harness)                                                 ▷ NSF, but retry a promising harness later
+19:     end if
+20:     emit certificate (t, ACCEPT/NSF, LCB, δk , εW1 , widened?, shadow)
+21: end for
+
+
+
+point—A LG 6–A LG 10 create and verify variation; A LG 1–A LG 5 gate and select among it; A LG 9
+is itself A LG 1/A LG 3/A LG 4/A LG 5 re-aimed onto the search layer (Table 2).
+
+
+C    Certificate Schema
+
+Each round of every controller emits an immutable, structured certificate with fields: algorithm,
+round, decision ∈ {ACCEPT, HOLD, REJECT, NSF}, delta_spent (this round’s error spend),
+cumulative_delta, a metrics map, and a free-text note. Controller-specific metrics include: A LG 1
+empirical risk, KL to prior, PAC-Bayes penalty and risk bound, forgetting bound, trust radius, gradient
+norm, damping count, εL; A LG 2 mean reward, e-value, KL to magnet, slow/fast rates, preference
+drift; A LG 3 gradient and step norms, path variation, restarts, contribution spread; A LG 4 corrected
+LCB, per-version value bounds, performative shift, widening flag, baseline-evaluated flag (so the
+stationarity stream can exclude rounds without a fresh baseline value); A LG 5 solved count, library
+size, ∆J (the SWE variant reports it only when the macro committed, alongside a committed-macro
+flag; the generic controller reports it unconditionally), archive coverage, frontier size, description-
+length bound. The composite controller merges sub-certificates with per-algorithm metric prefixes
+into one ledger row per round. The search-layer controllers emit a finer-grained, per-decision audit
+log: an opt-in, decision-neutral JSONL sink writes one flushed row per controller decision (the
+marginal gain and confidence interval for A LG 4, the collapsed behavior cells for A LG 5, the per-
+branch verified reward for A LG 3, the measured forgetting for A LG 1), so a crashed or killed run still
+leaves a complete, inspectable trail. This per-decision trail is what attributes each flip and regression
+to a named mechanism in §9.
+
+
+                                                       25
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 5 SDC-QD: library growth with MDL compression and quality-diversity acceptance
+ 1: init corpus C ← ∅; MAP-Elites archive M over descriptor ϕ; library L ← L0 ; solve threshold
+    s∗
+ 2: for t = 1, 2, . . . do
+ 3:     for each task in batch do                         ▷ WAKE: LLM-guided program search
+ 4:         ρ ← PARSE SE XPR LLM(task, Lt )          ▷ untrusted output; None if not well-formed
+ 5:         if ρ ̸= None and env.score(ρ) ≥ s∗ then C ← C ∪ {ρ}
+ 6:     end for            P
+ 7:     Jbefore ← |Lt | + ρ∈C |ρ|
+ 8:     cands ← subtrees(C) ∪ pairwise antiunifications of compatible subtrees ▷ SLEEP: Stitch
+ 9:     A∗ ← arg maxA∈cands u(A), u(A) = mA (bA − 1 − aA ) − bA ▷ descending scan, sound
+    dominance break
+10:     if A∗ ̸= None and ∆J := u(A∗ ) ≥ umin then                 ▷ quality-diversity acceptance,
+    minimum-utility bar
+11:         b ← ϕ(Lt ∪ {A∗ }) = ( |Lt |+1, meanρ∈C |ρ| ); f ← Jbefore − ∆J ▷ lower fitness is
+    better
+12:         if M.I S N OVEL(b, f ) then                      ▷ empty cell or improves incumbent
+13:             M.A DD(Lt ∪ {A∗ }, b, f ); Lt+1 ← Lt ∪ {A∗ }; surface A∗ in harness L2          ▷
+    ACCEPT
+14:        else Lt+1 ← Lt                                                ▷ REJECT: no novelty
+15:        end if
+16:    else Lt+1 ← Lt                                                 ▷ REJECT: no MDL gain
+17:    end if
+18:    cert ← description-length certificate, Eq. (8)
+19:    emit certificate (t, #solved, |Lt+1 |, ∆J, M.coverage, |M.ParetoFrontier()|, cert)
+20: end for
+
+
+Algorithm 6 (A LG 6) Verifier-in-the-loop search: best-of-N selection and refinement with backtrack-
+ing
+ 1: function B EST O F N(π, task x; n)               ▷ independent diverse attempts; verifier selects
+ 2:    for i = 0, . . . , n − 1 do yi ← ACT(π, x, attempt=i) ▷ attempt-indexed seed + isolated
+    workspace; live: n=2, attempt 2 only on a failing verdict, prompted to differ structurally
+ 3:    end for
+ 4:    return yi∗ , i∗ = arg maxi V (x, yi ) ▷ V : shaped native-test verifier; p → 1 − (1 − p)n
+ 5: end function
+
+ 6: function R EFINE(π, task x; depth d)                 ▷ verifier-guided hill-climb over patches
+ 7:    y ∗ ← ACT(π, x, attempt=0); v ∗ ← V (x, y ∗ )
+ 8:    for i = 1, . . . , d − 1 do
+ 9:        if v ∗ ≥ 1 then break                                              ▷ resolved; stop early
+           x′ ← x ⊕ y ∗ , F EEDBACK(x, y ∗ )
+                                                 
+10:                                                ▷ prior best patch + why the verifier rejected it
+11:        y ← ACT(π, x′ , attempt=i); v ← V (x, y)                   ▷ scored on the original task
+12:        if v > v ∗ then (y ∗ , v ∗ ) ← (y, v)                ▷ climb; else backtrack (keep best)
+13:    end for
+14:    return y ∗
+15: end function
+
+
+
+D    Default Hyperparameters
+
+Defaults in the reference implementation: A LG 1: δ = 0.05, τforget = 0.1 (raised to 1.1 above the
+anytime floor for live multi-step SWE runs), ε = 0.2, Lp  = 1, buffer capacity m = 16, damping
+                                                     ∗
+ρ = 0.5, λ set per evaluation to the DV-optimal λ = 8|A|At (λ = 4 fallback for At ≤ 0),
+REINFORCE baseline pooled over a replay window of 8× batch size, learning rate η = 0.5, anchor
+capacity A = 4. A LG 2: α = 0.3, β = 0.1, η = 0.5, τ = 0.1, δ0 = 0.05, magnet period K = 5,
+slow/fast step exponents 1.0/0.7 with a0 = 0.5, preference pairs pooled over the recent replay
+window. A LG 3: contribution half-life h = 64 over a window of 4h recent rollouts, drift test from 12
+
+
+                                                     26
+                                2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 7 (A LG 7) Verified micro-step search (fast loop): beam search with memory and a verifier
+cascade
+ 1: init beam ← {seed patch}; memory M ← ∅; best ← seed; depth ← 0
+ 2: while depth < MAX D EPTH and V (best) < 1 do
+ 3:     children ← [ ]
+ 4:     for node in beam do
+ 5:         H ← G ENERATE(node, M, k) ▷ reasoning-first: name class/method, then k distinct
+    one-line edits; capped prompt (issue ≤1.8k chars, JSON-array reply)
+ 6:         for h ∈ H with h ∈   / M.tried do
+ 7:             ρ ← C OMPOSE(node.patch, h); if ρ = ⊥ then M.tried += h; continue ▷ did not
+    apply
+ 8:             (v, fb) ← C ASCADE(ρ)            ▷ cheap parse/apply check, then native suite only on
+    survivors
+ 9:             M.R ECORD(h, v, fb); children.append(ρ, v); if v ≥ 1 then break
+10:         end for
+11:     end for
+12:     depth ← depth +1; if children = ∅ then break ▷ a whole diverse round moved nothing
+13:     beam ← top-b of (beam ∪ children) by V ; best ← arg maxV over all scored candidates ▷
+    parents kept; best tracked globally, independent of beam policy
+14: end while
+15: return best, its verified trace, and # expensive verifier calls
+
+
+Algorithm 8 (A LG 8) Self-authored reproduction oracles: grader-free in-loop verification
+ 1: given issue text (no gold tests, no test patch, no f2p/p2p lists); a verifier model; a solver agent
+ 2: O ← S YNTHESIZE(issue, k) over an ensemble of models                ▷ any model may author a usable
+    oracle (recall)
+ 3: A ← { o ∈ O : RUN O N BASE(o) fails, not a timeout, not a syntactic self-error } ▷ fails-on-base
+    admission—no ground truth
+ 4: A ← { o ∈ A : S YMPTOM J UDGE(o) matches the issue } ▷ denoise; separates real import bugs
+    from hallucinated APIs
+ 5: the agent debugs with run_tests=self-score over A:              ▷ the in-loop gradient is A, never the
+    grader
+                    #{o ∈ A : ρ flips o fail → pass}
+       Vself (ρ) =                                     , set to 0 if any green check regresses; promising
+                                  |A|
+    iff all flip
+ 6: ρ⋆ ← the agent’s submitted patch
+ 7: measure once (terminal, held out from the loop): held-out grader on ρ⋆ ▷ used only to report,
+    never to steer
+
+
+observations at level 0.01, exploration floor φ = 0.05. A LG 4: δ0 = 0.05, ϵtol = 0.02, ε = 0.1, CS
+α = 0.05 with σ = 0.5 (Hoeffding scale for [0, 1] rewards); SWE proposer cycle: force-edit threshold
+decrements of 2 down to a floor of 3 (initialized at half the step budget), step-budget increments of
+6 capped at 36, guidance rewrites under 60 words; pre-gate pilot of 1 task with minimum reward
+0.05 (disabled on the first round, when no evidence exists), shadow threshold 1.0 with retry cap of 2
+per harness; the paired-difference CS runs at scale σ = 1.0. A LG 5: δ = 0.05, solve threshold 1.0,
+minimum utility 1.0; SWE macro-reward bar equal to the corpus bar, downstream lift measured once
+the contextual pool holds ≥ 4 rewards; generic archive 16 × 16 over (library size, mean program
+size) in [0, 32]2 ; SWE archive 8 × 16 over (arity, pattern size) in [0, 8] × [0, 16], operation windows
+of length 2–3, corpus bar 0.4 on the process reward, minimum downstream lift 0.05 (strictly required;
+path-literal and single-op macros refused), library capped at 3 entries per (repository, status) context
+and 12 total, retirement over a 24-rollout window at bad-rate 0.5. Verifier mechanisms: best-of-N
+default n = 4, refinement depth 3 (best-of-N /A LG 6 is removed from the live composite, §9.1;
+refinement depth 1 so verify-react stays active; unverified-green cap 0.9; tie-break judge at score
+≥ 0.85 with zero admitted oracles; micro-search issue cap 1.8k characters; fuzzy-edit hint threshold
+0.6); run_tests feedback carries the last 1400 characters of the failure log. Composite default
+periods: A LG 1/A LG 3 every round, A LG 4/A LG 5 every 2, A LG 2 every 3; cost-aware skip after 2
+gainless scheduled rounds.
+
+
+                                                       27
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 9 (A LG 9) Efficient continual search: search-layer controllers (compute-allocation + QD
+diversity; step-credit + forgetting gate)
+ 1: init step-credit C (A LG 3); forgetting gate G (A LG 1); earlier-repo anchor A
+ 2: for each round over the problem stream do
+ 3:     for each problem x do
+ 4:          order branch classes for x by learned credit C      ▷ A LG 3: productive step macros first
+ 5:          B EAM S EARCH(x) with two controllers active:                                ▷ Algorithm 7
+ 6:             A LG 4 budget: record per-depth marginal gain; stop when the CS upper bound ≤
+    MIN G AIN
+ 7:             A LG 5 diversify: pick the next beam by MAP-Elites behavior cells, not raw top-b score
+ 8:          credit the solving branch 1, the branches tried before it 0 ▷ A LG 3 update; wasted shapes
+    demoted
+ 9:     end for
+10:     propose policy update; accept iff G: re-eval of anchor A does not regress ▷ A LG 1 forgetting
+    gate
+11:     record (mean depth, resolved-rate, forgetting) for the round
+12: end for
+
+Algorithm 10 (A LG 10) Verified self-repair: adopt a harness repair only by measured fix-rate
+ 1: function P ROPOSE R EPAIRS(failures F (base, hypothesis pairs that did not apply); repertoire R;
+    threshold τ )
+ 2:     adopted ← [ ]
+ 3:     for each primitive r ∈ R do
+ 4:         fixed ← {(b, h) ∈ F : r(h) ̸= h ∧ C OMPOSES(b, r(h))}          ▷ re-test against the real
+    composer                                                   
+ 5:         if fixed/|F | ≥ τ then adopted.append r, fixed/|F | ▷ credited only if it changed h and
+    applied
+ 6:     end for
+ 7:     return adopted sorted by fix-rate, best-first ▷ appended to the harness repair pipeline (L2 )
+ 8: end function
+
+ 9: function P ROPOSE G ENERATION R EPAIR(suffix repertoire G; baseline apply-rate ρ0 ; margin m)
+10:    for each suffix g ∈ G do
+11:        ρ ← R EGENA PPLY R ATE(g) ▷ re-generate hypotheses with g appended; fraction that
+    compose
+12:        if ρ − ρ0 ≥ m then adopt g                   ▷ verified at the source: fixes future candidates
+13:    end for
+14: end function
+
+
+E    The SWE Agent Tool Protocol
+The agent replies with exactly one structured action per turn, drawn from the vocabulary
+
+       list(d)       search(r)        read(f, i:j)   edit(f, old → new)             run_tests()
+                                              submit()
+
+over directories d, regular expressions r, files f , line ranges i:j, and exact text replacements.
+Edits require the search text to match exactly once; a miss falls back to a unique whitespace-
+normalized fuzzy match, and a true miss returns the nearest similar line as a hint (ambiguous matches
+are refused). Search is regular-expression matching with capped output (at most 60 matches); read
+windows report the file’s true line total; observations are truncated to a fixed character budget;
+malformed replies receive a corrective error message and consume a step. run_tests is advertised
+only when a test runner is configured; it applies the current edits, runs the instance’s target tests,
+and returns pass counts plus the tail of the failure log (“submit now” on a full resolve). When a test
+runner is available, submit is blocked until run_tests has been run on the latest edits, so the agent
+cannot submit blind; and an episode that would otherwise end with an empty diff triggers a final
+no-patch recovery pass (up to two forced-edit attempts at temperature 0). When the explore→edit
+
+
+                                                       28
+                                 2026 JP Morgan Chase & Co. All rights reserved
+Algorithm 11 Composite controller: scheduled co-evolution over one shared policy
+ 1: init shared policy π; schedule {(namei , Ci , Ki )}               ▷ Ki = 0 disables Ci (ablation)
+ 2: for t = 1, 2, . . . do
+ 3:     ran ← [ ]
+ 4:     for each (namei , Ci , Ki ) with Ki > 0 and t mod Ki = 0 do                 ▷ in schedule order
+ 5:         if cost-aware and Ci is a slow L2 controller with no committed gain for the last SKIPA FTER
+    rounds then skip (HOLD, reclaim its deploys); set its counter to SKIPA FTER − 1 (probe next
+    round); continue
+ 6:         Ci .π ← π; ci ← Ci .S TEP(t); π ← Ci .π                       ▷ propagate this layer’s edit
+ 7:         update Ci ’s no-gain counter from ci (reset on committed
+                                                                      gain: accept / shadow-accept /
+    committed macro / anti-macros); ran.append (namei , ci )
+ 8:     end for
+ 9:     emit merged certificate: metrics prefixed namei .∗; spends summed;
+           decision ← first of (ACCEPT, NSF, REJECT) present among {ci }, else HOLD
+10: end for
+
+
+budget binds, search/read/list return a corrective message until an edit lands. The final patch is
+the accumulated edit set, scored by the native evaluator.
+
+
+
+
+                                                      29
+                                2026 JP Morgan Chase & Co. All rights reserved
+                                                                                       gated self-modifications ⇒ πt+1
+                                                                           A LG 3/A LG 1→ L1 A LG 4/A LG 5→ L2 A LG 2→ q
+
+
+
+
+                                                                                actor & verified-search engine (A LG 6–A LG 10)
+                                                                                    generates & verifies candidate behaviors                                 L3 scheduled controllers (A LG 1–A LG 5)
+                                                                                                                                                                 gate & select self-modifications
+ L2 — harness: prompt · tools · budgets · library · repair
+                                                                               actor — multi-step R E ACT agent over the struc-
+                                                                               tured tool vocabulary (§7)                                             A LG 4 SGM-CS — gated harness edits (L2 )
+        L1 — steering adapter θ (online-steered)
+                                                                               A LG 6 best-of-N / refinement — designed opera-                        A LG 5 SDC-QD — grows the abstraction li-
+                                                                               tor; off in the live stack                                             brary (L2 )
+                                                             deploy πt / act
+                L0 — frozen base model
+                                                                               A LG 7 verified micro-step search — beam over       verified rollouts  A LG 3 PA-COCOA — counterfactual credit
+                                                                               one-line edits where the base is reliable          + process reward R̃ → θ (L1 )
+                    deployed policy
+                             (t)
+                πt = L0 ◦ L1 ◦ L2
+                                    (t)                                        A LG 8 self-authored oracles ⇒ Vself — dense,                          A LG 1 PPB-CL — forgetting gate + trust re-
+                                                                               grader-free in-loop reward                                             gion (L1 )
+
+                                                                               A LG 9 search-layer controllers — compute-stop ·                       A LG 2 PNMP-A — anchors the reward model
+                                                                               QD diversify · step-credit · forgetting gate                           q
+
+                                                                               A LG 10 verified self-repair — adopts
+                                                                               edit/compose fixes by measured fix-rate (→ L2 )
+
+                                                                                                                                                                                 e-value drift gate
+
+
+                                                                                                        finalized patch
+                                                                                                                                         q scores rollouts
+
+
+                                                                                       environment + held-out grader                                                                                       certificate ledger
+                                                                                         terminal measurement only                                                          reward
+                                                                                                                                                                            model q                   ACCEPT/ HOLD/ NSF · δ-spend
+                                                                                          — never steers the search
+
+
+
+
+Figure 4: The full self-evolution loop (extends Figure 1). The five scheduled controllers of Figure 1
+(right, A LG 1–A LG 5) can only select among behaviors the frozen policy stack (left, πt ) already
+produces. The verifier-tier mechanisms A LG 6–A LG 10 (centre, green dashed) are the engine that
+supplies them: the actor and its search operators (A LG 6/A LG 7) manufacture diverse candidate
+patches; self-authored reproduction oracles (A LG 8) score each candidate with a dense, grader-
+free reward Vself ; the search-layer controllers (A LG 9, = A LG 1/A LG 3/A LG 4/A LG 5 re-aimed)
+govern the search; and verified self-repair (A LG 10) fixes the harness’s own edit operators. The
+engine emits verified rollouts and process rewards R̃ that feed the L3 controllers, which gate each
+self-modification, write the certificate ledger, and close the loop by updating πt (A LG 3/A LG 1 on
+L1 , A LG 4/A LG 5 on L2 , A LG 2 on the reward model q). The held-out grader sits outside the loop,
+measuring the finalized patch once and never steering it.
+
+
+
+
+                                                                                                                                  30
+                                                                               2026 JP Morgan Chase & Co. All rights reserved
+

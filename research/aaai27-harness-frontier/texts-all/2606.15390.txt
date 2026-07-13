@@ -1,0 +1,1090 @@
+                                          Not All Skills Help: Measuring and Repairing Agent
+                                                               Knowledge
+
+
+                                               Yixuan Wang1*         Yiyang Zhou1* Yiming Liang2 Congyu Zhang1                    Fuxiao Liu3
+                                                                             Jiawei Zhou1 Huaxiu Yao1
+                                                                         1                      2            3
+                                                                             UNC Chapel Hill        Purdue       NVIDIA
+
+
+
+
+arXiv:2606.15390v1 [cs.CL] 13 Jun 2026
+                                                                                          Abstract
+                                                     LLM agents can improve without weight updates by accumulating natural-language
+                                                     skills from experience, but current systems entrust every decision about which
+                                                     skills to keep and how to apply them to LLM judgment alone. We argue that this
+                                                     conflates two distinct roles: generating a skill from experience is a creative act that
+                                                     judgment handles well, while deciding whether that skill actually helps requires
+                                                     empirical evidence across many tasks. Measuring per-skill causal contributions via
+                                                     randomized masking, we find that skill libraries exhibit pervasive causal hetero-
+                                                     geneity: individual skills routinely help on some task types while hurting on others,
+                                                     yet their opposing effects cancel in aggregate, making them invisible to global
+                                                     curation methods. We propose A SSAY, a framework that separates generation from
+                                                     curation: it computes a per-skill causal attribution on a small development set,
+                                                     restructures the library offline, and suppresses skills with negative predicted effect
+                                                     for each test task. Across seven base models spanning four providers and two
+                                                     benchmarks (AppWorld and τ -bench), A SSAY consistently improves over prior
+                                                     skill-curation approaches. On AppWorld’s hardest split, DeepSeek-V3 achieves
+                                                     69.3% task-goal completion (47.4% relative improvement), a new state of the art
+                                                     among all published methods including weight-tuned approaches. On τ -bench
+                                                     retail, GPT-4.1 improves by 8.7% relative, advancing past o4-mini, o1, and GPT-4.5
+                                                     on the public leaderboard without any weight modification. Ablation traces the
+                                                     dominant gain to per-task masking, confirming that the bottleneck is matching
+                                                     skills to tasks at inference time, not removing bad skills globally. Code is available
+                                                     at https://github.com/aiming-lab/assay.
+
+
+                                         1    Introduction
+                                         The past two years have seen rapid progress in LLM agents that improve without weight updates.
+                                         The recipe is simple: let the agent attempt tasks, distill successful trajectories into natural-language
+                                         skills (short rules, heuristics, procedural templates), and inject them into the context window for
+                                         future tasks [9, 23, 22, 3]. On interactive benchmarks such as AppWorld [11], skill-based methods
+                                         have produced double-digit gains, rivaling methods that fine-tune model weights. An assumption
+                                         runs quietly through this work: LLM judgment is a sufficient supervisory signal for the entire skill
+                                         lifecycle. Generation, retention, and retrieval are all delegated to the same LLM, and nothing ever
+                                         checks whether a retained skill actually helps.
+                                         We find that this unchecked accumulation has a systematic downside. Across seven models and
+                                         two benchmarks, skills essential on the tasks from which they were learned become pure overhead
+                                         on tasks where they do not apply. On AppWorld, rules for multi-step purchases exhaust the step
+                                         budget on simple single-action tasks; on τ -bench retail [18], rules from complex exchanges derail
+                                             ∗ Equal contribution.
+
+
+
+
+                                         Preprint.
+Figure 1: Skills designed for one domain can harm tasks in another; per-task masking fixes this.
+The task is to purchase a coffee grinder on Amazon that fits a 6.3×6.3-inch countertop and has a
+seller rating ≥4.5. Left: without any skill library, the agent fails to enforce the size constraint. Centre:
+the full skill library makes things worse: off-topic rules, including a Spotify playback verification rule
+(vc-00043) and a side-effect checking rule (vc-00021b), distract the agent from the dimensional
+requirement. Right: per-task masking suppresses these two skills and the agent succeeds. The causal
+effect of vc-00043 averages −0.067 across development tasks (bottom), confirming consistent harm.
+straightforward cancellations. Figure 1 traces an instance end to end: a Spotify playback verification
+rule distracts the agent from a dimensional constraint in an Amazon purchasing task; per-task masking
+suppresses it and the agent succeeds. When we trace failures across hundreds of tasks, we find that a
+small set of skills accounts for a disproportionate share of regressions, and that the same skill can
+help on one task type while hurting on another.
+To understand these failures, we measure per-skill causal effects via randomized masking [2] on
+held-out tasks. The resulting attribution reveals causal heterogeneity: many skills reverse sign across
+task types, helping on some and hurting on others. No single-task judge can detect this, because the
+reversal is visible only when evidence is aggregated across many tasks. We therefore separate the two
+roles: judgment generates skills, and measurement curates them. We present A SSAY, a framework
+that operationalises this separation in three stages: measure per-skill causal effects on held-out tasks
+via randomized masking, restructure the library offline by splitting heterogeneous skills and retiring
+inert ones, and personalise the library per test instance by suppressing skills with negative predicted
+impact.
+In summary, our primary contribution is A SSAY, a framework that provides the first empirical
+characterisation of causal heterogeneity in agent skill libraries and a practical method for resolving
+it. Across seven models and two benchmarks, A SSAY consistently improves over prior curation
+methods, with DeepSeek-V3 achieving a new state of the art on AppWorld (69.3% TGC, 47.4%
+relative improvement) and GPT-4.1 advancing past o4-mini, o1, and GPT-4.5 on τ -bench without
+weight modification. Ablation traces the dominant gain to per-task masking, confirming that the
+bottleneck is matching skills to tasks at inference time, not removing bad skills globally.
+
+2    A SSAY: Attribution-Based Skill Selection and Assembly
+Generating a useful skill from a single task requires creativity; deciding whether that skill actually
+helps across many tasks requires empirical evidence that no single task can provide. We operationalise
+this separation in a framework we call A SSAY. The entire framework flows from a single object: a
+per-skill, per-task causal attribution matrix C ∈ RN ×M , computed once on a small held-out set, from
+which all curation decisions derive. We describe how C is measured (§2.1), how it guides offline
+
+
+                                                     2
+Figure 2: Framework overview. Stage 1: randomized masking produces a causal attribution
+matrix C ∈ RN ×M ; each cell records whether a skill helps (green) or hurts (red) on a given task.
+Stage 2: three operations driven by C (split, retire, merge) restructure the library offline, subject to
+a development gate. Stage 3: at inference time, per-task masking suppresses skills with negative
+predicted causal effect, with a fallback to the full library.
+
+
+library restructuring (§2.2), and how it personalises the library for each test task at inference time
+(§2.3). Figure 2 gives an overview.
+Preliminaries. We assume access to a skill library S = {s1 , . . . , sN } produced by an existing
+curation pipeline and a held-out development set D = {d1 , . . . , dM } disjoint from both training and
+test splits. During upstream curation, we apply difficulty-aware ordering: each training task is run
+twice with the bare agent to estimate difficulty, and tasks are sorted hardest-first so that the curator
+encounters high-signal failure cases early. The resulting library contains skills automatically distilled
+from training trajectories.
+In addition to these learned skills, we append five hand-written operational templates (prefix tpl-)
+that capture common procedural patterns such as pagination, data validation, and cross-app identity
+resolution. These templates are derived from each benchmark’s public documentation and training-
+split failure analysis, and are marked as protected: they are exempt from all subsequent modification
+and masking (full text in Appendix B).
+
+
+2.1   Measuring Causal Effects
+
+A skill library is a collection of natural-language instructions that jointly shape the agent’s behaviour.
+The challenge in evaluating any single skill is that its effect depends on which other skills are co-
+present: a verification rule may be harmless alone but harmful alongside a pagination rule that already
+performs the same check. To disentangle these interactions, we turn to the simplest tool in causal
+inference: a randomized experiment.
+Randomized masking protocol. For each of K independent trials, we construct a random mask
+mk ⊆ S by including each skill independently with probability f (Bernoulli sampling). Let
+1[sj ∈ mk ] denote the inclusion indicator for skill sj in mask mk , and let ok (di ) ∈ {0, 1} denote the
+binary outcome on development task di when the agent operates under mask mk . Define the sets
+                                                                                   −
+of masks that include and exclude skill sj as M+    j = {k : sj ∈ mk } and Mj = {k : sj ∈        / mk },
+
+
+                                                    3
+respectively. The causal score of skill sj on task di is the difference-in-means estimator:
+                                     1   X               1   X
+                      C[j, i] =        +    ok (di ) −     −    ok (di ).                              (1)
+                                   |Mj |  +
+                                                       |Mj |  −
+                                          k∈Mj                      k∈Mj
+
+Under Bernoulli sampling, skills are included independently, so C[j, i] is an unbiased estimator of
+the average treatment effect (ATE) of including skill sj on task di , marginalised over the distribution
+of co-occurring skills. The variance of this estimator is bounded by
+                                                                       !
+                                                1     1         1
+                              Var C[j, i] ≤                  +           ,                            (2)
+                                                 4 |M+   j |   |M− j |
+
+since ok (di ) ∈ {0, 1} implies Var(ok (di )) ≤ 14 . Per-cell variance decreases with more masks;
+per-task masking further reduces effective noise by averaging over nearest development tasks (Eq. 6).
+All skills participate in attribution without exception; prefix-based protection applies only at the
+downstream masking stage (§2.3). Specific hyperparameter choices and statistical validation are
+reported in §3.
+Row statistics. Given the full matrix C, we derive two summary statistics from each row that drive
+all subsequent curation decisions. The global causal score of skill sj is the row mean:
+                                                        M
+                                                  1 X
+                                        C̄(j) =         C[j, i],                                       (3)
+                                                  M i=1
+
+capturing the average marginal contribution of sj across all development tasks. The causal hetero-
+geneity of skill sj is the row range:
+                               H(sj ) = max C[j, i] − min C[j, i],                                     (4)
+                                              i                i
+
+measuring the degree to which the skill’s effect varies across tasks.
+Definition 1 (Causally heterogeneous skill). A skill sj is causally heterogeneous at threshold τ if
+H(sj ) ≥ τ , i.e., its causal effect reverses or substantially varies across development tasks.
+
+A skill with high H(sj ) but near-zero C̄(j) is the most dangerous: it helps on some tasks and hurts
+on others, but its positive and negative effects cancel in aggregate, making it invisible to any curation
+method that evaluates skills by their global score alone. The full attribution is computed once per
+base model, because the causal structure of a skill library depends on the model that interprets it.
+
+2.2   Offline Library Restructuring
+
+The attribution matrix C reveals which skills are problematic, but measurement alone does not fix the
+library. A heterogeneous skill that helps on some tasks and hurts on others cannot simply be removed
+without losing its beneficial effects. Instead, the library must be restructured so that each skill’s
+applicability conditions are made explicit. The row statistics C̄(j) and H(sj ) partition skills into
+three regimes: uniformly beneficial (C̄(j) positive, H(sj ) small), negligible (|C̄(j)| small, H(sj )
+small), and causally heterogeneous (H(sj ) ≥ τsplit ). We apply three operations targeting each regime
+in turn: split resolves heterogeneous skills into conditional variants, retire removes negligible ones,
+and merge deduplicates near-identical skills introduced by splitting. The order is chosen to prevent
+information loss.
+Step 1: Split. For each skill sj with H(sj ) ≥ τsplit , we use the base LLM to rewrite sj into two
+conditional variants, each with an explicit trigger condition specifying when it should apply. The
+rewriting is guided by the causal score vector (C[j, 1], . . . , C[j, M ]): one variant targets tasks where
+the skill helps, and the other targets tasks where it hurts. Each rewritten pair must pass a development
+gate: the restructured library must achieve pass rate ≥ that of the original on all M attribution tasks.
+If it does not, the original skill is kept. Splitting runs first because a causally heterogeneous skill has
+C̄(j) ≈ 0 (positive and negative effects cancel) and would be incorrectly retired if retirement ran
+first. At most τmax_split candidates are processed; this is the one point where LLM judgment re-enters
+curation, bounded in scope and empirically validated.
+
+
+                                                    4
+Step 2: Retire. Once heterogeneous skills have been resolved, retirement targets the remaining
+low-signal skills. Any skill with |C̄(j)| < τretire is removed.
+Step 3: Merge. Splitting may introduce near-duplicate variants. Remaining skills are embedded;
+pairs exceeding cosine similarity τmerge are clustered, and the highest-scoring member of each cluster
+(by C̄) is retained. Merging runs last precisely because it must operate on the library that splitting
+and retirement have already shaped.
+
+2.3   Per-Task Causal Masking
+
+Offline restructuring produces a single repaired library S ′ , but a static library cannot account for the
+full diversity of test conditions. The core limitation of existing skill-application methods, whether
+they inject all skills or retrieve by semantic similarity, is that they cannot distinguish a helpful skill
+from a harmful one: the two look identical in embedding space. We address this by framing skill
+selection at inference time as a per-task risk minimization problem: for each test task, predict which
+skills would help and which would hurt, then suppress the harmful ones.
+Predicted causal effect. The key idea is to transfer causal evidence from similar development
+tasks to the new test task. Given a test task t with instruction embedding et ∈ Rd , we identify the
+k nearest development tasks N (t) ⊂ D by cosine similarity and compute attention weights via a
+temperature-scaled softmax:
+                                                           
+                                     exp τ · cos(et , edi )
+                      wi (t) = X                                ,   i ∈ N (t),                   (5)
+                                         exp τ · cos(et , edi′ )
+                                  i′ ∈N (t)
+
+where τ is a temperature parameter that concentrates weight on the closest neighbours. The predicted
+causal effect of skill sj on task t is a kernel-weighted projection of the j-th row of C onto the task:
+                                           X
+                           Ĉ(sj , t) =         wi (t) · C[j, i] = C[j, :] w(t),                     (6)
+                                         i∈N (t)
+
+where w(t) ∈ RM is the weight vector (zero outside N (t)). This can be read as a soft retrieval over
+the attribution matrix: each test task induces a different linear combination of the development-task
+columns of C, producing a task-specific causal profile for every skill.
+Risk-minimizing masking rule. Given the predicted causal effect for each skill, we suppress skills
+that are predicted to hurt while retaining all potentially helpful ones. Under the approximation that
+skills contribute independently to task success, the expected harm of including skill sj for task t is
+proportional to max(0, −Ĉ(sj , t)). A removal-only design minimises this expected harm:
+                       St = sj ∈ S ′ : Ĉ(sj , t) ≥ τmask or sj ∈ Sprotected ,
+                              
+                                                                                                   (7)
+where Sprotected denotes skills with protected prefixes (tpl-, shr-, api-). If the filtered set is too
+small, the full library S ′ is used instead, ensuring graceful degradation. The asymmetry of Eq. (7)
+is deliberate: missing a critical skill (e.g., a pagination template) causes catastrophic failure, while
+retaining a mildly harmful skill among many has a diluted effect. Algorithm 1 summarises the
+procedure. Summary. The three stages form a coherent pipeline unified by a single principle:
+judgment generates candidate skills, and measurement curates them. Every stage includes a structural
+fallback (offline restructuring rolls back failing splits; per-task masking reverts to the full library when
+too aggressive), so the pipeline cannot degrade performance below any prefix of stages. Because the
+framework operates entirely at inference time and requires only a skill library and a small development
+set, it can be applied on top of any existing skill-generation method.
+
+3     Experiments
+We evaluate on two benchmarks, seven base models spanning four providers, and two agent archi-
+tectures, applying the same pipeline and hyperparameters throughout. Our experiments address the
+following questions: (1) Does measurement-driven curation generalise across models and bench-
+marks? (2) Where do the gains concentrate, and where does uncurated skill injection cause harm?
+(3) Which stages of the pipeline matter most?
+
+
+                                                     5
+Algorithm 1 P ER -TASK C AUSAL M ASKING (inference time)
+Require: Test task t, restructured library S ′ , attribution matrix C ∈ RN ×M ,
+            development embeddings {edi }M  i=1 , parameters k, τ , τmask , τmin
+Ensure: Task-specific skill library St ⊆ S ′
+ 1: // Stage A: Predict per-skill causal effect
+ 2: Compute embedding et of task instruction
+ 3: N (t) ← k nearest development tasks by cos(et , edi )
+ 4: w(t) ← softmax τ · [cos(et , edi )]i∈N (t)                                                ▷ Eq. (5)
+ 5: for each skill sj ∈ S ′ do
+ 6:     Ĉ(sj , t) ← C[j, :] w(t)                                                              ▷ Eq. (6)
+ 7: end for
+ 8: // Stage B: Risk-minimizing filtering
+ 9: St ← {sj ∈ S ′ : Ĉ(sj , t) ≥ τmask or sj ∈ Sprotected }                                  ▷ Eq. (7)
+10: // Stage C: Graceful fallback
+11: if |St | < τmin then
+12:     St ← S ′                                                                 ▷ Revert to full library
+13: end if
+14: return St
+
+
+
+3.1   Experimental Setup
+
+Benchmarks. AppWorld [11] simulates nine consumer applications (email, calendar, Venmo,
+Spotify, Amazon, etc.) in which the agent composes multi-step Python API calls via a code REPL.
+We evaluate on two official test splits: test_normal (168 tasks) and test_challenge (417 tasks), both
+spanning difficulty levels 1–3. test_challenge has a higher concentration of level-3 tasks (47% vs.
+37%), making it substantially harder on average. The primary metric is Task Goal Completion
+(TGC); we also report Sub-Goal Completion (SGC; Appendix J). The agent is a ReAct agent [17]
+with a 40-step budget. τ -bench [18] simulates retail customer service through function-calling
+tools. The agent converses with an LLM-simulated customer (GPT-4o, temperature 0) and must
+satisfy requests while adhering to a policy document. We evaluate on the retail domain (115 tasks)
+with exact database-state match; partial credit is not awarded. The agent is the benchmark’s native
+ToolCallingAgent with a 30-turn budget. In both benchmarks, the skill library is injected as part
+of the system prompt and all agent calls use temperature 0.
+Models and data. We evaluate seven models in standard (non-reasoning) mode: GPT-5.4, GPT-
+5.1, GPT-4.1, and GPT-4o (OpenAI); DeepSeek-V3 (DeepSeek, open-weight); Claude Sonnet 4.5
+(Anthropic); and Gemini 2.5 Pro (Google). We deliberately exclude reasoning variants to isolate
+the effect of skill curation from chain-of-thought reasoning. Each model runs the complete pipeline
+independently; the attribution matrix C is recomputed per model because the causal structure of a
+skill library depends on the model that interprets it (§2.1). Data is partitioned into strictly disjoint
+sets: AppWorld uses 90 training, 15 development (of 57), and 168+417 test tasks; τ -bench uses
+500 training, 15 development (of 20), and 115 test.
+Baselines. For each model on AppWorld, we compare against the best available published method:
+ACE [22] for GPT-5.1 and DeepSeek-V3, CUGA [8] for GPT-4.1, and Gupta et al. [3] for GPT-4o.
+We additionally report the current AppWorld leaderboard leader. On τ -bench, we compare against
+each model’s unaugmented baseline, since no prior skill-based method has reported results on this
+benchmark under the same evaluation protocol. For GPT-5.4, Claude Sonnet 4.5, and Gemini 2.5
+Pro, no prior skill-based method has reported results on AppWorld either; we compare against the
+unaugmented ReAct baseline for these models.
+Attribution parameters. The attribution uses K=12 random masks with inclusion probability
+f =0.4, yielding approximately 5 masks per skill and a per-cell standard deviation of at most 0.29.
+Per-task masking averages over k=8 nearest development tasks, reducing effective per-decision noise
+to σ ≈ 0.10. Bootstrap analysis confirms that 97.2% of masking decisions are directionally stable
+    Alibaba Cloud ApsaraLab, AppWorld leaderboard submission (February 2026, Qwen3-14B, weight-tuned). No accompa-
+nying publication is available as of this writing.
+
+
+                                                        6
+Table 1: AppWorld results (TGC, %). ∆ is computed relative to bare ReAct. Bold: best prompt-
+based method per column. Red: degrades over ReAct. SGC is reported in Appendix J.
+                                                                test_normal (168)   test_challenge (417)
+           Model           Method                               TGC        ∆        TGC          ∆
+                           ReAct                                61.9                52.5
+           GPT-5.1         ACE                                  67.3    +5.4        49.9       −2.6
+                           Ours                                 77.4    +15.5       66.4       +13.9
+                           ReAct                                69.1                47.0
+           DeepSeek-V3     ACE                                  78.0    +8.9        63.1       +16.1
+                           Ours                                 83.3    +14.2       69.3       +22.3
+                           ReAct                                66.7                50.4
+           GPT-4.1         CUGA                                 73.2     +6.5       57.6       +7.2
+                           Ours                                 75.6     +8.9       64.0       +13.6
+                           ReAct                                48.8                30.2
+           GPT-4o          Gupta et al.                         68.5    +19.7       38.9       +8.7
+                           Ours                                 71.4    +22.6       41.0       +10.8
+           GPT-5.4         ReAct                                82.1                81.1
+                           Ours                                 88.7     +6.6       85.4       +4.3
+           Sonnet 4.5      ReAct                                83.9                70.3
+                           Ours                                 89.3     +5.4       75.3       +5.0
+           Gemini 2.5      ReAct                                72.6                49.4
+                           Ours                                 81.0     +8.4       54.9       +5.5
+                              ∗
+           Leaderboard best (Qwen3-14B, wt-tuned)               86.9                67.6
+           ∗ No accompanying publication; see footnote in §3.
+
+
+under mask resampling (Appendix K). The full attribution requires 180 agent rollouts per model
+(K=12 masks × M =15 development tasks). All remaining hyperparameters are listed in Appendix
+Table 5 (Appendix G); no per-cell tuning is performed.
+
+3.2   Main Results
+
+AppWorld. Table 1 presents results on both AppWorld splits. Every model improves over its
+respective baseline on both splits. On test_normal, GPT-5.1 gains 10.1 points over ACE (67.3→77.4)
+and DeepSeek-V3 gains 5.3 points (78.0→83.3), both from the same upstream library with only
+curation changed. GPT-4.1 and GPT-4o improve over CUGA and Gupta et al. respectively, baselines
+that already incorporate structured retrieval or demonstration selection. Three additional models
+(GPT-5.4, Sonnet 4.5, Gemini 2.5 Pro) confirm generality across four providers with gains ranging
+from +4.3 to +8.4 across both splits, with no per-provider tuning. On the harder split, DeepSeek-V3
+achieves 69.3% TGC, a new state of the art among all published methods including weight-tuned
+approaches, representing a 47.4% relative improvement over bare ReAct.
+The most revealing result is not the
+gain but the regression that precedes it.
+On test_challenge, the upstream skill li-
+brary decreases GPT-5.1’s TGC from
+52.5% to 49.9%: a library designed to
+help has made the agent strictly worse.
+Our method reverses this regression and
+improves by 26.5% relative beyond bare
+ReAct. Figure 3 reveals where the harm
+concentrates: on Level 2 and Level 3
+tasks, the uncurated library degrades
+performance, while Level 1 tasks al-
+ready benefit. Per-task masking recov-
+ers the degraded levels, with the largest
+gain on Level 3 (43.1→71.3, a 65.4%            Figure 3:       Per-difficulty breakdown on AppWorld
+relative improvement), confirming that         test_challenge (GPT-5.1, 417 tasks). The uncurated skill
+                                               library (red) improves Level 1 but degrades Level 2 and 3. Our
+the method’s value is greatest where un-
+                                               method (green) recovers at every level.
+curated libraries do the most damage. A
+
+
+                                                        7
+reverse-masking control (suppressing the most positively-scoring skills instead) degrades performance,
+confirming that the direction of masking, not mere context reduction, drives the improvement.
+τ -bench. Table 2 evaluates whether the framework transfers to a qualitatively different setting:
+conversational rather than code-based, function-calling rather than REPL, and with a simulated
+human in the loop.
+The framework transfers successfully.
+                                                     Rank Method                         Score
+GPT-4.1 improves by 8.7% relative
+(68.0%→73.9%), advancing from rank 14 to               1–5 Claude family               80.5–86.2
+the rank 8–9 range on the leaderboard, past                   Ours (GPT-5.4) ↑7.0         80.9
+o4-mini, o1, and GPT-4.5, without any weight             6 GLM-4.5                        79.7
+modification. GPT-5.4 gains 9.5% relative                7 GLM-4.5-Air                    77.9
+(73.9%→80.9%) and Gemini 2.5 Pro gains                   8 Qwen3-Coder 480B               77.5
+13.3% relative (65.2%→73.9%). Two models                      Ours (GPT-4.1) ↑5.9         73.9
+show zero gain: GPT-5.1 (62.6%→62.6%)                         Ours (Gemini 2.5) ↑8.7      73.9
+and Sonnet 4.5 (73.0%→73.0%); we analyse                 9 o4-mini                        71.8
+these boundary conditions in Appendix A.3               10 o1                             70.8
+and attribute them to high baseline compe-              13 GPT-4.5                        68.4
+tence that saturates the benefit of prompt-time         14 GPT-4.1 (raw)                  68.0
+skill injection. Gains concentrate on multi-                  Ours (DS-V3) ↑2.2           66.1
+step return and cancel tasks (Appendix                        Ours (GPT-4o) ↑2.2          62.6
+Table 4), where the skill library encodes                     GPT-4o (raw)                60.3
+procedural knowledge that the unaugmented
+agent must otherwise rediscover from the Table 2: τ -bench retail positioning on the public leader-
+policy document on every task.                  board. Green rows with ↑ show our method’s gain over the
+                                                      raw baseline. GPT-4.1 advances from rank 14 to rank 8–9;
+                                                      GPT-5.4 reaches the top-5 range. Two models (GPT-5.1,
+3.3   Ablation Study                                  Sonnet 4.5) show zero gain (§A.3).
+
+Table 7 (Appendix H) isolates each compo-
+nent’s contribution via sequential ablation on
+GPT-5.1 / AppWorld test_normal. Templates provide a 9.7% relative improvement, confirming
+that domain-agnostic operational scaffolding carries measurable value. Offline restructuring adds a
+further 2.9% relative gain by resolving heterogeneous skills and retiring inert ones. Per-task masking
+contributes the largest single increment (10.7% relative improvement), consistent with the central
+finding of this paper: the bottleneck is not which skills are in the library, but which skills each task
+should see. The full pipeline achieves a 25.0% relative improvement over bare ReAct.
+
+3.4   Causal Heterogeneity in Individual Skills
+
+The aggregate results above show that curation helps; this section examines why by tracing causal
+heterogeneity to individual skills. Two examples from the GPT-5.1 attribution on AppWorld illustrate
+the phenomenon.
+
+  Example 1: Contact Validation Rule (vc-00054)
+
+  Skill. “Validate that note names map unambiguously to contacts before creating Venmo requests.”
+  Global score. C̄ = −0.03 (near zero, invisible to global curation).
+  Helps (+0.50): shared-expense reconciliation tasks, where the validation catches real name ambiguities.
+  Hurts (−0.67): single-app tasks, where it forces the agent to cross-reference contacts irrelevant to the task.
+
+
+  Example 2: Response Checking Rule (vc-00021a)
+
+  Skill. “For repeated side-effecting API calls, capture and check each response.”
+  Global score. C̄ = +0.05 (near zero, invisible to global curation).
+  Helps (+0.71): mutation-heavy tasks, where unchecked API calls cause silent failures.
+  Hurts (−0.23): read-only tasks, where the checks are pure overhead.
+
+
+
+                                                        8
+Both skills would survive any global curation threshold. Only per-task measurement reveals their
+conditional nature, and only per-task masking can suppress them selectively. These examples confirm
+that causal heterogeneity is concrete and interpretable: skills encode assumptions about the task
+context, and when those assumptions are violated, the skill becomes harmful. Additional examples
+are in Appendix D.
+
+4   Related Work
+Skill generation and curation. A growing line of work improves agent performance by accumulating
+experience into the agent’s context rather than its weights. The methods differ in mechanism:
+Reflexion [9] maintains verbal self-reflections in an episodic memory buffer, ExpeL [23] extracts
+reusable insights by comparing successful and failed trajectories, ACE [22] grows evolving playbooks
+through a modular generate-reflect-curate loop, and CUGA [8] adopts a hierarchical planner-executor
+architecture with context enrichment. More recently, SkillNet [5] provides end-to-end tooling to
+create, evaluate, and connect skills within a unified ontology, and CoEvoSkills [20] co-evolves a skill
+generator and surrogate verifier without access to ground-truth tests. These methods share a structural
+property: every decision in the skill lifecycle, from generation to retention to application, is made
+by LLM judgment operating within individual tasks. No method aggregates evidence across tasks
+to verify that a retained skill actually helps. Our work treats the output of any such pipeline as raw
+material for a second, empirical curation stage.
+Skill retrieval and application. The same reliance on single-task judgment extends to how skills are
+surfaced at test time. Retrieval-augmented generation [4] and its agent-oriented variants [21] select
+context by embedding similarity, implicitly equating topical relevance with helpfulness. Gupta et al.
+[3] extend BERTScore-Recall to set-level demonstration selection for in-context learning in agentic
+tasks, and Su et al. [10] study skill retrieval augmentation at scale as agent skill libraries grow to
+thousands of entries. Our causal attribution reveals that this equation can be precisely wrong: a skill
+about “verifying list contents before iteration” is semantically close to a single-record lookup yet
+hurts on such tasks by inducing unnecessary verification steps. Per-task filtering addresses this by
+conditioning on predicted causal effect rather than similarity.
+Skill optimization beyond judgment. Several methods go beyond single-task judgment to optimize
+skill libraries. Voyager [12] builds an expanding skill library but only adds skills, never removing
+or conditioning them. SkillRL [15] uses reinforcement learning to recursively refine skills through
+failure analysis, treating the library as a dynamic component co-evolving with the agent policy.
+EvolveR [14] closes an experience-driven evolution loop, and Agentic Memory [19] optimizes
+memory management with GRPO. SkillClaw [7] enables collective skill evolution by aggregating
+trajectories across users to identify recurring behavioral patterns, and GraSP [16] compiles flat skill
+sets into typed directed acyclic graphs, observing that providing agents with more skills does not
+monotonically improve performance. Weight-based methods such as SAGE [13] and FireAct [1]
+internalise skills into model parameters via RL or trajectory fine-tuning, avoiding context-window
+limitations but requiring retraining for each base model. Our approach is complementary to all of
+the above: it operates at inference time, requires no weight updates, and can be layered on top of
+any skill-generation pipeline. The key distinction is that we measure per-skill causal effects via
+randomized masking, following the logic of Shapley-value attribution [6] and randomized ablation [2],
+but applied to natural-language skill instructions rather than model components.
+
+5   Conclusion
+We presented A SSAY, a framework that separates skill generation from skill curation by measuring
+per-skill causal effects via randomized masking. The causal attribution reveals pervasive heterogeneity
+in skill libraries, and per-task masking resolves it: on AppWorld, all seven models improve across four
+providers, with DeepSeek-V3 achieving a new state of the art (69.3%, 47.4% relative improvement);
+on τ -bench, GPT-4.1 advances past o4-mini, o1, and GPT-4.5 without weight modification. Ablation
+confirms that the bottleneck is matching skills to tasks at inference time, not removing bad skills
+globally. Two null results (GPT-5.1, Sonnet 4.5 on τ -bench) highlight a boundary: as base model
+competence strengthens, prompt-time skill injection yields diminishing returns. Extending the
+framework to online settings where skills are continuously added is a promising direction for future
+work.
+
+
+                                                  9
+References
+ [1] Baian Chen, Chang Shu, Ehsan Shareghi, Nigel Collier, Karthik Narasimhan, and Shunyu Yao.
+     Fireact: Toward language agent fine-tuning. arXiv preprint arXiv:2310.05915, 2023.
+ [2] Ian Covert, Scott Lundberg, and Su-In Lee. Explaining by removing: A unified framework for
+     model explanation. Journal of Machine Learning Research, 22(209):1–90, 2021.
+ [3] Shivanshu Gupta, Sameer Singh, Ashish Sabharwal, Tushar Khot, and Ben Bogin. Leveraging
+     in-context learning for language model agents. arXiv preprint arXiv:2506.13109, 2025.
+ [4] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman
+     Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, et al. Retrieval-augmented
+     generation for knowledge-intensive nlp tasks. Advances in neural information processing
+     systems, 33:9459–9474, 2020.
+ [5] Yuan Liang, Ruobin Zhong, Haoming Xu, Chen Jiang, Yi Zhong, Runnan Fang, Jia-Chen Gu,
+     Shumin Deng, Yunzhi Yao, Mengru Wang, et al. Skillnet: Create, evaluate, and connect AI
+     skills. arXiv preprint arXiv:2603.04448, 2026.
+ [6] Scott M Lundberg and Su-In Lee. A unified approach to interpreting model predictions.
+     Advances in neural information processing systems, 30, 2017.
+ [7] Ziyu Ma, Shidong Yang, Yuxiang Ji, Xucong Wang, Yong Wang, Yiming Hu, Tongwen Huang,
+     and Xiangxiang Chu. Skillclaw: Let skills evolve collectively with agentic evolver. arXiv
+     preprint arXiv:2604.08377, 2026.
+ [8] Sami Marreed, Alon Oved, Avi Yaeli, Segev Shlomov, Ido Levy, Offer Akrabi, Aviad Sela,
+     Asaf Adi, and Nir Mashkif. Towards enterprise-ready computer using generalist agent. arXiv
+     preprint arXiv:2503.01861, 2025.
+ [9] Noah Shinn, Federico Cassano, Edward Berman, Ashwin Gopinath, Karthik Narasimhan, and
+     Shunyu Yao. Reflexion: Language agents with verbal reinforcement learning. Advances in
+     neural information processing systems, 36:8634–8652, 2023.
+[10] Weihang Su, Jianming Long, Qingyao Ai, Yichen Tang, Changyue Wang, Yiteng Tu, and Yiqun
+     Liu. Skill retrieval augmentation for agentic AI. arXiv preprint arXiv:2604.24594, 2026.
+[11] Harsh Trivedi, Tushar Khot, Mareike Hartmann, Ruskin Manku, Vinty Dong, Edward Li,
+     Shashank Gupta, Ashish Sabharwal, and Niranjan Balasubramanian. Appworld: A controllable
+     world of apps and people for benchmarking interactive coding agents. In Proceedings of the
+     62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),
+     pages 16022–16076, 2024.
+[12] Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan,
+     and Anima Anandkumar. Voyager: An open-ended embodied agent with large language models.
+     Transactions on Machine Learning Research, 2024.
+[13] Jiongxiao Wang, Qiaojing Yan, Yawei Wang, Yijun Tian, Soumya Smruti Mishra, Zhichao Xu,
+     Megha Gandhi, Panpan Xu, and Lin Lee Cheong. Reinforcement learning for self-improving
+     agent with skill library. arXiv preprint arXiv:2512.17102, 2025.
+[14] Rong Wu, Xiaoman Wang, Jianbiao Mei, Pinlong Cai, Daocheng Fu, Cheng Yang, Licheng
+     Wen, Xuemeng Yang, Yufan Shen, Yuxin Wang, and Botian Shi. EvolveR: Self-evolving LLM
+     agents through an experience-driven lifecycle. arXiv preprint arXiv:2510.16079, 2025.
+[15] Peng Xia, Jianwen Chen, Hanyang Wang, Jiaqi Liu, Kaide Zeng, Yu Wang, Siwei Han, Yiyang
+     Zhou, Xujiang Zhao, Haifeng Chen, Zeyu Zheng, Cihang Xie, and Huaxiu Yao. Skillrl: Evolving
+     agents via recursive skill-augmented reinforcement learning. arXiv preprint arXiv:2602.08234,
+     2026.
+[16] Tianle Xia, Lingxiang Hu, Yiding Sun, Ming Xu, Lan Xu, Siying Wang, Wei Xu, and Jie Jiang.
+     GraSP: Graph-structured skill compositions for LLM agents. arXiv preprint arXiv:2604.17870,
+     2026.
+
+
+                                               10
+[17] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R Narasimhan, and Yuan
+     Cao. React: Synergizing reasoning and acting in language models. In The eleventh international
+     conference on learning representations, 2022.
+
+[18] Shunyu Yao, Noah Shinn, Pedram Razavi, and Karthik Narasimhan. τ -bench: A benchmark for
+     tool-agent-user interaction in real-world domains. arXiv preprint arXiv:2406.12045, 2024.
+
+[19] Yi Yu, Liuyi Yao, Yuexiang Xie, Qingquan Tan, Jiaqi Feng, Yaliang Li, and Libing Wu. Agentic
+     memory: Learning unified long-term and short-term memory management for large language
+     model agents. arXiv preprint arXiv:2601.01885, 2026.
+
+[20] Hanrong Zhang, Shicheng Fan, Henry Peng Zou, Yankai Chen, Zhenting Wang, Jiayu Zhou,
+     Chengze Li, Wei-Chieh Huang, Yifei Yao, Kening Zheng, Xue Liu, Xiaoxiao Li, and Philip S.
+     Yu. Coevoskills: Self-evolving agent skills via co-evolutionary verification. arXiv preprint
+     arXiv:2604.01687, 2026.
+
+[21] Jianguo Zhang, Tian Lan, Rithesh Murthy, Zhiwei Liu, Weiran Yao, Ming Zhu, Juntao Tan,
+     Thai Hoang, Zuxin Liu, Liangwei Yang, et al. Agentohana: Design unified data and training
+     pipeline for effective agent learning. arXiv preprint arXiv:2402.15506, 2024.
+
+[22] Qizheng Zhang, Changran Hu, Shubhangi Upasani, Boyuan Ma, Fenglu Hong, Vamsidhar
+     Kamanuru, Jay Rainton, Chen Wu, Mengmeng Ji, Hanchen Li, Urmish Thakker, James Zou,
+     and Kunle Olukotun. Agentic context engineering: Evolving contexts for self-improving
+     language models. arXiv preprint arXiv:2510.04618, 2025.
+
+[23] Andrew Zhao, Daniel Huang, Quentin Xu, Matthieu Lin, Yong-Jin Liu, and Gao Huang. Expel:
+     Llm agents are experiential learners. In Proceedings of the AAAI Conference on Artificial
+     Intelligence, volume 38, pages 19632–19642, 2024.
+
+
+A     Extended Analysis and Discussion
+A.1   The Landscape of Skill Effects
+
+The causal attribution matrix, introduced in §2.1 as a computational tool, doubles as a diagnostic
+lens, and what it reveals is, to our knowledge, a finding that no prior work on agent skill libraries
+has reported. On the GPT-5.1 attribution (15 development tasks, 103 curated skills), over 90% of
+skills have a per-task causal range exceeding τsplit =0.40, meaning that nearly every skill in the library
+helps on some tasks and hurts on others. Rather than relying solely on this descriptive statistic, we
+subject the heterogeneity claim to a stricter test: six independent lines of outcome-level evidence,
+each probing a different consequence that must hold if causal heterogeneity is real. For completeness,
+Appendix K (Table 9) reports that per-cell permutation tests lack adequate power at M =12, which is
+precisely why outcome-level validation provides a more rigorous foundation:
+1. Masking diversity. Per-task masking produces genuinely diverse skill subsets: 96% of dropped
+   skills are selective (not universally dropped), with mean pairwise Jaccard similarity of only 0.30,
+   ruling out a fixed pruning artefact.
+2. Attribution alignment. Dropped skills score significantly worse than kept skills on per-task
+   attribution (gap = 0.147, Mann-Whitney p < 10−98 ), confirming that masking decisions track
+   measured causal signal.
+3. Sign-reversing cases. Recovered tasks consistently exhibit skills with positive aggregate but
+   negative per-task scores (e.g., vc-00109a: C̄=+0.007 vs. Ĉ=−0.107), the hallmark of causal
+   heterogeneity.
+4. Split separation. 7 of 13 splits produce daughter variants with ≥ 0.05 systematic score divergence,
+   confirming that the split operation captures real conditional structure.
+5. Reverse masking. Suppressing the most positively-scoring skills instead of the most negatively-
+   scoring ones degrades performance by 4.7 pp, confirming that the direction of the attribution, not
+   mere context reduction, drives the gain.
+6. Bootstrap sign stability. Sign stability averages 71%/70% for positive/negative cells among the
+   top-26 heterogeneous skills, well above the 50% chance baseline.
+
+
+                                                   11
+The remaining ∼9% of skills have global scores near zero; skills with uniformly positive or uniformly
+negative effects are effectively absent. The pattern is qualitatively similar across all seven models
+(library sizes range from 71 to 126). Figure 4 visualises this structure directly: nearly every row of
+the attribution matrix contains both green and red cells.
+This finding reframes the curation problem. The conventional assumption, implicit in all prior work,
+is that skills are either good or bad, and the curator’s job is to separate the two. Our attribution reveals
+a different landscape: most skills are conditionally good or bad depending on the task, and the real
+challenge is determining when each skill should be active. This is why per-task masking dominates
+offline restructuring in the ablation (+7.5 vs. +2.0 pp): the bottleneck is not removing bad skills
+from the library, but matching skills to tasks at inference time. Concrete examples of sign-reversing
+skills are provided in Appendix D.
+
+A.2   Masking Behaviour
+
+The landscape analysis explains why per-task masking helps; we now examine how it operates
+in practice. Across all 417 test_challenge tasks (GPT-5.1), the method suppresses an average of
+5.5 skills per task (5.3% of the library) among the 329 tasks where masking is active, with a standard
+deviation of 2.8. On the remaining 88 tasks (21.1%), the fallback to the full library activates. Two
+properties of the suppressed sets are notable. First, the sets are highly task-dependent: only 2 skills
+are suppressed on more than 80% of non-fallback tasks, confirming that masking produces genuinely
+different libraries for different tasks rather than a fixed pruning. Second, the suppressed skills are not
+random: they consistently correspond to skills whose predicted causal scores are strongly negative on
+the nearest development tasks, confirming that the masking rule selects on measured harm rather than
+surface features.
+A representative example ties the mechanism back to Figure 1. Task 6474048_2 (the coffee grinder
+from §1) fails both without skills (incorrect dimension filtering) and with the full library (off-topic
+Spotify and side-effect-checking rules distract the agent). Per-task masking drops exactly these two
+irrelevant skills, and the agent succeeds, a microcosm of the broader pattern: measurement identifies
+the interference, and masking removes it.
+
+A.3   Limitations
+
+Several limitations merit discussion. GPT-5.1’s null result on τ -bench (62.6%→62.6%) highlights
+a boundary of context engineering. Two factors compound. First, GPT-5.1 already achieves 100%
+on read-only queries without any skill library, yet trails GPT-4.1 by over 10 percentage points on
+multi-step actions (exchange, modify), suggesting that its internal prior saturates easy tasks but
+is insufficiently aligned to absorb external procedural knowledge on hard ones. Second, the skill
+library is curated on AppWorld, a code-generation environment whose operational patterns transfer
+only partially to τ -bench’s conversational customer-service setting; GPT-5.1, with the strongest
+internal priors, is the most sensitive to this domain gap. These two hypotheses make distinguishable
+predictions. If the bottleneck is capability saturation, all action types should plateau; Table 4 shows
+otherwise: GPT-5.1 achieves 100% on read-only but only 56.7% on exchanges, indicating uneven
+rather than uniform saturation. If the bottleneck is domain transfer, the model with the strongest
+internal priors should be most resistant to external skill injection; GPT-5.1 is indeed the only model
+showing zero gain, consistent with this prediction. Claude Sonnet 4.5 independently confirms this
+pattern on τ -bench (73.0%→73.0%). Its base performance (73.0%) is comparable to GPT-4.1’s
+augmented result (73.9%), placing it in the high-competence regime where prompt-time skill injection
+yields diminishing returns. Two models from different providers exhibiting the same null result
+strengthens the interpretation: the boundary is determined by the model’s baseline competence
+on the target domain, not by provider-specific idiosyncrasies. More broadly, the marginal value
+of prompt-time skill injection appears to diminish as base model competence strengthens. The
+attribution matrix is computed on M =15 development tasks and extrapolated via nearest-neighbour
+weighting. On test_normal, mean cosine similarity to the top-8 nearest development tasks is 0.578,
+with 21.4% of tasks below 0.5; on test_challenge these figures are 0.469 and 69.1% (Appendix K,
+Figure 5). Despite limited coverage, the method gains +4.8 pp even in the lowest-coverage quartile
+of test_normal, supported by the structural fallback which activates on 21.1% of tasks. The split step
+invokes LLM judgment to produce conditional skill variants, reintroducing the subjectivity we aim to
+reduce; we bound this by limiting candidates and validating through the development gate, but a fully
+
+
+                                                    12
+measurement-driven splitting procedure remains open. Finally, our framework assumes a fixed skill
+library; extending it to online settings where skills are continuously added would require incremental
+attribution updates.
+
+B    Operational Templates
+The five AppWorld templates and five τ -bench retail templates below are appended to every skill
+library as a protected bedrock layer. They are exempt from all modification and masking opera-
+tions. Each template instantiates one of five domain-agnostic operational principles: complete data
+collection before acting, verify intermediate state before proceeding, confirm before irreversible
+actions, resolve ambiguous entities from authoritative sources, and sequence dependent operations
+correctly. In code-generation agents (AppWorld), templates take the form of executable code scaf-
+folds; in conversational agents (τ -bench), they take the form of procedural checklists derived from
+the benchmark’s policy document.
+
+AppWorld Templates. [tpl-00001] PAGINATION TEMPLATE. Use for any API that returns a
+list. Always paginate with a while True loop over page_index; never use range(N) or fetch only
+one page. Accumulate results into all_items and break when the page is empty.
+[tpl-00002] DATA VALIDATION TEMPLATE. Before acting on any data, print and inspect inter-
+mediate results (item count, sample keys, first item). Only proceed after confirming the data looks
+correct.
+[tpl-00003] SAFE COMPLETE_TASK TEMPLATE. Before submitting an answer, print it alongside
+the number of source data points from which it was derived. Only then call complete_task.
+[tpl-00004] LOGIN + ACCESS TOKEN TEMPLATE. Standard login flow: retrieve account pass-
+words via supervisor.show_account_passwords, match by app name, call the app’s login
+endpoint, and store the access token.
+[tpl-00005] CROSS-APP IDENTITY RESOLUTION TEMPLATE. When resolving a person across
+apps, always start from the phone contacts directory (paginated). Match by email or phone number,
+never by name alone.
+
+τ -bench Retail Templates. [tpl-tb-001] ITEM MODIFICATION CHECKLIST. Before
+calling modify_pending_order_items or exchange_delivered_order_items: (1) call
+get_product_details for each item, (2) present options and confirm exact choice, (3) ask if these
+are all the items, (4) collect all changes into a single list, (5) make one tool call. These tools can only
+be called once.
+[tpl-tb-002] EXCHANGE ITEM RESOLUTION. Six-step procedure: get current item IDs, fetch
+product details for available variants, match customer requirements, present ambiguous options,
+compare prices if requested, confirm exact new item ID.
+[tpl-tb-003] MULTI-ORDER SEQUENCING. For requests involving multiple orders: get all order
+IDs, check each order’s status, process sequentially, confirm each action individually, track completed
+orders.
+[tpl-tb-004] STATUS-GATED ACTION. Before any order action, verify status via
+get_order_details. Cancel/modify require “pending”; return/exchange require “delivered”. If
+status does not match, inform the customer of available actions.
+[tpl-tb-005] CONFIRMATION PROTOCOL. Before any destructive action, present a summary of:
+order ID, specific items and changes, payment method for refund, expected outcome. Wait for explicit
+customer confirmation before executing.
+
+C    Causal Attribution Matrix
+Figure 4 visualises the causal attribution matrix for GPT-5.1 on AppWorld, restricted to the 40
+most heterogeneous skills and the 7 most informative development tasks. Each cell encodes the
+difference-in-means causal score C[j, i] (Eq. 1): green indicates that including the skill improves task
+performance, red indicates harm. The pervasive coexistence of green and red within nearly every row
+
+
+                                                    13
+Figure 4: Causal attribution matrix for GPT-5.1 on AppWorld (top 40 skills by heterogeneity,
+7 informative development tasks). Each cell shows the causal score C[j, i]: green indicates the
+skill helps on that task, red indicates harm. Left: the matrix itself, sorted by heterogeneity H(sj )
+descending. Nearly every row contains both positive and negative cells, and outcome-level validation
+(§A.1, Appendix K) confirms this pattern reflects genuine task-dependent effects rather than sampling
+noise. Centre: the heterogeneity score H(sj ); the dashed orange line marks the split threshold
+τsplit =0.40. Right: the global causal score C̄(j). Skills with near-zero global scores but wide per-task
+ranges are the most dangerous, as they are invisible to any curation method that evaluates skills
+globally.
+
+
+
+confirms the central empirical finding of this paper (over 90% of skills are causally heterogeneous,
+validated through six outcome-level tests in §A.1 and Appendix K) and motivates per-task masking
+as the primary curation mechanism. The right-hand panels display the heterogeneity score H(sj )
+and the global causal score C̄(j); skills with high heterogeneity but near-zero global scores are the
+most dangerous, as they evade any curation method that evaluates skills only in aggregate.
+
+
+D    Sign-Reversing Skill Examples
+
+Two examples from the GPT-5.1 attribution on AppWorld illustrate causal heterogeneity at the
+individual skill level.
+Example 1: vc-00054. “Validate that note names map unambiguously to contacts before creating
+Venmo requests.” Global causal score: C̄ = −0.03 (near zero). Per-task range: +0.50 on shared-
+expense reconciliation tasks (catches real name ambiguities) to −0.67 on single-app tasks (forces
+irrelevant cross-referencing). A judgment-based curator would retain this skill because its global
+score is harmless; only per-task measurement reveals that it helps half the time and hurts the other
+half.
+Example 2: vc-00021a. “For repeated side-effecting API calls, capture and check each response.”
+Global causal score: C̄ = +0.05 (near zero). Per-task range: +0.71 on mutation-heavy tasks (catches
+silent API failures) to −0.23 on read-only tasks (adds pure overhead). Both examples share the
+
+
+                                                   14
+signature of causal heterogeneity: near-zero global score, large per-task range, and invisible to any
+curation method that does not disaggregate by task.
+
+
+
+
+E    Per-Difficulty Breakdown
+
+
+Table 3 disaggregates Task Goal Completion by difficulty level (L1–L3) for six base models on both
+AppWorld test splits. Level 1 tasks are largely saturated across methods, while the most substantial
+improvements from our pipeline appear on Level 2 and Level 3 tasks—precisely the multi-step
+scenarios where uncurated skill libraries cause the most interference. For GPT-5.1 on test_challenge,
+the upstream ACE library degrades L2 and L3 performance relative to bare ReAct (50.0→44.0 and
+48.2→43.1), while our method recovers and substantially exceeds baseline performance at every
+difficulty level.
+
+
+
+
+Table 3: Per-difficulty breakdown (TGC). Gains concentrate on Level 2 and Level 3 tasks. GPT-4o
+per-level breakdown is not available at single-attempt granularity.
+                                             test_normal               test_challenge
+                Model        Method    L1     L2     L3    All    L1     L2     L3      All
+                             ReAct    86.0   68.8   44.4   61.9   69.4   50.0   48.2    52.5
+                GPT-5.1      ACE      86.0   72.9   46.0   67.3   80.6   44.0   43.1    49.9
+                             Ours     93.0   93.8   60.3   77.4   88.9   68.7   71.3    66.4
+                             ReAct    89.5   75.0   46.0   69.1   61.1   45.3   43.1    47.0
+                DS-V3        ACE      93.0   85.4   58.7   78.0   77.8   61.3   59.0    63.1
+                             Ours     93.0   91.7   68.3   83.3   86.1   72.7   60.5    69.3
+                             ReAct    84.2   79.2   41.3   66.7   79.2   43.3   45.1    50.4
+                GPT-4.1      CUGA     91.2   77.1   54.0   73.2   91.7   58.7   44.1    57.6
+                             Ours     91.2   85.4   54.0   75.6   75.0   61.3   62.1    64.0
+                             ReAct    85.7 82.1 78.6 82.1 83.5 81.3 78.4 81.1
+                GPT-5.4
+                             Ours     91.1 87.5 87.5 88.7 87.1 84.2 84.9 85.4
+                           ReAct      87.5   80.4   83.9   83.9   71.2   71.9   67.6    70.3
+                Sonnet 4.5
+                           Ours       94.6   85.7   87.5   89.3   75.5   76.3   74.1    75.3
+                           ReAct      76.8   69.6   71.4   72.6   48.2   46.8   53.2    49.4
+                Gemini 2.5
+                           Ours       80.4   80.4   82.1   81.0   56.1   54.0   54.7    54.9
+
+
+
+
+F    Per-Action Breakdown (τ -bench)
+
+
+Table 4 reports per-action accuracy on τ -bench retail for all seven models under our method. The five
+action categories—exchange, return, modify, cancel, and read-only—differ substantially in procedural
+complexity: read-only queries require no state mutation, while exchanges involve multi-step item
+resolution, price comparison, and confirmation. All models achieve near-perfect accuracy on read-
+only queries (except GPT-4o), and the largest gains from skill-based curation concentrate on the more
+complex action types (return and cancel), where procedural templates and curated skills provide the
+strongest marginal value over unaugmented baselines.
+
+
+                                                    15
+Table 4: τ -bench per-action breakdown (our method). Task counts in parentheses. Models sorted
+by overall score.
+                             Exchange       Return      Modify      Cancel     Read-
+               Model                                                          only (9)     All
+                               (30)          (31)        (34)        (11)
+               GPT-5.4            73.3        80.6        79.4       87.5       100       80.9
+               GPT-4.1            70.0        83.9        67.6       81.8       100       73.9
+               Gemini 2.5         76.7        71.0        64.7       87.5       91.7      73.9
+               Sonnet 4.5         66.7        71.0        70.6       87.5       91.7      73.0
+               DS-V3              70.0        64.5        61.8       63.6       100       66.1
+               GPT-5.1            56.7        64.5        55.9       63.6       100       62.6
+               GPT-4o             66.7        77.4        61.8       27.3       44.4      62.6
+
+
+
+
+G    Reproducibility Details
+
+
+
+This section provides the complete set of hyperparameters, model identifiers, and software versions
+needed to reproduce all experiments. Table 5 lists every hyperparameter used across the pipeline; all
+values are fixed across every (model, benchmark) configuration with no per-cell tuning. Table 6 lists
+the exact API identifiers for all models.
+
+
+
+
+      Table 5: Hyperparameters. All values are fixed across every (model, benchmark) cell.
+               Stage                     Parameter                                Value
+                                         Difficulty-estimation rollouts             2
+               Upstream curation
+                                         Task ordering                         Hardest-first
+                                         Development tasks M                        15
+               Causal attribution        Random masks K                             12
+                                         Keep probability f                        0.4
+                                         Split threshold τsplit                    0.40
+                                         Max split candidates                       15
+               Offline restructuring
+                                         Retire threshold τretire                  0.10
+                                         Merge similarity τmerge                   0.85
+                                         Nearest neighbours k                       8
+                                         Softmax temperature τ                      5
+               Per-task masking
+                                         Mask threshold τmask                    −0.10
+                                         Min retained skills                       30
+               Shared                    Embedding model                     Qwen3-Emb-0.6B
+
+
+
+
+Model identifiers. All models are accessed via API; Table 6 lists the exact identifiers returned by
+each provider.
+
+
+                                                     16
+                                         Table 6: Model API identifiers.
+                 Model                  API identifier                            Provider
+                 GPT-5.1                gpt-5.1-2025-11-13                        Azure OpenAI
+                 GPT-5.4                gpt-5.4-2026-03-05                        Azure OpenAI
+                 GPT-4.1                gpt-4.1-2025-04-14                        Azure OpenAI
+                 GPT-4o                 gpt-4o-2024-11-20†                        Azure OpenAI
+                 DeepSeek-V3            deepseek-chat (V3.2)                      DeepSeek direct
+                 Sonnet 4.5             claude-sonnet-4-5-20250929                Anthropic direct
+                 Gemini 2.5 Pro         gemini-2.5-pro                            Google AI Studio
+                 Embedding              Qwen3-Embedding-0.6B                      HuggingFace (local)
+                 τ -bench user sim      gpt-4o-2024-11-20                         Azure OpenAI
+† Our agent and the Gupta et al. [3] baseline use this version. The ReAct baseline (48.8%) is from the AppWorld leaderboard
+
+                                            entry using gpt-4o-2024-05-13.
+
+
+Benchmark versions. AppWorld: appworld==0.1.4.dev0 (pip, aligned with the ACE codebase).
+τ -bench: commit 4754e6b of sierra-research/tau-bench.
+Determinism. All agent calls use temperature 0 and seed 100. Attribution masks are generated with
+Python’s random.Random(seed) where seed = 42 for all (model, benchmark) cells except GPT-5.1
+on AppWorld, which uses seed = 45. Attribution configuration is otherwise uniform: K=12 masks,
+M =15 development tasks, keep probability f =0.4 (Bernoulli).
+Library sizes. After upstream curation (before offline restructuring), the skill library contains
+103 skills for GPT-5.1, 87 for GPT-4.1, 126 for GPT-4o, 80 for DeepSeek-V3, 95 for GPT-5.4, 71 for
+Claude Sonnet 4.5, and 88 for Gemini 2.5 Pro on AppWorld. On τ -bench, library sizes are 76, 72,
+61, 161, 81, 94, and 68 respectively. DeepSeek-V3’s notably larger τ -bench library (161 vs. 61–76
+for the OpenAI models) reflects more aggressive skill generation during curation: DeepSeek-V3
+proposed 115 ADD actions over 500 training tasks, compared to 15–30 for the other models under
+the same curation prompt. Our downstream attribution and masking mechanisms are agnostic to
+library size. Variation arises because each model’s curation run produces a different set of skills from
+the same training tasks.
+
+H     Sequential Ablation
+Table 7 isolates the contribution of each pipeline component by sequentially adding them to the
+bare ReAct baseline on GPT-5.1 / AppWorld test_normal (168 tasks). This additive design ensures
+that each row’s ∆ reflects the marginal value of the newly added component on top of all preceding
+ones. The results confirm that per-task masking contributes the largest single increment (+7.5 pp),
+consistent with the finding that the dominant challenge is not removing globally harmful skills but
+selecting the right skill subset for each individual task.
+
+
+Table 7: Sequential ablation (GPT-5.1, AppWorld test_normal, 168 tasks). Each row adds one
+component to the preceding configuration. Per-task masking contributes the largest single increment
+(+7.5 pp), consistent with the finding that over 90% of skills are causally heterogeneous (§A.1).
+                                Configuration                           TGC           ∆
+                                (a) ReAct baseline                       61.9        —
+                                (b) + Templates                          67.9       +6.0
+                                (c) + Offline Restructuring              69.9       +2.0
+                                (d) + Per-Task Masking (full)            77.4       +7.5
+
+
+
+I    Offline Restructuring: Split Example
+To illustrate what offline restructuring produces in practice, we show one of the 13 splits performed
+on the GPT-5.1 AppWorld library (bifurcation score H = 1.56).
+
+
+                                                           17
+Before (single skill). [psw-00007] “Many APIs return items in pages. Make sure to run through all
+the pages by looping over page_index.”
+This rule is essential for tasks that require scanning many items (e.g., browsing products, enumerating
+emails), but harmful for targeted purchases where the agent already knows which item it wants:
+exhaustive pagination wastes the step budget.
+After (two conditional variants). [psw-00007a] [IF task involves browsing or comparing multiple
+product options or scanning through multiple emails/messages]: “Many APIs return items in pages.
+Make sure to run through all the pages by looping over page_index.”
+[psw-00007b] [IF task is a targeted purchase of a specific known item or constrained to prior
+sellers]: “Do NOT run through all pages or loop over page_index; instead, focus only on the
+specific item or on items from previously used sellers without exhaustive pagination.”
+Both variants pass the development gate (no regression on any of the M =15 attribution tasks).
+The trigger conditions are generated by the base LLM from the per-task causal score vector; the
+development gate ensures they do not introduce regressions.
+
+
+J   Sub-Goal Completion (SGC)
+
+Table 8 reports Sub-Goal Completion on AppWorld, a finer-grained metric that awards partial
+credit for completing individual sub-goals within each task even when the overall task fails. SGC
+complements the primary TGC metric by revealing whether improvements reflect more tasks being
+fully solved or deeper progress on partially solved ones. The pattern mirrors the TGC results: our
+method achieves the highest SGC for six of seven models on both splits, with the largest gains on
+test_challenge where uncurated libraries cause the most interference.
+
+
+Table 8: AppWorld SGC results (%). Bold: best prompt-based method per column. Red: degrades
+over ReAct.
+                                                              test_normal (168)   test_challenge (417)
+         Model              Method                                  SGC                  SGC
+                            ReAct                                   46.4                 30.9
+         GPT-5.1            ACE                                     55.4                 28.8
+                            Ours                                    71.4                 48.9
+                            ReAct                                   48.2                 25.2
+         DeepSeek-V3        ACE                                     66.1                 43.9
+                            Ours                                    71.4                 52.5
+                            ReAct                                   46.4                 32.4
+         GPT-4.1            CUGA                                    62.5                 48.2
+                            Ours                                    60.7                 48.2
+                            ReAct                                   32.1                 13.0
+         GPT-4o             Gupta et al.                            57.1                 23.0
+                            Ours                                    58.9                 30.2
+         GPT-5.4            ReAct                                   91.9                 91.7
+                            Ours                                    96.7                 95.4
+         Sonnet 4.5         ReAct                                   94.0                 88.7
+                            Ours                                    97.2                 93.5
+         Gemini 2.5         ReAct                                   87.8                 80.5
+                            Ours                                    95.5                 91.8
+         Leaderboard best∗ (Qwen3-14B, wt-tuned)                    80.4                 50.4
+         ∗ No accompanying publication; see footnote in §3.
+
+
+
+
+                                                        18
+K     Statistical Validation
+
+Statistical validation is conducted on GPT-5.1; the same attribution protocol (K=12, M =15, f =0.4)
+applies to all seven models.
+
+
+K.1   Power Analysis
+
+Table 9 reports the statistical power of a per-skill permutation test for detecting a true ±0.30 causal
+effect at the α=0.05 level, as a function of the number of random masks M . At M =12 (our setting),
+per-cell permutation tests achieve only 38.5% power, and the descriptive threshold H ≥ 0.40 cannot
+distinguish real heterogeneity from noise at the single-skill level. This is precisely why we adopt a
+higher evidentiary standard: rather than relying on per-cell significance, we validate heterogeneity
+through six independent outcome-level tests (§A.1) that are robust to the per-cell noise level. The
+table also shows that increasing M to 30–50 masks would bring per-cell power to 80–98%, providing
+a clear path for future work to strengthen the per-skill analysis.
+
+
+Table 9: Power analysis for per-skill heterogeneity detection. Power is computed for a true ±0.30
+effect via 1000-trial permutation simulation.
+                   Masks M        Per-cell σ          Power (±0.30)     Null H≥0.40 FPR
+                    12 (ours)          0.290             38.5%                  ∼100%
+                       20              0.225             59.5%                    —
+                       30              0.183             80.0%                    —
+                       50              0.142             98.0%                    —
+
+
+
+K.2   Bootstrap Decision Stability
+
+To assess the robustness of individual curation decisions, we resample the K=12 attribution masks
+with replacement 1000 times and recompute each decision. Table 10 summarises the results. Among
+the 287 (skill, task) cells where per-task masking suppresses a skill (Ĉ < −0.10), 97.2% remain
+below the threshold at the bootstrap median, indicating strong directional stability—the method
+consistently identifies the same skills as harmful for each task. The k=8 averaging in Eq. 6 is key to
+this stability: it reduces the effective per-decision noise from σ ≈ 0.29 (per cell) to σ ≈ 0.10 (per
+decision), bringing the signal-to-noise ratio close to 1 for the masking threshold. At the stricter 95%
+CI level, 4.2% of cells are confirmed, reflecting the inherent conservatism of cell-level confidence
+intervals at M =12; the directional stability rate is the operationally relevant metric since the fallback
+mechanism (§2.3) ensures graceful degradation for borderline cases.
+
+
+                      Table 10: Bootstrap decision stability (1000 resamples).
+                Decision type              Total         Directionally stable    Strictly stable
+                                                              (median)             (95% CI)
+                Mask (Ĉ < −0.10)        287 cells            97.2%                  4.2%
+                Retire (|C̄| < 0.10)     100 skills     88.0% (≥80% boots)            —
+
+
+
+K.3   Outcome-Level Heterogeneity Evidence
+
+Since per-cell significance testing lacks power at M =12 (§K.1), we validate the heterogeneity claim
+through six independent lines of outcome-level evidence, summarised in Table 11. Each line tests a
+different prediction of the causal heterogeneity hypothesis; together they provide convergent support
+that the attribution matrix captures genuine task-dependent structure.
+
+
+                                                         19
+                  Table 11: Outcome-level evidence for causal heterogeneity.
+                  Evidence                    Statistic
+                  Mask diversity              96% selective, mean Jaccard = 0.30
+                  Drop vs. Keep attribution   gap = 0.147, Mann-Whitney p < 10−98
+                  Sign-reversing cases        vc-00109a: C̄=+0.007, Ĉ=−0.107
+                  Split separation            7/13 splits ≥ 0.05 divergence
+                  Reverse masking             −4.7 pp (causal direction confirmed)
+                  Sign stability              71%/70% pos/neg (vs. 50% null)
+
+
+K.4   Development Set Coverage
+
+Figure 5 shows the cumulative distribution of mean cosine similarity between each test task and
+its k=8 nearest development tasks. On test_normal, 78.6% of tasks have similarity ≥ 0.50; on
+test_challenge, only 30.9% do. Table 12 stratifies performance by coverage quartile on test_normal
+(GPT-5.1). The method improves over ReAct even in the lowest-coverage quartile (+4.8 pp), though
+gains are largest in the mid-range where the attribution signal is strongest.
+
+
+
+
+Figure 5: Coverage of test tasks by the attribution development set. CDF of mean cosine similarity
+to the top-8 nearest development tasks. The dashed line marks similarity = 0.50.
+
+
+
+        Table 12: Performance by coverage quartile (GPT-5.1, test_normal, 168 tasks).
+                         Quartile     Sim range     ReAct    Ours      ∆
+                         Q1 (low)     0.29–0.51      61.9%   66.7%   +4.8
+                         Q2           0.52–0.58      59.5%   78.6%   +19.0
+                         Q3           0.58–0.62      69.0%   85.7%   +16.7
+                         Q4 (high)    0.62–0.83      71.4%   78.6%   +7.1
+
+
+
+
+                                                  20
+

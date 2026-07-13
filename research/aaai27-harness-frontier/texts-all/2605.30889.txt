@@ -1,0 +1,666 @@
+                                                           MLIPilot: LLM-Driven Auto-Research for Machine-Learned
+                                                                          Interatomic Potentials
+                                                                            Etinosa Osaro∗, Santosh Adhikari, Stamatia Zavitsanou,
+
+
+
+
+arXiv:2605.30889v1 [physics.chem-ph] 29 May 2026
+                                                                                       Kelsey Parker, and Dario Rocca†
+                                                                             PsiQuantum, 700 Hansen Way, Palo Alto, CA 94304
+
+                                                                                                        May 2026
+
+
+
+                                                                                                        Abstract
+                                                             Constructing production-quality machine-learned interatomic potentials (MLIPs) requires bal-
+                                                             ancing accuracy, dynamical stability, and computational throughput under constraints that are
+                                                             not captured by a single training loss. We introduce MLIPilot, an auto-research framework in
+                                                             which tool-calling large language models propose hypotheses, edit MLIP training code, launch
+                                                             HPC jobs, and accept or revert changes using a fixed, physically constrained scorecard. We
+                                                             evaluate MLIPilot on MACE potential optimization using both commercial and open-weight
+                                                             LLM agents, including GPT-5.5, GPT-4.1, Mistral-24B, and Qwen3-32B. The benchmarks span
+                                                             molecular and periodic settings: a QM7-derived dataset for which we generated B3LYP/6-31G(d)
+                                                             energies and forces, and a Cu EMT dataset with periodic copper supercells labeled by ASE’s
+                                                             Effective Medium Theory calculator. Across these benchmarks, the strongest agents move
+                                                             initially constraint-violating baselines to accepted models by discovering useful training strate-
+                                                             gies, including output normalization, loss-function changes, progressive training schedules, and
+                                                             model-capacity adjustments. These results suggest that LLM agents can serve as autonomous
+                                                             operators for scientific machine-learning workflows when their search is constrained by domain-
+                                                             specific validation criteria, shifting part of MLIP development from manual trial-and-error toward
+                                                             auditable, automated experimentation.
+
+
+                                                   1        Introduction
+                                                   Machine-learned interatomic potentials approximate quantum-mechanical energy surfaces at a
+                                                   fraction of the cost of density functional theory, enabling nanosecond-scale molecular dynamics of
+                                                   104 –106 atoms [1, 2]. Yet developing a production MLIP remains an exercise in multi-objective
+                                                   constrained optimization: energy and force accuracy must satisfy application-specific thresholds;
+                                                   NVE dynamics must conserve energy over several picosecond trajectories; and inference throughput
+                                                   must support practical simulation timescales. These objectives are coupled in non-obvious ways.
+                                                   Aggressive energy-loss weighting can destabilize molecular dynamics. Deeper networks improve
+                                                   accuracy but reduce throughput below usable limits. Extended training may overfit in ways that
+                                                   manifest not as increased validation loss but as explosive NVE drift, a catastrophic failure mode
+                                                   invisible to standard metrics.
+                                                       ∗
+                                                           eosaro@psiquantum.com
+                                                       †
+                                                           drocca@psiquantum.com
+
+
+
+
+                                                                                                             1
+    Human experts navigate this space through iterative experimentation guided by physical intuition,
+a slow and irreproducible process that has motivated decades of work on automated machine
+learning [3, 4].
+    The question motivating this work is whether large language models [5, 6, 7], given appropri-
+ate tools and feedback, can serve as autonomous interatomic-potential researchers. Karpathy’s
+AutoResearch framework1 [8, 9] demonstrated precisely this paradigm for general ML: an LLM
+agent iteratively edits training code within a fixed evaluation harness, submits experiments, and
+retains only improvements, reducing Time-to-GPT-2 from 2.02 to 1.8 hours across approximately
+700 autonomous experiments on nanochat LLM pretraining. The “fix evaluation, vary training, keep
+improvements” pattern maps naturally to MLIP development, with one critical modification: the
+scalar validation loss must be replaced by a multi-objective scorecard with hard physical-feasibility
+constraints that reject dynamically unstable models regardless of composite improvement.
+    We present three contributions:
+1. MLIPilot: an agentic framework coupling tool-calling LLMs with Slurm HPC execution, SHA-
+   256 integrity enforcement, and hypothesis-driven experiment logging.
+2. A physically constrained scorecard with targets parsed from natural-language prompts and
+   hard gates at 4× target that guarantee dynamical stability of accepted models.
+3. A multi-agent benchmark on two datasets revealing that scientific reasoning quality, not
+   model scale or token budget, determines optimization success, and that open-weight models can
+   outperform larger proprietary ones on specific tasks.
+
+
+2        Related Work
+Equivariant MLIPs. The field has progressed from invariant descriptors (BPNN [10], SchNet [11])
+through angular features (DimeNet++ [12]) to fully E(3)-equivariant message passing (NequIP [2],
+Allegro [13], PaiNN [14], GemNet [15]). MACE [1] combines higher-order equivariant messages
+with multi-body correlation, achieving favorable accuracy-speed Pareto fronts. Universal potentials
+(MACE-MP [16], M3GNet [17], CHGNet [18]) cover the periodic table but require system-specific
+fine-tuning for quantitative accuracy [19]. Our work is orthogonal: MLIPilot optimizes the training
+procedure for any architecture.
+    LLM agents for science. The emergence of tool-calling capabilities in LLMs [20, 21] has
+enabled autonomous scientific agents. Coscientist [22] demonstrated closed-loop chemical synthesis
+with robotic execution; ChemCrow [23] augmented LLMs with 18 chemistry tools; Jablonka et
+al. [24] applied GPT-4 to materials data analysis. In ML research automation, FunSearch [25]
+used LLMs to discover novel mathematical algorithms, and the AI Scientist [26] automated paper
+writing from idea generation through experimentation. Karpathy’s AutoResearch [8] established the
+paradigm closest to our work: LLM-driven iterative code improvement within a fixed evaluation
+harness. MLIPilot extends this to atomistic simulation, where evaluation requires multi-objective
+constraints with hard physical-feasibility gates across HPC experiments.
+    Automated optimization. Bayesian methods (Optuna [27], BOHB [28]), neural architecture
+search [29, 30], and population-based training [31] operate over predefined parameter spaces with
+scalar objectives. MLIPilot differs in three respects: agents make arbitrary code changes (architec-
+tures, loss functions), the objective includes hard feasibility gates, and agents reason causally about
+why changes succeed or fail, accumulating knowledge across iterations in a manner more akin to
+human researchers than black-box optimizers.
+    1
+        https://github.com/karpathy/AutoResearch
+
+
+
+
+                                                   2
+3     Method
+3.1   System Architecture
+MLIPilot operates as a closed loop (Algorithm 1): the LLM agent proposes a code change, the
+system trains a model on an HPC cluster, evaluates the result against the scorecard, and either
+accepts the improvement or reverts to the previous best. This cycle repeats until the iteration
+budget is exhausted or the agent converges. Five components implement this loop:
+1. Data Inspector: Parses extXYZ datasets via ASE [32], identifies species, periodicity, and
+   property keys, and generates train/valid/test splits (70/20/10) when absent.
+2. Template Generator: Synthesizes train.py with an editable experiment surface above a fixed
+   evaluation harness (separated by a # FIXED HARNESS sentinel), plus a scorecard with targets
+   parsed from the user’s goal prompt.
+3. Agent Loop: Orchestrates LLM tool-calling with retry logic, context truncation at 80k tokens,
+   and dynamic early stopping via plateau detection.
+4. HPC Executor: Manages Slurm job lifecycle with exponential-backoff polling and local-GPU
+   fallback for pre-allocated environments.
+5. Scorecard Evaluator: Computes composite score, enforces hard gates, and issues accept/reject
+   decisions with automatic workspace revert on rejection.
+
+3.2   Physically Constrained Scorecard
+A trained MLIP must satisfy multiple objectives simultaneously: low energy error, low force error,
+stable molecular dynamics, and sufficient throughput. Rather than optimizing a single loss, MLIPilot
+evaluates each candidate model against a scorecard that enforces two acceptance criteria:
+1. Improvement: the candidate’s composite score must be strictly better than the current best.
+2. Physical feasibility: every metric must fall within a hard gate set at 4× the user-specified
+   target.
+Both conditions must hold for acceptance; otherwise the candidate is rejected and the workspace
+reverts to the previous best configuration.
+    Why hard gates? A model with excellent energy accuracy but catastrophic NVE drift produces
+unphysical trajectories. Composite scores alone cannot prevent this: a low energy penalty can mask
+a dangerously high drift. Hard gates enforce that no single metric can be worse than 4× target
+regardless of how favorable other metrics appear.
+    Concrete example. On QM7, the energy target is 10 meV/atom, so the hard gate is
+40 meV/atom. The default baseline produces 51.98 meV/atom, which exceeds the 40 meV gate
+and is therefore rejected. GPT-5.5’s first optimization (energy weight = 10) reduces energy to
+21.89 meV/atom, passing all gates and achieving score 1.490 (accepted). A subsequent experiment
+(500 epochs) passes the energy gate but causes NVE drift of 6.59 meV/atom/ps, exceeding the
+4 meV/atom/ps drift gate, and is rejected despite lower energy.
+    Formal definition. Each metric mi has a target ti , weight wi , direction di (lower or higher is
+better), and penalty cap ci . For metrics with hard gates, the gate is set to gi = 4 ti ; as shown in
+Table 1, hard gates are not applied to all metrics. The per-metric penalty ratio is
+                                 (
+                                   min(xi /ti , ci ) di = lower-is-better
+                            pi =                                                                  (1)
+                                   min(ti /xi , ci ) di = higher-is-better
+
+where xi is the measured value
+                           P and the
+                                  P cap ci prevents any single metric from dominating the score.
+The composite score is S = wi pi / wi , where S=1.0 means all metrics exactly meet their targets
+
+                                                 3
+Algorithm 1 MLIPilot Agent Loop
+Require: Dataset D, goal G, budget B, LLM M
+ 1: σ ← ParseScorecard(G)
+ 2: τ ← GenerateCode(D, σ)
+ 3: h0 ← SHA256(harness ∥ σ)
+ 4: S ∗ ← ∞; n ← 0
+ 5: while n < B and not converged do
+ 6:    resp ← M .Chat(context, tools)
+ 7:    for tc ∈ resp.tool calls do
+ 8:       if tc = submit and wait then
+ 9:          verify SHA256 = h0
+10:          metrics ← TrainAndEvaluate(τ )
+11:          S, pass ← Score(metrics, σ)
+12:          n←n+1
+13:          if S < S ∗ and pass then
+14:             S ∗ ← S; Snapshot()
+15:          else
+16:             Revert()
+17:          end if
+18:       end if
+19:    end for
+20: end while
+
+
+and lower is better. A candidate is accepted if:
+
+                                   Snew < Sbest    and   xi ≤ gi ∀ i                               (2)
+
+    Adaptive targets. Targets are parsed automatically from natural-language goal prompts (e.g.,
+“energy < 10 meV/atom” → tenergy =10, genergy =40), enabling users to specify dataset-appropriate
+ constraints in a single command without manual scorecard configuration.
+
+3.3   Tool Interface
+Agents interact through six typed tools: read file, write file, edit file, list files, submit and wait,
+and finish. Only train.py above the harness sentinel is writable. submit and wait requires
+three structured arguments: hypothesis (what should improve), target metric (which metric),
+and risk (what might degrade), enforcing scientific discipline and producing auditable experiment
+records.
+
+3.4   Integrity Enforcement
+SHA-256 hashes of the evaluation harness and scorecard are computed at initialization and verified
+before every submission. This prevents the agent from inflating scores by modifying test data,
+evaluation code, or scoring criteria.
+
+3.5   MACE Backend
+Training invokes mace run train [1]. The fixed evaluation harness benchmarks each trained model
+on four axes: (i) energy/force/stress MAE on held-out test frames, (ii) throughput via 10 perturbed
+evaluations, (iii) geometry relaxation (FIRE, fmax =0.05 eV/Å), and (iv) NVE MD stability (300 K,
+0.5 fs timestep, 5,000 steps in total, drift from linear regression of total energy vs. time). Although
+
+                                                   4
+Table 1: Scorecard configuration. Targets parsed from goal; gates at 4× target. Perfect score S=1.0.
+                     Metric                 Dir       Target     w     Cap   Gate
+                                                  QM7      Cu                (4t)
+                     E (meV/atom)            ↓     10       1     3    10     40/4
+                     F (meV/Å)              ↓     10       5     3    10    40/20
+                     Thr. (steps/s)          ↑     50      50    0.3   5       –
+                     Drift (meV/atom/ps)     ↓     1.0     0.5    1    10     4/2
+                     σ (GPa)                 ↓      –      0.5   0.5   10     –/2
+
+
+the experiments reported here focus on MACE, MLIPilot implements a backend registry designed to
+support additional MLIP frameworks, including NequIP, Allegro, CHGNet, and other architectures.
+
+
+4     Experiments
+4.1   Datasets
+QM7 B3LYP: Starting from the 7,165 organic molecules (C, H, N, O, S) in original QM7
+daatset [33, 34], we generated B3LYP/6-31G(d) single-point energies and forces and split the
+resulting dataset into 5,015/1,433/717 train/validation/test structures. 7,165 organic molecules
+(C, H, N, O, S) with B3LYP/6-31G(d) energies and forces. Split 5,015/1,433/717. Non-periodic,
+chemically diverse, with large variance in molecular size and energy scale. This dataset presents
+a particular challenge for MLIPs because the wide energy distribution across different molecular
+compositions rewards models that can robustly handle statistical outliers.
+    Cu EMT: 200 strained/rattled FCC Cu supercells (32 atoms, 2×2×2) with energies, forces,
+and Voigt stress from ASE’s Effective Medium Potential (EMT) calculator. The 200 structures were
+split into 140 training, 40 validation, and 20 test structures. The dataset is periodic and chemically
+simple, but geometrically diverse, making it a useful benchmark for testing whether agents can
+drive models toward tight convergence targets, including sub-meV/atom energy errors relative to
+EMT reference labels.
+
+4.2   Protocol
+Table 1 defines scorecard parameters. Four agents were benchmarked: GPT-5.5 (OpenAI reasoning
+model), GPT-4.1 (OpenAI tool-optimized), Mistral-24B (self-hosted via vLLM on H100), and Qwen3-
+32B (self-hosted via vLLM on H100). Each received budget B=10 (up to ten train-and-evaluate
+iterations), identical MACE defaults, and a natural-language goal prompt specifying numeric targets.
+Because scorecard feedback is used throughout the agent loop, we treat the repeatedly evaluated
+held-out split as a validation/selection set rather than a fully blind test set; a separate sealed test
+set will be required for definitive generalization estimates.
+
+4.3   QM7 Results
+The QM7 benchmark reveals the clearest separation between agents that reason scientifically and
+those that tune parameters. All agents begin from baselines that violate hard gates: the default
+model produces 51.98 meV/atom energy MAE, exceeding the 40 meV gate (Table 3, iteration 1:
+rejected). The baseline force MAE (10.42 meV/Å) is already near target, so the primary challenge
+is reducing energy error without destabilizing dynamics.
+
+
+                                                  5
+Table 2: QM7 B3LYP final results. All baselines fail hard gates (S≈2.6, E > 40 meV gate).
+B=budget exhausted, S=LLM stopped.
+           Model      Score      E             F             Drift        Thr.     Tokens      Stop
+                        ↓     meV/atom       meV/Å       meV/atom/ps    steps/s
+           GPT-5.5    0.831      9.52         9.83           0.051         70       244k       B
+           Mistral    1.061      14.32         9.94          0.111         42       256k       B
+           GPT-4.1    1.288      17.83        12.17          0.082         47       205k       B
+           Qwen3      1.818      28.71        11.58          0.938         61       486k       S
+
+
+Table 3: GPT-5.5 on QM7: autonomous discovery of ScaleShiftMACE (iter 5) and Huber loss
+(iter 7). These are not hyperparameter adjustments but changes to the model’s functional form and
+training objective. Best (iter 9, bold) achieves both targets.
+#    Intervention                        E (meV/at)   F (meV/Å)        Drift        Thr.          Score   Decision
+                                                                     (meV/at/ps)   (steps/s)
+ 1   Default baseline                      51.98           10.42        0.469         68       2.659 [✗]   Rej (gate)
+ 2   energy weight = 10                    21.89           13.01        0.183         68         1.490     Acc
+ 3   500 epochs                            19.62           12.13        6.594         67       2.239 [✗]   Rej (gate)
+ 4   lr = 0.001                            24.80           13.77        0.714         68         1.713     Rej (score)
+ 5   ScaleShiftMACE                        17.11           12.52        0.756         70         1.351     Acc
+ 6   3 interactions                        18.64           13.85        2.486         48         1.719     Rej (score)
+ 7   Huber loss                            19.18            9.61        0.684         70         1.306     Acc
+ 8   ew = 30                               10.48           10.05        0.020         70         0.876     Acc
+9    300 ep + ew30 + Huber + SS            9.52            9.83         0.051         70        0.831      Acc
+10   400 epochs                             8.70           9.47         0.418         70         0.833     Rej (score)
+
+
+
+     GPT-5.5 is the only agent to make architectural changes. Table 3 shows its full trajectory. After
+establishing feasibility via energy weighting (iter 2, score 1.49), it attempts longer training (iter 3),
+which passes the energy gate but causes catastrophic NVE drift (6.59 meV/atom/ps, above the
+4.0 meV/atom/ps hard gate), illustrating the failure mode hard gates are designed to catch. Rather
+than retrying training duration, GPT-5.5 pivots to architecture: switching to ScaleShiftMACE
+(iter 5, score 1.35→accepted), hypothesizing that explicit output normalization suits the wide energy
+distribution in QM7’s diverse molecular compositions. It then substitutes Huber loss for squared
+error (iter 7), reasoning about robustness to outlier configurations, which drops force MAE from
+12.52 to 9.61 meV/Å. The final configuration (ScaleShiftMACE + Huber + energy weight 30 +
+300 epochs) satisfies both accuracy targets, achieving energy MAE below 10 meV/atom and force
+MAE below 10 meV/Å, with a low NVE drift of only 0.051 meV/atom/ps.
+     Mistral-24B achieves the second-best score (1.061), surpassing GPT-4.1 despite being a smaller
+open-weight model. Its strategy is instructive: after two failed jobs (iterations 3–4, code errors with
+LR schedulers), it recovers and pursues a capacity-then-duration approach: increasing to 256 irreps
+with 3 interactions (iter 6, score 1.217), then extending training to 1000 epochs (iter 9, score
+1.061). While lacking GPT-5.5’s architectural innovation, Mistral compensates through persistent
+exploration and willingness to invest heavily in training duration (4.9 hours for the final 1000-epoch
+run vs. GPT-5.5’s 38 minutes for 300 epochs). Mistral-24B and Qwen3-32B ran on a pre-allocated
+local GPU, where training executes synchronously. Its force MAE (9.94 meV/Å) is comparable to
+GPT-5.5’s (9.83), but its energy MAE remains 50% higher (14.32 vs. 9.52) without the ScaleShift
+normalization.
+     GPT-4.1 achieved score 1.288 through parametric optimization (energy weight 10, 256 irreps,
+
+
+                                                      6
+Figure 1: Composite score convergence on QM7 (lower is better). All agents start from infeasible
+baselines (S≈2.6, hard gates violated). Missing points indicate failed jobs that produced no score:
+Mistral-24B iters 3–4 (code errors in LR scheduler), GPT-4.1 iter 8 (failed with correlation=4).
+GPT-5.5 achieves the steepest descent through architectural innovation at iterations 5 and 7.
+
+
+3 interactions). Its attempt to increase many-body correlation from 3 to 4 (iter 8) failed and
+produced no score (visible as a missing point in Figure 1). A subsequent LR scheduler experiment
+(iter 9) produced catastrophic NVE drift, a failure invisible to energy/force MAE that hard gates
+correctly reject.
+    Qwen3-32B consumed 486k tokens in only 3 iterations (162k/iteration with 20 edit calls
+per 3 submissions) before the LLM stopped responding. It achieved 1.818 through simple weight
+adjustments, never attempting architectural or training-duration changes.
+
+
+
+
+                                                7
+Figure 2: Accept/reject decisions on QM7. Green: accepted; red: rejected; ×: hard gates failed.
+GPT-5.5’s iterations 3 and baseline fail gates, while all other rejections are due to non-improving
+scores. Mistral-24B has 2 FAILED jobs (iters 3–4) before recovering.
+
+
+
+
+Figure 3: Final score ranking on QM7. GPT-5.5 achieves 1.3× better score than Mistral-24B and
+1.5× better than GPT-4.1.
+
+
+
+
+                                                8
+Table 4: Cu EMT final results. All baselines fail hard gates (S≈4.5, E > 4 meV gate). B=budget
+exhausted, C=converged.
+                Model         Score      E             F         σ         Drift        Stop
+                                ↓     meV/atom       meV/Å     GPa     meV/atom/ps
+                GPT-5.5       0.401       0.57        1.40     0.001       0.121         B
+                GPT-4.1       0.653       1.06        2.45     0.001       0.110         B
+                Mistral       1.190       1.93        4.91     0.003       0.097         B
+                Qwen3         1.301       2.37        4.09     0.003       0.108         C
+
+
+Table 5: GPT-5.5 iteration history on Cu EMT. The progressive epoch scaling (50→500→1000→2000)
+is an emergent strategy. Best iteration (7, bold) achieves sub-meV accuracy by adding a third
+interaction layer.
+  #    Intervention           E (meV/atom)       F (meV/Å)   σ (GPa)   Drift   Thr.   Score   Gates   Dec
+   1   Default (50 epochs)        12.69            7.70       0.016     0.112   65     4.499    ✗      Rej
+   2   500 epochs                  1.22            2.85       0.002     0.104   65     0.746    ✓      Acc
+   3   energy weight = 10         1.67             2.69       0.002     0.103   65     0.904    ✓      Rej
+   4   1000 epochs                 0.69            2.13       0.001     0.107   66     0.486    ✓      Acc
+   5   2000 epochs                 0.77            1.76       0.001     0.069   65     0.481    ✓      Acc
+   6   lr = 0.005                  1.30            1.75       0.001     0.088   65     0.689    ✓      Rej
+  7    3 interactions             0.57             1.40       0.001     0.121   46     0.401    ✓      Acc
+   8   Narrower (64 irreps)        0.80            1.61       0.001     0.113   46     0.501    ✓      Rej
+   9   3000 epochs                 0.59            1.32       0.001     0.145   46     0.406    ✓      Rej
+  10   Seed change                 0.89            1.54       0.001     0.128   46     0.536    ✓      Rej
+
+
+
+4.4    Cu EMT Results
+All agents begin from baselines that violate hard gates: the default model produces 12.7 meV/atom
+energy MAE, which exceeds the 4 meV gate (Table 5, iteration 1: rejected). The agent must
+first make a large enough change to cross the feasibility boundary before any configuration can be
+accepted.
+     Table 5 details GPT-5.5’s full trajectory. The agent’s first change (increasing from 50 to 500
+training epochs) drops energy MAE from 12.7 to 1.22 meV/atom, passing all hard gates for the first
+time and achieving score 0.746 (accepted). It then tries increasing energy loss weight (iteration 3),
+which passes gates but produces a worse score (0.904 vs. 0.746), so it is rejected. The agent
+learns from this and returns to epoch scaling: 1000 epochs (accepted, 0.486) then 2000 epochs
+(accepted, 0.481). At iteration 7, it combines 2000 epochs with a third message-passing interaction
+layer, achieving 0.57 meV/atom energy MAE (well below the 1 meV target) at the cost of reduced
+throughput (46 vs. 65 steps/s). Three subsequent attempts (smaller model, more epochs, different
+seed) all produce valid models that pass gates, but none beat the current best score of 0.401, so all
+are rejected.
+     GPT-4.1 adopted a capacity-first strategy: increasing irreps to 256 (iter 3), then energy
+weighting (ew=30, iter 7), then extended training (500 epochs, iter 8). It reached score 0.653 with
+E=1.06 meV/atom, just above the 1 meV target.
+     Mistral-24B made 5 accepted steps through methodical single-variable changes (epochs, weight-
+ing, interactions, irreps, LR), achieving 1.190 but never discovering that training duration beyond
+200 epochs is the dominant optimization axis.
+     Qwen3-32B converged early at score 1.301 after 7 iterations (3 consecutive rejections triggered
+
+
+                                                          9
+Figure 4: Composite score convergence on Cu EMT. Missing point: Qwen3-32B iter 6 (FAILED job
+from invalid loss function string). GPT-5.5 achieves the best final score through progressive epoch
+scaling, reaching 0.401 at iteration 7.
+
+
+early stopping). Its single acceptance (iter 3: 200 epochs + LR scheduler) was the only configuration
+that passed gates. Subsequent attempts included capacity increase (rejected, worse score), energy
+weighting (rejected, marginal), changing the loss function string to an invalid value (iter 6: job
+FAILED, visible as a missing point in Figure 4), and a corrected loss variant that failed hard gates.
+
+
+
+
+                                                 10
+Figure 5: Accept/reject decisions on Cu EMT. Green: accepted; red: rejected; ×: hard gates failed.
+All baselines (column 1) fail gates. GPT-5.5 requires only one iteration to reach feasibility.
+
+
+
+
+Figure 6: Final score ranking on Cu EMT. GPT-5.5 achieves 1.6× lower score than GPT-4.1 and
+3.2× lower than Qwen3-32B.
+
+
+
+
+                                               11
+                   Table 6: Efficiency summary. Improvement = Sbaseline /Sbest .
+                    Model      Data       Iters   Tokens   Impr.   Acceptance %
+                    GPT-5.5    QM7         10     244k     3.2×         50
+                    Mistral    QM7         10     256k     2.5×         40
+                    GPT-4.1    QM7          9     205k     2.0×         33
+                    Qwen3      QM7          3     486k     1.4×         67
+                    GPT-5.5    Cu EMT      10     546k     11.2×        40
+                    GPT-4.1    Cu EMT      10     183k      6.9×        50
+                    Mistral    Cu EMT      10     232k      3.8×        50
+                    Qwen3      Cu EMT      7      184k      3.5×        14
+
+
+4.5   Cross-Dataset Analysis
+Four patterns emerge from Table 6:
+    (1) Reasoning quality dominates scale. GPT-5.5 achieves 3.2–11.2× improvement through
+qualitatively different interventions (architecture, loss function); GPT-4.1 achieves 2.0–6.9× through
+parametric tuning; open-weight models 1.4–3.8× through incremental changes.
+    (2) Token count does not predict quality. Qwen3-32B’s 486k tokens on QM7 (162k/iteration
+with excessive edit calls) yield only 1.4× improvement, while GPT-5.5’s 244k yield 3.2×. On Cu
+EMT, GPT-5.5’s 546k tokens produce 11.2× vs. Mistral’s 232k for 3.8×.
+    (3) Open-weight models can outperform proprietary ones. Mistral-24B surpasses GPT-
+4.1 on QM7 (2.5× vs. 2.0× improvement) through willingness to invest in extended training (1000
+epochs). This suggests that some optimization landscapes reward persistence over sophistication, as
+long as the agent can identify and execute a viable strategy.
+    (4) Tighter targets amplify differentiation. Cu EMT improvement factors span 3.5–11.2×
+(3.2× dynamic range) vs. QM7’s 1.4–3.2× (2.3× range), reflecting that sub-meV targets require
+deeper reasoning to satisfy.
+
+
+5     Discussion
+5.1   Emergent Scientific Behaviors
+Without explicit instruction, agents develop behaviors characteristic of expert researchers:
+• Progressive scaling: GPT-5.5 escalates epochs 50→500→1000→2000 on Cu EMT, monotonically
+  increasing computational investment as diminishing returns require deeper optimization.
+• Architecture switching: Mid-campaign on QM7, GPT-5.5 replaces MACE with ScaleShift-
+  MACE, hypothesizing that molecular energies benefit from explicit output normalization. This is
+  a change to the model’s functional form, not a hyperparameter.
+• Loss innovation: GPT-5.5 replaces squared-error loss with Huber loss on QM7, reasoning
+  about robustness to outlier configurations in a chemically diverse dataset. Force MAE drops 23%
+  (12.52→9.61 meV/Å).
+• Multi-level diagnosis: When 500-epoch training caused drift failure on QM7, GPT-5.5 sequen-
+  tially tried LR reduction (insufficient), then pivoted to an architectural change (successful).
+• Error recovery: Mistral-24B on QM7 encountered two consecutive FAILED jobs (LR scheduler
+  syntax errors) but recovered by fixing the code and continuing optimization.
+• Risk-aware retreat: After LR reduction worsened Cu EMT score, GPT-5.5 abandoned the LR
+  dimension entirely and explored model depth instead.
+
+
+                                                  12
+Figure 7: Token expenditure vs. final score (QM7). Qwen3-32B’s 486k tokens (162k/iter) yield only
+1.4× improvement, while GPT-5.5’s 244k produce 3.2×.
+
+
+5.2   The Role of Hard Gates
+Hard gates at 4× target serve three functions. First, they exclude dynamically unstable models:
+every baseline and several optimized configurations (GPT-5.5 QM7 iter 3: drift 6.59; GPT-4.1
+QM7 iter 9: catastrophic drift from LR scheduler; Mistral QM7 iter 10: drift from aggressive
+loss weighting) are correctly rejected despite acceptable energy/force MAE. Second, they create a
+feasibility-first optimization landscape where agents must solve a constraint-satisfaction problem
+before standard minimization begins. Third, the 4× multiplier provides a reasonable heuristic
+boundary: potentials within 4× of target retain qualitative correctness for screening applications,
+while those beyond it produce unphysical trajectories.
+
+5.3   What Distinguishes Effective Agent Researchers
+Optimization success correlates with three capabilities: (1) Creative search: making qualitative
+changes (architecture, loss function) rather than only quantitative adjustments; (2) Compositional
+reasoning: combining independently beneficial changes (ScaleShift + Huber + energy weight +
+epochs) into a jointly superior configuration; (3) Causal interpretation: diagnosing why a change
+failed (drift instability from overtraining) and pivoting to an orthogonal intervention rather than
+repeating similar modifications.
+    These capabilities are present in GPT-5.5, partially in GPT-4.1 and Mistral-24B, and largely
+absent in Qwen3-32B. The ranking on QM7 (GPT-5.5 > Mistral > GPT-4.1 > Qwen3) is particularly
+informative: Mistral’s success over GPT-4.1 demonstrates that willingness to fully exhaust a working
+
+
+                                                13
+strategy (extended training) can compensate for lack of architectural innovation on datasets where
+training duration is a dominant axis.
+
+
+6    Conclusion
+MLIPilot demonstrates that tool-calling LLMs can function as autonomous interatomic-potential
+researchers, achieving 3.2–11.2× improvement in composite score and up to 22× reduction in
+energy MAE (12.69→0.57 meV/atom on Cu EMT) within 10 iterations. The physically constrained
+scorecard with 4× hard gates is essential: all baselines fail gates, and configurations with catas-
+trophic dynamics (drift >6 meV/atom/ps on QM7, failing the 4 meV/atom/ps gate) are correctly
+rejected despite composite-score improvement. GPT-5.5’s autonomous discovery of ScaleShiftMACE
+with Huber loss on QM7 represents a qualitative advance beyond hyperparameter optimization,
+demonstrating genuine scientific reasoning about which model variant and loss function suit a
+dataset’s statistical structure. Mistral-24B’s ability to surpass GPT-4.1 on QM7 through persistent
+training-duration exploration suggests that the landscape of ML research tasks is multidimensional:
+some reward creative insight while others reward methodical exhaustion of viable strategies.
+    As language models advance in causal and compositional reasoning, systems like MLIPilot point
+toward a future where the bottleneck in atomistic simulation shifts from how to train potentials to
+what physical questions to ask, freeing domain scientists from the engineering of training pipelines.
+
+
+Author Contributions
+E.O., S.A., and D.R. conceptualized the project. E.O. developed the software, designed and executed
+all LLM benchmarks. E.O. and D.R. wrote the initial manuscript. S.A. and S.Z. validated the
+software. E.O. and K.P. generated the data for this work. All authors contributed to scientific
+reasoning. All authors revised and approved the final manuscript.
+
+
+Acknowledgments
+The authors thank the broader PsiQuantum application team. Authors particularly acknowledge
+helpful discussions with Arpan Kundu, Swagata Roy, and Arvin Kakekhani.
+
+
+References
+ [1] Ilyes Batatia, Dávid Péter Kovács, Gregor N C Simm, Christoph Ortner, and Gábor Csányi.
+     MACE: Higher order equivariant message passing neural networks for fast and accurate force
+     fields. Advances in Neural Information Processing Systems, 35:11423–11436, 2022.
+ [2] Simon Batzner, Albert Musaelian, Lixin Sun, Mario Geiger, Jonathan P Mailoa, Mordechai
+     Kornbluth, Nicola Molinari, Tess E Smidt, and Boris Kozinsky. E(3)-equivariant graph neural
+     networks for data-efficient and accurate interatomic potentials. Nature Communications,
+     13:2453, 2022.
+ [3] Frank Hutter, Lars Kotthoff, and Joaquin Vanschoren. Automated Machine Learning: Methods,
+     Systems, Challenges. Springer, 2019.
+ [4] Xin He, Kaiyong Zhao, and Xiaowen Chu. AutoML: A survey of the state-of-the-art. Knowledge-
+     Based Systems, 212:106622, 2021.
+
+                                                 14
+ [5] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal,
+     et al. Language models are few-shot learners. In Advances in Neural Information Processing
+     Systems, volume 33, pages 1877–1901, 2020.
+
+ [6] OpenAI. GPT-4 technical report. arXiv preprint arXiv:2303.08774, 2023.
+
+ [7] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, et al.
+     LLaMA: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971,
+     2023.
+
+ [8] Andrej Karpathy. AutoResearch: AI agents running research on single-GPU nanochat training
+     automatically. https://github.com/karpathy/AutoResearch, 2026.
+
+ [9] Andrej Karpathy. Nanochat: Autoresearch round 1 improvements. https://github.com/
+     karpathy/nanochat/commit/6ed7d1d82cee16c2e26f45d559ad3338447a6c1b, 2026.
+
+[10] Jörg Behler and Michele Parrinello. Generalized neural-network representation of high-
+     dimensional potential-energy surfaces. Physical Review Letters, 98:146401, 2007.
+
+[11] Kristof T Schütt, Huziel E Sauceda, P-J Kindermans, Alexandre Tkatchenko, and Klaus-Robert
+     Müller. SchNet – a deep learning architecture for molecules and materials. The Journal of
+     Chemical Physics, 148:241722, 2018.
+
+[12] Johannes Gasteiger, Shankari Giri, Johannes T Margraf, and Stephan Günnemann. Fast
+     and uncertainty-aware directional message passing for non-equilibrium molecules. In Machine
+     Learning for Molecules Workshop, NeurIPS, 2020.
+
+[13] Albert Musaelian, Simon Batzner, Anders Johansson, Lixin Sun, Cameron J Owen, Mordechai
+     Kornbluth, and Boris Kozinsky. Learning local equivariant representations for large-scale
+     atomistic dynamics. Nature Communications, 14:579, 2023.
+
+[14] Kristof T Schütt, Oliver T Unke, and Michael Gastegger. PaiNN: Polarizable atom interaction
+     neural network. In International Conference on Machine Learning, pages 9377–9388, 2021.
+
+[15] Johannes Gasteiger, Florian Becker, and Stephan Günnemann. GemNet: Universal directional
+     graph neural networks for molecules. In Advances in Neural Information Processing Systems,
+     volume 34, pages 6790–6802, 2021.
+
+[16] Ilyes Batatia, Philipp Benner, Yuan Chiang, Alin M Elena, Dávid P Kovács, Janosh Riebesell,
+     et al. A foundation model for atomistic materials chemistry. arXiv preprint arXiv:2401.00096,
+     2024.
+
+[17] Chi Chen and Shyue Ping Ong. A universal graph deep learning interatomic potential for the
+     periodic table. Nature Computational Science, 2:718–728, 2022.
+
+[18] Bowen Deng, Peichen Zhong, KyuJung Jun, Janosh Riebesell, Kevin Han, Christopher J
+     Bartel, and Gerbrand Ceder. CHGNet as a pretrained universal neural network potential for
+     charge-informed atomistic modelling. Nature Machine Intelligence, 5:1031–1041, 2023.
+
+[19] Xiang Fu, Zhenghao Wu, Wujie Wang, Tian Xie, Sinan Keten, Rafael Gomez-Bombarelli,
+     and Tommi Jaakkola. Forces are not enough: Benchmark and critical evaluation for machine
+     learning force fields with molecular simulations. Transactions on Machine Learning Research,
+     2023.
+
+                                               15
+[20] Timo Schick, Jane Dwivedi-Yu, Roberto Dessı̀, Roberta Raileanu, Maria Lomeli, Eric Hambro,
+     Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can
+     teach themselves to use tools. Advances in Neural Information Processing Systems, 36, 2023.
+
+[21] Yujia Qin, Shengding Liang, Yining Ye, Kunlun Zhu, Lan Yan, Yaxi Lu, et al. Tool learning
+     with foundation models. arXiv preprint arXiv:2304.08354, 2023.
+
+[22] Daniil A Boiko, Robert MacKnight, Ben Kline, and Gabe Gomes. Autonomous chemical
+     research with large language models. Nature, 624:570–578, 2023.
+
+[23] Andres M Bran, Sam Cox, Oliver Schilter, Carlo Baldassari, Andrew D White, and Philippe
+     Schwaller. ChemCrow: Augmenting large-language models with chemistry tools. Nature
+     Machine Intelligence, 6:525–535, 2024.
+
+[24] Kevin Maik Jablonka, Qianxiang Ai, Alexander Al-Feghali, Shruti Baber, David Balcells, et al.
+     14 examples of how LLMs can transform materials science and chemistry: a reflection on a
+     large language model hackathon. Digital Discovery, 2:1233–1250, 2023.
+
+[25] Bernardino Romera-Paredes, Mohammadamin Barekatain, Alexander Novikov, Matej Balog,
+     M Pawan Kumar, Emilien Dupont, Francisco J R Ruiz, Jordan S Ellenberg, Pengming Wang,
+     Omar Fawzi, et al. Mathematical discoveries from program search with large language models.
+     Nature, 625:468–475, 2024.
+
+[26] Chris Lu, Cong Lu, Robert Tjarko Lange, Jakob Foerster, Jeff Clune, and David Ha.
+     The AI scientist: Towards fully automated open-ended scientific discovery. arXiv preprint
+     arXiv:2408.06292, 2024.
+
+[27] Takuya Akiba, Shotaro Sano, Toshihiko Yanase, Takeru Ohta, and Masanori Koyama. Optuna:
+     A next-generation hyperparameter optimization framework. In Proceedings of the 25th ACM
+     SIGKDD International Conference on Knowledge Discovery & Data Mining, pages 2623–2631,
+     2019.
+
+[28] Stefan Falkner, Aaron Klein, and Frank Hutter. BOHB: Robust and efficient hyperparameter
+     optimization at scale. In International Conference on Machine Learning, pages 1437–1446,
+     2018.
+
+[29] Barret Zoph and Quoc V Le. Neural architecture search with reinforcement learning. In
+     International Conference on Learning Representations, 2017.
+
+[30] Thomas Elsken, Jan Hendrik Metzen, and Frank Hutter. Neural architecture search: A survey.
+     Journal of Machine Learning Research, 20:1–21, 2019.
+
+[31] Max Jaderberg, Valentin Dalibard, Simon Osindero, Wojciech M Czarnecki, Jeff Donahue, Ali
+     Razavi, Oriol Vinyals, Tim Green, Iain Dunning, Karen Simonyan, et al. Population based
+     training of neural networks. arXiv preprint arXiv:1711.09846, 2017.
+
+[32] Ask Hjorth Larsen, Jens Jørgen Mortensen, Jakob Blomqvist, Ivano E Castelli, Rune Chris-
+     tensen, Marcin Dulak, Jesper Friis, Michael N Groves, Bjørk Hammer, Cory Hargus, et al. The
+     atomic simulation environment – a Python library for working with atoms. Journal of Physics:
+     Condensed Matter, 29:273002, 2017.
+
+
+
+
+                                               16
+[33] Matthias Rupp, Alexandre Tkatchenko, Klaus-Robert Müller, and O. Anatole von Lilienfeld.
+     Fast and accurate modeling of molecular atomization energies with machine learning. Physical
+     Review Letters, 108:058301, 2012.
+
+[34] Lorenz C Blum and Jean-Louis Reymond. 970 million druglike small molecules for virtual
+     screening in the chemical universe database GDB-13. Journal of the American Chemical Society,
+     131:8732–8733, 2009.
+
+
+
+
+                                               17
+

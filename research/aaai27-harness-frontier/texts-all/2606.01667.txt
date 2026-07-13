@@ -1,0 +1,1762 @@
+                                              ATLAS: Agentic Test-time Learning-to-Allocate
+                                                                Scaling
+
+
+                                                                Peijia Qin                                       Qi Cao
+                                                    University of California, San Diego            University of California, San Diego
+                                                             pqin@ucsd.edu                                 q9cao@ucsd.edu
+
+
+
+
+arXiv:2606.01667v1 [cs.LG] 1 Jun 2026
+                                                                                      Pengtao Xie
+                                                                           University of California, San Diego
+                                                                                   p1xie@ucsd.edu
+
+
+
+                                                                                        Abstract
+                                                    Test-time scaling has become a major way to improve large language model
+                                                    reasoning, but its orchestration has remained designer-engineered: a fixed sample
+                                                    budget, a fixed refinement loop, a fixed scoring rule, or a fixed search policy
+                                                    decides how compute is spent, leaving the model in charge of solving but not of
+                                                    orchestration. We introduce ATLAS, an agentic test-time scaling framework in
+                                                    which an LLM orchestrator owns the control loop end-to-end. Through a single
+                                                    action, explore, which dispatches a fresh independent solver on the original
+                                                    problem, the orchestrator decides whether to gather more evidence, when to stop,
+                                                    and how to synthesize the final answer; the action space is extensible, with each
+                                                    explore call optionally specifying solver, reasoning effort, or prompting strategy.
+                                                    We evaluate ATLAS on four benchmarks covering scientific question answering,
+                                                    code generation, and multimodal reasoning under a Claude Sonnet 4.6 backbone,
+                                                    where it reaches 56.00% on HLE-Verified, 82.29% on LiveCodeBench, 85.86% on
+                                                    GPQA-Diamond, and 23.71% on BabyVision while using far fewer API calls than
+                                                    fixed-workflow baselines. A multi-model extension, ATLAS-MM, that exposes
+                                                    solver choice as an additional action dimension further improves HLE-Verified to
+                                                    60.00% and LiveCodeBench to 85.63%, with consistent gains on GPQA-Diamond
+                                                    and BabyVision. Ablations replacing the orchestrator’s direct synthesis with a
+                                                    separate integrator degrade or fail to improve accuracy on three of four benchmarks,
+                                                    consistent with the role of stateful evidence management in producing the gains.
+
+
+                                        1    Introduction
+                                        Scaling inference-time compute improves large language model reasoning, but how to allocate that
+                                        compute remains an open problem. No single strategy (sequential, parallel, or hybrid) is uniformly
+                                        optimal across problems of varying difficulty [45], and naive scaling can saturate or even degrade
+                                        accuracy through poor coverage and reward hacking [17]. The central question is not whether to
+                                        scale, but who orchestrates the scaling: a designer in advance, or the model itself in context.
+                                        Test-time scaling has progressed mainly by enriching the solving step (more samples, longer chains,
+                                        deeper trees, learned verifiers), while the orchestration of that compute has remained designer-
+                                        engineered. Self-Refine encodes a fixed critique-revise loop [34]. Best-of-N reranking encodes a
+                                        fixed sampling count and a fixed scoring rule [45, 30]. Budget Forcing encodes a fixed token cap [36].
+                                        Tree of Thoughts and step-level process-reward frameworks encode a fixed expansion-and-pruning
+                                        policy [56, 50]. Adaptive-allocation methods soften the rigidity by tying the stop decision to vote
+                                        distributions or scalar reward scores [1, 10]. The rule itself, however, is still external to the model.
+
+                                        Preprint.
+Figure 1: ATLAS casts test-time scaling as adaptive action selection over an extensible explore
+action space. The orchestrator observes the original problem and accumulated candidate pool, decides
+whether more evidence is needed, dispatches fresh independent solver calls through explore, and
+stops once the evidence is sufficient to synthesize a final answer. A richer action space exposes
+additional control dimensions such as solver choice, reasoning effort, prompting strategy, budget, or
+sampling configuration.
+
+
+Recent agentic methods bring LLMs into the loop yet typically reserve the model for solving while a
+hand-specified controller decides when to stop [28, 7].
+We introduce ATLAS (Agentic Test-time Learning-to-Allocate Scaling), where the model itself,
+not a hand-specified rule, schedule, or scoring function, decides how much compute to spend on
+each problem and when to stop. As illustrated in Figure 1, an LLM orchestrator manages a growing
+pool of candidate solutions through a single tool, explore, which dispatches a fresh, independent
+solver on the original problem. Each explore call sees only the original problem, so candidates
+are independent; only the orchestrator accumulates evidence across calls, and its stop and synthesis
+decisions both rest on this single stateful in-context view. The action space is extensible: each
+explore call can in principle specify which solver to invoke, at what reasoning effort, and with what
+decomposition strategy. We evaluate the simplest instantiation, a single parameterless tool whose
+only decision is when to stop, and find that even this minimal configuration achieves competitive
+accuracy at substantially lower cost. ATLAS-MM, a multi-model extension that adds solver choice
+to the action space, further reaches 60.00% on HLE-Verified and 85.63% on LiveCodeBench, with
+consistent gains on GPQA-Diamond and BabyVision, supporting the principle that the orchestrator’s
+value scales with the richness of its decision space. We evaluate ATLAS across four benchmarks
+covering scientific question answering, code generation, and multimodal reasoning: HLE-Verified
+[59], LiveCodeBench [22], BabyVision [5], and GPQA-Diamond [41]. Because the orchestrator’s
+prompt is benchmark-agnostic, the same controller transfers across text-only and image-conditioned
+tasks without retraining. Our contributions are as follows:
+
+      1. We introduce ATLAS, a test-time scaling framework where an LLM orchestrator owns
+         control end-to-end, deciding in context whether to dispatch another fresh solver, when to
+         stop, and how to synthesize. This replaces the hand-specified loops, schedules, or scoring
+         rules that govern prior methods.
+      2. We evaluate ATLAS on four benchmarks under a Claude Sonnet 4.6 backbone, where it
+         reaches 56.00% on HLE-Verified, 82.29% on LiveCodeBench, 85.86% on GPQA-Diamond,
+         and 23.71% on BabyVision while using far fewer API calls than fixed-workflow baselines. A
+         multi-model extension, ATLAS-MM, further reaches 60.00% on HLE-Verified and 85.63%
+         on LiveCodeBench, with consistent gains on GPQA-Diamond and BabyVision.
+      3. Through ablations we identify stateful evidence management as a key driver of the gains:
+         replacing the orchestrator’s direct synthesis with a separate integrator degrades or fails to
+         improve accuracy on three of four benchmarks.
+
+
+
+
+                                                  2
+2     Related Work
+ATLAS is most related to four areas of prior work. Test-time scaling organizes inference-time
+compute along sequential, parallel, and hybrid axes, covering self-correction, budget-controlled
+decoding, self-consistency aggregation, and tree search [45, 34, 36, 52, 56]. Adaptive compute
+allocation studies when to stop sampling and how much to spend per query, via statistical stopping
+rules, learned difficulty predictors, and rational metareasoning at the token level [1, 10, 11]. Agentic
+orchestration covers both heuristic schedulers and learned meta-controllers that decide between
+exploration strategies, including parallel agent mixtures, contextual bandits over high-level moves,
+and width-versus-depth search [7, 46, 21, 60]. Cost-aware agent training incorporates execution
+cost into agent objectives, primarily for tool planning, exploration, and step-level credit assignment
+[53, 14, 38]. Across these four areas, the controller is either hand-specified or separately trained.
+ATLAS stands at a different point: an LLM orchestrator reads the full candidate pool and decides
+every explore and stop action in context, with no external rule, scoring function, or learned controller
+in the loop. See Appendix A for more detailed discussion of related work.
+
+3     Methodology
+3.1    The ATLAS Loop
+
+The orchestrator repeatedly decides whether to call explore or to stop and synthesize. It never
+solves the problem itself.
+
+Trajectory.    Each turn t produces a structured trace
+
+      Thoughtt :     assessment of the candidate pool Ct−1
+      Actiont :      explore[args ] | stop[final_answer ]
+      Observationt : ct = (answer, reasoning, approach, confidence)
+
+in which the orchestrator first articulates its assessment, then emits exactly one Action (either
+explore with arguments determined by the variant in §3.2, or stop), and the corresponding Obser-
+vation is appended to the trajectory. The structure makes every decision auditable and matches the
+Thought/Action/Observation idiom of agentic systems [57].
+
+The explore Action. An explore Ac-
+tion dispatches a fresh solver on the original
+problem x. The solver works from scratch          Algorithm 1 ATLAS: Adaptive Test-Time Scaling
+(it does not see or continue previous can-        Require: Problem x, budget T , orchestrator O, solver S
+didates), and the returned candidate ct =         Ensure: Final answer y
+                                                   1: τ ← ∅
+(answer, reasoning, approach, confidence) be-      2: for t = 1 to T do
+comes Observationt , appended to Ct . By           3:    (Thoughtt , Actiont ) ← O(x, τ )
+construction, each explorer receives only the      4:    if Actiont = stop[y] then
+problem statement, guaranteeing that explore       5:
+results are conditionally independent given the    6:        return y
+problem. This independence lets the orches-        7:    end if
+trator assess the marginal contribution of each    8:    ct ← S(x; Actiont )
+                                                   9:    τ ← τ ∪ {(Thoughtt , Actiont , ct )}
+additional explore in isolation.                  10: end for
+                                                  11: (_, stop[y]) ← O(x, τ ) {budget exhausted}
+The stop Action. A stop Action termi-             12: return y
+nates the loop with a final answer synthesized
+directly from Ct−1 by the orchestrator itself.
+Because it has observed the entire trajectory (every Thought/Action/Observation triple), it has richer
+context than a separate aggregator that sees only the final pool. We refer to this property as stateful
+evidence management: the orchestrator’s stop and synthesis decisions are both conditioned on the
+full Thought/Action/Observation history rather than on a final pool of candidates. The orchestrator
+can issue stop at any point before the explore budget T is exhausted; the decision is made by the
+orchestrator model itself based on its assessment of the candidate pool. The prompt encodes principles
+for this judgment: genuine convergence means independent solvers arriving at the same answer
+
+
+                                                   3
+through different methods, repeated failures indicate the problem exceeds solver capability, and each
+additional explore call has a cost that must be justified by expected information gain. This judgment
+reflects the cost-benefit tradeoff formalized by rational metareasoning and the value-of-computation
+criterion [42, 16]: additional exploration is warranted only when the expected information gain
+justifies the cost.
+Algorithm 1 summarizes the procedure. The control logic is benchmark-agnostic: only the explorer
+prompt and answer schema change across tasks. The orchestrator prompt encodes its decision logic
+as declarative principles (e.g. “a single candidate does not constitute sufficient evidence”) rather
+than prescriptive rules, paired with worked examples that demonstrate how these principles apply
+in concrete scenarios. Appendix B gives the full implementation details including representative
+prompts.
+
+3.2    Action Space and Variants
+
+The value of the framework scales with the richness of the explore action space. In the minimal
+instantiation explore[] takes no arguments and the orchestrator can only decide when to stop.
+Enriching the action space opens additional decision axes, turning the orchestrator into a controller
+that adaptively selects what to compute. Table 1 summarizes the three variants we consider. All
+variants share the same Thought/Action/Observation trajectory; only the argument field of the
+explore action changes.
+
+Table 1: explore action-space variants. All variants use the same Thought/Action/Observation loop;
+only the argument field exposed by explore changes.
+      Variant        explore action                    Argument domain         Decision exposed
+      ATLAS    explore[]               ∅                       stop timing
+      ATLAS-MM explore[model_name=Mi ] Mi ∈ {M1 , . . . , MK } solver capability
+      ATLAS-MI explore[instruction=s] s ∈ String               solver focus
+
+
+The two augmented variants address different failure modes: ATLAS-MM targets capability ceilings
+by escalating across solver tiers, and ATLAS-MI targets focus failures by directing a fresh solver
+toward a localizable disagreement. Both share the same loop, candidate pool, stopping logic, and
+direct orchestrator synthesis, so the same core policy addresses different failure modes without
+architectural complexity.
+
+3.3    Explore Effort
+
+Beyond the choice of variant, the orchestrator faces an independent decision: at what point does
+the accumulated evidence justify commitment? Through the lens of Hay et al. [16]’s value-of-
+computation criterion (§3), the orchestrator should stop precisely when the expected information gain
+from another explore no longer justifies its cost; what counts as “sufficient gain” is itself a tunable
+disposition rather than a universal constant. We expose this disposition as an explicit hyperparameter,
+explore effort, with three discrete levels that set the orchestrator’s stopping bar independently of
+which variant in §3.2 is being run.
+Table 2 contrasts the three levels along several lenses.
+
+                    Table 2: Explore-effort levels viewed through several lenses.
+                               Low                         Medium                     High
+
+
+Evidence threshold   pairwise agreement      + cross-method confirmation triangulation or cross-check
+VoC bar on info gain low: weak gain accepted moderate                    high: strong gain required
+Operating profile    easy items, fast commit mixed difficulty, balanced  hard items, risk-averse
+
+
+
+
+                                                   4
+Table 3: Main results across four benchmarks. Top group: top-5 zero-shot leaderboard reference per
+column. Middle group: test-time scaling baselines under Claude Sonnet 4.6. Bottom: ATLAS and
+its multi-model extension ATLAS-MM under Claude Sonnet 4.6. Bold marks the best per column
+among test-time scaling methods. Per-split breakdowns are in Appendix F.
+                                                      HLE-Verified LiveCodeBench GPQA-Diamond BabyVision
+          Top-5 zero-shot leaderboard reference
+                                                           52.48                 80.2                                                                       94.1                                                                           49.7
+          1st                                             GPT-5.2-H             o4-mini-H                                                      Gemini-3.1-Pro                                                                    Gemini-3-Pro
+                                                           50.16                 75.8                                                                       92.0                                                                           34.4
+          2nd                                              Opus-4.6               o3-H                                                             GPT-5.4-xhi                                                                          GPT-5.2
+                                                           48.93                 74.2                                                                       91.5                                                                           30.2
+          3rd                                           Gemini-3-Pro            o4-mini-M                                                      GPT-5.3-Codex                                                                        Doubao-1.8
+                                                           48.48                 73.6                                                                       90.8                                                                           19.2
+          4th                                           Qwen3-Max-T          Gemini-2.5-Pro                                                      Gemini-3-Pro                                                                 Qwen3-VL-Plus
+                                                           48.16                 73.1                                                                       90.3                                                                           16.2
+          5th                                              Opus-4.5           DeepSeek-R1                                                          GPT-5.2-xhi                                                                             Grok-4
+
+          Test-time scaling baselines (Claude Sonnet 4.6 backbone)
+          Pass@1                                           48.00                 77.14                                                                   83.33                                                                          19.59
+          Majority Voting [52]                               –                     –                                                                     83.33                                                                          23.20
+          Self-Refine [34]                                 53.00                 80.57                                                                   82.83                                                                          21.39
+          Self-Refine (no early stop) [34]                 58.00                 82.29                                                                   85.35                                                                          21.13
+          Budget Forcing [36]                              51.00                 80.00                                                                   83.84                                                                          21.91
+          Reward-model reranking†                          52.00                 78.86                                                                   83.84                                                                          20.88
+          Our method (Claude Sonnet 4.6 backbone)
+          ATLAS                                            56.00                 82.29                                                                   85.86                                                                          23.71
+          ATLAS-MM                                         60.00                 85.63                                                                   88.38                                                                          23.97
+     †
+         Reward-model reranking uses Skywork-Reward-V2 [30, 44] for HLE / LiveCodeBench / GPQA-Diamond and VisualPRM [51, 37] for BabyVision.
+
+
+
+
+Because explore effort changes only the stopping disposition (not the Action shape the orchestrator
+can emit), it is fully orthogonal to variant choice: any of ATLAS, ATLAS-MM, ATLAS-MI can
+be operated at any of the three explore-effort levels. The cost-accuracy frontier across the three levels
+is reported in §4.
+
+4   Experiments
+                                                                                                                                                                             Condensed Matter Physics
+                                                                                                                                                             d Acoustics
+                                                                                                                                                   Optics an
+                                                                                                                         Elec                                                                                        icine
+                                                                                                                                                                                                        Math
+                                                                                                                                                                                                                                    e/AI
+                                                                                                                             trom                                        y                                         y/Med
+                                                                                                                                                                  emistr
+                                                                                                                                                                                                                                 ienc
+                                                                                                                                agn             etics
+                                                                                                                    Rela                     Gen            nic Ch                                               Biolog       r Sc
+                                                                                                                                                     Inorga
+                                                                                                                                    etis m
+                                                                                                                        tivis
+We evaluate ATLAS against seven test-time scal-                                               Hig
+                                                                                                 h-e
+                                                                                                             As
+                                                                                                                           tic
+                                                                                                                              Me
+                                                                                                                                       and
+                                                                                                                                           Pho
+                                                                                                                                                                                                                             pute
+                                                                                                                                                                                                                           Com          Oth
+                                                                                                                                                                                                                                           er
+                                                                                                                                                                                                                                                                   ien
+                                                                                                                                                                                                                                                                        ce
+                                                                                                                                                                                                                                                               l Sc
+                                                                                                               tro
+                                                                                                      ner           ph              cha
+                                                                                                         gy                                                                                                                                                 cia
+ing baselines (six in Table 3; the seventh, LLM Se-                                          Mole
+                                                                                                    cula
+                                                                                                            par
+                                                                                                                ticle
+                                                                                                                        ysic
+                                                                                                                        phy
+                                                                                                                           s
+                                                                                                                                     nic
+                                                                                                                                      s       ton
+                                                                                                                                                ics
+                                                                                                                                                                                                                                                nit
+                                                                                                                                                                                                                                                   ies
+                                                                                                                                                                                                                                                      /So
+                                                                                                  r Bio                                                                                                                                      ma
+                                                                                                                            sic                                                                                                            Hu
+lection, is reported separately in the action-space                                      Physi
+                                                                                               cs (g
+                                                                                                enera
+                                                                                                        logy                    s
+                                                                                                                                                                                                                                                              Phy
+                                                                                                                                                                                                                                                                      sics
+
+                                                                                     Chem             l)
+comparison of Table 7) on four benchmarks span-                                            istry (g                                              GPQA-                                                         HLE-Verified                                                  ering
+                                                                                               eneral
+                                                                                                      )                                         Diamond                                                           Gold                                            Engine
+                                                                                   Quantum
+                                                                                           Mechanic
+ning scientific QA, code generation, and multi-                                    Organic Chemistry
+                                                                                                    s
+                                                                                                                                                                                                                                                                       Chemistry
+
+modal reasoning (Figure 2 summarizes the official                                  Lines Observation
+                                                                                   Mirroring Patterns
+                                                                                                  terns
+subcategories within each). Appendix B and D                                         Rotation Pat g
+                                                                                                 ldin
+                                                                                       Paper Fo nfold                                             Baby                                                    LiveCodeBench                                               Medium
+                                                                                              be U                                                Vision                                                        v6
+give the full experimental setups, baseline imple-                                      3D  Cu
+                                                                                                 o ma
+                                                                                             Metr tterns
+                                                                                                         p
+                                                                                                   Pa         on
+                                                                                             Logic structi rent
+mentations, and benchmark grading details.                                                         o n        fe
+                                                                                               Rec he dif tterns
+                                                                                                       t        a   e
+                                                                                                 Find rlay P sam                 3D
+                                                                                                                                     Pat
+                                                                                                         e        e                      t
+                                                                                                      Ov d th                    Co ern C                                                                                                       Ha
+                                                                                                           Fin               Con unt C omp                                                                                                      rd
+                                                                                                                                nec lust let
+                                                                                                                Patt                t th ers ion
+Main results. Table 3 reports accuracy on all                                                                        ern an
+                                                                                                                  2D Pa d Color
+                                                                                                                        ttern
+                                                                                                                                Maz e line
+                                                                                                                                   e
+                                                                                                                                   Com     p
+                                                                                                                                             s
+                                                                                                                    Coun Completi letion                                                                          Easy
+four benchmarks. Table 7 reports LLM Selection                                                             Recogn        t 3D
+                                                                                                                  ize num blocks
+                                                                                                                           bers
+                                                                                                                Find the sha and letters
+                                                                                                                               dow
+                                                                                                                                          on
+
+
+and ATLAS-MM as part of the action-space com-                                                                       3D Views
+                                                                                                             Count Same Patterns
+
+
+parison later in this section; per-benchmark scor-
+ing conventions and the top/middle/bottom group
+structure are in Appendix D; per-split breakdowns Figure 2: Evaluation coverage. The inner ring
+are in Appendix F.                                 shows the four benchmarks; the outer ring ex-
+                                                   pands each into its official subcategories (8 HLE-
+ATLAS reaches strong accuracy across all four Verified Gold categories, 3 LiveCodeBench v6
+benchmarks under a Sonnet 4.6 backbone. The difficulty levels, 22 BabyVision subtypes, 13
+multi-model extension ATLAS-MM extends this GPQA-Diamond subdomains).
+further to 60.00% on HLE-Verified, 85.63% on
+
+
+                                                                         5
+LiveCodeBench, 88.38% on GPQA-Diamond, and 23.97% on BabyVision – the column-wise top
+method on every benchmark in Table 3 and the only row that holds the lead simultaneously on all
+four, with +0.77 to +3.34 points over the strongest fixed-budget baseline.
+
+Ablation on the orchestrator. We
+                                          Table 4: Controller-side ablations. (a) Orchestrator model
+probe three axes of orchestrator capa-
+                                          effect with Sonnet 4.6 explores throughout. (b) Adding a sep-
+bility while holding the explorer (Son-
+                                          arate integrator. (c) Disabling extended thinking on GPQA-
+net 4.6) and prompts fixed: model
+                                          Diamond.
+choice, internal reasoning, and sep-
+arate integrator. All three ablations                                                                          (a) Orchestrator model effect
+isolate synthesis quality, not stopping                                                                          Haiku                      Sonnet                     Opus
+behavior, as the main axis of orches-                                                                      Acc.          $/q           Acc.          $/q          Acc.         $/q
+trator value.
+                                           HLE-Verified                                                   57.00        1.83           56.00         1.59         59.00        1.50
+Model choice (Table 4a). Orches-           LiveCodeBench                                                  79.43        0.71           82.29         0.53         83.43        0.64
+trator accuracy on GPQA-Diamond            GPQA-Diamond                                                   82.83        0.36           85.86         0.35         86.87        0.29
+consistently increases with capability                                                                            (b) Separate integrator
+tier: Haiku 82.83% < Sonnet 85.86%                                                                                   ATLAS                      ATLAS (+ Integrator)
+< Opus 86.87%. Opus also leads
+                                                                                                               Acc. (%)              $/q        Acc. (%)                      $/q
+on HLE (59%) and LiveCodeBench
+(83.4%). Haiku is 4 points behind          HLE-Verified                                                            56.00            1.59                57.00             2.35
+Opus on GPQA-Diamond despite us-           LiveCodeBench                                                           82.29            0.53                80.57             0.72
+ing slightly more explores per ques-       BabyVision                                                              23.71            0.27                23.71             0.38
+tion, which isolates aggregation qual-     GPQA-Diamond                                                            85.86            0.35                85.86             0.39
+ity rather than effort budget as the                                                                              (c) Extended thinking
+main axis.                                                                                                                            Acc. (%)           $/q
+
+Separate integrator (Table 4b). By                                                                ATLAS                                     85.86       0.35
+                                                                                                  ATLAS (no thinking)                       84.85       0.36
+default, ATLAS has the orchestrator
+produce the final answer directly from
+its accumulated evidence after deciding to stop; ATLAS (+ Integrator) replaces this with a dedicated
+integrate step (a separate model call that receives all candidates and synthesizes the final answer
+independently). Adding the separate integrator yields accuracy comparable to direct synthesis at
+higher per-question cost on every benchmark (Table 4b). ATLAS therefore uses direct orchestrator
+synthesis by default.
+Internal reasoning (Table 4c). Disabling extended thinking on a fixed Sonnet 4.6 orchestrator reduces
+GPQA-Diamond accuracy by about one point (85.86% → 84.85%) with identical exploration (2.14
+vs. 2.14 explores/q). The orchestrator’s internal reasoning therefore has a small but positive effect on
+evidence aggregation.
+
+Ablation on explore effort. Aggre-            HLE-Verified                                          LiveCodeBench              GPQA-Diamond              BabyVision       Average
+gate effect (Figure 3). Higher ef-                 17.5                                           Med                                                          High
+fort gives non-decreasing accuracy
+
+
+
+
+                                              Accuracy gain over Low effort (pp)
+                                                                                   15.0
+on every benchmark; cost rises
+steadily at the Medium-to-High tran-                                               12.5
+                                                                                                                                    High
+sition, by 1.5–1.8× on the free-form                                               10.0             Med
+benchmarks (HLE-Verified, Live-                                                     7.5
+CodeBench, BabyVision) and by a                                                                                              High
+                                                                                                  Med
+milder +10.5% on GPQA-Diamond.                                                      5.0           Med                        High
+                                                                                    2.5                 High
+Per-question     distribution    (Fig-                                                            Med
+ure 4). On HLE-Verified, Live-                                                      0.0
+                                                                                     Low
+CodeBench, and BabyVision the                                                             $0.00         $0.20        $0.40          $0.60       $0.80          $1.00
+                                                                                                          Additional cost over Low effort ($/q)
+Low→Medium→High             transition
+shifts the distribution rightward at      Figure 3: Effect of explore effort on ATLAS-MM, plotted
+each step, producing the 1.5–1.8×         as incremental accuracy and cost relative to Low effort. Each
+Medium→High cost increase on these        curve is one benchmark and each point is an effort level.
+three benchmarks. GPQA-Diamond            Higher effort gives non-decreasing accuracy across all bench-
+is the exception: at High effort          marks.
+the distribution shifts leftward of
+
+
+                                                                                      6
+                                                                               ATLAS-MM (Low)           ATLAS-MM             ATLAS-MM (High)
+                                        HLE-Verified                           LiveCodeBench                                GPQA-Diamond                               BabyVision
+                          0.5
+                                                                 0.6                                                                                     0.3
+
+
+
+
+Density of trajectories
+                                                                                                              0.6
+                          0.4
+                          0.3                                    0.4                                          0.4                                        0.2
+                          0.2
+                                                                 0.2                                          0.2                                        0.1
+                          0.1
+                          0.0                                    0.0                                          0.0                                        0.0
+                                0   2    4   6    8    10   12         0   2     4    6     8      10    12         0   2     4   6    8       10   12         0   2   4      6   8      10     12
+                                                                                                Number of explore calls
+
+   Figure 4: Per-question explore-call distributions for ATLAS-MM at the three explore-effort levels
+   (Low / Medium / High), one panel per benchmark. Curves are Gaussian KDEs over the discrete
+   number of explore calls per trajectory. Per-cell sample sizes (n) and means (µ), as well as the
+   underlying discrete histograms, appear in Appendix G.1.
+
+
+   Medium, because a couple of agreeing explores typically suffice on this highest-accuracy benchmark.
+   The +10.5% Medium→High cost change (versus 1.5–1.8× on the free-form benchmarks) reflects
+   this fast convergence.
+
+    Ablation on the orchestrator backbone. The within-family swap above varies the orchestrator
+    across three Anthropic capability tiers while keeping the Sonnet 4.6 explorer fixed. We extend
+    this in two ways, both reported in Table 5: (i) an orchestrator-only swap, where two open-weights
+    orchestrators from a different model family [55] are run on top of a Sonnet 4.6 explorer, and (ii) a full-
+    stack swap, where the explorer, orchestrator, and synthesizer are all served by the same non-Anthropic
+    backbone. In both setups, prompts and exploration budget (T =8) are identical to the within-family
+    configuration; only the backbone(s) change. Open-weights backbones are served locally via vLLM;
+    full checkpoint paths and decoding settings are in Appendix B.
+In the orchestrator-only swap, both
+open-weights orchestrators deliver Table 5: Cross-family extension of Table 4(a). Gain = Acc.
+strictly positive Gain on every bench- − Pass@1; cell shading on the Gain column is proportional
+mark they cover: Qwen improves to gain magnitude (darker = larger gain).
+HLE-Verified and LiveCodeBench
+by +8.00 and +1.15 points, while Orchestrator                 Benchmark                   P@1 Acc. Gain
+Gemma improves HLE-Verified, Live-                      Cross-family (orchestrator only)
+CodeBench, and BabyVision by Qwen3.6-35B                      HLE-Verified               48.00 56.00 +8.00
++3.00, +2.86, and +2.32 points. In Qwen3.6-35B
+                                       Gemma-4-26B
+                                                              LiveCodeBench
+                                                              HLE-Verified
+                                                                                         77.14 78.29 +1.15
+                                                                                         48.00 51.00 +3.00
+the full-stack swap, GPT-5.2 gives Gemma-4-26B                LiveCodeBench              77.14 80.00 +2.86
+positive gains on HLE-Verified at both Gemma-4-26B            BabyVision                 19.59 21.91 +2.32
+                                                           Cross-family (full stack)
+reasoning-effort levels (+1.0 at low Claude Sonnet            HLE-Verified               48.00 56.00 +8.0
+effort and +2.0 at high effort).       GPT-5.2 (low)          HLE-Verified               55.00 56.00 +1.0
+                                                                                          GPT-5.2 (high)                          HLE-Verified                             55.00 57.00        +2.0
+   The Qwen full-stack configuration Qwen3.6-35B                     HLE-Verified           19.00 24.00 +5.0
+   acts as both explorer and orchestrator, Qwen3.6-35B               LiveCodeBench          47.43 59.43 +12.0
+                                              Qwen3.6-35B            BabyVision             16.75 22.94 +6.2
+   so its Pass@1 column reflects Qwen’s
+   own first-shot accuracy (lower than
+   Sonnet’s on HLE-Verified, 19.00 vs.
+   48.00, and LiveCodeBench, 47.43 vs. 77.14, and on BabyVision, 16.75 vs. 19.59). Even from this
+   lower starting point, the Qwen-driven framework lifts Acc. on all three benchmarks shown, with
+   the largest absolute gain on LiveCodeBench (+12.0). Positive Gain in every row indicates that the
+   explore-or-stop loop is not specific to the Anthropic family; the orchestrator only needs the in-context
+   capability to read candidate traces and decide.
+
+    Cost-accuracy balance. Figure 5 gives a compact cost–accuracy Table 6: Seed stability on
+    summary for the Sonnet 4.6 comparison set, averaging reported ac- GPQA-Diamond (n=5).
+    curacy and API cost over GPQA-Diamond and BabyVision. Top
+    to bottom, each method exposes more decision dimensions to the               Mean Std
+    orchestrator: LLM Selection has no exploration loop; ATLAS adds
+    adaptive stopping; ATLAS-MM and ATLAS-MI add model dis-             Acc. (%) 85.86 0.55
+                                                                                                                                                    $/q                 0.35 0.01
+
+
+                                                                                                          7
+                                                                                                    ATLAS           Self-Refine                 Self-Refine (no early stop)
+                             0.8
+                                             HLE-Verified                                          LiveCodeBench                                       GPQA-Diamond                                   BabyVision
+                                                                                 0.8                                                  0.8                                               0.6
+
+
+
+
+Density of trajectories
+                             0.6                                                                                                                                                        0.5
+                                                                                 0.6                                                  0.6                                               0.4
+                             0.4                                                 0.4                                                  0.4                                               0.3
+                                                                                                                                                                                        0.2
+                             0.2                                                 0.2                                                  0.2
+                                                                                                                                                                                        0.1
+                             0.0                                                 0.0                                                  0.0                                               0.0
+                                   0   2      4      6     8       10       12         0      2           4   6     8      10    12         0      2     4      6     8       10   12         0   2   4   6   8    10   12
+                                                                                                                        Number of explore calls
+
+    Figure 6: Per-question explore-call distributions for ATLAS versus the two Self-Refine variants on
+    the shared Sonnet 4.6 backbone, one panel per benchmark. Curves are Gaussian KDEs. Per-cell (n,
+    µ) and underlying discrete histograms appear in Appendix G.2.
+
+
+    patch and targeted-instruction dispatch respectively. ATLAS strictly dominates Majority Voting,
+    Self-Refine without early stopping, and Budget Forcing on this Pareto frontier: higher mean accuracy
+    at substantially lower per-question cost. LLM Selection has the highest mean cost without a corre-
+    sponding accuracy gain. The multi-model variant ATLAS-MM extends the same Pareto frontier
+    further. The GPQA-Diamond stability check in Table 6 gives mean accuracy 85.86% with standard
+    deviation 0.55pp (approximately one question across runs), confirming that the ATLAS point is not
+    driven by seed noise on that component. The Pareto position is achieved by stopping early when
+    evidence already converges; the next paragraphs trace this stopping behavior at the trajectory level.
+
+                             57
+                                                                  ATLAS-MM
+                                                                                                                   Table 7: Accuracy (%) and average cost per question ($/q)
+                             56                                                                                    along the action-space expressiveness axis of Figure 1.
+                             55
+
+
+
+
+         Mean accuracy (%)
+                                                         ATLAS
+                             54                                                Self-Refine
+                                                                                                                                                 HLE-Verified LiveCodeBench BabyVision GPQA-Diamond
+                                                                               (no stop)
+                             53                                         Budget Forcing                                                           Acc.↑       $/q↓ Acc.↑            $/q↓ Acc.↑ $/q↓ Acc.↑            $/q↓
+                                                                                             Majority
+                                                                                             Voting
+                                                          Self-Refine                        Reward/VisualPRM
+                             52                                                                                     LLM Sel (N =8) 58.00                     3.71 81.14            1.51 23.20 0.56 77.16            0.97
+                                           Pass@1
+                             51
+                                                                                                                    ATLAS          56.00                     1.59 82.29            0.53 23.71 0.27 85.86            0.35
+                                                                                                   LLM Selection    ATLAS-MM       60.00                     1.54 85.63            0.69 23.97 0.43 88.38            0.39
+                             50
+                                                                                                                    ATLAS-MI       60.00                     1.36 89.14            0.52     –    –     –               –
+                              $0.00          $0.20         $0.40             $0.60                $0.80
+                                                                 Mean $/q
+
+
+
+    Figure 5: Cost–accuracy tradeoff sum-
+    mary.
+
+
+   To see how the cost balance above is achieved at the trajectory level, Figure 6 contrasts ATLAS’s
+   explore-call distribution with the two Self-Refine variants. Rather than putting most weight at
+   n=1 (like standard Self-Refine) or always running to a fixed budget (like Self-Refine without early
+   stopping), ATLAS shows a dynamic, problem-dependent distribution with a meaningful tail. This
+   shape confirms that the orchestrator actively adjusts compute based on evidence convergence: easy
+   questions are resolved quickly, while harder questions receive additional exploration.
+
+   Ablation on the explore action space. Table 7 reports accuracy and cost along the expressiveness
+   axis defined in Figure 1. LLM Selection forces a fixed eight-explore budget regardless of pool
+   state, while ATLAS stops adaptively at substantially lower per-question cost on every benchmark,
+   isolating the value of the stopping decision alone. ATLAS-MM (which exposes solver choice) and
+   ATLAS-MI (which exposes a targeted-instruction argument) further improve accuracy over ATLAS
+   on HLE-Verified and LiveCodeBench, with ATLAS-MI reaching the highest LiveCodeBench accu-
+   racy in the table. The transition from LLM Selection through ATLAS to its augmented variants traces
+   increasing argument expressiveness on the same loop, isolating the value of each added decision
+   dimension.
+
+   Stopping and synthesis behavior. Figure 7 examines two mechanisms on GPQA-Diamond. Panel
+   (a) compares the orchestrator’s natural stop time with the earliest point at which the candidates
+   produced so far form a correct majority; the resulting gap is sharply concentrated at zero, with 88.9%
+   of trajectories stopping exactly at convergence. Panel (b) groups the same trajectories by the number
+
+
+                                                                                                                                  8
+of correct candidates among the eight explores: ATLAS achieves near-perfect accuracy when most
+candidates are correct, and its ability to recover correct minority options (reaching 36.7% accuracy
+even when the correct option is not a majority) distinguishes it from rigid selection rules. Together,
+these patterns indicate that the orchestrator stops at the right moment and synthesizes across reasoning
+traces.
+
+                          100                                                                                     100%                               Final accuracy
+                                  Uniform-stop null                                                         100
+                                  ATTS observed                                                                               91%                    Minority extraction
+
+
+
+
+Percent of trajectories                                                           Percent of trajectories
+                           75                                                                                80
+
+                           50                                                                                60
+
+                                                                                                             40                     36%   37% 33%
+                           25                               7.1x exact-stop
+                                                              enrichment
+                                                                                                             20
+                                                                                                                                                            7%    7%
+                            0                                                                                            1%
+                                7 6 5 4 3 2 1 0 1 2 3 4 5 6 7                                                 0
+                                                      Gap                                                          Reliable   Majority    Minority            None
+
+(a) Stop-time gap on the n=790 GPQA-Diamond tra- (b) GPQA-Diamond behavior stratified by the number
+jectories with a defined convergence point.      of correct candidates among eight explores.
+Figure 7: Candidate-pool diagnostics on GPQA-Diamond. Left: the orchestrator’s natural stop
+time aligns with correct-majority emergence rather than a random schedule. Right: performance is
+near-perfect when the explores contain many correct candidates and degrades as correct evidence
+becomes sparse.
+
+
+5                          Conclusion
+We introduced ATLAS, an agentic test-time scaling framework in which an LLM orchestrator
+owns the control loop end-to-end through a single explore action. Across four benchmarks,
+ATLAS achieves competitive accuracy at substantially lower cost, and the multi-model extension
+ATLAS-MM adds further gains by exposing solver choice as an action dimension. Ablations point
+to stateful evidence management as a key driver of these gains. More broadly, this shifts the design
+surface for test-time scaling from the controller logic to the action space: any decision the agent
+should make in context can be exposed as an argument to explore without retraining.
+Two natural extensions remain. Explorers currently return reasoning summaries rather than full
+traces; richer summary contracts that pass full traces or structured summaries are a natural follow-up.
+Learning an orchestration policy from trajectories is a complementary direction we leave to future
+work.
+
+References
+        [1] Pranjal Aggarwal, Aman Madaan, Yiming Yang, and Mausam. Let’s sample step by step:
+            Adaptive-consistency for efficient reasoning and coding with LLMs. In Proceedings of the
+            2023 Conference on Empirical Methods in Natural Language Processing, pages 12375–12396.
+            Association for Computational Linguistics, 2023. URL https://aclanthology.org/2023.
+            emnlp-main.761/.
+        [2] Anthropic. Claude code SDK documentation. https://docs.anthropic.com/en/docs/c
+            laude-code/sdk, 2025.
+        [3] Bradley Brown, Jordan Juravsky, Ryan Ehrlich, Ronald Clark, Quoc V. Le, Christopher Ré,
+            and Azalia Mirhoseini. Large language monkeys: Scaling inference compute with repeated
+            sampling, 2024. URL https://arxiv.org/abs/2407.21787.
+        [4] Center for AI Safety, Scale AI, and HLE Contributors Consortium. A benchmark of expert-level
+            academic questions to assess AI capabilities. Nature, 649:1139–1146, 2026. doi: 10.1038/s415
+            86-025-09962-4.
+        [5] Liang Chen, Weichu Xie, Yiyan Liang, et al. Babyvision: Visual reasoning beyond language,
+            2026. URL https://arxiv.org/abs/2601.06521.
+
+
+                                                                              9
+ [6] Xinyun Chen, Renat Aksitov, Uri Alon, Jie Ren, Kefan Xiao, Pengcheng Yin, Sushant Prakash,
+     Charles Sutton, Xuezhi Wang, and Denny Zhou. Universal self-consistency for large language
+     model generation. In ICML 2024 Workshop on In-Context Learning, 2024. URL https:
+     //arxiv.org/abs/2311.17311.
+ [7] Yongchao Chen, Jiefeng Chen, Rui Meng, Ji Yin, Na Li, Chuchu Fan, Chi Wang, Tomas Pfister,
+     and Jinsung Yoon. Tumix: Multi-agent test-time scaling with tool-use mixture, 2025. URL
+     https://arxiv.org/abs/2510.01279.
+ [8] Hyeong Kyu Choi and Banghua Zhu. Debate or vote: Which yields better decisions in multi-
+     agent large language models? In Advances in Neural Information Processing Systems, 2025.
+     URL https://arxiv.org/abs/2508.17536.
+ [9] Paula Cordero-Encinar and Andrew B Duncan. Certified self-consistency: Statistical guarantees
+     and test-time training for reliable reasoning in llms. arXiv preprint arXiv:2510.17472, 2025.
+[10] Mehul Damani, Idan Shenfeld, Andi Peng, Andreea Bobu, and Jacob Andreas. Learning how
+     hard to think: Input-adaptive allocation of LM computation. In International Conference on
+     Learning Representations, 2025. URL https://arxiv.org/abs/2410.04707.
+[11] C. Nicolò De Sabbata, Theodore R. Sumers, Badr AlKhamissi, Antoine Bosselut, and Thomas L.
+     Griffiths. Rational metareasoning for large language models. In Advances in Neural Information
+     Processing Systems, 2024. URL https://arxiv.org/abs/2410.05563.
+[12] DeepSeek-AI. DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning.
+     Nature, 645:633–638, 2025. doi: 10.1038/s41586-025-09422-z. URL https://www.nature
+     .com/articles/s41586-025-09422-z.
+[13] Dujian Ding, Ankur Mallick, Shaokun Zhang, Chi Wang, Daniel Madrigal, Mirian Del Car-
+     men Hipolito Garcia, Menglin Xia, Laks VS Lakshmanan, Qingyun Wu, and Victor Rühle.
+     Best-route: Adaptive llm routing with test-time optimal compute. In International Conference
+     on Machine Learning, pages 13870–13884. PMLR, 2025.
+[14] Wenxuan Ding, Nicholas Tomlin, and Greg Durrett. Calibrate-then-act: Cost-aware exploration
+     in LLM agents, 2026. URL https://arxiv.org/abs/2602.16699.
+[15] Meng-Hao Guo, Xuanyu Chu, Qianrui Yang, et al. Rbench-v: A primary assessment for visual
+     reasoning models with multi-modal outputs, 2025. URL https://arxiv.org/abs/2505.1
+     6770.
+[16] Nicholas Hay, Stuart Russell, David Tolpin, and Solomon Eyal Shimony. Selecting compu-
+     tations: Theory and applications. In Uncertainty in Artificial Intelligence, pages 346–355,
+     2012.
+[17] Audrey Huang, Adam Block, Qinghua Liu, Nan Jiang, Akshay Krishnamurthy, and Dylan J.
+     Foster. Is best-of-n the best of them? coverage, scaling, and optimality in inference-time
+     alignment. In International Conference on Machine Learning (ICML), 2025. URL https:
+     //arxiv.org/abs/2503.21878.
+[18] Jie Huang, Xinyun Chen, Swaroop Mishra, Huaixiu Steven Zheng, Adams Wei Yu, Xinying
+     Song, and Denny Zhou. Large language models cannot self-correct reasoning yet. In Interna-
+     tional Conference on Learning Representations, 2024. URL https://arxiv.org/abs/2310
+     .01798.
+[19] Jingkai Huang, Will Ma, and Zhengyuan Zhou. Optimal bayesian stopping for efficient inference
+     of consistent llm answers. arXiv preprint arXiv:2602.05395, 2026.
+[20] Idavidrein. Idavidrein/gpqa (hugging face dataset card). https://huggingface.co/datas
+     ets/Idavidrein/gpqa, 2026.
+[21] Yuichi Inoue, Kou Misaki, Yuki Imajuku, So Kuroki, Taishi Nakamura, and Takuya Akiba.
+     Wider or deeper? scaling LLM inference-time compute with adaptive branching tree search. In
+     Advances in Neural Information Processing Systems, 2025. URL https://arxiv.org/abs/
+     2503.04412.
+
+
+                                                10
+[22] Naman Jain, Kevin Han, Alex Gu, et al. Livecodebench: Holistic and contamination free
+     evaluation of large language models for code. In ICLR, 2025. URL https://arxiv.org/ab
+     s/2403.07974.
+[23] Bowen Jin, Hansi Zeng, Zhenrui Yue, Jinsung Yoon, Sercan O Arik, Dong Wang, Hamed
+     Zamani, and Jiawei Han. Search-r1: Training llms to reason and leverage search engines with
+     reinforcement learning. In Second Conference on Language Modeling, 2025.
+[24] Chen Jin, Ryutaro Tanno, Tom Diethe, and Philip Teare. CoRefine: Confidence-guided self-
+     refinement for adaptive test-time compute, 2026. URL https://arxiv.org/abs/2602.089
+     48.
+[25] Yusuf Kalayci, Vinod Raman, and Shaddin Dughmi. Optimal stopping vs best-of-n for inference
+     time optimization. arXiv preprint arXiv:2510.01394, 2025.
+[26] Yegon Kim, Seungyoo Lee, Chaeyun Jang, Hyungi Lee, and Juho Lee. Parallel test-time scaling
+     with multi-sequence verifiers, 2026. URL https://arxiv.org/abs/2603.03417.
+[27] Jaeyeon Lee, Guantong Qi, Matthew Brady Neeley, Zhandong Liu, and Hyun-Hwan Jeong.
+     ConSol: Sequential probability ratio testing to find consistent LLM reasoning paths efficiently,
+     2025. URL https://arxiv.org/abs/2503.17587.
+[28] Nicholas Lee, Lutfi Eren Erdogan, Chris Joseph John, Surya Krishnapillai, Michael W. Mahoney,
+     Kurt Keutzer, and Amir Gholami. Agentic test-time scaling for webagents, 2026. URL
+     https://arxiv.org/abs/2602.12276.
+[29] Xiaochuan Li, Ryan Ming, Pranav Setlur, Abhijay Paladugu, Andy Tang, Hao Kang, Shuai
+     Shao, Rong Jin, and Chenyan Xiong. Benchmark test-time scaling of general LLM agents,
+     2026. URL https://arxiv.org/abs/2602.18998.
+[30] Chris Yuhao Liu, Liang Zeng, Yuzhen Xiao, Jujie He, Jiacai Liu, Chaojie Wang, Rui Yan, Wei
+     Shen, Fuxiang Zhang, Jiacheng Xu, Yang Liu, and Yahui Zhou. Skywork-reward-v2: Scaling
+     preference data curation via human-ai synergy. In International Conference on Learning
+     Representations, 2026. URL https://arxiv.org/abs/2507.01352.
+[31] livecodebench. livecodebench/code_generation_lite (hugging face dataset card). https:
+     //huggingface.co/datasets/livecodebench/code_generation_lite, 2026.
+[32] LiveCodeBench Team. Livecodebench leaderboard. https://livecodebench.github.io/
+     leaderboard.html, 2026.
+[33] Da Ma, Ziyue Yang, Hongshen Xu, Haotian Fang, Kai Yu, and Lu Chen. Empowering LLM
+     tool invocation with tool-call reward model. In The Fourteenth International Conference on
+     Learning Representations, 2026. URL https://openreview.net/forum?id=LnBEASInVr.
+[34] Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe,
+     Uri Alon, Nouha Dziri, Shrimai Prabhumoye, Yiming Yang, Sean Welleck, Bodhisattwa Prasad
+     Majumder, Shashank Gupta, Amir Yazdanbakhsh, and Peter Clark. Self-refine: Iterative
+     refinement with self-feedback. In Advances in Neural Information Processing Systems, 2023.
+     URL https://proceedings.neurips.cc/paper_files/paper/2023/file/91edff0
+     7232fb1b55a505a9e9f6c0ff3-Paper-Conference.pdf.
+[35] Rohin Manvi, Anikait Singh, and Stefano Ermon. Adaptive inference-time compute: LLMs can
+     predict if they can do better, even mid-generation. In International Conference on Learning
+     Representations, 2025. URL https://arxiv.org/abs/2410.02725.
+[36] Niklas Muennighoff, Zitong Yang, Weijia Shi, Xiang Lisa Li, Li Fei-Fei, Hannaneh Hajishirzi,
+     Luke Zettlemoyer, Percy Liang, Emmanuel Candès, and Tatsunori Hashimoto. s1: Simple
+     test-time scaling. In Proceedings of the 2025 Conference on Empirical Methods in Natural
+     Language Processing, pages 20275–20321. Association for Computational Linguistics, 2025.
+     doi: 10.18653/v1/2025.emnlp-main.1025. URL https://aclanthology.org/2025.emnl
+     p-main.1025/.
+
+
+
+                                                 11
+[37] OpenGVLab. Visualprm-8b (hugging face model card). https://huggingface.co/OpenG
+     VLab/VisualPRM-8B, 2025.
+[38] Cheng Qian, Emre Can Acikgoz, Qi He, Hongru Wang, Xiusi Chen, Dilek Hakkani-Tur, Gokhan
+     Tur, and Heng Ji. ToolRL: Reward is all tool learning needs. In Advances in Neural Information
+     Processing Systems, 2025. URL https://arxiv.org/abs/2504.13958.
+[39] Cheng Qian, Zuxin Liu, Shirley Kokane, Akshara Prabhakar, Jielin Qiu, Haolin Chen, Zhi-
+     wei Liu, Heng Ji, Weiran Yao, Shelby Heinecke, et al. xrouter: Training cost-aware llms
+     orchestration system via reinforcement learning. arXiv preprint arXiv:2510.08439, 2025.
+[40] R-Bench Team. R-bench/r-bench-v (hugging face dataset card and leaderboard). https:
+     //huggingface.co/datasets/R-Bench/R-Bench-V, 2026.
+[41] David Rein, Betty Li Hou, Asa Cooper Stickland, et al. Gpqa: A graduate-level google-
+     proof q&a benchmark. In First Conference on Language Modeling (COLM), 2024. URL
+     https://arxiv.org/abs/2311.12022.
+[42] Stuart J. Russell and Eric Wefald. Do the Right Thing: Studies in Limited Rationality. MIT
+     Press, Cambridge, MA, 1991.
+[43] skylenage. skylenage/hle-verified (hugging face dataset card). https://huggingface.co/d
+     atasets/skylenage/HLE-Verified, 2026.
+[44] Skywork. Skywork-reward-v2-qwen3-8b (hugging face model card). https://huggingface.
+     co/Skywork/Skywork-Reward-V2-Qwen3-8B, 2025.
+[45] Charlie Snell, Jaehoon Lee, Kelvin Xu, and Aviral Kumar. Scaling LLM test-time compute
+     optimally can be more effective than scaling model parameters. In International Conference on
+     Learning Representations, 2025. URL https://arxiv.org/abs/2408.03314.
+[46] Yuan Sui, Yufei He, Tri Cao, Simeng Han, Yulin Chen, and Bryan Hooi. Meta-reasoner:
+     Dynamic guidance for optimized inference-time reasoning in large language models, 2025.
+     URL https://arxiv.org/abs/2502.19918.
+[47] UniPat-AI. Unipatai/babyvision (hugging face dataset card). https://huggingface.co/d
+     atasets/UnipatAI/BabyVision, 2026.
+[48] Siddarth Venkatraman, Vineet Jain, Sarthak Mittal, Vedant Shah, Johan Obando-Ceron, Yoshua
+     Bengio, Brian R. Bartoldson, Bhavya Kailkhura, Guillaume Lajoie, Glen Berseth, Nikolay
+     Malkin, and Moksh Jain. Recursive self-aggregation unlocks deep thinking in large language
+     models, 2025. URL https://arxiv.org/abs/2509.26626.
+[49] Guangya Wan, Zixin Stephen Xu, Sasa Zorc, Manel Baucells, Mengxuan Hu, Hao Wang, and
+     Sheng Li. BEACON: Bayesian optimal stopping for efficient LLM sampling. arXiv preprint
+     arXiv:2510.15945, 2025. URL https://arxiv.org/abs/2510.15945.
+[50] Peiyi Wang, Lei Li, Zhihong Shao, R. X. Xu, Damai Dai, Yifei Li, Deli Chen, Yiran Wu,
+     and Zhifang Sui. Math-shepherd: Verify and reinforce LLMs step-by-step without human
+     annotations. In Proceedings of the 62nd Annual Meeting of the Association for Computational
+     Linguistics (ACL), 2024. URL https://arxiv.org/abs/2312.08935.
+[51] Weiyun Wang, Zhangwei Gao, Lianjie Chen, Zhe Chen, Jinguo Zhu, Xiangyu Zhao, Yangzhou
+     Liu, Yue Cao, Shenglong Ye, Xizhou Zhu, Lewei Lu, Haodong Duan, Yu Qiao, Jifeng Dai, and
+     Wenhai Wang. Visualprm: An effective process reward model for multimodal reasoning, 2025.
+     URL https://arxiv.org/abs/2503.10291.
+[52] Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc Le, Ed Chi, Sharan Narang, Aakanksha
+     Chowdhery, and Denny Zhou. Self-consistency improves chain of thought reasoning in language
+     models. In International Conference on Learning Representations, 2023. URL https:
+     //arxiv.org/abs/2203.11171.
+
+
+
+
+                                                12
+[53] Duo Wu, Jinghe Wang, Yuan Meng, Yanning Zhang, Le Sun, and Zhi Wang. CATP-LLM:
+     Empowering large language models for cost-aware tool planning. In Proceedings of the
+     IEEE/CVF International Conference on Computer Vision (ICCV), pages 8699–8709, 2025.
+     URL https://arxiv.org/abs/2411.16313.
+[54] Yuxi Xie, Anirudh Goyal, Wenyue Zheng, Min-Yen Kan, Timothy P. Lillicrap, Kenji Kawaguchi,
+     and Michael Shieh. Monte carlo tree search boosts reasoning via iterative preference learning,
+     2024. URL https://arxiv.org/abs/2405.00451.
+[55] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu,
+     Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint
+     arXiv:2505.09388, 2025.
+[56] Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Thomas L. Griffiths, Yuan Cao, and Karthik
+     Narasimhan. Tree of thoughts: Deliberate problem solving with large language models. In
+     Advances in Neural Information Processing Systems, 2023. URL https://arxiv.org/abs/
+     2305.10601.
+[57] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan
+     Cao. ReAct: Synergizing reasoning and acting in language models. In International Conference
+     on Learning Representations, 2023. URL https://arxiv.org/abs/2210.03629.
+[58] Yuanqing Yu, Zhefan Wang, Weizhi Ma, Shuai Wang, Chuhan Wu, Zhiqiang Guo, and Min
+     Zhang. StepTool: Enhancing multi-step tool usage in LLMs via step-grained reinforcement
+     learning. In Proceedings of the 34th ACM International Conference on Information and
+     Knowledge Management, 2025. doi: 10.1145/3746252.3761391. URL https://dl.acm.org
+     /doi/10.1145/3746252.3761391.
+[59] Weiqi Zhai, Zhihai Wang, Jinghang Wang, et al. Hle-verified: A systematic verification and
+     structured revision of humanity’s last exam, 2026. URL https://arxiv.org/abs/2602.1
+     3964.
+[60] Haozhen Zhang, Tao Feng, and Jiaxuan You. Router-r1: Teaching LLMs multi-round routing
+     and aggregation via reinforcement learning. In Advances in Neural Information Processing
+     Systems, 2025. URL https://arxiv.org/abs/2506.09033.
+[61] Hanlin Zhou and Huah Yong Chan. ORCH: many analyses, one merge—a deterministic
+     multi-agent orchestrator for discrete-choice reasoning with EMA-guided routing. Frontiers
+     in Artificial Intelligence, 9, 2026. doi: 1 0 . 3 3 8 9 / f r a i . 2 0 2 6 . 1 7 4 8 7 3 5. URL h t t p s :
+     //www.frontiersin.org/journals/artificial-intelligence/articles/10.3389
+     /frai.2026.1748735/full.
+
+
+A    Extended Related Work
+This appendix preserves the full version of the related-work discussion summarized in Section 2.
+
+Test-Time Scaling. Inference-time compute for LLMs is commonly organized along three axes.
+Sequential scaling increases reasoning depth within a single trajectory, including self-correction
+[34], budget-controlled decoding [36], and long-thinking models that internalize extended chains of
+thought via reinforcement learning [12]. A critical negative result is that LLMs cannot self-correct
+reasoning through prompting alone [18], motivating architectures that separate evaluation from
+solution generation. Parallel scaling increases reasoning width by sampling multiple independent
+candidates and aggregating them. Self-consistency marginalizes over diverse reasoning paths [52];
+coverage scales log-linearly with the sample count [3]; and Universal Self-Consistency uses the LLM
+itself to select among candidates for free-form tasks [6]. Learned reward models and verifiers improve
+selection beyond majority voting [45, 30, 51], and Multi-Sequence Verifiers jointly process the entire
+candidate pool rather than scoring each independently [26]. Theoretical analysis shows that naive
+parallel scaling is not uniformly beneficial: overly aggressive sampling can degrade accuracy through
+reward hacking [17]. Hybrid search combines depth and width by expanding and pruning partial
+trajectories via tree search [56], Monte Carlo Tree Search with preference learning [54], step-level
+
+
+                                                      13
+process reward models [50], or interleaved aggregation and refinement [48]. ATLAS is neither a
+single-trajectory method nor a tree-search method: it delegates independent complete solves to a
+separate explorer and manages the resulting candidate pool sequentially, occupying a distinct point in
+this design space.
+
+Adaptive Compute Allocation. A growing body of work addresses when to stop sampling and
+how much compute to allocate per problem. Statistical stopping criteria include Beta/Dirichlet
+confidence thresholds [1], the Sequential Probability Ratio Test [27], anytime-valid concentration
+bounds [9], Bayesian optimal stopping with sequential posterior updates [49], and optimal answer
+tracking showing that monitoring the top-3 answers suffices for asymptotic optimality [19]. Kalayci
+et al. [25] frame each generation as opening a box in Weitzman’s Pandora’s Box problem, deriving
+reservation-price stopping rules. On the learned side, Damani et al. [10] train a difficulty predictor to
+adapt the number of best-of-k samples per query, and BEST-Route jointly selects which model and
+how many responses to sample [13]. These methods rely on either statistical criteria or learned scalar
+predictors. At the theoretical level, De Sabbata et al. [11] operationalize rational metareasoning for
+LLMs at the token level, training models with a VOC-derived reward that penalizes unnecessary
+reasoning steps within a single generation; they identify candidate-level agentic extension as an
+open direction. ATLAS uses an LLM orchestrator that reads full reasoning traces (accessing richer
+information than answer frequencies or scalar scores) within a sequential closed loop where each
+observation informs the next action.
+
+Agentic Orchestration. Recent work studies both agentic test-time scaling and learned meta-level
+controllers. On the scaling side, CATTS allocates compute via vote-derived uncertainty [28], TUMIX
+coordinates parallel heterogeneous agents [7], and General AgentBench benchmarks sequential and
+parallel scaling for open-ended agents [29]. On the meta-control side, Manvi et al. [35] show that
+LLMs can predict mid-generation whether restarting will help; CoRefine attaches a lightweight
+controller that decides to halt, re-examine, or try a different approach [24]; Meta-Reasoner employs
+a contextual bandit over high-level strategies such as backtrack, restart, or switch approach [46];
+AB-MCTS dynamically decides between expanding width and depth [21]; and ORCH orchestrates
+multiple LLM analyses followed by a single merge [61]. A parallel trend trains LLM orchestrators
+via reinforcement learning: Router-R1 uses GRPO for multi-round routing to external LLMs [60],
+xRouter learns cost-aware orchestration across multiple external models [39], and Search-R1 trains
+multi-turn search-interleaved reasoning [23]. On multi-agent interaction, symmetric debate has been
+shown to induce a martingale over belief trajectories, providing no expected accuracy improvement
+beyond majority voting [8]. ATLAS differs from these approaches in one key respect: it dispatches
+fresh independent solvers (not routing to different models or managing a single evolving trajectory),
+and only the orchestrator accumulates evidence. The result is an asymmetric, delegated architecture
+with a single action type (explore) whose value is assessed after each invocation.
+
+Cost-Aware Agent Training. A nascent line of work incorporates execution costs into agent
+objectives. CATP-LLM optimizes a performance-cost tradeoff for tool planning via cost-aware
+offline RL [53]. Calibrate-Then-Act formalizes the cost-uncertainty tradeoff for agent exploration,
+comparing the expected information value of an additional tool call against its cost [14]. On reward
+engineering for tool use, ToolRL systematically studies reward type, scale, and granularity for
+GRPO-based training [38]; StepTool assigns per-interaction rewards based on invocation success
+and task contribution [58]; and the Tool-call Reward Model enables step-level credit assignment in
+PPO/GRPO pipelines [33]. These works address planning, exploration, and reward design for general
+tool use. ATLAS targets a more specific problem: candidate-level test-time scaling, where the “tool”
+is an independent solver call and the meta-decision is a sequential explore-or-stop choice. To our
+knowledge, no prior work combines an LLM orchestrator that reads full candidate reasoning traces,
+sequential closed-loop stopping, and independently generated candidates within a unified framework
+for test-time compute allocation.
+
+B    Implementation Details
+Controller and backend setup. ATLAS is implemented as a delegated controller with two roles:
+an orchestrator and an explorer. The orchestrator never solves the task directly; it only decides
+whether to spend the remaining budget on another explore call or to stop and synthesize the final
+
+
+                                                   14
+answer from the accumulated evidence. Each explore call returns a structured candidate containing
+an answer, supporting reasoning, an approach summary, and an optional confidence score. When the
+orchestrator decides to stop, it produces the final answer directly via the SDK’s structured output
+mechanism. For the Claude implementation, we use the Claude Agent SDK [2] and expose explore
+as the only available delegated tool. We also evaluate a variant that adds a separate integrate tool
+that delegates final synthesis to a dedicated model call; see the ablation in Table 4(b). The same
+high-level controller is reused across benchmarks, while the underlying sub-model backend can be
+swapped without changing the controller logic.
+
+Variant configurations and sampling. The two configurations reported in the main results are
+concrete instantiations of the variants in §3.2. ATLAS (single-model) uses Claude Sonnet 4.6
+(claude-sonnet-4-6) for both the orchestrator and the explorer, with exploration budget T =8
+and direct orchestrator synthesis (no integrate). ATLAS-MM (multi-model) keeps Sonnet 4.6
+as the orchestrator and dispatches to a three-model pool {Haiku, Sonnet, Opus} at Medium explore
+effort, with budget T =20 split as Haiku 8, Sonnet 8, Opus 4. Across all variants and baselines,
+sampling parameters use the API defaults, and Claude orchestrator and explorer calls run with
+extended thinking enabled at the API’s default reasoning effort, except where stated otherwise; the
+extended-thinking budget is 32,000 tokens per call.
+
+Open-weights orchestrator backends. For the cross-family ablations (Table 5), we use two
+open-weights backbones served locally via vLLM:
+
+       • Qwen3.6-35B-A3B: Hugging Face checkpoint Qwen/Qwen3.6-35B-A3B-Instruct-FP8
+         (https://huggingface.co/Qwen/Qwen3.6- 35B- A3B- Instruct- FP8). A
+         Mixture-of-Experts model with 35B total / 3B active parameters, served as native FP8 with
+         tensor-parallel size 2. We use Qwen3.6’s recommended thinking-mode decoding: T =1.0,
+         top-p=0.95, top-k=20, presence-penalty 1.5, with thinking mode enabled.
+       • Gemma-4-26B-A4B: Hugging Face checkpoint google/gemma-4-26B-A4B-it (https:
+         //huggingface.co/google/gemma-4-26B-A4B-it). A Mixture-of-Experts model
+         with 26B total / 4B active parameters, served via vLLM. We decode with thinking mode
+         disabled; the orchestrator aggregates over candidates produced by a Sonnet 4.6 explorer.
+
+Prompt families. ATLAS uses two prompt families: a benchmark-agnostic orchestrator prompt
+and a benchmark-specific explorer prompt. The orchestrator prompt defines the controller role. The
+explorer prompt asks for an independent solution from scratch under the target answer format. The
+full templates – orchestrator variants, stopping-threshold instructions, and finalize instructions – are
+reproduced verbatim in Appendix H. For Claude runs, these prompts are paired with structured-output
+schemas so that each sub-call returns machine-readable fields rather than free-form text only.
+
+Schemas and benchmark-specific prompt instantiation. Benchmark-specific adaptation is inten-
+tionally lightweight. Most answer-based tasks share the explorer schema {approach, reasoning,
+answer, confidence} and the integrator schema {analysis, final_answer, reasoning}.
+Only the answer interface changes across tasks. LiveCodeBench uses code-generation fields, GPQA
+expects one option letter, and multimodal benchmarks pass the associated image with the text question.
+This design keeps the controller fixed while preserving each benchmark’s native answer format and
+grading protocol.
+
+Runtime behavior. At runtime, the controller maintains the candidate pool and repeatedly calls
+explore until the exploration budget is exhausted or the controller decides to stop and synthesize.
+The same implementation supports both text-only and image-conditioned tasks, and all runs can
+optionally record the controller trace and sub-model outputs for later inspection. These choices make
+the evaluation pipeline inspectable without changing the core decision process.
+
+Grading. LiveCodeBench uses deterministic grading via code execution. GPQA-Diamond uses
+exact option-letter matching, consistent with the official GPQA evaluation protocol [41]. HLE-
+Verified always uses an LLM judge (Claude Haiku 4.5) that compares the predicted answer against
+the reference answer. BabyVision uses hybrid grading: multiple-choice items are graded by string
+match on the extracted option letter, and fill-in-the-blank items use the same Haiku judge.
+
+
+                                                  15
+Cost accounting. All costs reported as $/q reflect API token charges only, computed from per-
+model pricing and recorded token usage. For ATLAS, this includes orchestrator tokens, explorer
+tokens, and (when applicable) integrator tokens. For reward-model reranking, the reported cost covers
+the N =8 candidate generation calls; the reward model itself runs locally and incurs no API cost but
+does require GPU compute not reflected in the dollar figure. Grading costs (LLM judge calls for HLE
+and BabyVision) are excluded from all rows. In all tables, bold marks the best accuracy per group
+and the lowest $/q among test-time scaling methods.
+
+Baseline implementations. All baselines use the same backbone model and the same benchmark-
+specific answer format as ATLAS, so the comparison isolates the inference-time strategy.
+Pass@1 generates a single independent response per question and returns its answer directly.
+Majority Voting draws N = 8 independent responses and selects the most frequent answer.
+Self-Refine [34] generates an initial draft, then enters a feedback-revision loop: a separate feedback
+call critiques the current draft and returns a correctness judgment; if the draft is judged incorrect,
+a revision call produces an updated draft conditioned on all prior drafts and feedbacks. The loop
+terminates when feedback returns a positive judgment or the iteration budget is exhausted. In practice,
+the feedback model frequently accepts the initial draft, so Self-Refine terminates after a single
+feedback call on the majority of questions.
+Self-Refine (no early stop) matches the default fixed-iteration setting of the original Self-Refine
+algorithm [34] (§3.3), which runs Feedback-Refine for a fixed number of rounds rather than relying
+on critic-decided early termination. This variant uses the identical control flow as our Self-Refine
+baseline, but changes the critic step in two ways. First, the critic prompt applies a skeptical review
+rubric: it asks the model to set the proposed reasoning aside, form a fresh intuition before re-engaging
+with the draft, and then answer five probing questions about the weakest step, hidden assumptions,
+and unused information in the question. Second, the critic is required to mark the current draft as
+not yet acceptable until the trajectory has produced at least two refined drafts beyond the initial
+generation, i.e. at least three total drafts. These constraints are prompt-level rather than hard-coded;
+Figure 9 reports the realized iteration-count distribution.
+Budget Forcing [36] runs N sequential rounds on the same question. Round 1 generates an initial
+solution. Each subsequent round feeds the previous round’s full reasoning trace back to the model with
+“Wait” appended, suppressing premature termination and forcing the model to continue deliberating
+before producing a new answer. All N rounds run unconditionally, and the final round’s answer is
+returned. Because continuation rounds extend the existing reasoning rather than solving from scratch,
+they tend to produce shorter completions and lower per-round cost.
+Reward-model reranking (Skywork-Reward-V2 for text benchmarks, VisualPRM for multimodal
+benchmarks) draws the same N = 8 independent candidates, then scores each with a separately
+trained reward model and returns the highest-scoring answer. Skywork-Reward-V2 is an outcome
+reward model that assigns a single scalar score per response; VisualPRM is a process reward model
+that aggregates per-step scores. The reward models run locally and incur no API cost, but the
+candidate generation cost is identical to that of Majority Voting.
+LLM Selection draws the same N = 8 independent candidates as Majority Voting and reward-model
+reranking, then feeds all eight candidates back to the backbone model in a single call and asks it to
+analyze, compare, and synthesize a final answer. Candidates are generated upfront rather than chosen
+sequentially by a controller, so any improvement over Pass@1 is attributable to single-shot synthesis
+rather than to closed-loop stopping decisions. This baseline therefore isolates the contribution of
+LLM-based aggregation from adaptive sequential exploration; results are reported in Table 7 alongside
+ATLAS-MM, since both consume a fixed eight-explore budget per question.
+
+C    Qualitative Analysis
+To understand how ATLAS improves over Pass@1, we examine the GPQA-Diamond questions
+where ATLAS produces a correct answer but the first exploration does not. Two mechanisms appear.
+Majority correction: the first explore gives the wrong answer, but subsequent explores converge on the
+correct option through independent analyses, and the orchestrator follows the consensus (Listing 1).
+
+
+
+                                                  16
+Minority extraction: the explore majority is incorrect, but the orchestrator identifies a reasoning flaw
+in the majority and selects the correct minority candidate (Listing 2).
+
+  Listing 1: Majority correction on a Diels-Alder/NMR question (GPQA-Diamond)
+  Question: A dicarboxylic acid containing a cis-alkene was dehydrated to
+  the corresponding anhydride [...] reacted with 1,2,3,4-tetramethyl-
+  cyclopentadiene [...] How many peaks are in the CHCH3 region?
+  Options: (A) 2 peaks (B) 3 peaks (C) 4 peaks (D) 8 peaks
+  Gold: A
+
+  Turn 1
+    Thought:     trajectory empty; need a first candidate
+    Action:      explore[]
+    Observation: c_1 = (answer=D, confidence=0.85,
+                       approach="Diels-Alder stereochemistry; 8 peaks")
+
+  Turn 2
+    Thought:     single candidate; insufficient evidence
+    Action:      explore[]
+    Observation: c_2 = (answer=A, confidence=0.88,
+                       approach="endo bicyclic product; symmetry collapses
+                                methyls to bridge (6H) + ring (6H), 2 peaks")
+
+  Turn 3
+    Thought:     candidates split 1-1; continue
+    Action:      explore[]
+    Observation: c_3 = (answer=A, confidence=0.88,
+                       approach="independent confirmation via endo selectivity")
+
+  [Turns 4-5 produce two more A candidates; tally A=4, D=1.]
+
+  Turn 6
+    Thought:         four independent candidates converge on A through consistent
+                     endo-selectivity reasoning; the dissenting D candidate assumed
+                    exo. Reasoning quality and vote count both favor A.
+    Action:         stop[answer=A, confidence=0.75]
+
+
+
+
+                                                  17
+  Listing 2: Minority extraction on a molecular-symmetry question (GPQA-Diamond)
+  Question: Which of the following molecules has C3h symmetry?
+  (A) Triisopropyl borate (B) Triphenylene trianhydride
+  (C) Benzene trianhydride (D) Quinuclidine
+  Gold: B
+
+  Turn 1
+    Thought:     trajectory empty
+    Action:      explore[]
+    Observation: c_1 = (answer=A, confidence=0.92,
+                       approach="BO3 plane gives sigma_h; C3h")
+
+  Turn 2
+    Thought:     single candidate; need independent confirmation
+    Action:      explore[]
+    Observation: c_2 = (answer=B, confidence=0.85,
+                       approach="isopropyl propeller breaks sigma_h;
+                                A is C3, not C3h")
+
+  Turn 3
+    Thought:     1-1 split with directly contradicting structural claims
+    Action:      explore[]
+    Observation: c_3 = (answer=A, confidence=0.88,
+                       approach="repeats sp2-planar argument for A")
+
+  Turn 4
+    Thought:     A leads 2-1 but the B candidate raised a specific topology
+                 issue not yet addressed; continue
+    Action:      explore[]
+    Observation: c_4 = (answer=B, confidence=0.82,
+                       approach="C has perpendicular C2 axes -> D3h;
+                                B's fused-ring inequivalence -> C3h")
+
+  [Turns 5-7 produce two more A candidates and one more B; tally A=4, B=3.]
+
+  Turn 8
+    Thought:       majority favors A but every A candidate uniformly assumes
+                   sigma_h; c_2 and c_4 explicitly identify the propeller-
+                    conformation flaw. Reasoning quality overrides vote count.
+    Action:        stop[answer=B, confidence=0.62]
+
+
+D    Benchmark Details
+This appendix details each benchmark’s official evaluation protocol and our adaptation for Table 3.
+The top-group rows in that table cite the top-5 zero-shot leaderboard reference per benchmark with
+backbones labeled beneath each cell; backbones differ across cells, so these rows are not directly
+comparable to the middle and bottom groups, which share a Claude Sonnet 4.6 backbone so that
+differences there isolate the inference-time strategy.
+
+HLE-Verified. We use the official HLE-Verified dataset release skylenage/HLE-Verified [43],
+which partitions the 2,500 audited HLE items into Gold (668), Revision (1,143), and Uncertain (689)
+subsets [59]. HLE-Verified preserves the original HLE answer-based evaluation semantics: each
+item contains a problem statement, a final answer, and sometimes a rationale, but official scoring
+is driven by the problem and final answer, with rationale used only as auxiliary evidence during
+verification and revision [4, 59]. In the HLE-Verified evaluation paper, the reported baselines are
+run on the text-only portion of HLE using the official HLE system prompt, each model’s default
+recommended decoding configuration, and five independent rollouts per item; the paper reports both
+avg5 Accuracy and Calibration Error, with calibration computed by the official HLE evaluation
+code [59]. In this paper, HLE reporting uses the first n=100 items of the 668-item Gold subset,
+while Table 3 reproduces the official revised-subset accuracy references from Zhai et al. [59] for
+
+
+                                                18
+context. Our grading uses an LLM-as-judge pipeline with Claude Haiku 4.5 as the judge model,
+which determines semantic equivalence between the predicted and gold answers.
+
+LiveCodeBench. We           use      the    LiveCodeBench          code       generation      release
+livecodebench/code_generation_lite [31], configuration v6 [22]. LiveCodeBench is
+a continuously updated programming benchmark sourced from LeetCode, AtCoder, and CodeForces.
+Each problem is tagged by release date, so official evaluations can be restricted to post-cutoff time
+windows [22]. In the official code generation setting, the model receives the natural-language
+problem statement together with example input-output pairs and must return a complete executable
+program. Correctness is determined purely by functional correctness on unseen tests, using
+the benchmark harness rather than an LLM judge [22]. The benchmark paper reports Pass@1
+as the primary metric and also reports difficulty-stratified Pass@1 using the platform-provided
+Easy/Medium/Hard labels. The public generation leaderboard [32] follows this same framing, and
+Table 3 reports overall Pass@1 from the same leaderboard view. In this paper, LCB reporting uses
+the first n=175 problems of the v6 release. Our grading uses the official lcb_runner execution
+harness with a 10-second per-test-case timeout.
+
+BabyVision. We use the BabyVision dataset release UnipatAI/BabyVision [47], which contains
+388 image-question pairs spanning four task families: Fine-grained Discrimination (163), Visual
+Tracking (83), Spatial Perception (91), and Visual Pattern Recognition (51) [5]. The benchmark
+contains 135 multiple-choice items and 253 fill-in-the-blank items; in the official inference setup,
+each model is queried with a unified prompt template of the form “{question} Think about the
+question and give your final answer in {format}.”, which standardizes answer format-
+ting for downstream extraction and judging [5]. Official scoring uses an LLM-as-judge pipeline:
+given a model answer and the gold answer, Qwen3-Max determines semantic equivalence under
+the benchmark’s fixed judge prompt, which the authors report as having perfect agreement with
+their human evaluators on the benchmark responses they audited [5]. The primary metric is Avg@3,
+defined in the paper as the mean Pass@1 accuracy across three random runs, and the official tables ad-
+ditionally report the corresponding standard deviation; Table 3 keeps only the overall mean accuracy
+in the main text. Our grading is hybrid: multiple-choice items (135 of 388) are graded by string match
+on the extracted option letter, while fill-in-the-blank items (253 of 388) use an LLM-as-judge pipeline
+with Claude Haiku 4.5, following the official semantic-equivalence protocol with the substituted
+judge model.
+
+GPQA-Diamond. We use the GPQA release Idavidrein/gpqa [20], configuration
+gpqa_diamond, which corresponds to the 198-question Diamond subset introduced in the GPQA
+paper [41]. GPQA is a graduate-level four-option multiple-choice science benchmark spanning
+biology, physics, and chemistry, and GPQA-Diamond is the highest-stringency subset retained after
+expert-accuracy and non-expert-difficulty filtering [41]. The official task is closed-book answer
+selection unless otherwise stated: the model is shown the question and four candidate options and
+must output exactly one final option. Scoring is exact option-key accuracy with no semantic judge and
+a random-guess baseline of 25% [41]. In addition to Diamond-set accuracy, the original GPQA paper
+also reports accuracies on the Extended and Main sets and distinguishes closed-book few-shot/CoT
+baselines from an open-book GPT-4-with-search baseline; Table 3 reports the Diamond-set accuracy
+column used by current public references. Our grading extracts the option letter (A–D) from the
+model response via regex and performs exact matching against the gold option key, with no LLM
+judge, consistent with the official protocol.
+
+RBench-V. We use the RBench-V dataset release at R-Bench Team [40]. The benchmark consists
+of 803 multi-modal reasoning problems spanning four task families: Math (176), Physics (157),
+Counting (195), and Games (275) [15]. Every item is image-conditioned, and the question pool mixes
+multiple-choice items with open-ended free-form answers. Because the benchmark includes both
+multiple-choice and open-ended questions, the official protocol grades all items through a unified
+LLM-as-judge framework with GPT-4o as the judge model, reporting Top-1 accuracy as the primary
+metric [15]. Our grading reuses an LLM-as-judge pipeline with Claude Haiku 4.5 in the judge
+role, preserving the open-ended semantic-equivalence semantics required by the official protocol.
+The official RBench-V protocol additionally scores intermediate image generations (e.g., auxiliary
+lines drawn onto the input figure); the orchestrators and explorers used in this paper do not natively
+emit raster images, so our explorers receive only the original problem (image plus text) without
+
+
+                                                  19
+ground-truth answers and reason about the visual content through textual descriptions delegated by
+the orchestrator.
+
+E   Results on RBench-V
+
+                 Table 8: Math accuracy on the RBench-V Math subset (n=176).
+                                                                Math (%)
+                                             Zero-shot models
+                                   OpenAI o3                        48.3
+                                   OpenAI o4-mini                   43.2
+                                   Gemini 2.5 Pro                   42.6
+                                   Doubao-1.5-thinking-pro-m        38.6
+                                   OpenAI o1                        34.7
+                                        Test-time scaling methods
+                                   Pass@1                           54.5
+                                   ATLAS                            61.4
+
+
+Table 8 reports ATLAS and Pass@1 on the RBench-V Math subset (n=176) under a Gemini 3 Flash
+Preview backbone. The zero-shot rows are cited from Table 3 of Guo et al. [15]; the bottom group
+reports Pass@1 and ATLAS under our own evaluation, with the Gemini 3 Flash Preview backbone
+serving as orchestrator and explorer end-to-end. ATLAS reaches 61.4%, ahead of Pass@1 by 6.9
+points; both rows exceed the highest cited zero-shot reference (OpenAI o3, 48.3%).
+
+F   Full Per-Split Results
+This appendix reports the per-split breakdowns summarized in Table 3 (§4). Table 9 reproduces the
+LiveCodeBench Easy/Medium/Hard split and the BabyVision Fine-grained / Tracking / Spatial /
+Pattern split for the four-benchmark subset.
+
+
+
+
+                                                   20
+Table 9: Per-split breakdown for the main four benchmarks (HLE-Verified, LiveCodeBench, GPQA-
+Diamond, BabyVision). Each subtable shows the zero-shot leaderboard references (upper group) and
+test-time scaling methods (lower group). Bold marks the best per group.
+               (a) HLE-Verified                                         (b) LiveCodeBench
+
+                                   Acc. (%)                                      Pass@1      Easy Med. Hard
+               Zero-Shot Models                                          Zero-Shot Models
+      Gemini 3 Pro                    48.93          O4-Mini (High)                80.2      99.1   89.4    63.5
+      GPT-5.2-High                    52.48          O3 (High)                     75.8      99.1   84.4    57.1
+      Claude Opus 4.5                 48.16          O4-Mini (Med.)                74.2      98.2   86.5    52.7
+      Grok 4.1 Fast Reasoning         43.07          Gemini-2.5-Pro                73.6      99.1   87.2    50.2
+      Claude Opus 4.6                 50.16          DeepSeek-R1                   73.1      98.7   85.2    50.7
+      DeepSeek-V3.2                   47.45
+      Qwen3-Max-Thinking              48.48                          Test-Time Scaling Methods
+                                                     Pass@1                        77.14 95.35 88.46 60.00
+           Test-Time Scaling Methods                 Self-Refine                   80.57 100.00 90.38 63.75
+      Pass@1                       48.00             Self-Refine (no early stop)   82.29 100.00 90.38 67.50
+      Self-Refine                  53.00             Budget Forcing                80.00 100.00 88.46 63.75
+      Self-Refine (no early stop)  58.00             Skywork-Reward-V2             78.86 100.00 90.38 60.00
+      Budget Forcing               51.00             ATLAS                         82.29 100.00 90.38 67.50
+      Skywork-Reward-V2            52.00             ATLAS-MM                      85.63 100.00 92.31 73.42
+      ATLAS                        56.00
+      ATLAS-MM                     60.00
+
+             (c) GPQA-Diamond                                             (d) BabyVision
+
+                                    Acc. (%)                              Overall Fine-gr. Tracking Spatial Pattern
+               Zero-Shot Models                Human                         94.1     92.3      94.6       94.7     97.8
+     Gemini 3.1 Pro Preview             94.1
+     GPT-5.4 (xhigh)                    92.0                             Zero-Shot Models
+     GPT-5.3 Codex (xhigh)              91.5   Gemini3-Pro-Preview           49.7    46.2       43.4       53.7     53.9
+     Gemini 3 Pro Preview (high)        90.8   GPT-5.2                       34.4    27.3       34.9       35.2     54.9
+     GPT-5.2 (xhigh)                    90.3   Doubao-1.8                    30.2    39.2       15.7       24.7     37.7
+                                               Qwen3-VL-Plus                 19.2    21.8       11.5       18.1     25.5
+           Test-Time Scaling Methods           Grok-4                        16.2    11.0       24.1       13.2     24.8
+     Pass@1                          83.33
+     Majority Voting                 83.33                            Test-Time Scaling Methods
+     Self-Refine                     82.83     Pass@1                        19.59 20.86        19.28   19.78      15.69
+     Self-Refine (no early stop)     85.35     Majority Voting               23.20 23.93        21.69   23.08      23.53
+     Budget Forcing                  83.84     Self-Refine                   21.39 20.25        22.89   20.88      23.53
+     Skywork-Reward-V2               83.84     Self-Refine (no early stop) 21.13 18.40          25.30   20.88      23.53
+     ATLAS                           85.86     Budget Forcing                21.91 20.86        28.92   21.98      13.73
+     ATLAS-MM                        88.38     VisualPRM                     20.86 20.86        21.69   21.98      17.65
+                                               ATLAS                         23.71 22.09        24.10   26.37      23.53
+                                               ATLAS-MM                      23.97 22.09        27.71   23.08      25.49
+
+
+
+
+G    Explore-Count Distributions
+This appendix reports the per-question explore-call distributions underlying the two main-text KDE
+summaries in Figures 4 and 6. Figures 8 and 9 below are matrices of discrete histograms: rows
+correspond to methods, columns to benchmarks. Each panel’s x-axis is the number of explore
+calls used for one question, and the y-axis is the number of questions at that count; bar heights are
+annotated with exact counts, and the boxed annotation reports the sample size n and per-question
+mean µ.
+
+
+
+
+                                                    21
+   G.1                     ATLAS-MM under varying explore effort
+
+                  60
+                                HLE-Verified                     LiveCodeBench                       GPQA-Diamond                          BabyVision
+                                               =2.86                             =2.47                               =2.26   150                        =3.42
+
+
+
+
+ATLAS-MM (Low)
+                                                       125                                 125
+                  40                                   100                                 100
+                                                                                                                             100
+                                                        75                                  75
+                  20                                    50                                  50                                50
+                                                        25                                  25
+                   0                                     0                                   0                                 0
+                                                       150                                                                   125
+                  60                           =3.70                             =3.32     150                       =3.14                              =4.56
+                                                       125
+                                                                                                                             100
+
+
+ATLAS-MM
+                  40                                   100                                 100                                75
+                                                        75
+                                                        50                                                                    50
+                  20                                                                        50
+                                                        25                                                                    25
+                   0                                     0                                   0                                 0
+                                                                                           125                                80
+                                               =6.72                             =5.45                               =2.65                              =8.08
+
+
+
+
+ATLAS-MM (High)
+                  40                                   125
+                                                                                           100                                60
+                  30                                   100
+                                                                                            75
+                                                        75                                                                    40
+                  20                                                                        50
+                                                        50
+                  10                                                                        25                                20
+                                                        25
+                   0                                     0                                   0                                 0
+                       0    2    4   6   8     10 12         0   2   4   6   8   10 12           0   2   4   6   8   10 12         0   2    4   6   8   10 12
+
+                                                                             Number of explore calls
+
+   Figure 8: Per-question explore-call distributions for ATLAS-MM at three explore-effort levels (rows:
+   Low / Medium / High) across four benchmarks (columns). Effort tier rises top-to-bottom. Same data
+   source as the main-text KDE summary in Figure 4.
+
+
+  (i) Low effort. All four benchmarks concentrate mass at n∈{2, 3} (HLE: 51 at n=2; LCB: 121
+  at n=2; GPQA: 142 at n=2; BV: 141 at n=2 plus 111 at n=3), establishing a baseline mode of
+  two-to-three explores per question.
+  (ii) Medium effort. The mode shifts up by one on HLE/LCB/GPQA (from n=2 to n=3, with 55–154
+  trajectories at the new mode), while BV develops a wider plateau between n=3 and n=4 (109 and
+  101 trajectories).
+  (iii) High effort. HLE, LCB, and BV all exhibit a marked rightward shift: HLE’s mode moves to n=5
+  (39 trajectories) with appreciable mass through n=10; LCB’s mode moves to n=5 (123 trajectories)
+  with a small tail; BV flattens dramatically between n=5 and n=12 (≥ 19 trajectories in every bin).
+  (iv) GPQA-Diamond. The High-effort distribution returns mass to n=2 (112 trajectories, ≈ 56.6%,
+  up from 12 trajectories at Medium), with secondary mass at n=3 (59 trajectories). The mean drops
+  from µ=3.19 at Medium to µ=2.75 at High. This distributional contraction is the direct cause of the
+  Medium→High cost trajectory (+10.5%, versus 1.5–1.8× on the free-form benchmarks) reported in
+  Figure 3 and discussed in §4.
+
+
+
+
+                                                                                      22
+      G.2                              ATLAS vs. Self-Refine baselines
+
+                                            HLE-Verified           100
+                                                                             LiveCodeBench                       GPQA-Diamond                          BabyVision
+                                                           =2.39                             =1.85                               =2.13   200                        =2.79
+                              60                                    80                                 150
+                                                                    60                                                                   150
+ATLAS
+                              40                                                                       100
+                                                                    40                                                                   100
+                              20                                                                        50                                50
+                                                                    20
+                               0                                     0                                   0                                 0
+                                                                   200
+                              80                           =1.68                             =1.05                               =1.13   200                        =2.61
+                                                                   150                                 150
+
+
+Self-Refine
+                              60                                                                                                         150
+                                                                   100                                 100                               100
+                              40
+                              20                                    50                                  50                                50
+                               0                                     0                                   0                                 0
+
+
+
+
+Self-Refine (no early stop)
+                    100                                    =3.26                             =2.87                               =3.07   300                        =3.62
+                     80                                            150                                 150
+                     60                                                                                                                  200
+                                                                   100                                 100
+                     40
+                                                                    50                                  50                               100
+                     20
+                      0                                              0                                   0                                 0
+                                   0    2    4   6   8     10 12         0   2   4   6   8   10 12           0   2   4   6   8   10 12         0   2    4   6   8   10 12
+
+                                                                                         Number of explore calls
+
+      Figure 9: Per-question explore-call distributions for ATLAS (orange), Self-Refine (light green), and
+      Self-Refine (no early stop) (dark green), all on the shared Sonnet 4.6 backbone (rows) across four
+      benchmarks (columns). All three rows share the same exploration budget T =8, so differences in the
+      observed distributions reflect each method’s stopping mechanism. Same data source as the main-text
+      KDE summary in Figure 6. Budget Forcing terminates at the cap by construction, giving a degenerate
+      distribution at T =8.
+
+
+     All four benchmarks share the same exploration budget T =8 and the same orchestrator prompt for the
+     ATLAS row, so differences in the observed distributions reflect the orchestrator’s input-conditioned
+     stopping decisions rather than externally imposed budgets. We highlight five observations from the
+     ATLAS row of this figure, then return to the contrast with Self-Refine.
+
+      Observation 1: Mean explore count tracks benchmark difficulty. The per-benchmark mean
+      explore count for ATLAS ranges from 1.85 on LiveCodeBench to 2.79 on BabyVision, with
+      GPQA-Diamond at 2.14 and HLE-Verified at 2.39. Harder benchmarks (those on which test-time
+      scaling methods reach lower absolute accuracy in Table 3) receive more exploration per question on
+      average. Given that all four benchmarks share the same budget and the same orchestrator prompt,
+      this is a direct numerical expression of the adaptive compute allocation claim: the controller spends
+      more calls where first-pass evidence is less conclusive.
+
+     Observation 2: The modal behavior is “explore twice,” not “explore once.” Three of the four
+     benchmarks (HLE-Verified, GPQA-Diamond, BabyVision) place their ATLAS distribution mode at
+     n=2 explore calls, and the share of questions stopping at n=1 is below 15% on each of these three
+     benchmarks. LiveCodeBench is the only exception, with a bimodal distribution in which the first
+     mode at n=1 (72 trajectories) is comparable in size to the second mode at n=2 (84). The default
+     orchestrator behavior is therefore “explore twice before synthesizing,” not “explore once and submit.”
+     The contrast with Self-Refine is sharp: under Self-Refine (Figure 9, middle row) the mode is n=1
+     on three of four benchmarks (mean 1.05–1.68 on HLE/LCB/GPQA) because the critic accepts the
+     initial draft on the first revision check for the vast majority of questions. ATLAS’s mass is centered
+     between Self-Refine’s one-shot acceptance and a hypothetical fixed-budget schedule, reflecting that
+     the orchestrator’s stop decisions are conditioned on accumulated evidence rather than on a single
+     one-shot critic check.
+
+
+
+
+                                                                                                  23
+Observation 3: The budget cap T =8 is almost never reached. Across the 861 questions in the
+four benchmarks combined, exactly one question consumes the full exploration budget of T =8 (on
+LiveCodeBench). Questions using n ≥ 6 explore calls remain rare on every benchmark: 6 on
+LiveCodeBench, 6 on GPQA-Diamond, 2 on HLE-Verified, and 19 on BabyVision. The orchestrator
+terminates exploration well before the cap on virtually every question, supporting the interpretation
+that T functions as a safety ceiling rather than a target.
+
+Observation 4: LiveCodeBench bimodality reflects per-problem difficulty recognition. Live-
+CodeBench is the only benchmark with a substantial mass at n=1 (41% of questions). These
+single-explore questions likely correspond to problems for which the first candidate is obviously
+sufficient: LiveCodeBench’s Easy tier already reaches 100% Pass@1 (Appendix F), and a fraction of
+Medium problems are similarly unambiguous once a first candidate is produced. The orchestrator’s
+ability to terminate immediately on such problems, rather than always continuing to the modal n=2
+seen on the other three benchmarks, is direct evidence that the controller performs per-problem
+difficulty recognition rather than following a fixed exploration schedule.
+
+Observation 5: BabyVision is the inverse-pattern case. BabyVision is the only benchmark on
+which the highest mean explore count (2.79) co-occurs with the lowest accuracy among the four
+(23.71% in Table 3). The orchestrator explores most aggressively on BabyVision (roughly half of
+all questions receive three or more explore calls). This inverse pattern indicates that BabyVision
+approaches the capability ceiling of the explorer pool: more exploration uncovers more candidate
+disagreement but does not yield a correct answer that the orchestrator can extract.
+
+H     Prompt Families
+The orchestrator’s system prompt is composed at runtime from three orthogonal slots: a variant tem-
+plate that fixes the explore action space, a stopping-threshold instruction, and a finalize instruction.
+Two of these slots reflect framework design choices that are realised purely at the prompt level rather
+than as runtime knobs. First, the three explore action variants (§3.2) each carry a distinct template
+instead of sharing one template with a switch. Second, the explore-effort hyperparameter is itself a
+short stopping-threshold instruction injected into the prompt. We document the contents of each slot
+below; the few-shot example blocks that appear inside the templates are omitted, since their role is
+operational.
+
+H.1   Stopping-threshold instructions
+
+Explore-effort selects one of three short instructions. Each is injected verbatim into the system prompt
+and changes the orchestrator’s default convergence criterion without touching any other component.
+
+  Listing 3: Low effort
+  Your stopping threshold leans loose. When two independent candidates agree on
+  the same answer, that's typically enough for you to feel ready to submit --
+  chasing extra confirmation rarely repays the cost of another call. Clean
+  convergence ends the round.
+
+  Listing 4: Medium effort
+  Your stopping threshold is moderate. Two converging candidates earns the answer
+  your trust, but on anything non-trivial you usually prefer one more
+  cross-method explore before committing. A lone confident candidate seldom
+  satisfies you, since self-reported confidence is unreliable.
+
+  Listing 5: High effort
+  Your stopping threshold leans strict. On a hard problem, two agreeing
+  candidates feel encouraging but not yet conclusive -- you typically prefer
+  three independent methods agreeing, or an explicit cross-check (different
+  model). When you're torn between submitting and exploring once more, you
+  usually choose the explore.
+
+
+
+                                                  24
+H.2   Variant templates for the explore action space
+
+The three explore action variants (base ATLAS, ATLAS-MM, and ATLAS-MI) each ship with
+a dedicated system-prompt template. We paste the three templates verbatim below, omitting only
+the worked-example sections at the bottom of each template (these contain few-shot dialogues used
+to teach the LLM the expected reasoning pattern). The placeholders {stop_instruction} and
+{finalize_instruction} are filled at runtime from the listings in the previous and next subsection
+respectively.
+
+  Listing 6: Base ATLAS
+  You are a meta-reasoning orchestrator. You manage a pool of candidate solutions
+  for a problem.
+
+  After each explore, you will see the candidate result (answer, confidence,
+  approach, reasoning).
+
+  {finalize_instruction}
+
+  {stop_instruction}
+
+  ## Principles (HIGHEST PRIORITY -- override any urge to solve the problem
+  yourself)
+
+  1. You cannot solve problems yourself. Your only window into the problem is
+  what solvers return. Reasoning about the problem content -- analyzing
+  algorithms, deriving formulas, writing code -- constitutes solving, even when
+  framed as "analysis" or "synthesis". Any answer without candidate evidence is
+  baseless and undermines the system.
+  2. A single candidate, regardless of its self-reported confidence, does not
+  constitute sufficient evidence. Self-reported confidence is poorly calibrated.
+  3. Genuine convergence means independent solvers arriving at the same answer
+  through different methods. Candidates that agree but share the same reasoning
+  path may reflect a shared misconception rather than true convergence.
+  4. Solver failure (timeout, empty answer) reflects the problem's difficulty.
+  Repeated failures reinforce this -- more attempts will not help. If solvers
+  timed out, you will almost certainly fail too. When solvers consistently fail,
+  the problem is practically unsolvable -- submitting an empty answer is better
+  than attempting it yourself, because you would also fail and waste budget in
+  the process.
+  5. CRITICAL: Each explore costs budget. Giving up is a valid and preferred
+  action -- when candidates provide no useful information, you MUST submit an
+  empty answer immediately rather than wasting budget or attempting to solve.
+
+  Every decision you make must be grounded in one of the principles above.
+  Explicitly cite which principle justifies your action.
+
+
+
+
+                                               25
+Listing 7: ATLAS-MM
+You are a meta-reasoning orchestrator. You manage a pool of candidate solutions
+for a problem.
+
+You have access to multiple solver models of different capability and cost.
+Each explore call lets you choose which model to use.
+
+After each explore, you will see the candidate result (answer, confidence,
+approach, reasoning), which model produced it, and how much it cost.
+
+{finalize_instruction}
+
+{stop_instruction}
+
+## Model Profiles
+
+Pricing (per million tokens): Haiku $1 input / $5 output, Sonnet $3 input / $15
+output, Opus $5 input / $25 output.
+Haiku is 3-5x cheaper than Sonnet per call. Sonnet is ~2x cheaper than Opus per
+call.
+
+Public benchmark scores (from official Anthropic announcements):
+
+| Benchmark | Category | Haiku | Sonnet | Opus |
+|---|---|---|---|---|
+| MATH-500 | Math (standard) | -- | 97.8% | 97.6% |
+| AIME 2025 | Math (competition) | 80.7% | 83.0% | 99.8% |
+| AIME 2026 | Math (competition) | -- | -- | 96.7% |
+| GPQA-Diamond | Graduate science | 73.0% | 89.9% | 91.3% |
+| HLE | Hard reasoning | -- | 33.2% | 40.0% |
+| ARC-AGI-2 | Novel problem-solving | -- | 58.3% | 68.8% |
+| MMMLU | General knowledge | 83.0% | 89.3% | 91.1% |
+| SWE-bench Verified | Coding | 73.3% | 79.6% | 80.8% |
+| Terminal-Bench 2.0 | Coding (agentic) | 41.0% | 59.1% | 65.4% |
+| OSWorld-Verified | Computer use | 50.7% | 72.5% | 72.7% |
+| BrowseComp | Web search | -- | 74.7% | 84.0% |
+
+Use this table together with the pricing to decide which model to dispatch for
+each explore call.
+
+
+
+
+                                       26
+Listing 8: ATLAS-MM (continued)
+## Principles (HIGHEST PRIORITY -- override any urge to solve the problem
+yourself)
+
+1. You cannot solve problems yourself. Your only window into the problem is
+what solvers return. Reasoning about the problem content -- analyzing
+algorithms, deriving formulas, writing code -- constitutes solving, even when
+framed as "analysis" or "synthesis". Any answer without candidate evidence is
+baseless and undermines the system.
+2. A single candidate, regardless of its self-reported confidence, does not
+constitute sufficient evidence. Self-reported confidence is poorly calibrated.
+3. Genuine convergence means independent solvers arriving at the same answer
+through different methods. Candidates from different models that agree provide
+stronger evidence than candidates from the same model.
+4. A weaker model failing does not mean a stronger model will also fail. Start
+with cheaper models first; escalate when they fail or disagree. Only when the
+strongest model fails repeatedly is the problem beyond reach.
+5. CRITICAL: Each explore costs real money. Giving up is a valid and preferred
+action -- when candidates provide no useful information, you MUST submit an
+empty answer immediately rather than wasting budget or attempting to solve.
+
+Before each explore call, explicitly reason about: (a) which model to use and
+why, citing cost data; (b) what you expect to learn from this call.
+
+Every decision you make must be grounded in one of the principles above.
+Explicitly cite which principle justifies your action.
+
+
+
+
+                                       27
+  Listing 9: ATLAS-MI
+  You are a meta-reasoning orchestrator. You manage a pool of candidate solutions
+  for a problem.
+
+  Each explore call dispatches a fresh, independent solver. You may optionally
+  pass `additional_prompt` (a short string) to steer the solver toward a specific
+  direction -- a different solving method, a particular sub-step to focus on, or
+  a stricter sanity check.
+
+  After each explore, you will see the candidate result (answer, confidence,
+  approach, reasoning).
+
+  {finalize_instruction}
+
+  {stop_instruction}
+
+  ## When to use additional_prompt
+
+  Default: omit it. The first explore call should never use additional_prompt --
+  you have no candidates yet, so no specific direction is justified.
+
+  Use additional_prompt only when prior candidates give you concrete information
+  that justifies a directional ask:
+  - Prior candidates all converged on the same answer via the same method. Ask
+  the next solver to try a fundamentally different method to verify -- approach
+  diversity is stronger evidence than method-redundant agreement (principle 3).
+  - Prior candidates disagree on a specific sub-step. Ask the next solver to
+  focus on that sub-step.
+  - A candidate has high confidence but its reasoning has an obvious weak link.
+  Ask the next solver to scrutinize that link.
+  - Prior candidates are all shallow or hand-wavy. Ask the next solver to be more
+  rigorous on a named part.
+
+  When you do use additional_prompt, write it short and concrete. "Try a
+  different method" is fine; "focus on whether step 5's case analysis is
+  exhaustive" is better.
+
+  ## Principles (HIGHEST PRIORITY -- override any urge to solve the problem
+  yourself)
+
+  1. You cannot solve problems yourself. Your only window into the problem is
+  what solvers return. Reasoning about the problem content -- analyzing
+  algorithms, deriving formulas, writing code -- constitutes solving, even when
+  framed as "analysis" or "synthesis". Any answer without candidate evidence is
+  baseless.
+  2. A single candidate, regardless of self-reported confidence, does not
+  constitute sufficient evidence. Self-reported confidence is poorly calibrated.
+  3. Genuine convergence means independent solvers arriving at the same answer
+  through DIFFERENT methods. Same-method agreement may reflect a shared
+  misconception. additional_prompt is your tool for forcing method diversity when
+  the explore pool has drifted into method-redundancy.
+  4. Solver failure (timeout, empty answer) reflects the problem's difficulty.
+  Repeated failures reinforce this -- more attempts will not help.
+  5. CRITICAL: Each explore costs budget. Giving up is valid -- when candidates
+  provide no useful information, submit an empty answer immediately rather than
+  wasting budget or attempting to solve.
+
+  Every decision must cite which principle justifies the action.
+
+
+H.3   Finalize instructions
+
+The third slot decides whether the final answer is produced by the orchestrator itself or delegated to a
+separate synthesizer.
+
+
+                                                  28
+Listing 10: Without integrator (default)
+Your final answer must be derived from candidate outputs. You may combine
+insights from multiple candidates, but you cannot introduce information that no
+candidate provided. If no candidate produced useful information, you should
+give up and submit an empty answer to save cost.
+
+Listing 11: With integrator
+When you are ready, call `integrate` to dispatch a synthesizer that produces
+the final answer from all candidates.
+
+
+
+
+                                           29
+

@@ -1,0 +1,446 @@
+                                                 Embodied CAD: Solver-Grounded LLM Agents for Parametric
+                                                               B-Rep Assembly Modeling
+                                                                          Fumin Liu* Haoyu Zhou† Fei Hao                 Lin Yang‡
+                                                                                      Nanjing University
+                                                                  602025710018@smail.nju.edu.cn; haoyu.max@gmail.com
+                                                                  6020250201012@smail.nju.edu.cn; linyang@nju.edu.cn
+
+
+
+
+arXiv:2606.31252v1 [cs.AI] 30 Jun 2026
+                                                                                                  Abstract
+                                                       Large language models can write plausible CAD scripts, but reliable industrial CAD modeling re-
+                                                   quires more than syntactically valid code: every feature, placement, and assembly relation must be ac-
+                                                   cepted by an exact geometric kernel while remaining editable as parametric boundary representation
+                                                   geometry. We present Embodied CAD, a closed-loop framework that grounds an LLM agent in a CAD
+                                                   execution environment. Instead of generating a complete script in one pass, the agent iteratively selects
+                                                   actions from a stratified L0–L4 CAD skill library, resolves them into typed geometric operations, exe-
+                                                   cutes them in a CAD backend, and uses solver feedback to plan, repair, and learn. The framework com-
+                                                   bines operation-family prediction, deterministic parameter resolution, and solver-derived rewards for su-
+                                                   pervised warm-up and GRPO-style refinement. We evaluate Embodied CADon multi-step mechanical,
+                                                   industrial-equipment, and mold-oriented assembly tasks using solver-aligned metrics: executable rate,
+                                                   skill accuracy, operation-family accuracy, exact policy accuracy, task completion, and FreeCAD execu-
+                                                   tion success. The results show that solver-grounded planning executes all strong-planner workflows in
+                                                   the current benchmark, while learned controllers reach high executable rates and expose the remaining
+                                                   gap between valid tool calls and exact long-horizon policy prediction.
+
+
+                                         1        Introduction
+                                         Large language models (LLMs) have made rapid progress in program synthesis, tool use, and interactive
+                                         software automation [Ouyang et al., 2022, Yao et al., 2023, Schick et al., 2023, Madaan et al., 2023, Shinn
+                                         et al., 2023]. Computer-aided design (CAD), however, remains a difficult target for autonomous generation.
+                                         A useful engineering CAD artifact is not just a visually plausible mesh. It must be represented as editable
+                                         parametric B-Rep geometry, respect dimensional and topological constraints, preserve feature dependencies,
+                                         and compose multiple parts through precise assembly relations.
+                                              This gap is especially visible in long assembly workflows. An LLM may emit syntactically valid Cad-
+                                         Query or FreeCAD code while placing a cutter in the wrong coordinate frame, selecting a stale local face,
+                                         duplicating repeated holes with an incorrect offset, or stacking components at the origin. These errors are
+                                         often invisible at the token level but fatal at the CAD-kernel level. Existing sequence, sketch, and text-to-
+                                         CAD systems have shown strong progress on part-level modeling and command generation [Wu et al., 2021,
+                                         Xu et al., 2022, Khan et al., 2024, Doris et al., 2025, Guan et al., 2025], yet industrial assemblies require a
+                                         different form of grounding: the model must repeatedly act in, inspect, and recover from an exact geometric
+                                         environment.
+                                             * Equal contribution.
+                                             †
+                                                 Equal contribution.
+                                             ‡
+                                                 Corresponding author.
+
+
+                                                                                                      1
+Figure 1: Overview of Embodied CAD. The LLM planner predicts skill-level actions or operation families.
+A deterministic resolver instantiates typed arguments, the skill executor calls the CAD backend, and the
+solver returns execution diagnostics. The same feedback supports online repair and training rewards.
+
+
+    Embodied CAD addresses this problem by treating CAD generation as closed-loop embodied tool use.
+The agent receives a natural-language specification and a structured parameter set, chooses the next CAD
+skill, executes it through a deterministic backend, observes solver feedback, and continues until the assembly
+is complete. The framework follows the loop
+      Intent → Skill Planning → CAD Execution → Solver Feedback → Reflection / Policy Update.
+The key design choice is to constrain the model to semantically meaningful CAD skills while leaving fragile
+geometric bookkeeping to deterministic resolvers and the CAD solver.
+     The paper makes four contributions. First, we formulate autonomous parametric assembly modeling
+as a solver-grounded skill-trajectory problem rather than open-loop script generation. Second, we design an
+L0–L4 CAD skill hierarchy that spans workspace operations, primitive construction, feature machining, spa-
+tial assembly, and domain-level macros. Third, we introduce operation-family resolution and solver-derived
+feedback as a bridge between LLM planning and exact B-Rep execution. Fourth, we evaluate the frame-
+work on multi-category industrial assembly tasks with solver-aligned metrics and report both quantitative
+controller performance and qualitative construction traces.
+
+
+2    Related Work
+Parametric CAD generation. Large CAD datasets and sequence models have made parametric CAD gen-
+eration a practical learning problem. ABC provides a large B-Rep-oriented corpus for geometric learning
+[Koch et al., 2019]; the Fusion 360 Gallery dataset exposes human design histories for programmatic CAD
+construction [Willis et al., 2021]. DeepCAD models CAD commands as a sequence generation problem
+[Wu et al., 2021], SkexGen improves sequence generation with disentangled codebooks [Xu et al., 2022],
+and Text2CAD maps natural language to CAD command sequences [Khan et al., 2024]. Recent CAD-code
+systems further explore vision- and text-conditioned code generation [Doris et al., 2025, Guan et al., 2025].
+In contrast, Embodied CAD does not ask the model to emit an entire CAD program in one pass. It constrains
+generation to solver-checked skill trajectories whose intermediate states can be inspected and repaired.
+    B-Rep learning and executable structure. Engineering CAD models contain topology, analytic sur-
+faces, curves, feature history, and constraints that are not captured by visual surface similarity alone. BRep-
+
+                                                      2
+Figure 2: Step-wise PhyClaw construction snapshots for three representative strong-planner workflows: a
+press machine, a mold-core insert, and a cooling-tower workflow whose early checkpoints emphasize the
+lower module before the final 175-step assembly. Each row uses the same number of solver-checked stages
+to show base geometry, repeated feature construction, and the final editable state.
+
+
+Net performs topological message passing over solid models [Lambourne et al., 2021]; UV-Net learns
+from parametric curve and surface domains [Jayaraman et al., 2021]; SolidGen and BRepGen target di-
+rect boundary-representation synthesis [Jayaraman et al., 2022, Xu et al., 2024]. Programmatic approaches
+such as CSGNet and ShapeAssembly show the value of explicit executable structure [Sharma et al., 2018,
+Jones et al., 2020]. Embodied CAD shares this preference for executable structure but focuses on long,
+editable assembly workflows in which each intermediate CAD state is validated by a solver.
+    Assembly generation and tool-using agents. Assembly modeling adds repeated parts, joint relations,
+and spatial constraints beyond single-part generation. JoinABLe studies bottom-up assembly of parametric
+CAD joints [Willis et al., 2022]. Tool-augmented CAD systems, including CAD-Assistant, ArtiCAD, and
+TOOLCAD, connect foundation models to CAD tools or tool-use training pipelines [Mallis et al., 2025,
+Shui et al., 2026, Gong et al., 2026]. Our work is closest to these tool-augmented systems, but emphasizes
+typed skill calls, operation-family resolution, and solver-aligned evaluation rather than visual-only judging.
+
+
+3    Problem Formulation
+Given an industrial modeling request x and a parameter set p, the goal is to produce an executable trajectory
+
+                                  τ = (a1 , . . . , aT ),       at = (ℓt , ft , θt ),                      (1)
+
+where ℓt is the skill level, ft is a skill or operation family, and θt contains typed arguments. A CAD kernel
+K deterministically updates the state:
+                                                 st = K(st−1 , at ).                                      (2)
+
+                                                            3
+Algorithm 1 Closed-loop CAD skill execution
+ 1: Initialize CAD state s0 from intent x and parameters p.
+ 2: for t = 1, . . . , T do
+ 3:    Planner proposes skill or operation family ft .
+ 4:    Resolver derives typed arguments θt from st−1 .
+ 5:    Execute at = (ℓt , ft , θt ) with CAD kernel K.
+ 6:    Collect solver feedback ot from the resulting state st .
+ 7:    if execution fails then
+ 8:       revise ft or θt using ot and retry within budget.
+ 9:    end if
+10: end for
+11: Return the final parametric B-Rep assembly and trajectory log.
+
+
+
+A trajectory is solver-feasible if every action executes without kernel error and the final state satisfies task-
+specific checks such as valid solids, expected components, bounding boxes, feature counts, and assembly
+completion. The central challenge is that θt often depends on the current geometric state: a hole center,
+chamfer target, mirrored instance, or repeated fastener index must be selected consistently with previous
+operations.
+    Embodied CAD separates this problem into planning, resolution, and execution. The LLM predicts
+high-level skills or operation families; deterministic modules derive geometry-dependent arguments; the
+CAD backend executes each skill; and the feedback is returned to the planner and to the learning objective.
+This separation reduces hallucinated coordinates and makes failure modes observable.
+
+
+4     Method
+4.1   Closed-Loop Architecture
+Figure 1 summarizes the architecture. The planner observes the user intent, parameters, construction his-
+tory, and solver feedback. It selects the next skill or operation family. The resolver maps reusable operation
+families, such as build_pin_body or cut_hole_grid, to concrete instance identifiers and typed pa-
+rameters. The executor dispatches the resolved call to the CAD backend. The solver returns structured feed-
+back, including success or failure, object names, validity checks, volumes, bounding boxes, and topology
+summaries when available.
+
+4.2   Skill Stratification
+A raw CAD scripting space is too large for reliable long-horizon LLM planning. We therefore organize
+actions into five levels (Table 1). The hierarchy keeps the model’s choices close to engineering operations
+while preserving enough expressivity to build multi-part assemblies.
+
+4.3   Operation Families and Deterministic Resolution
+Industrial assemblies contain repeated structures: balls in bearings, pins in manifolds, screws in mold plates,
+guide posts in press machines, and ribs on shafts. Directly predicting instance-specific operation keys en-
+tangles semantic intent with fragile indexing. We instead ask the model to predict operation families. The
+controller resolves a family into the next valid instance using construction state, counters, symmetry rules,
+
+
+
+                                                       4
+ Level       Role                     Representative skills
+ L0          Workspace and inspec-    Reset workspace, import references, parse parameters, query handbook en-
+             tion                     tries, render checkpoints, inspect solids and bounding boxes.
+ L1          Primitive construction   Boxes, cylinders, oriented cylinders, spheres, truncated cones, plates, spline
+                                      extrusions, profile-based solids, and reusable cutters.
+ L2          Machining features       Boolean cuts, hole grids, ring cutters, spline cutters, chamfers, fillets, wash-
+                                      ers, nuts, counterbores, and repeated feature arrays.
+ L3          Spatial assembly         Move, align, mirror, pattern, mate, group, finalize assembly, and export ed-
+                                      itable CAD states.
+ L4          Domain macros            Higher-level modules such as bearings, springs, gears, press plates, cooling-
+                                      tower modules, mold plates, and mold-core inserts.
+
+Table 1: L0–L4 skill hierarchy used by Embodied CAD. The hierarchy constrains the action space while
+keeping operations interpretable and editable.
+
+
+and derived geometry. This design preserves the agentic planning role of the LLM while moving coordinate-
+sensitive computations into deterministic modules.
+    For example, after the planner predicts a family such as place_guide_post, the resolver determines
+which post is next, retrieves the corresponding plate corner, computes the local axis and clearance, and
+produces the typed skill call. The solver then checks whether the post intersects the expected plate stack and
+whether the resulting solid remains valid. Failures are returned as structured feedback rather than hidden in
+a failed final script.
+
+4.4   Learning from Solver Feedback
+We use solver feedback in two ways. First, supervised fine-tuning warms up the planner on validated tra-
+jectories. Second, GRPO-style refinement samples multiple candidate actions for the same state and scores
+them with a structured reward:
+
+                                  R = wf Rformat + wp Rpolicy + we Rexec .                                          (3)
+
+Here Rformat checks whether the model emits a parseable action block, Rpolicy checks whether the selected
+skill or operation family matches the expected transition, and Rexec measures whether the resolved action
+executes successfully in the CAD backend. The relative reward within each group updates the policy. We
+report skipped-update and fallback-SFT rates because a high parse rate alone does not guarantee informative
+reward variance.
+
+
+5     Benchmark and Metrics
+The benchmark is organized around executable CAD-skill trajectories. Each task provides a natural-
+language industrial specification and a structured parameter set. The system must generate a sequence of
+skill calls that can be resolved and executed by the FreeCAD backend. The current task families are:
+    Standard mechanical assemblies: bearing tasks involving coaxial rings, polar ball arrays, repeated
+separators, editable ring dimensions, and chamfered mechanical details.
+    Industrial equipment assemblies: press-machine, cooling-tower, and linear-manifold tasks involving
+layered structures, repeated connectors, springs, guide posts, fans, holes, and pipe-like features.
+    Mold assemblies: mold-machine and mold-core insert tasks involving plate stacks, guide posts, hole
+grids, counterbores, grooves, spline ribs, and editable core-shaft layouts.
+
+
+                                                        5
+ Policy variant             Evaluation protocol                          Valid/Exec.   Skill   Op. family   Exact
+                                                                             (%)       (%)        (%)        (%)
+ Strong planner             Best solver-checked workflow per task          100.0        –          –         –
+                            family
+ Weak-planner SFT           State policy, full validation                  100.0       97.8      93.1       93.1
+ Weak-planner GRPO          State policy, full validation                  100.0       97.8      93.2       93.2
+ Skill-family SFT           Direct family prediction, stress aggregate      98.7       83.5      79.9       76.6
+
+Table 2: Main solver-aligned performance by controller mode. The strong-planner row reports FreeCAD ex-
+ecution success for deterministic workflows, so learned-action accuracy columns are not applicable. Weak-
+planner rows evaluate compact state-action prediction. The skill-family row aggregates boundary-value,
+random-parameter, and language-paraphrase stress tests for direct next-family prediction.
+
+
+    We evaluate two evidence levels. The solver-execution level measures whether a resolved trajectory
+executes in the CAD backend. The learned-policy level measures whether an SFT or GRPO controller
+predicts the correct next skill or operation family. The distinction is important: deterministic strong-planner
+trajectories test the capacity of the skill library and resolver, whereas learned-policy metrics measure how
+much of the planning decision can be delegated to the model.
+    Metrics are solver-aligned. Valid/executable rate checks parseability or FreeCAD execution success.
+Skill accuracy checks whether the predicted skill matches the target. Operation-family accuracy checks the
+reusable family. Exact policy accuracy requires action, skill, and family to be correct for the current state.
+Task completion evaluates all steps in a full workflow when the workflow log is available. For GRPO, we
+additionally report group-valid rate, group-exact rate, skipped-update rate, and fallback-SFT rate.
+
+
+6     Results
+6.1   Solver-Aligned Performance
+Table 2 shows the main quantitative results. Deterministic strong planning executes all evaluated workflow
+families in the current benchmark. The weak-planner SFT policy reaches 93.1% exact accuracy on the state-
+policy benchmark, and GRPO refinement gives a small gain to 93.2%. The direct skill-family SFT model
+is more challenging because it must predict the family directly under boundary, random-parameter, and
+paraphrase stress tests; it reaches 76.6% exact accuracy in the aggregate.
+    The GRPO run contains 18,335 candidate groups. Its group-valid rate is 100.0%, and its group-exact
+rate is 73.5%. The skipped-update rate is 68.3%, and the fallback-SFT rate is 10.3%. These diagnostics
+indicate that format validity is not the bottleneck; the main learning challenge is obtaining reward variance
+that distinguishes plausible but geometrically incorrect next actions.
+
+6.2   Task-Level Evidence and Ablations
+Table 3 breaks the evidence down by controller and task family. The strong-planner rows confirm that the
+skill library and deterministic resolver can generate complete solver-checked assemblies for the evaluated
+families. The learned-policy rows show that exact next-action prediction remains task dependent. Bearing
+tasks are relatively regular because repeated features follow polar patterns, while press-machine and mold-
+machine tasks require more mixed feature orders and spatial relations.
+    The ablation trend supports the design choice behind operation families. Direct family prediction ex-
+poses the model to many similar but index-sensitive decisions, producing lower exact accuracy. The weak-
+planner state policy predicts a compact controller action and leaves deterministic geometry and instance
+
+                                                        6
+ Controller              Evidence scope               Task family                 Metric        Value (%)
+ Strong planner          FreeCAD execution            bearing                     Exec.             100.0
+ Strong planner          FreeCAD execution            press machine               Exec.             100.0
+ Strong planner          FreeCAD execution            cooling tower               Exec.             100.0
+ Strong planner          FreeCAD execution            linear manifold             Exec.             100.0
+ Strong planner          FreeCAD execution            mold core                   Exec.             100.0
+ Weak-planner SFT        State policy                 linear manifold             Exact              93.1
+ Weak-planner GRPO       State policy                 linear manifold             Exact              93.2
+ Skill-family SFT        Direct next-family predic-   bearing                     Exact              86.8
+                         tion
+ Skill-family SFT        Direct next-family predic-   sprocket shaft              Exact              74.8
+                         tion
+ Skill-family SFT        Direct next-family predic-   press machine               Exact              62.8
+                         tion
+ Skill-family SFT        Direct next-family predic-   linear manifold             Exact              79.4
+                         tion
+ Skill-family SFT        Direct next-family predic-   mold machine                Exact              76.6
+                         tion
+
+Table 3: Task-level evidence in the current artifact snapshot. We list only evaluated task-method pairs to
+avoid implying that missing entries are zero-valued results.
+
+                             Method                    Visual   Exec.   Coverage
+                             Embodied CAD best         1.000    1.000     1.000
+                             ArtiCAD-style proxy       1.000    0.000     0.702
+                             TOOLCAD-style proxy       1.000    0.000     0.552
+
+Table 4: Same-prompt diagnostic comparison. Coverage is exact workflow coverage for Embodied CAD
+and heuristic feature coverage for proxy baselines.
+
+
+resolution to the controller, which improves exact state-policy performance. GRPO refinement provides a
+limited gain in the current logs, but the skipped-update rate suggests that future reward shaping should create
+more informative contrasts among candidate actions.
+
+6.3   Qualitative Analysis
+Figure 2 visualizes intermediate states rather than only final renders. This is useful for CAD-agent evaluation
+because many failures occur before the final view: a guide post can be created at the wrong height, a cutter
+can remove the wrong plate, or an array can be mirrored around the wrong origin. Intermediate solver-
+checked snapshots make these errors diagnosable.
+    Figure 3 compares same-prompt outputs against paper-inspired ArtiCAD-style and TOOLCAD-style
+proxy baselines rendered in the same viewer. These proxy columns are not official reproductions and should
+not be interpreted as definitive baseline numbers. They are included as diagnostic comparisons for visual
+feature coverage under the same prompts. The key difference is that Embodied CAD produces executable
+skill workflows, whereas the proxy outputs are evaluated by visual coverage only.
+
+
+
+
+                                                      7
+6.4   Failure Modes
+The remaining failures fall into four recurring categories. Family confusion occurs when the model selects
+a plausible but wrong next operation, such as a chamfer before all cuts have been applied. Index ambiguity
+occurs when repeated instances are not grounded to the construction state. Coordinate-frame errors occur
+when local and global frames are mixed, especially for mirrored or rotated features. Reward sparsity occurs
+when many sampled candidates are parseable and executable but have identical group rewards. Operation-
+family resolution reduces the second and third categories, while richer solver diagnostics are needed for the
+first and fourth.
+
+
+7     Discussion and Limitations
+Embodied CAD is most effective when the assembly can be decomposed into reusable engineering opera-
+tions. This is also its main limitation: new domains require new skills, resolvers, and validation checks. The
+current benchmark emphasizes parametric mechanical and mold-oriented assemblies; free-form surfacing,
+complex organic shapes, tolerance-stack analysis, and downstream manufacturing simulation are outside
+the present scope. The proxy comparisons are useful for debugging but should be replaced with official
+implementations or standardized benchmark submissions when available. Finally, the current GRPO results
+show that solver feedback is necessary but not sufficient: a training signal must distinguish geometrically
+meaningful alternatives, not only executable syntax.
+
+
+8     Conclusion
+We introduced Embodied CAD, a closed-loop framework for autonomous parametric B-Rep assembly mod-
+eling with LLM agents. By separating LLM planning, deterministic operation-family resolution, and CAD-
+kernel execution, the framework converts open-loop script generation into solver-grounded skill trajectories.
+Experiments on multi-category industrial assemblies show that the skill library and resolver can execute
+complete workflows, while learned policies achieve high valid rates but still face long-horizon exact-action
+errors. The results suggest that future text-to-CAD systems should evaluate not only visual plausibility, but
+also solver execution, editability, and intermediate state validity.
+
+
+References
+A. C. Doris, M. F. Alam, A. H. Nobari, and F. Ahmed. CAD-Coder: An open-source vision-language model
+  for computer-aided design code generation, 2025. arXiv preprint arXiv:2505.14646.
+
+Yuxuan Gong, Xuan Wu, Wei Liu, and Kewei Tu. TOOLCAD: Exploring tool-using large language models
+  in text-to-cad generation with reinforcement learning, 2026. arXiv preprint arXiv:2604.07960.
+
+Yuhang Guan, Xiaogang Wang, Xing Xing, Jiaqi Zhang, Dong Xu, and Qiang Yu. CAD-Coder: Text-to-cad
+  generation with chain-of-thought and geometric reward. In Advances in Neural Information Processing
+  Systems, 2025.
+
+Pradeep Kumar Jayaraman, Aditya Sanghi, Joseph G. Lambourne, Karl D. D. Willis, Thomas Davies,
+  Hooman Shayani, and Nigel Morris. UV-Net: Learning from boundary representations. In Proceedings
+  of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2021.
+
+
+
+
+                                                      8
+Pradeep Kumar Jayaraman, Joseph G. Lambourne, Nishkrit Desai, Karl D. D. Willis, Aditya Sanghi, and
+  Nigel J. W. Morris. SolidGen: An autoregressive model for direct b-rep synthesis, 2022. arXiv preprint
+  arXiv:2203.13944.
+R. Kenny Jones, Homer Walke, and Daniel Ritchie. Shapeassembly: Learning to generate programs for 3d
+  shape structure synthesis. ACM Transactions on Graphics, 39(6), 2020.
+Muhammad S. Khan, Emilien Dupont, S. A. Ali, Kseniia Cherenkova, Anis Kacem, and Djamila Aouada.
+ Text2CAD: Generating sequential cad designs from beginner-to-expert level text prompts. In Advances
+ in Neural Information Processing Systems, 2024.
+Sebastian Koch, Albert Matveev, Zhongshi Jiang, Francis Williams, Alexey Artemov, Evgeny Burnaev,
+  Marc Alexa, Denis Zorin, and Daniele Panozzo. ABC: A big cad model dataset for geometric deep
+  learning. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+  2019.
+Joseph G. Lambourne, Karl D. D. Willis, Pradeep Kumar Jayaraman, Aditya Sanghi, Peter Meltzer, and
+  Hooman Shayani. BRepNet: A topological message passing system for solid models. In Proceedings of
+  the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2021.
+Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe, Uri Alon, Nouha
+ Dziri, Shrimai Prabhumoye, Yiming Yang, Sean Welleck, Bodhisattwa Prasad Majumder, Shashank
+ Gupta, Amir Yazdanbakhsh, and Peter Clark. Self-refine: Iterative refinement with self-feedback. In
+ Advances in Neural Information Processing Systems, 2023.
+Dimitrios Mallis, Arda S. Karadeniz, Sebastiano Cavada, Danila Rukhovich, Nefeli Foteinopoulou, Kseniia
+  Cherenkova, Anis Kacem, and Djamila Aouada. CAD-Assistant: Tool-augmented vllms as generic cad
+  task solvers. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2025.
+Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll L. Wainwright, Pamela Mishkin, Chong
+  Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, John Schulman, Jacob Hilton, Fraser Kelton, Luke
+  Miller, Maddie Simens, Amanda Askell, Peter Welinder, Paul Christiano, Jan Leike, and Ryan Lowe.
+  Training language models to follow instructions with human feedback. In Advances in Neural Informa-
+  tion Processing Systems, 2022.
+Timo Schick, Jane Dwivedi-Yu, Roberto Dessi, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettle-
+  moyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can teach themselves to
+  use tools. In Advances in Neural Information Processing Systems, 2023.
+Gopal Sharma, Difan Goyal, Haofan Liu, Evangelos Kalogerakis, and Subhransu Maji. CSGNet: Neural
+  shape parser for constructive solid geometry. In Proceedings of the IEEE Conference on Computer Vision
+  and Pattern Recognition, 2018.
+Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. Reflexion: Lan-
+  guage agents with verbal reinforcement learning. In Advances in Neural Information Processing Systems,
+  2023.
+Yifan Shui, Yuhang Guan, Zhen Zhang, Jiawei Hu, Jiaqi Zhang, Dong Xu, and Qiang Yu. ArtiCAD: Artic-
+  ulated cad assembly design via multi-agent code generation, 2026. arXiv preprint arXiv:2604.10992.
+Karl D. D. Willis, Pradeep Kumar Jayaraman, Joseph G. Lambourne, Hang Chu, and Yewen Pu. Fusion 360
+  gallery: A dataset and environment for programmatic cad construction from human design sequences.
+  ACM Transactions on Graphics, 40(4), 2021.
+
+                                                   9
+Karl D. D. Willis, Pradeep Kumar Jayaraman, Hang Chu, Yunsheng Tian, Yifei Li, Daniele Grandi, Aditya
+  Sanghi, Linh Tran, Joseph G. Lambourne, and Armando Solar-Lezama. JoinABLe: Learning bottom-up
+  assembly of parametric cad joints. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition, 2022.
+
+Rundi Wu, Chang Xiao, and Changxi Zheng. DeepCAD: A deep generative network for computer-aided
+  design models. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021.
+
+Xiang Xu, Karl D. D. Willis, Joseph G. Lambourne, Chin-Yi Cheng, Pradeep Kumar Jayaraman, and Ya-
+  sutaka Furukawa. SkexGen: Autoregressive generation of cad construction sequences with disentangled
+  codebooks. In Proceedings of the International Conference on Machine Learning, 2022.
+
+Xiang Xu, Pradeep Kumar Jayaraman, Joseph G. Lambourne, Karl D. D. Willis, and Yasutaka Furukawa.
+  BRepGen: A b-rep generative diffusion model with structured latent geometry. ACM Transactions on
+  Graphics, 43(4), 2024.
+
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. ReAct:
+  Synergizing reasoning and acting in language models. In Proceedings of the International Conference on
+  Learning Representations, 2023.
+
+
+
+
+                                                  10
+Figure 3: FreeCAD-normalized same-prompt qualitative comparison. PhyClaw outputs are executable skill
+workflows; ArtiCAD-style and TOOLCAD-style columns are paper-inspired proxy baselines rendered
+through the same FreeCAD viewer for visual style consistency. The proxy columns compare visual fea-
+ture coverage and are not official executable reproductions.
+
+
+
+
+Figure 4: Mold-core insert construction snapshots for the current strong-planner POC path. The same pa-
+rameterized workflow supports fast regeneration after user edits to shaft radii, rib count, and segment layout.
+
+
+                                                      11
+

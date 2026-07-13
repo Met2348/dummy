@@ -1,0 +1,1198 @@
+                                                            Agentic Fuzzing: Opportunities and Challenges
+                                                                    Junyoung Park                                                            Insu Yun
+                                                                parkjuny@kaist.ac.kr                                                 insuyun@kaist.ac.kr
+                                                                        KAIST                                                                KAIST
+                                                              Daejeon, Republic of Korea                                           Daejeon, Republic of Korea
+
+                                         Abstract                                                                  captured by general patterns. For example, detecting an integer
+                                         Fuzzers and static analyzers find many bugs but struggle with logic       overflow bug may require static analyzers to understand how to
+                                         bugs in mature codebases. Triggering such a bug often requires            achieve sufficiently large integer values through multiple stages of
+                                         multi-step reasoning that produces no distinctive execution feed-         execution, which is difficult to express as a simple general pattern.
+                                         back, and variants can appear across implementations too different           Historical bugs can provide useful guidance for finding logic
+
+
+
+
+arXiv:2605.10074v1 [cs.CR] 11 May 2026
+                                         for a single pattern to match. Recent LLM-assisted approaches help,       bugs, as they demonstrate root causes and trigger conditions that
+                                         but they use LLMs as auxiliaries rather than as the reasoning engine.     can be used to hypothesize new vulnerability scenarios. However,
+                                            We propose agentic fuzzing, a bug-finding approach seeded by           existing tools lack the reasoning capability to use this guidance
+                                         historical bugs in which deep agents perform the reasoning directly.      effectively. Fuzzers can use Proof-of-Concept (PoC) code as a seed
+                                         Given a reference bug, the agent analyzes its root cause, hypoth-         to generate or mutate inputs, exploring around the original trigger
+                                         esizes new scenarios elsewhere in the codebase that may share             path. However, because they do not understand the meaning of
+                                         that cause, and verifies each hypothesis by generating and running        the seed, they can only explore around the original trigger path,
+                                         proof-of-concept code. This lets the agent find variants that differ      missing similar bugs with different trigger paths (e.g., JavaScript
+                                         completely in trigger path or code structure from the reference.          vs. WebAssembly). Static analyzers can match bug patterns derived
+                                            We identify three practical challenges in implementing agentic         from historical bugs. However, a pattern broad enough to cover
+                                         fuzzing: harness engineering, redundant investigations across seeds       different code structures (e.g., different components) loses the preci-
+                                         with similar root causes, and scheduling seeds in a large corpus.         sion needed to avoid false positives, while a more precise one does
+                                         We address these in AFuzz through a four-stage agent pipeline,            not carry over to another implementation of the same logical flaw.
+                                         scenario coverage that deduplicates previously explored scenarios,           Recent works use LLMs to assist fuzzing [28, 33, 34, 36, 66, 68, 89,
+                                         and a DPP-MAP scheduler that orders seeds by diversity. We ran            94, 95, 99] and static analysis [62, 63]. They use LLMs to generate
+                                         AFuzz on the V8 JavaScript engine for about one month, finding 40         test inputs, infer protocol grammars, or label code property graph
+                                         bugs (including three duplicates), receiving a total $35,000 bounty,      nodes. However, in each case, LLMs are used as auxiliaries, while
+                                         and being assigned two CVEs. AFuzz also found 19 bugs (including          coverage feedback or pattern matching still steers the search. Be-
+                                         one duplicate) in SpiderMonkey and JavaScriptCore using the seeds         cause the deep reasoning LLMs are capable of is mostly not used to
+                                         from V8. However, agentic fuzzing is in its early stages with several     drive the search, the fundamental limitations of existing approaches
+                                         remaining open problems we discuss in the paper. Still, we think it       persist. Logic bugs that require reasoning about complex conditions
+                                         points to a promising direction for finding logic bugs.                   across multiple stages of execution can avoid detection, and similar
+                                                                                                                   bugs that differ in trigger paths or code structures are unmatched.
+                                         1   Introduction                                                             We propose agentic fuzzing, a new approach that uses deep
+                                                                                                                   agents instead as the primary reasoning engine for finding bugs,
+                                         As software systems grow in size and complexity, automated bug
+                                                                                                                   seeded by historical bugs. Recent deep agents [17, 40, 59, 69] are
+                                         detection techniques are commonly used to maintain software qual-
+                                                                                                                   capable of complex, multi-step reasoning and code manipulation,
+                                         ity and security. Among them, fuzzing [42, 45, 65, 80] and static
+                                                                                                                   matching what a human auditor is capable of. Therefore, an agentic
+                                         analysis [37, 39, 55–57, 88, 90, 92] have been widely adopted for
+                                                                                                                   fuzzer mimics how a human auditor finds bugs: it takes a reference
+                                         their ability to discover bugs at scale. Fuzzers discover bugs by gen-
+                                                                                                                   bug as a seed, analyzes its root cause, hypothesizes new vulnera-
+                                         erating a large number of diverse inputs and observing execution
+                                                                                                                   bility scenarios that share the same root cause, and verifies each
+                                         feedback such as code coverage or crashes. Static analysis matches
+                                                                                                                   hypothesis through code reasoning and PoC generation. This lets
+                                         predefined patterns or traces data flows across the program without
+                                                                                                                   agentic fuzzers find similar bugs even when they completely differ
+                                         executing it. These techniques have discovered tens of thousands
+                                                                                                                   in trigger paths and code structures, because the agent can under-
+                                         of bugs in projects like Chromium [42] and are widely deployed
+                                                                                                                   stand the root cause at a high level and then reason about how it
+                                         across open-source projects [39].
+                                                                                                                   may occur across the codebase.
+                                            However, these techniques struggle to find logic bugs in ma-
+                                                                                                                      In practice, implementing an agentic fuzzer raises three problems.
+                                         ture codebases. A blog post by the V8 team [46] revealed that V8
+                                                                                                                   First, there is no obvious way to define the agent’s tasks—a problem
+                                         JavaScript engine vulnerabilities are rarely memory corruption
+                                                                                                                   known as harness engineering [77]. It requires domain expertise and
+                                         bugs, but instead logic bugs that have the potential to turn into
+                                                                                                                   iterative experimentation to find the right design. Second, when an
+                                         ones when exploited. Because logic bugs do not necessarily exhibit
+                                                                                                                   agentic fuzzer processes multiple seeds, it often performs redundant
+                                         observable signals such as crashes, fuzzers are likely to miss them
+                                                                                                                   investigations because each seed is analyzed independently and
+                                         since they rely on such signals to guide their search. Static analyzers
+                                                                                                                   semantically similar seeds lead to overlapping hypotheses. Third,
+                                         also cannot reliably find them because finding such bugs usually
+                                                                                                                   given a large seed corpus, an agentic fuzzer needs to decide which
+                                         requires reasoning about complex conditions that may not be easily
+                                                                                                                           Junyoung Park and Insu Yun
+
+
+                                                                            1   // src/compiler/turboshaft/operations.h
+seeds to process and in what order to maximize bug discovery.               2   const uint16_t input_count; // input_count is defined as uint16_t
+Ideally, an agentic fuzzer would prioritize the most promising seeds,       3                                           truncated
+                                                                            4   explicit Operation(Opcode opcode, size_t input_count)
+but estimating each seed’s potential is difficult.                          5       : opcode(opcode), input_count(input_count) { // accepts as size_t
+   We implemented a prototype AFuzz, which addresses each of                6     DCHECK_LE(input_count, // DCHECK only fires in debug builds
+these problems as follows. First, AFuzz decomposes the task into a          7               std::numeric_limits<decltype(this->input_count)>::max());
+                                                                            8   }
+four-stage pipeline of specialized agents (Analyzer, Investigator,
+Scenario Analyzer, and Validator), each focused on a single                               (a) Vulnerable code in V8’s Turboshaft IR.
+objective. This pipeline enables deep analysis of each seed and yields
+                                                                            1   (block $outer (result i32)
+the highest per-seed bug discovery rate in our evaluation. Second,          2     (local.get $cond)
+AFuzz tracks scenario coverage, a record of all previously explored         3     (if
+                                                                            4       (then
+location-hypothesis pairs, to skip redundant investigations. Third,         5         (i32.const 1)
+AFuzz uses a strategy to disperse seed selection across diverse             6         (local.get $idx)
+                                                                            7         ;; 33,000 targets, all branch to outer
+root causes, using a DPP-MAP [29, 49, 67] algorithm. This strategy          8         (br_table $outer $outer $outer $outer ... (33,000x)))
+allows AFuzz to cover a broad range of root causes early on.                9       (else
+   We evaluated AFuzz on the V8 JavaScript engine [78] for about           10         (i32.const 2)
+                                                                           11         (local.get $idx)
+one month, processing about 750 of the 3,146 seeds collected from          12         ;; 33,000 targets, all branch to outer
+the Chromium issue tracker [41]. As a result, AFuzz discovered             13         (br_table $outer $outer $outer $outer ... (33,000x)))
+                                                                           14     )
+40 bugs (including three duplicates), of which four vulnerabilities        15     (i32.const 0) ;; fallthrough
+received a total bounty of $35,000 and were assigned two CVEs              16   )
+(CVE-2026-2649 and CVE-2026-7902). The bugs are not limited to a
+                                                                           (b) Simplified WebAssembly structure that triggers the vulnerability.
+specific component but span the parser, interpreter, and multiple
+compilers. As we detail in §5.3, several of these bugs are complex
+                                                                           Figure 1: Motivating example: an integer truncation vulnera-
+logic bugs that are hard to find with conventional fuzzing or static
+                                                                           bility (CVE-2026-2649) in V8’s Turboshaft compiler discov-
+analysis.
+                                                                           ered by AFuzz. The red arrow in (a) shows size_t→uint16_t
+   Agentic fuzzing is still in its early stages, with several open prob-
+                                                                           truncation.
+lems. These include the high operational cost (we evaluated only
+about 23.8% of our seed corpus within our budget), the assumption
+that reference bugs are available (which does not hold for closed-         2.1      Motivating Example
+source software), and the fragility of design choices across model         Figure 1a shows a code snippet of an integer truncation vulnera-
+generations. We discuss these in §6.                                       bility in V8’s Turboshaft compiler that AFuzz discovered during
+   Our contributions are as follows.                                       evaluation. The Operation base class stores the operand count of
+                                                                           each IR node in a uint16_t field input_count (line 2). However, the
+• We propose agentic fuzzing, a new bug-finding approach that              constructor accepts input_count as a size_t (line 5), implicitly trun-
+  uses deep agents as the primary reasoning engine and takes               cating it to 16 bits during initialization. A DCHECK assertion guards
+  reference bugs as seeds.                                                 this truncation (line 6), but it is stripped in release builds, leaving
+• We identify three practical challenges in agentic fuzzing: harness       the truncation unchecked. An attacker can exploit this truncation
+  engineering, redundant investigations across seeds, and seed             to cause out-of-bounds access when subsequent compiler phases
+  scheduling over a large seed corpus.                                     use the truncated input_count. This leads to memory corruption
+• We design and implement a prototype AFuzz with a four-stage              and potential arbitrary code execution.
+  agent pipeline, scenario coverage, and DPP-MAP seed schedul-                To trigger the vulnerability, we use WebAssembly’s br_table
+  ing.                                                                     instruction (i.e., switch-case), which can carry up to 65,520 en-
+• We evaluated AFuzz primarily on V8, discovering 40 bugs (in-             tries (kV8MaxWasmFunctionBrTableSize). When Turboshaft compiles
+  cluding three duplicates), receiving a $35,000 bounty and two            a br_table, each entry adds one predecessor to the destination
+  CVEs. Our case studies show that AFuzz can find bugs that con-           block. When multiple branches merge, Turboshaft creates a PhiOp
+  ventional fuzzing and static analysis tools rarely find.                 whose operand count equals the total number of predecessors. We
+• We discuss open problems for agentic fuzzing, including cost             place two br_table instructions in opposite arms of an if-else struc-
+  effectiveness, the need for reference bugs, and design uncertainty.      ture as shown in Figure 1b, each with 33,000 entries targeting the
+                                                                           same merge point. This creates a PhiOp with 66,000 predecessors,
+                                                                           exceeding the uint16_t limit and triggering the truncation.
+2    Motivation
+                                                                           2.2      Limitations & Key Insights
+Using a motivating example, we demonstrate the challenges of
+                                                                           In this section, we discuss the problem of finding logic bugs and
+finding logic bugs and how existing automated approaches struggle
+                                                                           the insights that motivate our design of AFuzz.
+to find them. Then, we show how agentic fuzzing addresses these
+challenges using deep LLM agents and reference bugs. Finally, we           2.2.1 Large and complex codebases. It is challenging to identify
+discuss the challenges in scaling this approach to large codebases         logic bugs in large and complex codebases. For example, V8 [78],
+with many reference bugs, which motivates our design of AFuzz.             the JavaScript engine used in Google Chrome, adopts a multi-phase
+Agentic Fuzzing: Opportunities and Challenges
+
+
+ 1   // src/maglev/maglev-ir.h
+ 2   // Bitfield: [opcode:16][input_count:16][properties:16][extras:16]   parameter count, the bytecode register count, and a fixed number
+ 3   using OpcodeField = base::BitField64<Opcode, 0, 16>;                 of kFixedInputCount=2 (line 20). Then, the IR graph builder passes
+ 4   using InputCountField = OpcodeField::Next<size_t, 16>; // 16-bit
+ 5
+                                                                          the input count to node creation as an int (line 21). When we create
+ 6   // src/maglev/maglev-ir.h (NodeBase::Allocate)                       a generator with a sufficiently large number of local variables (e.g.,
+ 7   uint64_t bitfield = OpcodeField::encode(opcode_of<Derived>) |        65,534), the local variables become bytecode registers, and the input
+ 8       OpPropertiesField::encode(Derived::kProperties) |
+ 9       InputCountField::encode(input_count); // encodes to bitfield     count exceeds the 16-bit limit.
+10
+                            truncated
+11   // src/base/bit-field.h                                              2.2.2 Lack of reasoning. Existing approaches struggle to find bugs
+12   static constexpr U encode(T value) {                                 even with the help of historical bugs. There are two main ap-
+13     DCHECK(is_valid(value)); // only in debug builds
+14     return static_cast<U>(value) << kShift; // truncates to 16-bit     proaches that use historical bugs: coverage-guided fuzzing and
+15   }
+                                                   data flow              variant analysis. First, coverage-guided fuzzing uses the Proof-of-
+16
+17   // src/maglev/maglev-graph-builder.cc                                Concept (PoC) code as a seed and mutates it to find variants without
+18   int input_count = parameter_count_without_receiver()                 understanding its meaning. Unfortunately, while the reference bug
+19       + args.register_count()
+20       + GeneratorStore::kFixedInputCount; // input count calculation
+                                                                          and the motivating example share a similar root cause (i.e., integer
+21   AddNewNode<GeneratorStore>(input_count, ...); // passed as int       truncation in compiler IR), their PoC codes are completely different.
+                                                                          In particular, the former uses JavaScript for creating a generator
+              (a) Vulnerable code in V8’s Maglev compiler.
+                                                                          with a large number of local variables (Figure 2b), while the latter
+ 1   const kNumRegs = 65534;                                              uses WebAssembly to do so (Figure 1b). Therefore, coverage-guided
+ 2   let body = [];                                                       fuzzers are unable to find such variants.
+ 3   for (let i = 0; i < kNumRegs; ++i) {
+ 4     body.push(` let r${i} = ${i};`);                                      Second, variant analysis tools, such as CodeQL [39] or Joern [93],
+ 5   }                                                                    use static analysis to find variants. These tools detect variants by
+ 6   let f = eval(`(function*() {\n${body.join(’\n’)}})`);
+ 7
+                                                                          matching predefined code patterns or signatures [39, 57, 88, 93],
+ 8   %PrepareFunctionForOptimization(f);                                  measuring syntactic or structural similarity [55, 92], or analyzing
+ 9   f();
+10   %OptimizeMaglevOnNextCall(f);
+                                                                          program slices or traces [37, 56, 90]. However, the reference bug
+11   f();                                                                 and the motivating example occur in completely different imple-
+                                                                          mentations: one uses Maglev and the other uses Turboshaft. As a
+         (b) JavaScript code that triggers the vulnerability [43].
+                                                                          result, existing variant analysis tools also fail to find such variants.
+                                                                          Insight 2: LLM for reasoning. To address these challenges, we
+Figure 2: Reference vulnerability (CVE-2025-10892) in V8’s                use LLMs to reason about the code. LLMs can understand code
+Maglev compiler [43]. Blue dashed arrows and the red arrow                semantics and perform complex reasoning that is challenging for
+in (a) show the data flow and integer truncation, respectively.           existing tools. In the motivating example, LLMs can abstract away
+                                                                          low-level implementation details such as Maglev’s bitfield encoding
+                                                                          and Turboshaft’s constructor, and focus on high-level semantics:
+execution pipeline consisting of parsing, an interpreter (Ignition),
+                                                                          they both store wide input counts in a 16-bit field. Then, LLMs
+a baseline compiler (Sparkplug), and an optimizing compiler (Tur-
+                                                                          can reason about how to make the input count exceed the 16-bit
+boFan). V8 later added a mid-tier compiler, Maglev, in 2023 [79],
+                                                                          limit, for example by using large br_table instructions to create a
+further increasing its complexity. Each component is designed with
+                                                                          PhiOp with too many predecessors. As a result, LLMs can match
+distinct performance goals, making JavaScript code transition dy-
+                                                                          the vulnerability pattern across Maglev and Turboshaft and figure
+namically across multiple execution tiers at runtime. This complex-
+                                                                          out how to trigger the vulnerability, discovering the motivating
+ity makes it difficult to reason about program behavior and detect
+                                                                          example from the reference bug.
+subtle logic bugs such as the one in our motivating example.
+Insight 1: Historical bugs as hints. Although it is difficult to          2.2.3 Limited LLM integration. Instead of using LLMs as the pri-
+discover the motivating example from scratch, historical bugs in          mary reasoning engine, existing LLM-based approaches use LLMs
+V8 can provide useful guidance. Figure 2a shows CVE-2025-10892            as auxiliaries to assist fuzzing or static analysis. This limited in-
+in V8’s Maglev compiler [43]. Notably, this bug shares a common           tegration prevents them from fully leveraging LLMs’ reasoning
+pattern with the motivating example: a 16-bit representation of           capabilities to find logic bugs like our motivating example. For ex-
+input counts, truncation from wider integer types, and language           ample, LLM-assisted fuzzers [89, 99] use LLMs to generate inputs
+features that push the count beyond its limit, despite differences in     that can maximize code coverage, rather than to reason about why
+backend and input path.                                                   and how a bug occurs and how to find new bugs based on that
+   We now describe this bug in detail. In Maglev, the NodeBase base       understanding. Similarly, LLM-assisted static analysis tools [62, 63]
+class packs each IR node’s metadata into a 64-bit bitfield, storing       use LLMs to label source and sink nodes in taint analysis, generate
+the input count in a 16-bit field InputCountField (line 4). When the      code queries, or triage false positives. While this reduces human
+Allocate function creates a node, it encodes the input count into         effort, LLMs still serve as auxiliaries rather than to reason about
+this bitfield (line 9). However, BitField::encode accepts the input       why and where a bug might occur.
+count as a size_t and silently truncates it to 16 bits (line 14). This    Insight 3: Deep agents. Instead of limiting LLMs to assisting
+vulnerability is triggered through the GeneratorStore operation,          existing fuzzing, we use deep agents [17, 40, 59, 69] as the primary
+which saves all local variables when suspending a generator func-         reasoning engine. Deep agent is an LLM agent paradigm that com-
+tion. The IR graph builder computes the input count by adding the         bines planning, sub-agents, filesystem access, and shell integration
+                                                                                                                      Junyoung Park and Insu Yun
+
+
+to execute complex tasks over a long horizon. These capabilities        together in time [11–15], as they often originate from the same
+are essential for finding bugs like our motivating example. Notably,    fuzzing campaign or code audit. Ideally, we would prioritize seeds
+such a bug cannot be discovered in a single step: the agent must        that are most likely to lead to new discoveries, but it is difficult to
+analyze, hypothesize, and verify.                                       estimate this a priori.
+                                                                           Instead, we use a strategy of dispersing seed selection across
+                                                                        different root causes to maximize diversity (§3.3.2). Specifically, we
+2.3    Technical Challenges                                             use the DPP-MAP [29, 49, 67] algorithm, which has been used in
+We combine these three insights into agentic fuzzing, a new ap-         recommendation systems [29] and machine learning [49] for select-
+proach that uses deep agents to detect logic bugs through code          ing diverse subsets of items. This approach allows AFuzz to cover
+reasoning, and implement it in AFuzz. Instead of receiving a test       a broad range of root causes early on, rather than spending bud-
+input as a seed, AFuzz takes a reference bug as a seed. Given a         get on clusters of similar seeds. However, optimal seed scheduling
+seed, AFuzz analyzes its root cause, searches the codebase for other    for agentic fuzzing remains an open problem: more sophisticated
+locations where the same root cause could produce a bug, and in-        strategies that estimate the potential of each seed to lead to new
+vestigates each candidate to determine whether it contains a new        discoveries could further improve efficiency.
+vulnerability. Unlike traditional fuzzing, which generates or mu-
+tates inputs, and observes execution signals (e.g., crashes), AFuzz     2.4    Comparison to Google Big Sleep
+hypothesizes vulnerabilities from reference bugs and verifies them
+                                                                        Recently, many works have applied LLM agents to vulnerability
+through code reasoning and PoC generation. It mimics how human
+                                                                        discovery [25, 31, 32, 62, 63]. Among them, Google Big Sleep [25]
+auditors find bugs by analyzing, hypothesizing, and verifying.
+                                                                        is the closest work to ours, as it uses LLM agents for discovering
+   However, implementing this approach is more challenging than
+                                                                        bugs from reference bugs. Google Big Sleep demonstrates its ef-
+it may seem, as it introduces the following challenges:
+                                                                        fectiveness by discovering vulnerabilities in multiple open-source
+Challenge 1: Harnessing. The first challenge is how to define
+                                                                        projects, including SQLite [52] and Chromium [75].
+tasks for AFuzz to perform. This is known as harness engineer-
+                                                                            Despite these similarities, we still believe our work remains
+ing [77]: defining the interface and behavior of an agent to perform
+                                                                        novel for the following reasons. First, Google Big Sleep does not
+a task. There is no algorithmic solution to this; it requires domain
+                                                                        disclose its architecture or details. In contrast, we disclose AFuzz’s
+expertise and iterative experimentation.
+                                                                        architecture and details and leverage commercial LLMs, making it
+   We decomposed the task into a four-stage pipeline: Analyzer,
+                                                                        more accessible to the community. Second, Google Big Sleep already
+Investigator, Scenario Analyzer, and Validator (§3.2), so that
+                                                                        performed vulnerability discovery on the V8 engine as shown in its
+each agent can focus on a single objective. As a result, our pipeline
+                                                                        issue tracker [24]. In particular, the reference bug in our motivating
+achieved the highest per-seed bug discovery (9 bugs from 100 seeds)
+                                                                        example (CVE-2025-10892, Figure 2a) was itself discovered by Big
+in our evaluation (§5.4). However, the optimal harness design for
+                                                                        Sleep [24], indicating that Big Sleep has investigated this family of
+agentic fuzzing remains an open problem: a single-agent baseline
+                                                                        bugs in Maglev. However, the Turboshaft variant (Figure 1a), which
+that self-decomposes using subagents performed comparably to
+                                                                        shares the same root-cause pattern but arises in a different compiler
+our pipeline, suggesting that there may be other effective ways to
+                                                                        backend, remained undiscovered until AFuzz found it. Third, AFuzz
+structure the agents and their interactions.
+                                                                        assumes a general user setting and introduces several optimizations.
+Challenge 2: Repeated scenarios. When AFuzz processes mul-
+                                                                        Model providers (e.g., Google) face fewer constraints on token usage.
+tiple seeds, it often produces repeated scenarios. This happens
+                                                                        In contrast, general users must manage costs, making AFuzz’s
+because AFuzz analyzes each seed independently, leading to over-
+                                                                        approach more meaningful for them.
+lapping hypotheses if the seeds are semantically similar. This is
+especially common when multiple seeds report different symptoms
+of the same root cause (e.g., fuzzer crashes that hit the same code     2.5    Target Selection
+path) or are variants of each other. One naïve way to resolve this is   We target the V8 JavaScript engine, a widely used open-source
+to append previous hypotheses to the prompt, but this increases         project with a well-maintained issue tracker [41]. As discussed
+the cost of analysis and fills the context window.                      above, V8’s multi-tier execution pipeline creates cross-component
+   To mitigate this, AFuzz tracks scenario coverage, a record of        complexity where logic bugs can hide in interactions between very
+all previously explored location-hypothesis pairs. In detail, before    different implementations. V8 is also one of the most heavily fuzzed
+exploring a new hypothesis, AFuzz checks whether a similar hy-          codebases in the world: Google’s ClusterFuzz [42] infrastructure
+pothesis has already been investigated at that location. If so, AFuzz   continuously fuzzes it, and the V8 team integrates and maintains
+skips the redundant investigation and instead uses a summary of         both conventional (e.g., libFuzzer [65]) and state-of-the-art fuzzers
+prior findings to refine or devise new hypotheses. By doing so,         (e.g., Fuzzilli [45] and DUMPLING [80]). Any bug that survives
+AFuzz can avoid redundant investigations and save LLM budget.           this process is one that conventional fuzzing alone rarely finds. To
+Challenge 3: Seed scheduling. Given a large corpus of reference         confirm this, we ran Fuzzilli [45] for 72 hours and it found no bugs
+bugs, AFuzz must decide which seeds to process and in what order        while achieving 17.85% code coverage. This makes V8 a good target
+to maximize bug discovery within a limited budget. Naïve strategies,    for showing the effectiveness of agentic fuzzing in finding logic
+such as processing seeds chronologically or randomly, risk concen-      bugs that are missed by conventional fuzzing. Although we use V8
+trating effort on similar seeds, limiting the diversity of discovered   as our primary target, AFuzz can generalize to other targets as we
+bugs. Notably, many bugs with similar root causes are clustered         show in other JavaScript engines (§5.7) and applications (§5.8).
+Agentic Fuzzing: Opportunities and Challenges
+
+
+
+
+           Seed Corpus                                     Seed Scheduler                                   Scenario                    Vulnerability Reports
+                                                                                                            Coverage
+          Bug #1 Integer
+      Truncation in Maglev ...                  Pre Analysis            Select Next Seed               Location    Hypothesis
+                                                                                                                                              Confirmed
+                                              Seed analysis              Diversity-driven
+                                            before embedding               DPP-MAP                   operations.h: 16-bit trunc                Duplicate
+      Bug #2 Type Confusion
+                                                                                                        1026          in ...
+         in Turboshaft ...
+                                                                                                        ast.cc:   Element type              Out of Scope
+                                                                                                         889       transition ...
+                 ...
+                                                Embedding                 Seed Queue                                                        False Positive
+                                                                                                        Coverage Agent
+                                              Map seed to
+      Bug #N Sandbox Escape:                                                                             Checks Duplicate
+          WebAssembly ...                   embedding space                                                                                    Rejected
+                                                                                                       Location & Hypothesis
+
+
+
+
+                                                                        LLM Agent Pipeline
+       1                                    2                                                  3                                    4
+                Analyzer                            Investigator              Coverage             Scenario Analyzer                        Validator
+                Root Cause                          Investigate &              Check                Verify Scenarios /                   Validate Results &
+            Extraction of Seeds                 Hypothesize Scenarios                              Generate PoC Code                       Write Report
+
+
+
+
+                                                     Figure 3: Overview of AFuzz, an Agentic Fuzzer
+
+
+3 Design                                                                              the bug, including the root cause, bug mechanism, impact, fix de-
+                                                                                      scription, affected files and functions, vulnerable code snippets,
+3.1 Overview
+                                                                                      and patch code. One notable output is the bug mechanism, which
+Figure 3 shows the overall architecture of AFuzz. AFuzz consists                      describes the step-by-step process of how the vulnerability works.
+of three main components: 1 the seed scheduler, 2 the LLM agent                       This mechanism guides the agents in later stages to search for
+pipeline, and 3 the scenario coverage tracker. Given a corpus of                      similar instances of the bug.
+reference bugs as seeds, AFuzz works as follows. Initially, the seed                  Stage 2: Investigator. Investigator takes the analysis report from
+scheduler (§3.3) schedules the seeds by iteratively selecting a seed                  Analyzer and searches the target codebase for locations where the
+that maximizes the diversity of explored bugs. Each seed is then pro-                 same or similar assumption violations might exist. Guided by the
+cessed by the four-stage LLM agent pipeline (§3.2), which searches                    bug mechanism, Investigator reads source files, traces code paths,
+for vulnerabilities in the target codebase that share similar root                    and identifies locations that share the same underlying pattern as
+causes with the reference bug. Throughout this process, the sce-                      the reference bug. Specifically, it looks for direct pattern matches,
+nario coverage tracker records which (location, hypothesis) pairs                     subclasses or implementations of the same vulnerable interfaces,
+have been explored, allowing the pipeline to skip redundant inves-                    related subsystems with similar logic, and cross-component inter-
+tigations across different seeds.                                                     action boundaries. When Investigator finds a suspicious location,
+                                                                                      it formulates a vulnerability hypothesis describing the broken as-
+                                                                                      sumption or missing validation and submits it as a scenario for the
+3.2     LLM Agent Pipeline                                                            next stage. Each scenario includes the affected source locations, a
+The LLM agent pipeline consists of four specialized agents that                       potential trigger path from JavaScript to the vulnerable code, and
+execute sequentially: 1 Analyzer, 2 Investigator, 3 Scenario                          advisory notes that help Scenario Analyzer navigate defensive
+Analyzer, and 4 Validator. Each agent feeds its results to the                        checks or target specific optimization states. Investigator does
+next stage, progressively deepening the investigation from under-                     not stop at the first scenario; it keeps exploring the codebase for
+standing the reference bug to validating new vulnerabilities. The                     multiple independent scenarios before completing its investigation.
+agents operate on the target codebase, reading source files, hypothe-                 Stage 3: Scenario Analyzer. Scenario Analyzer receives a sce-
+sizing scenarios, and executing test code to validate those scenarios.                nario from Investigator and verifies whether the hypothesis in the
+We describe each stage in detail below. We also explain an example                    scenario is valid by producing a Proof-of-Concept (PoC) that demon-
+of how the pipeline discovers a bug in Appendix C.                                    strates the vulnerability. It first reads the scenario’s code locations
+Stage 1: Analyzer. Analyzer takes a reference bug as input and                        in the target codebase, traces the execution path from JavaScript to
+produces a comprehensive analysis report. Given a reference bug                       the suspected vulnerable code, and determines what conditions are
+as an issue tracker URL or a commit hash, Analyzer fetches re-                        needed to reach it. Using the examined trigger path and advisory
+lated artifacts such as the bug report, patches, code reviews, and                    notes from Investigator as a starting point, Scenario Analyzer
+PoC code. Then, it examines the relevant source code in the target                    writes an initial batch of test code. It then executes the test code on
+codebase to understand the vulnerability. As a result, Analyzer                       the target engine, checking if the execution produces observable
+produces a report containing comprehensive information about                          evidence of a vulnerability such as crashes, debug assertion failures,
+                                                                                                                                                        Junyoung Park and Insu Yun
+
+
+
+                         Scenario                                        Scenario Coverage
+                                                                                                           Algorithm 1 Seed scheduling via Fast Greedy DPP-MAP [29].
+ Title Turbolev exception handler Phi uint16_t overflow          Location             Hypothesis           Require: Seed corpus C, embedding model 𝜙
+ Location turbolev-graph-builder.cc:876,                                         Turboshaft Operation
+ operations.h:1021, ...                                       operations.h:                                    // Pre-analysis
+                                                                                   base class stores
+                                                                  1021
+ Hypothesis When Turbolev converts a Maglev                                        input_count as ...
+                                                                                                            1: for each seed 𝑠 ∈ C do
+ exception handler block ... Turboshaft Operation                                Turboshaft Operation
+                                                             turboshaft-graph-
+ class stores input_count as ...
+                                                             interface.cc:6508
+                                                                                  base class stores         2:      𝑡𝑠 ← PreAnalyze(𝑠)           ⊲ Pre-analyze seed (Analyzer)
+ Potential Trigger ...                                                             input_count as ...
+ Advice Function needs many throwing bytecodes ...                     ...                ...
+                                                                                                            3:      v𝑠 ← 𝜙 (𝑡𝑠 )/∥𝜙 (𝑡𝑠 )∥             ⊲ Normalized embedding
+                                                                                                               // Iterative scheduling
+                                                                                        Accept              4: P ← ∅                                 ⊲ Already-processed seeds
+                                    Does not overlap
+                                                                               Send to Scenario Analyzer
+                                                                               Save to Scenario Coverage    5: while C \ P ≠ ∅ do
+            Stage 1.
+                                                     Stage 2.
+         Spatial Overlap                        Hypothesis Overlap           Does not overlap
+                                                                                                            6:      𝑠 ∗ ← FastGreedyDPP({v𝑠 }𝑠 ∈ C\P , {v𝑠 }𝑠 ∈ P )      ⊲ [29]
+        Checks Duplicate
+           Locations            Overlaps          Check Duplicate
+                                                   Hypotheses                 Overlaps
+                                                                                                            7:      Dispatch 𝑠 ∗ to the agent pipeline
+           Same file,
+            ±20 lines                                                                                       8:      P ← P ∪ {𝑠 ∗ }
+                                                Coverage Agent                           Reject
+                                                 Checks Duplicate                Return Tool Output with
+               operations.h:1021               Location & Hypothesis             Overlapping Hypotheses
+                   overlaps
+
+                                      REDUNDANT: Both hypotheses identify the same
+                                                                                                           different seeds. Figure 4 depicts how it works. Each time Investiga-
+                                        buggy code: the uint16_t input_count field ...                     tor submits a new scenario, the coverage tracker checks whether
+                                                                                                           a similar scenario has already been explored at overlapping code
+Figure 4: Scenario coverage to avoid redundant investigations.                                             locations before dispatching it to Scenario Analyzer.
+The example scenario (§2.1) follows the blue arrow (Stage 1                                                    The check proceeds in two stages. First, it queries the coverage
+→ Stage 2 → Reject), rejected due to spatial and hypothesis                                                database for existing entries matching the source file locations of
+overlap with a previously investigated scenario.                                                           the scenario. Agents often investigate the same code region with
+                                                                                                           slightly different line numbers, especially when a statement spans
+                                                                                                           multiple lines. To account for this, the check considers two scenar-
+or unexpected values that violate the JavaScript specification. If the                                     ios to be spatially overlapping if they target the same source file
+initial attempt does not produce observable evidence, Scenario An-                                         and their line numbers fall within a tolerance window (±20 lines). If
+alyzer iteratively refines its approach—trying different JavaScript                                        no overlapping entry exists, the scenario is approved immediately.
+constructs, optimization states (interpreted, baseline-compiled, or                                        If overlapping entries are found, an LLM agent using a lightweight
+optimized code), object shapes, and edge cases. Finally, Scenario                                          model (e.g., Haiku) compares the proposed hypothesis against ex-
+Analyzer examines the execution results and reports either suc-                                            isting hypotheses to determine whether they overlap semantically.
+cess, with the final PoC code and execution results, or failure, with                                      Redundant scenarios are rejected; distinct ones are approved. Ap-
+a description of the approaches tried and why they did not work.                                           proved scenarios are recorded in the coverage database so that
+Scenarios with a successful PoC are forwarded to Validator for                                             future submissions can be checked against them.
+final verification.                                                                                        Example. In the example of Figure 4, the proposed scenario tries
+Stage 4: Validator. Validator independently verifies each sce-                                             to achieve integer truncation using the exception handler of a dif-
+nario and produces a vulnerability report for confirmed vulnera-                                           ferent compiler component, Turbolev. It flows through Stage 1 →
+bilities. For each scenario with a successful PoC, Validator re-                                           Stage 2 → Reject (the blue arrow in the figure), and is rejected as
+executes the PoC, checks the validity of the evidence, and de-                                             redundant with the existing scenario of our motivating example
+termines whether to accept or reject the scenario. It also checks                                          (§2.1). At Stage 1, the two scenarios are considered spatially over-
+whether the evidence conforms to the threat model (see §4). For                                            lapping because they both target operations.h 1021. At Stage 2, the
+example, it warns if the execution of the PoC uses any security-                                           proposed scenario is considered semantically redundant with the
+disabling flags (e.g., –no-wasm-bounds-checks) or debug-only native                                        existing scenario. Although they use different attack vectors, they
+functions (e.g., %AbortJS). For confirmed vulnerabilities, Validator                                       share the same root cause: both hypothesize that the Turboshaft
+produces a vulnerability report containing summary, technical de-                                          Operation class stores input_count as uint16_t, which can lead to
+tails, trigger conditions, reproduction steps with outputs from both                                       an integer truncation vulnerability. Since any scenario that exploits
+release and debug builds, and a suggested patch. Humans can then                                           this root cause would yield the same bug regardless of the attack
+independently validate the report and decide whether it is worth                                           vector, the proposed scenario is rejected and discarded.
+reporting to the vendor.
+                                                                                                           3.3.2 Seed scheduling. To schedule seeds from a large corpus of
+3.3        Exploration Strategy                                                                            reference bugs, AFuzz prioritizes diversity by selecting seeds that
+                                                                                                           cover distinct root causes and bug mechanisms before similar ones.
+As discussed in Challenges 2 and 3 of §2.3, scaling agentic fuzzing to
+                                                                                                           To achieve this, AFuzz uses Determinantal Point Process Maximum
+a large number of seeds (i.e., reference bugs) raises two challenges:
+                                                                                                           a Posteriori inference (DPP-MAP) [29, 49, 67], which was previously
+avoiding investigation of redundant scenarios and scheduling seeds.
+                                                                                                           applied in recommendation systems [29] and machine learning [49]
+We describe our approaches to each below.
+                                                                                                           for selecting diverse subsets of items.
+3.3.1 Scenario coverage. Scenario coverage tracks all previously                                              The scheduling works in three steps as shown in Algorithm 1.
+explored scenarios (i.e., location-hypothesis pairs) across the en-                                        First, Analyzer pre-analyzes all seeds in the corpus to extract
+tire fuzzing campaign, preventing redundant investigations across                                          their root causes and bug mechanisms. Although pre-analyzing
+Agentic Fuzzing: Opportunities and Challenges
+
+
+all seeds in advance is costly, this is a one-time cost that can be        the execution result so the agent can self-correct. The flag block-
+amortized across multiple runs, and the results can be directly            list includes –expose-memory-corruption-api, –no-sandbox, and any
+reused as Analyzer results during actual runs. Second, the pre-            flag whose name contains “experimental,” since experimental fea-
+analysis results are mapped to normalized vector embeddings using          tures are not shipped in production. The native allowlist con-
+a text embedding model (e.g., OpenAI’s text-embedding-3-large),            servatively permits only 15 optimization-related functions (e.g.,
+so that seeds with similar root causes and mechanisms can be               %OptimizeFunctionOnNextCall); all others are rejected. Beyond these
+mapped close together in the embedding space. Finally, AFuzz               validations, the tool inspects execution results for common false
+uses the Fast Greedy DPP-MAP algorithm of Chen et al. [29] to              positives. A CHECK failure (release-build assertion) means V8 inten-
+greedily select the seed most distinct from those already processed        tionally detected the issue and terminated, which is usually not a
+in the embedding space. This algorithm selects the next item that          bug; the tool warns the agent to look for a DCHECK failure (debug-
+maximizes the diversity of the selected subset at each step, measured      only, compiled out in release) or a crash instead. For sandbox bugs,
+by the determinant of the kernel matrix of the selected items.             the tool checks if the output contains “V8 sandbox violation de-
+                                                                           tected”; we ignore other sandbox-related messages and warn the
+                                                                           agent that they indicate the sandbox is working correctly rather
+                                                                           than being bypassed (e.g., “Safely terminating process”).
+4    Implementation                                                        Mitigating commit history bias. We observed that agents tend
+We implemented AFuzz as a web application with a total of 28.0k            to pipe git log through head to keep context short, which means
+lines of code, including 13.0k lines of Python for the backend, 3.4k       they only see the most recent commits and miss older ones that
+lines of Python and 720 lines of prompt templates for the agent            may be relevant. To mitigate this, we wrapped git log with a script
+service, and 10.9k lines of TypeScript for the frontend. The agents        that randomly shuffles the output entries before returning them. To
+are built on the Claude Agent SDK [16], which provides an interface        notify agents of this behavior, the wrapper prepends a note to the
+to Claude Code [17]. The backend is responsible for agent task             output indicating that the commit history is not in chronological
+orchestration, database management, and API handling while the             order. If agents need to see the commit history in its original order,
+frontend provides a user interface for monitoring and interacting          they can pass a flag (i.e., –no-shuffle).
+with running agents. We designed the backend to spawn agents               Collecting and processing seeds. We implemented a seed col-
+as individual Docker containers, allowing for scalable and isolated        lector that fetches V8 security bugs from the Chromium issue
+execution. Each agent container has access to its own target source        tracker [41]. We collected 3,146 seeds by filtering for vulnerabili-
+code and prebuilt binaries, enabling it to perform dynamic analysis        ties in V8 while excluding duplicate, intended-behavior, infeasible,
+and PoC execution as needed.                                               obsolete, and non-reproducible reports. Each seed is represented
+Time budget and soft timeout. To prevent agents from running               by its issue URL, which Analyzer fetches at runtime to retrieve
+too long and exhausting resources, we implemented a soft timeout           its contents. To aid Analyzer, we also implemented a tool that
+mechanism. Specifically, we observed that agents occasionally fall         extracts the contents of a bug report from its URL, including the
+into a compaction death spiral [26, 74]. In this state, agents loop over   discussion, patches, and PoC code if available. We needed the tool
+the same tasks without progress as long conversations lose context         because the issue tracker dynamically loads its contents, which the
+during compaction. To mitigate this, AFuzz injects a warning into          built-in WebFetch tool of the Claude Agent SDK [16] cannot fully
+the agent’s conversation at 50%, 80%, and 90% of its soft time budget,     retrieve. For seed scheduling, we embedded the pre-analysis text of
+telling the agent how much time remains and prompting it to wrap           each seed using OpenAI’s text-embedding-3-large model and ran
+up. After the soft timeout, additional warnings fire every 5 minutes       DPP-MAP over these embeddings as described in §3.3.
+until the hard timeout kills the process. AFuzz currently sets the
+soft timeout to 6 hours and the hard timeout to 12 hours, but these
+values can be adjusted when needed.                                        5   Evaluation
+PoC execution and threat model warning. AFuzz targets bugs                 Research questions. In this section, we answer the research
+reachable by untrusted JavaScript, so all PoC code must trigger the        questions below.
+vulnerability without security-disabling flags or debug-only native
+functions. Agents execute PoC code through a dedicated tool that
+runs it against prebuilt d8 binaries (the V8 developer shell). We pre-     • RQ1: Can AFuzz find new bugs in V8? (§5.3)
+compiled both release and debug builds for nine architectures: x64,        • RQ2: How do pipeline design choices affect bug-finding effec-
+arm64, ia32, arm, loong64, mips64el, ppc64, s390x, and riscv64. The          tiveness? (§5.4)
+flags –allow-natives-syntax and –expose-gc are always included             • RQ3: Does DPP-MAP seed scheduling improve exploration di-
+so that agents can use optimization-triggering natives and explicit          versity over simpler strategies? (§5.5)
+garbage collection. We also apply a 300-second timeout to each             • RQ4: How much do Analyzer stage and the reference bugs
+execution to prevent hanging.                                                contribute to bug discovery? (§5.6)
+   While we instruct agents to use PoC code that works without             • RQ5: Can seeds from one engine be used to find bugs in other
+security-disabling flags or debug-only natives, our execution tool           JavaScript engines? (§5.7)
+also warns about violations programmatically. Our execution tool
+implements this using a blocklist of flags and an allowlist of native      We also include our mini-experiment results with open-source
+functions. If a violation is found, the tool appends a warning to          models and other software targets in §5.8.
+                                                                                                                                           Junyoung Park and Insu Yun
+
+
+                 Table 1: New bugs discovered by AFuzz. Ref. ID refers to the seed that led to the discovery of the bug.
+
+      #     ID           Detail                                                                                             Ref. ID      Status
+      1      480788626 Type Confusion in MegaDOM IC                                                                        450328966 Fixed
+      2†∗ 481074858 Integer Truncation in Turboshaft PhiOp input_count via WASM br_table                                   444048019 Fixed
+      3      484300742 TOCTOU Race During [REDACTED]                                                                       427600180 Duplicate
+      4†     484789568 Missing Guard in [REDACTED]                                                                         458090625 Fixed
+      5      485281841 Sandbox Escape via [REDACTED]                                                                       458679941 Duplicate
+      6⋄     496807872 Signed Integer Overflow in [REDACTED]                                                               444048019 Fixed
+      7      499659070 JIT Miscompilation via [REDACTED]                                                                   40088942     Fixed
+      8‡     502030575 Incorrect [REDACTED]                                                                                40055069     Fixed
+      9      482083327 Signed Integer Overflow in parseInt via InternalStringToIntDouble                                   420697404 Reported
+      10     482199449 DCHECK Failure in Scope::ForceDynamicLookup via PreParser info_id_ Reset in REPL Mode               418478214 Fixed
+      11     489494031 Use Count Corruption in Maglev Phi Representation Selector via HoleyFloat64 ToBoolean Path          428226995 Duplicate
+      12     491881374 JIT Miscompilation in Turboshaft Loop Unrolling via Non-Commutative Sub                             436305802 Fixed
+      13     498010834 Incomplete Constant Pool State Cleanup in ARM Assembler via Maglev Codegen Abort                    40057489     Fixed
+      14     498904291 DCHECK Mismatch in DependOnContextCell via Function Context Cells                                   412756062 Fixed
+      15     498904295 DCHECK Failure in Label Destructor via Regexp Compilation Error Propagation                         452681948 Fixed
+      16     498904299 Miscompilation in Turboshaft via Div-to-Mul with Denormal Reciprocal                                429761781 Fixed
+      17     499018901 Missing [REDACTED] During Deopt.                                                                    424627229 Fixed
+      18     499150024 OOB Vector Access in DataDrop During Streaming WASM Compilation                                     40094133     Fixed
+      19     499155349 Integer Overflow in [REDACTED]                                                                      369685641 Fixed
+      20     499188872 Missing Prototype Chain Dependency for Module Exports via PropertyAccessInfo::ModuleExport          40057622     Fixed
+      21     499206651 Spec Violation in Parser via Missing Escape Check for ’using’ Contextual Keyword                    40091892     Reported
+      22     499254994 Multiple Disposal of Resources in C-style For Loops with using Declarations                         385170388 Fixed
+      23     499254996 Missing Immutability Check for Exported using/await using Module Variables                          385170388 Fixed
+      24     499323105 Spec Violation in Parser via Missing PrecededBy Member Checks                                       40092882     Fixed
+      25     499520013 Missing StackOverflowCheck in JSBuiltinsConstructStubHelper on RISCV/LOONG64/MIPS64                 40094550     Fixed
+      26     499659062 Signed/Unsigned Confusion in Fast API kUint64 Argument Lowering via CheckedSigned64AsWord64 40064983             Fixed
+      27     499672315 Incorrect Private Name Resolution in Heritage Expression via Skip Bit Loss in FinalizeBlockScope    40093214     Fixed
+      28     499834467 Incorrect Deoptimization of undefined to NaN via Missing Check in Constant Encoding                 394120836 Reported
+      29     500224598 Incorrect Math.round in Maglev on RISCV64/LOONG64 via Flawed "add 0.5 then floor" Algorithm         40063144     Fixed
+      30     500507435 Incorrect ToUint8Clamped Codegen in RISCV64 Maglev Backend                                          380604249 Fixed
+      31     500507436 Incorrect Codegen in RISCV64 Maglev CompareIntPtrAndBranch Uses Uninitialized Scratch Register      380604249 Reported
+      32     500536164 Spec Violation in IterableForEach — Missing Prototype Check Bypasses Iterator Protocol              385386138 Fixed
+      33     502035871 Register Clobber in RISCV UnalignedStoreHelper via Hardcoded t4 Scratch Register                    380604249 Reported
+      34     502083475 Spec Violation in Float16Array Search Methods via Incorrect Range Check                             394120836 Fixed
+      35§ 482083331 Race Condition in WASM Stack Switching via Profiler Signal Handler                                     424905890 Confirmed
+      36§ 482088900 Type Confusion in [REDACTED]                                                                           420464880 Confirmed
+      37§ 499027764 Incorrect F16x8 Comparison in TurboFan/Liftoff via Incorrect vpackssdw Usage                           369685641 Reported
+      38§ 499103615 ImmutableArrayBuffer Write Protection Bypass in WASM Turboshaft DataView Setter                        384773802 Fixed
+      39§ 499150035 Register Allocation Mismatch in F16x8ReplaceLane Instruction Selector on x64                           40052865     Reported
+      40§ 499155348 SIGSEGV/DCHECK Failure in SetOrCopyDataProperties via Object.assign on Shared-Space Objects            40062686     Fixed
+      ∗ Assigned CVE-2026-2649. † Each awarded $11,000 bounty. ‡ Awarded $8,000 bounty and CVE-2026-7902. ⋄ Awarded $5,000 bounty. § Requires experimental flag.
+
+
+5.1       Experimental Setup                                                              For RQ2–RQ5, we pre-analyzed 669 seeds using the Claude Opus
+Environments. We conducted all our experiments on servers run-                         4.6 model with high effort, which cost $1,068 in API calls ($1.60 per
+ning Ubuntu 24.04.3, each equipped with two Intel Xeon Gold 6248R                      seed on average) and took 5,526 minutes (8.3 minutes per seed on av-
+CPUs (48 cores total) and 256 GB of RAM. As described in §4, agents                    erage). We then embedded the pre-analysis outputs using OpenAI’s
+run in isolated Docker containers limited to 6 hours of soft time and                  text-embedding-3-large model at negligible cost (under $0.0001)
+12 hours of hard time. We limited each agent to 32 GB of RAM to pre-                   and ran DPP-MAP over the resulting embeddings. Note that pre-
+vent resource exhaustion. For LLM API calls, we used Claude Opus                       analysis is a one-time cost per seed: once a seed is pre-analyzed and
+4.6 via the Claude Agent SDK [16], which provides an interface                         embedded, its embedding can be reused across multiple scheduling
+to Claude Code [17]. We used OpenAI’s text-embedding-3-large                           rounds without additional API calls.
+model for text embeddings in seed scheduling. We evaluated on
+the V8 JavaScript engine (§2.5), with additional experiments on
+SpiderMonkey and JavaScriptCore (§5.7).
+                                                                                       5.2     Threat to Validity
+Seed corpus and pre-analysis. We collected a total of 3,146 seeds                      Budget constraints. Our budget limited the accuracy, breadth,
+from the Chromium issue tracker (see §4). For RQ1 (§5.3), we used                      and depth of our evaluation. We had to restrict our evaluation to
+the full corpus of 3,146 seeds to maximize the chance of finding new                   the 669 seeds and the Claude Opus 4.6 model, and capped most
+bugs in V8, though we managed to run about 750 of them within                          experiments at $1,000 or 100 seeds. Also, because LLM outputs are
+our budget. For RQ2–RQ5, we could not afford the pre-analysis cost                     non-deterministic, a larger number of repetitions would be needed
+of seed scheduling, which requires running Analyzer on each seed                       for statistical confidence, but our budget did not allow this. A larger
+to extract its root cause and bug mechanism (see §3.3). Therefore,                     budget would also have allowed us to evaluate on more seeds and
+we limited the scope of our evaluation to 669 seeds selected from                      compare across different models.
+the main components of V8: parser, interpreter, and compilers.                         Tool and model updates. Agent behavior can change due to
+                                                                                       updates to the tools and models. We observed that updates to Claude
+Agentic Fuzzing: Opportunities and Challenges
+
+
+Table 2: Pipeline design choice comparison. # is the number                            Table 3: Bug reproducibility across pipeline design choices.
+of seeds processed. TP and FP are true and false positives.                            pass@5 counts how many of the 21 bugs were rediscovered at
+                                                                                       least once across five runs; Total counts the total rediscoveries
+                                                   Cost ($)           Time (min)       across all runs. For per-bug detail, see Table 7 of Appendix.
+ Effort      Pipeline          #    TP   FP      Total    Avg.        Total    Avg.
+ (a) Fixed budget (∼$1,000)                                                                                 High              Medium              Low
+             Four-stage       39     3    1      986.3    25.3       5,081.3   130.3     Pipeline      pass@5      Total   pass@5    Total    pass@5    Total
+ High        Three-stage      62     3    2      994.0    16.0       5,121.9    82.6
+             One-stage        82     8    0      993.7    12.1       4,294.5    52.4     Four-stage      15/21   32/105       9/21   19/105     4/21    12/105
+                                                                                         Three-stage      8/21   15/105      11/21   19/105     5/21     8/105
+             Four-stage        53    2    2      995.5    18.8       4,269.1    80.5     One-stage       13/21   25/105       9/21   17/105     6/21     7/105
+ Medium      Three-stage       92    4    0      993.6    10.8       4,122.8    44.8
+             One-stage        110    5    1      999.4     9.1       3,880.1    35.3
+             Four-stage       127    4    0      996.3        7.8    4,359.1    34.3
+ Low         Three-stage      237    3    1      997.5        4.2    4,579.5    19.3   5.4    RQ2. Pipeline Design Choices
+             One-stage        300    2    2      998.5        3.3    3,654.9    12.2
+                                                                                       Experiment setup. Table 2 compares three pipeline designs us-
+ (b) Fixed seeds (100 each)                                                            ing Claude Opus 4.6 at three effort levels (high, medium, and
+              Four-stage      100    9    1     2,845.5   28.5      13,483.5   134.8
+ High         Three-stage     100    3    2     1,583.0   15.8       7,597.2    76.0   low), which control the model’s reasoning depth, with our DPP-
+              One-stage       100    8    1     1,188.6   11.9       5,070.7    50.7   MAP scheduling. The four-stage pipeline is the full AFuzz pipeline
+             Four-stage       100    3    3     1,909.6   19.1       8,484.6    84.8   (Analyzer → Investigator → Scenario Analyzer → Valida-
+ Medium      Three-stage      100    4    0     1,090.5   10.9       4,474.7    44.7   tor) as described in §3.2. The three-stage pipeline (Analyzer →
+             One-stage        100    4    1       917.9    9.2       3,507.3    35.1
+                                                                                       Bug Finder → Validator) merges Investigator and Scenario
+             Four-stage       100    4    0      766.2        7.7    3,305.0    33.0   Analyzer into a single Bug Finder agent that both explores the
+ Low         Three-stage      100    3    0      409.0        4.1    1,826.0    18.3
+             One-stage        100    0    0      286.3        2.9    1,045.9    10.5   codebase and generates PoCs. The one-stage pipeline runs a single
+                                                                                       Bug Finder agent that performs analysis, investigation, PoC gener-
+                                                                                       ation, and validation within one execution. For fair comparison, we
+                                                                                       included all detailed prompts and instructions of AFuzz for Bug
+                                                                                       Finder agent in the three- and one-stage designs, except for the
+Code (e.g., the addition of general-purpose subagents [18]) can
+                                                                                       explicit stage descriptions. This way, they can have similar informa-
+alter our agents’ behavior. Therefore, for evaluation, we pinned the
+                                                                                       tion and guidance to the four-stage pipeline. However, because Bug
+versions of Claude Agent SDK [16] and Claude Code [17] to v0.1.49
+                                                                                       Finder agent does not explicitly formulate scenarios, the scenario
+and v2.1.77, respectively, which were the latest versions available
+                                                                                       coverage (§3.3) is not used in the three- and one-stage designs.
+at the time. However, our results are still susceptible to silent model
+                                                                                          We evaluated each design in two ways. First, we ran each design
+changes that may have occurred during our evaluation, as some
+                                                                                       once under two resource settings (Table 2): (a) a fixed API budget
+public reports claim that model behavior changed [60].
+                                                                                       of $1,000, and (b) a fixed count of 100 seeds. Second, because LLM-
+                                                                                       based agents are non-deterministic, we additionally measured the
+5.3       RQ1. Discovered New Bugs by AFuzz                                            reproducibility of discovered bugs across pipeline designs and effort
+Over a three-month span from 2026-02 to 2026-04, we ran AFuzz                          levels. We took the seeds that produced bug discoveries in the first
+for about one month on about 750 of the 3,146 seeds collected                          experiment (18 mapped to Table 1; 3 were independently fixed by
+from the Chromium issue tracker [41]. During this period, AFuzz                        V8 developers before we reported them), reran them five times each,
+discovered 40 bugs as listed in Table 1, including three duplicates.                   and counted how often each bug was rediscovered (Table 3; see
+So far, 28 have been fixed, two confirmed, and the remaining seven                     Table 7 of Appendix for detail).
+non-duplicate bugs are still under review. Four of the bugs received                   Results. Our results show that no single pipeline design dominates
+VRP bounties: bug #2 ($11,000), bug #4 ($11,000), bug #8 ($8,000),                     across both resource settings. The depth of the pipeline trades off
+and bug #6 ($5,000), totaling $35,000. Bug #2 and #8 were each                         against the number of seeds a fixed budget can process. Under a
+assigned CVE-2026-2649 and CVE-2026-7902 respectively. Although                        fixed seed count of 100, the four-stage pipeline at high effort found
+we instructed agents to avoid using experimental flags as explained                    the most bugs (9, vs. 8 for one-stage and 3 for three-stage) and
+in §4, they occasionally ignored our instructions during exploration                   achieved the highest rediscovery rates across five runs (15 of 21 at
+and found six bugs that require an experimental flag to trigger. We                    pass@5, 32 total discoveries out of 105). However, it spent $2,846,
+still reported these bugs as they were valid and should be fixed                       roughly 2.4× the one-stage pipeline’s $1,189. Under a fixed budget
+before the features are enabled by default. These results show that                    of $1,000, this cost difference reverses the ranking: the one-stage
+AFuzz can find new bugs in V8, including security vulnerabilities                      pipeline at high effort found 8 bugs from 82 seeds while the four-
+that were not previously reported.                                                     stage pipeline found only 3 from 39 seeds. We observed that the
+   AFuzz reported bugs in various V8 subsystems, including the                         one-stage agent frequently invokes auxiliaries like subagents [18]
+optimizing compilers (e.g., Maglev and TurboFan), the parser, the                      and todo list management [20], which let a single agent decompose
+interpreter, the WASM pipeline, and architecture-specific backends.                    the task and manage its workflow without explicit stage separation.
+The bugs also cover various types of issues, from specification                        In short, the best pipeline design depends on whether the bottleneck
+violations to exploitable type confusions. We provide detailed case                    is seeds (prefer four-stage, more bugs per seed) or dollars (prefer
+studies of two interesting bugs in Appendix D.                                         one-stage, more bugs per dollar).
+                                                                                                                                      Junyoung Park and Insu Yun
+
+
+Table 4: Evaluation of seed scheduling strategies. # is the                     Table 5: Results without Analyzer stage and reference bugs.
+number of seeds in each run. Cov. measures the fraction of                      # is the number of repeated iterations (without reference
+scenarios that pass the coverage redundancy check.                              bugs) or seeds (AFuzz).
+
+                                               Cost ($)        Time (min)                                                      Cost ($)          Time (min)
+  Strategy        #     TP     FP   Cov.     Total    Avg.     Total    Avg.      Effort         #    TP    FP     Cov.      Total    Avg.      Total      Avg.
+  (a) Fixed budget (∼$1,000)                                                      Without analyzer and reference bugs
+  DPP-MAP        53      2      2   99.0%    995.5    18.8    4,269.1    80.5     High∗         2      1      2 76.4%       1,006.1   503.1    4,398.3   2,199.2
+  Newest         44      1      1   83.2%    984.2    22.4    4,222.0    96.0     Medium∗      20      1      2 81.1%       1,103.7    55.2    4,718.6     235.9
+  Random         50      2      1   90.2%    973.8    19.5    4,456.4    89.1     Low          61      0      0 73.0%         992.5    16.3    4,290.7      70.3
+  (b) Fixed seeds (100 each)                                                      With analyzer and reference bugs (AFuzz)
+  DPP-MAP 100             3     3   94.4%   1,909.6   19.1    8,484.6    84.8     High          39      3      1 97.7%         986.3    25.3 5,081.3      130.3
+  Newest         100      2     2   80.0%   2,260.7   22.6   10,275.7   102.8     Medium        53      2      2 99.0%         995.5    18.8 4,269.1       80.5
+  Random         100      6     2   90.7%   1,936.4   19.4    9,242.5    92.4     Low          127      4      0 91.7%         996.3     7.8 4,359.1       34.3
+                                                                                  ∗ Includes one additional iteration that exceeded the $1,000 budget.
+
+
+
+5.5     RQ3. Seed Scheduling Strategies                                         fewer bugs at each effort level: 1, 1, and 0 bugs at high, medium, and
+Experiment setup. To evaluate the effectiveness of our DPP-MAP                  low effort, respectively, compared to 3, 2, and 4 bugs in AFuzz. With-
+seed scheduling strategy (§3.3), we compared it against two other               out reference bugs, Investigator had to survey the codebase for
+strategies: Newest-first and Random. Newest-first prioritizes seeds             general vulnerability hypotheses on its own each iteration, increas-
+based on their creation date, with newer seeds being processed                  ing per-iteration cost by 2.1–19.9×. In AFuzz, Analyzer extracts
+first. Random selects seeds randomly from the corpus without any                seed-specific root causes once and passes them to Investigator,
+specific ordering. We ran each strategy under the same two resource             which naturally spreads the search across different components
+settings as in §5.4: (a) a fixed API budget of $1,000, and (b) a fixed          and bug mechanisms. Without this, the agent fell back to broader
+count of 100 seeds. All runs used Claude Opus 4.6 with the medium               searches that produced more overlapping scenarios, dropping the
+effort level, which is the default.                                             scenario coverage check pass rate by 17.9–21.3%p (from 91.7–99.0%
+Results. Among the three strategies, DPP-MAP shows the high-                    down to 73.0–81.1%).
+est scenario approval rates (99.0% (a) for the fixed API budget
+and 94.4% (b) for the fixed seed count), compared to Newest-first               5.7    RQ5. Cross-Engine Fuzzing
+(83.2% (a) /80.0% (b) ) and Random (90.2% (a) /90.7% (b) ). The higher ap-      Experiment setup. To evaluate whether AFuzz can find bugs in
+proval rates of DPP-MAP indicate that its selected seeds produce                other JavaScript engines using the seeds collected from V8, we ran
+scenarios that overlap less with previously explored ones, con-                 AFuzz on SpiderMonkey and JavaScriptCore. We used the same
+firming that our diversity-based scheduling reduces redundant in-               four-stage pipeline with Claude Opus 4.6 and DPP-MAP scheduling.
+vestigations. This was also reflected in the average cost and time              We ran each engine under a fixed API budget of $1,000 and a fixed
+per seed: DPP-MAP is the most efficient with $18.8 (a) /$19.1 (b)               count of 100 seeds, following the same setup as in §5.4. However,
+and 80.5 (a) /84.8 (b) minutes, while the other two strategies cost             due to the budget and time constraints, we ran all experiments
+more ($22.4 (a) /$22.6 (b) and $19.5 (a) /$19.4 (b) ) and take longer           only at the high effort level to maximize per-seed bug discovery as
+(96.0 (a) /102.8 (b) and 89.1 (a) /92.4 (b) minutes). Unfortunately, even       shown in §5.4.
+though DPP-MAP showed better efficiency, it did not find more bugs              Results. Table 6 shows that reference bugs from one project can be
+than the other strategies in our experiments. We attribute this to the          used to find bugs in similar software. With 100 V8 seeds per engine,
+small absolute bug counts (one to six per strategy), which make the             AFuzz found five bugs (including one duplicate) in SpiderMonkey
+differences inconclusive. Due to the budget limit described in §5.2,            and 14 in JavaScriptCore. AFuzz extracted root causes from V8 bugs,
+we could not run more seeds or repeat runs to achieve statistical               found relevant code in the other engines, and hypothesized how
+confidence.                                                                     similar ideas could trigger bugs there. For example, seed 40057622
+                                                                                (CVE-2021-38001) [58] is a V8 bug where the property access cache
+5.6     RQ4. Effect of Reference Bugs                                           mistakes which object it should read a property from, during super
+Experiment setup. To measure how much reference bugs con-                       property access. From this seed, AFuzz found JSC bug #7 (Issue
+tribute to bug discovery, we disabled Analyzer stage and ran the                312681), where JavaScriptCore’s property access cache makes the
+remaining three stages. We instructed Investigator to explore                   same mistake in a different caching mechanism, reading a property
+the parser, interpreter, and compiler subsystems of V8 for bugs,                value from a stale object instead of the intended one.
+following the same scope as our seed corpus. We ran experiments
+with Claude Opus 4.6 at three effort levels (high, medium, and low)             5.8    Additional Experiments
+under a fixed API budget of $1,000. At the high and medium ef-                  Open Source Model. We ran mini-experiments with two open-
+forts, we included one additional iteration that exceeded the budget            source models, Gemma 4 [44] and GLM-5.1 [98], to test whether
+because excluding it would leave the budget significantly unused.               they can be used in place of commercial models in AFuzz. As a re-
+Results. Table 5 shows that Analyzer stage and reference bugs                   sult, we found that neither is yet competitive. Gemma 4 frequently
+contribute to bug discovery. Removing them resulted in discovering              produced malformed tool calls, causing the agent to fail before
+Agentic Fuzzing: Opportunities and Challenges
+
+
+Table 6: Bugs discovered by AFuzz in SpiderMonkey and JavaScriptCore. Ref. ID refers to the V8 seed that led to the discovery.
+
+               #   ID          Detail                                                                                                 Ref. ID     Status
+              SpiderMonkey
+               1 2032677       Packed Field Narrowing/Widening Bypass in Wasm GC Struct Scalar Replacement                            40090201    Duplicate
+               2 2032761       Missing canonicalizeValueZero in GenerateImportJitExit Externref Path                                  40090201    Reported
+               3 2032821       JSOp::ArgumentsLength returns wrong value for block-hoisted function arguments(){}                     40089200    Fixed
+               4 2032819       for (using x of iterable) in Generators — Disposal Skipped on Generator Close                          40092882    Reported
+               5 2032943       LOONG64 JIT [REDACTED]                                                                                 380604249   Fixed
+              JavaScriptCore
+               1 312632        SIGSEGV in FTL [REDACTED]                                                                              382547699   Reported
+               2 312664        Hole-to-NaN Conversion in DFG Object Allocation Sinking Phase                                          382547699   Fixed
+               3 312667        DFG [REDACTED]                                                                                         442086665   Reported
+               4 312669        DFG operationStringProtoFuncReplaceAllGeneric Skips Global Flag Check for RegExp                       442086665   Reported
+               5 312672        Array ToPrimitive Fast Path Ignores Object.prototype.valueOf Override                                  406871259   Reported
+               6 312675        Incorrect Scope Resolution for Sloppy Function Hoisting from eval() in Default Parameter Expressions   40089200    Reported
+               7 312681        Incorrect Property Read in Megamorphic Cache due to ownProperty Flag Confusion                         40057622    Fixed
+               8 312682        LLInt/BBQ JIT Discrepancy in WebAssembly div/rem Constant Folding                                      40055671    Fixed
+               9 312684        Unchecked [REDACTED]                                                                                   40064614    Reported
+              10 312685        Set Spread in DFG/FTL Missing Per-Instance Prototype Check                                             385386138   Reported
+              11 312687        Incorrect Math.round Result via floor(x+0.5) JIT Fast Path                                             416128193   Reported
+              12 312688        YARR Omits Named Group from indices.groups via Tracking-Slot Reset on Backtrack                        40093076    Reported
+              13 312689        BBQ JIT Constant Folding Signed Zero Mishandling in computeFloatingPointMinOrMax                       40070548    Fixed
+              14 312690        Input Position Corruption in Yarr Backreference Backward Matching via Surrogate Pair Rewind            40053946    Reported
+
+
+
+it could make meaningful progress; it found no bugs across 100                           without them, the agent falls back to broad, undirected searches
+seeds. GLM-5.1 handled tool call formatting correctly but produced                       that cost more and find fewer bugs. For well-studied open-source
+weaker hypotheses: it found only one bug after running 27 seeds,                         targets like V8, years of public bug reports with detailed root causes
+consuming approximately 700M tokens. These results suggest that                          and PoCs provide a rich seed corpus.
+open-source models are not yet suitable for agentic fuzzing at the                          However, not all projects provide such references. Closed-source
+level AFuzz requires, though we expect their performance to grad-                        software like Windows only publishes CVE entries with short de-
+ually improve in the future.                                                             scriptions (e.g., “Windows kernel buffer overflow”), which lack the
+Generalization to Other Software. Although our evaluation                                detail AFuzz can refer to. Newer or less-documented open-source
+mainly targets JavaScript engines, the core techniques of AFuzz are                      projects may simply have too few prior reports. In these settings,
+not specific to them. To test this, we ran AFuzz on two additional                       AFuzz cannot be directly applied. One possible direction is to boot-
+targets outside our main evaluation. On ANGLE, Google Chrome’s                           strap seeds from related projects, as our cross-engine experiments
+GPU graphics layer, AFuzz found one heap buffer overflow vulnera-                        (§5.7) suggest that root causes can transfer across implementations
+bility [70]. We also found several vulnerabilities by adapting AFuzz                     that share architectural similarities. Another direction is to let the
+to the Windows kernel, a closed-source target. Unfortunately, the                        agent build its own seed corpus from documentation, changelogs,
+Windows kernel lacks public bug details, so we had to manually                           or code review history, though this remains unexplored.
+craft seeds based on CVE entries. These results suggest that AFuzz                       Design uncertainty. Design choices for agentic fuzzing are hard
+can generalize beyond JavaScript engines and can even work on                            to justify definitively. Our pipeline comparison (§5.4) demonstrates
+closed-source software when suitable seeds are provided. As fu-                          this: the four-stage pipeline achieved the highest per-seed bug
+ture work, we plan to evaluate AFuzz on more targets and further                         discovery (9 bugs from 100 seeds at high effort), but the one-stage
+explore its generalization capabilities.                                                 pipeline is competitive (8 bugs with the same setup) because the
+                                                                                         agent self-organizes using subagents and task management on its
+6    Open Problems                                                                       own. This aligns with recent findings that single-agent systems can
+Despite its effectiveness, agentic fuzzing is still in its early stages.                 outperform multi-agent designs under equal token budgets [76].
+There are many open problems that need to be addressed.                                  We cannot confidently say which design is better—it depends on
+Cost effectiveness. Cost effectiveness remains a major challenge                         budget, model, and target. More broadly, AFuzz’s design is based on
+for agentic fuzzing. AFuzz is still expensive to run. As a result,                       empirical observations about current LLMs, not on well-understood
+we could evaluate only about 23.8% of the collected seeds from                           principles. This makes the design inherently heuristic and fragile
+the Chromium issue tracker [41] (see §5.3). This limitation also                         across model generations. For example, few-shot prompting [27]
+prevents us from evaluating AFuzz on more projects. While we                             improved performance in earlier non-reasoning models, but the
+attempted to mitigate this limitation by introducing techniques like                     effect is reduced in reasoning models [47]. A design choice that
+scenario coverage (see §3.3.1) and seed scheduling (see §3.3.2), we                      works today may not survive the next model update.
+believe that more research is needed to further improve the cost
+efficiency of agentic fuzzing while maintaining its effectiveness.
+No reference bug. AFuzz assumes that reference bugs are avail-                            7    Discussion
+able; however, this is not always the case. Reference bugs guide the                      Bug Explainability. Compared to traditional fuzzing or static
+agent toward specific components and root causes, as shown in §5.6:                       analysis tools, AFuzz provides an advantage in explaining bugs.
+                                                                                                                                 Junyoung Park and Insu Yun
+
+
+Traditional tools typically report a crash or a violation of an asser-   combines LLM-based mutation with fine-tuning LLM from cover-
+tion, which may not provide much insight into the root cause of          age feedback in JavaScript engine fuzzing. While these works focus
+the bug. In contrast, AFuzz generates detailed reports that include      on augmenting fuzzing, AFuzz uses deep agents to directly reason
+the steps taken to discover the bug, the reasoning behind each           about code semantics to find bugs.
+step, and the potential impact of the bug. This level of detail can      Variant analysis. Traditionally, variant analysis found bugs by
+help developers understand the underlying issue more quickly and         matching code patterns or signatures. CodeQL [39] and Joern [93]
+accurately, leading to faster and more effective fixes. For example,     provide a query language to define buggy code patterns and al-
+when we reported a duplicate bug (Issue 489494031), which was            low these patterns to be matched against codebases. VUDDY [57],
+found by the fuzzers of the V8 team a day before our report, a V8        TRACER [56], and others [37, 54, 55, 87, 88, 90, 92] detect vari-
+developer commented “Our fuzzers didn’t provide an explanation           ants by matching abstracted code signatures, code hashes, program
+of what’s happening, so thanks for that!”. This feedback suggests        slices, or traces. These approaches rely on syntactic or structural
+that AFuzz’s explanations can be valuable even for bugs that are         similarity, which limits their ability to find logic bug variants that
+already known, as they can help developers save time and effort in       share semantic patterns but differ in code structure.
+diagnosing and fixing the issue.                                         JavaScript engine fuzzing. Fuzzing has been the predominant
+Implications. Our results imply that current commercial LLMs,            technique used to find bugs in JavaScript engines. JavaScript en-
+with proper harnessing, can discover vulnerabilities that skilled        gine fuzzing spans 1 grammar-based fuzzing [21, 53, 81, 82], 2
+human auditors can find. This raises a concern: threat actors can        semantics-aware generation [48, 86], 3 language model-based gen-
+use the same techniques to find vulnerabilities that were previously     eration [36, 61], 4 mutation-based fuzzing [45, 51, 83, 84, 91], 5 dif-
+out of reach and exploit them for real attacks. At the same time,        ferential and oracle-based testing [22, 80, 85], 6 binding-layer and
+the defenders’ side is already under pressure. Bug report volume is      cross-language fuzzing [35, 64], and 7 conformance testing [71, 97].
+growing, and AI-generated slop reports (e.g., [23]) add noise that de-   While these fuzzers have shown their effectiveness in finding bugs,
+velopers must still triage. Developers increasingly turn to AI-based     they still struggle to find logic bugs that require semantic under-
+techniques such as Automatic Program Repair (APR) to keep up, but        standing.
+APR still requires human review to ensure correctness. The result is
+an asymmetry: attackers can scale discovery through automation,          9    Conclusion
+while defenders remain bottlenecked by human verification. This          We propose agentic fuzzing, which takes reference bugs as seeds and
+imbalance disproportionately affects low-resource entities that lack     uses deep agents to find similar bugs through code reasoning. We
+the budget to absorb the cost of either AI-assisted defense or the       designed an agentic fuzzer AFuzz with a four-stage agent pipeline,
+increased volume of vulnerabilities.                                     scenario coverage to avoid redundant investigations across seeds,
+                                                                         and DPP-MAP seed scheduling to cover diverse root causes early.
+8   Related Work                                                         We evaluated AFuzz primarily on the V8 JavaScript engine, where
+                                                                         it found 40 bugs (including three duplicates) with a total bounty of
+LLM-based vulnerability discovery. Researchers have recently             $35,000 and two CVEs (CVE-2026-2649 and CVE-2026-7902). Sev-
+been using LLM agents to discover vulnerabilities. Big Sleep [25] dis-   eral of these are complex logic bugs that conventional fuzzing and
+covered several impactful vulnerabilities in multiple open-source        static analysis struggle to find. We further showed that V8 seeds
+projects, including SQLite [52] and Chromium [75], using LLM             can be used in other engines, finding five bugs in SpiderMonkey (in-
+agents in variant analysis. ÆSIR [38] also found 21 CVEs in AI infras-   cluding one duplicate) and 14 in JavaScriptCore. However, agentic
+tructure by performing variant analysis of new CVEs. XBOW [31],          fuzzing is still in its early stages, with open problems including cost
+PentestGPT [32], and other works [30, 50, 73] automate penetra-          effectiveness, the need for reference bugs, and design uncertainty.
+tion testing with LLM agents by giving them tools to dynamically
+test the target system, while IRIS [63] and LLMxCPG [62] combine         References
+LLMs with static analysis for vulnerability detection. Similar to         [1] 2017. Proceedings of the 38th IEEE Symposium on Security and Privacy (Oakland).
+Big Sleep, AFuzz discovers new bugs from reference bugs using                 San Jose, CA.
+LLM agents. However, we disclose AFuzz’s architecture and details         [2] 2019. Proceedings of the 26th Annual Network and Distributed System Security
+                                                                              Symposium (NDSS). San Diego, CA.
+while Big Sleep does not, and we also introduce several optimiza-
+                                                                          [3] 2020. Proceedings of the 29th USENIX Security Symposium (Security). Boston, MA.
+tions that can make AFuzz more cost-effective for general users.
+                                                                          [4] 2022. Proceedings of the 29th ACM Conference on Computer and Communications
+Moreover, AFuzz found new bugs in the same V8 environment                     Security (CCS). Los Angeles, CA.
+where Big Sleep had already found vulnerabilities.                        [5] 2023. Proceedings of the 32nd USENIX Security Symposium (Security). Anaheim,
+LLM-assisted fuzzing. A line of work has focused on using LLMs                CA.
+to assist fuzzing. Several works [33, 34, 89, 94, 96] use LLMs to gen-    [6] 2024. Proceedings of the 31st ACM Conference on Computer and Communications
+erate or mutate test inputs for language processors or deep learning          Security (CCS). Salt Lake City, UT.
+libraries. ELFuzz [28] and G2Fuzz [99] extend this by generating          [7] 2024. Proceedings of the 33rd USENIX Security Symposium (Security). Philadelphia,
+                                                                              PA.
+and mutating input generators rather than test inputs. ChatAFL [68]
+                                                                          [8] 2024. Proceedings of the 46th International Conference on Software Engineering
+leverages LLMs’ knowledge of protocol specifications to guide pro-            (ICSE). Lisbon, Portugal.
+tocol fuzzing, while KernelGPT [95] uses LLMs to generate syzkaller       [9] 2025. Proceedings of the 32nd Annual Network and Distributed System Security
+specifications for kernel fuzzing. PromptFuzz [66] uses LLMs to iter-         Symposium (NDSS). San Diego, CA.
+atively fuzz LLM prompts to generate fuzzing harnesses. CovRL [36]       [10] 2025. Proceedings of the 34th USENIX Security Symposium (Security). Seattle, WA.
+Agentic Fuzzing: Opportunities and Challenges
+
+
+[11] 24...@project.gserviceaccount.com. 2025.      DCHECK failure in (builder_-          [34] Yinlin Deng, Chunqiu Steven Xia, Chenyuan Yang, Shizhuo Dylan Zhang, Shu-
+     >current_block()) == nullptr in maglev-graph-builder.cc. https://issues.chromium.        jing Yang, and Lingming Zhang. 2024. Large Language Models are Edge-Case
+     org/issues/439945236. Accessed: 2026-04-23.                                              Generators: Crafting Unusual Programs for Fuzzing Deep Learning Libraries,
+[12] 24...@project.gserviceaccount.com. 2025.      DCHECK failure in (builder_-               See [8].
+     >current_block()) == nullptr in maglev-graph-builder.cc. https://issues.chromium.   [35] Sung Ta Dinh, Haehyun Cho, Kyle Martin, Adam Oest, Kyle Zeng, Alexandros
+     org/issues/440145531. Accessed: 2026-04-23.                                              Kapravelos, Gail Joon Ahn, Tiffany Bao, Ruoyu Wang, Adam Doupé, and Yan
+[13] 24...@project.gserviceaccount.com. 2025. DCHECK failure in (current_block())             Shoshitaishvili. 2021. Favocado: Fuzzing the Binding Code of JavaScript Engines
+     == nullptr in maglev-graph-builder.cc. https://issues.chromium.org/issues/               Using Semantically Correct Test Cases. In Proceedings of the 28th Annual Network
+     439752700. Accessed: 2026-04-23.                                                         and Distributed System Security Symposium (NDSS). Virtual.
+[14] 24...@project.gserviceaccount.com. 2025. DCHECK failure in (current_block())        [36] Jueon Eom, Seyeon Jeong, and Taekyoung Kwon. 2024. Fuzzing JavaScript
+     == nullptr in maglev-graph-builder.cc. https://issues.chromium.org/issues/               Interpreters with Coverage-Guided Reinforcement Learning for LLM-Based
+     439970326. Accessed: 2026-04-23.                                                         Mutation. In Proceedings of the 33rd International Symposium on Software Testing
+                                                                                              and Analysis (ISSTA). Vienna, Austria.
+[15] 24...@project.gserviceaccount.com. 2025. DCHECK failure in new_nodes_-
+     at_end_.empty() in maglev-reducer.h. https://issues.chromium.org/issues/            [37] Siyue Feng, Yueming Wu, Wenjie Xue, Sikui Pan, Deqing Zou, Yang Liu, and
+     439752712. Accessed: 2026-04-23.                                                         Hai Jin. 2024. FIRE: Combining Multi-Stage Filtering with Taint Analysis for
+                                                                                              Scalable Recurring Vulnerability Detection, See [7].
+[16] Anthropic. 2026. Agent SDK overview. https://platform.claude.com/docs/en/
+     agent-sdk/overview. Accessed: 2026-04-23.                                           [38] Peter Girnus. 2026. Introducing ÆSIR: Finding Zero-Day Vulnerabilities at
+                                                                                              the Speed of AI. https://www.trendmicro.com/en_us/research/26/a/aesir.html.
+[17] Anthropic. 2026. Claude Code by Anthropic | AI Coding Agent, Terminal, IDE.              Accessed: 2026-04-23.
+     https://claude.com/product/claude-code. Accessed: 2026-04-23.
+                                                                                         [39] GitHub. [n. d.]. CodeQL. https://codeql.github.com/. Accessed: 2026-04-23.
+[18] Anthropic. 2026. Create custom subagents. https://code.claude.com/docs/en/sub-
+     agents. Accessed: 2026-04-23.                                                       [40] Google. [n. d.]. Build, debug & deploy with AI | Gemini CLI. https://geminicli.
+                                                                                              com/. Accessed: 2026-04-23.
+[19] Anthropic. 2026. Introducing Claude Opus 4.6. https://www.anthropic.com/
+     news/claude-opus-4-6. Accessed: 2026-04-23.                                         [41] Google. [n. d.]. Chromium Issue Tracker. https://issues.chromium.org/. Accessed:
+                                                                                              2026-04-23.
+[20] Anthropic. 2026. Todo Lists. https://code.claude.com/docs/en/agent-sdk/todo-
+     tracking. Accessed: 2026-04-23.                                                     [42] Google. [n. d.]. ClusterFuzz. https://github.com/google/clusterfuzz. Accessed:
+                                                                                              2026-04-23.
+[21] Cornelius Aschermann, Tommaso Frassetto, Thorsten Holz, Patrick Jauernig,
+     Ahmad-Reza Sadeghi, and Daniel Teuchert. 2019. NAUTILUS: Fishing for Deep           [43] Google Big Sleep. 2025. V8: Integer truncation during Maglev compilation leading
+     Bugs with Grammars, See [2].                                                             to memory corruption. https://issues.chromium.org/issues/444048019. Accessed:
+                                                                                              2026-04-23.
+[22] Lukas Bernhard, Tobias Scharnowski, Moritz Schloegel, Tim Blazytko, and
+     Thorsten Holz. 2022. JIT-Picking: Differential Fuzzing of JavaScript Engines, See   [44] Google DeepMind. 2026. Gemma 4 — Google DeepMind. https://deepmind.
+     [4].                                                                                     google/models/gemma/gemma-4. Accessed: 2026-04-23.
+
+[23] Kritik Bhattarai. 2026. V8 Sandbox bypass via untagged ExternalIntPtr in Access-    [45] Samuel Groß, Simon Koch, Lukas Bernhard, Thorsten Holz, and Martin Johns.
+     Builder::ForExternalIntPtr (Chrome 145.0.7632.159). https://issues.chromium.             2023. FUZZILLI: Fuzzing for JavaScript JIT Compiler Vulnerabilities. In Pro-
+     org/issues/491749534. Accessed: 2026-04-23.                                              ceedings of the 30th Annual Network and Distributed System Security Symposium
+                                                                                              (NDSS). San Diego, CA.
+[24] Big Sleep. 2026. Big Sleep Tracker - Issue Tracker. https://issuetracker.google.
+     com/savedsearches/7155917. Accessed: 2026-04-23.                                    [46] Samuel Groß. 2024. The V8 Sandbox. https://v8.dev/blog/sandbox. Accessed:
+                                                                                              2026-04-23.
+[25] Big Sleep team. 2024. From Naptime to Big Sleep: Using Large Language Models
+     To Catch Vulnerabilities In Real-World Code. https://projectzero.google/2024/       [47] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Peiyi Wang, Qihao Zhu,
+     10/from-naptime-to-big-sleep.html. Accessed: 2026-04-23.                                 Runxin Xu, Ruoyu Zhang, Shirong Ma, Xiao Bi, et al. 2025. DeepSeek-R1 incen-
+                                                                                              tivizes reasoning in LLMs through reinforcement learning. Nature 645, 8081
+[26] Konstantin Borimechkov. 2025. Stop the Bleed: The Developer’s Guide to Taming            (2025), 633–638.
+     Claude Code. https://theexcitedengineer.substack.com/p/stop-the-bleed-the-
+     developers-guide. Accessed: 2026-04-23.                                             [48] HyungSeok Han, DongHyeon Oh, and Sang Kil Cha. 2019. CodeAlchemist:
+                                                                                              Semantics-aware Code Generation to Find Vulnerabilities in JavaScript Engines,
+[27] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan,                   See [2].
+     Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda
+     Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan,       [49] Insu Han and Jennifer Gillenwater. 2020. MAP inference for customized deter-
+     Rewon Child, Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris            minantal point processes via maximum inner product search. In International
+     Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack          Conference on Artificial Intelligence and Statistics. PMLR, 2797–2807.
+     Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and        [50] Andreas Happe and Jürgen Cito. 2023. Getting pwn’d by AI: Penetration Testing
+     Dario Amodei. 2020. Language Models are Few-Shot Learners. In Proceedings of             with Large Language Models. In Proceedings of the 31st ACM Joint European
+     the 34th Annual Conference on Neural Information Processing Systems (NeurIPS).           Software Engineering Conference and Symposium on the Foundations of Software
+     Virtual.                                                                                 Engineering (ESEC/FSE). San Francisco, CA.
+[28] Chuyang Chen, Brendan Dolan-Gavitt, and Zhiqiang Lin. 2025. ELFuzz: Efficient       [51] Xiaoyu He, Xiaofei Xie, Yuekang Li, Jianwen Sun, Feng Li, Wei Zou, Yang Liu, Lei
+     Input Generation via LLM-driven Synthesis Over Fuzzer Space, See [10].                   Yu, Jianhua Zhou, Wenchang Shi, and Wei Huo. 2021. SoFi: Reflection-Augmented
+[29] Laming Chen, Guoxin Zhang, and Eric Zhou. 2018. Fast Greedy MAP Inference                Fuzzing for JavaScript Engines. In Proceedings of the 28th ACM Conference on
+     for Determinantal Point Process to Improve Recommendation Diversity. In Pro-             Computer and Communications Security (CCS). Virtual.
+     ceedings of the 32nd Annual Conference on Neural Information Processing Systems     [52] Richard D Hipp. 2026. SQLite Home Page. https://sqlite.org. Accessed: 2026-04-
+     (NeurIPS). Montreal, Canada.                                                             23.
+[30] Isaac David and Arthur Gervais. 2025. Multi-Agent Penetration Testing AI for        [53] Christian Holler, Kim Herzig, and Andreas Zeller. 2012. Fuzzing with Code
+     the Web. arXiv preprint arXiv:2508.20816 (2025).                                         Fragments. In Proceedings of the 21st USENIX Security Symposium (Security).
+[31] Oege de Moor. 2024. Introducing XBOW. https://xbow.com/blog/introducing-                 Bellevue, WA.
+     xbow. Accessed: 2026-04-23.                                                         [54] Kaifeng Huang, Chenhao Lu, Yiheng Cao, Bihuan Chen, and Xin Peng. 2024.
+[32] Gelei Deng, Yi Liu, Víctor Mayoral-Vilches, Peng Liu, Yuekang Li, Yuan Xu,               VMud: Detecting Recurring Vulnerabilities with Multiple Fixing Functions via
+     Tianwei Zhang, Yang Liu, Martin Pinzger, and Stefan Rass. 2024. PentestGPT:              Function Selection and Semantic Equivalent Statement Matching, See [6].
+     Evaluating and harnessing large language models for automated penetration           [55] Jiyong Jang, Abeer Agrawal, and David Brumley. 2012. ReDeBug: Finding Un-
+     testing, See [7].                                                                        patched Code Clones in Entire OS Distributions. In Proceedings of the 33rd IEEE
+[33] Yinlin Deng, Chunqiu Steven Xia, Haoran Peng, Chenyuan Yang, and Lingming                Symposium on Security and Privacy (Oakland). San Francisco, CA.
+     Zhang. 2023. Large Language Models Are Zero-Shot Fuzzers: Fuzzing Deep-             [56] Wooseok Kang, Byoungho Son, and Kihong Heo. 2022. TRACER: Signature-based
+     Learning Libraries via Large Language Models. In Proceedings of the International        Static Analysis for Detecting Recurring Vulnerabilities, See [4].
+     Symposium on Software Testing and Analysis (ISSTA). Seattle, WA.
+                                                                                                                                                  Junyoung Park and Insu Yun
+
+
+[57] Seulbae Kim, Seunghoon Woo, Heejo Lee, and Hakjoo Oh. 2017. VUDDY: A                 [83] Jiming Wang, Yan Kang, Chenggang Wu, Yuhao Hu, Yue Sun, Jikai Ren, Yuan-
+     Scalable Approach for Vulnerable Code Clone Discovery, See [1].                           ming Lai, Mengyao Xie, Charles Zhang, Tao Li, and Zhe Wang. 2024. OptFuzz:
+[58] Kunlun Lab. 2021.   Security: TianfuCup RCE bug Type confusion in                         Optimization Path Guided Fuzzing for JavaScript JIT Compilers, See [7].
+     LoadIC::ComputeHandler. https://issues.chromium.org/issues/40057622. Ac-             [84] Jiming Wang, Chenggang Wu, Jikai Ren, Yuhao Hu, Yan Kang, Xiaojie Wei,
+     cessed: 2026-04-23.                                                                       Yuanming Lai, Mengyao Xie, and Zhe Wang. 2025. BCFuzz: Bytecode-Driven
+[59] LangChain. [n. d.]. deepagents. https://github.com/langchain-ai/deepagents.               Fuzzing for JavaScript Engines. In Proceedings of the 40th IEEE/ACM International
+     Accessed: 2026-04-23.                                                                     Conference on Automated Software Engineering (ASE). Seoul, South Korea.
+
+[60] Stella Laurenzo. 2026. [MODEL] Claude Code is unusable for complex en-               [85] Junjie Wang, Zhiyi Zhang, Shuang Liu, Xiaoning Du, and Junjie Chen. 2023.
+     gineering tasks with the Feb updates. https://github.com/anthropics/claude-               FuzzJIT: Oracle-Enhanced Fuzzing for JavaScript Engine JIT Compiler, See [5].
+     code/issues/42796. Accessed: 2026-04-23.                                             [86] Wai Kin Wong, Dongwei Xiao, Cheuk Tung Lai, Yiteng Peng, Daoyuan Wu, and
+[61] Suyoung Lee, HyungSeok Han, Sang Kil Cha, and Sooel Son. 2020. Montage: A                 Shuai Wang. 2025. Extraction and Mutation at a High Level: Template-Based
+     Neural Network Language Model-Guided JavaScript Engine Fuzzer, See [3].                   Fuzzing for JavaScript Engines. In Proceedings of the Annual ACM Conference on
+                                                                                               Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA)
+[62] Ahmed Lekssays, Hamza Mouhcine, Khang Tran, Ting Yu, and Issa Khalil. 2025.               2025. Singapore.
+     LLMxCPG: Context-Aware Vulnerability Detection Through Code Property
+     Graph-Guided Large Language Models, See [10].                                        [87] Seunghoon Woo, Eunjin Choi, Heejo Lee, and Hakjoo Oh. 2023. V1SCAN: Discov-
+                                                                                               ering 1-day Vulnerabilities in Reused C/C++ Open-source Software Components
+[63] Ziyang Li, Saikat Dutta, and Mayur Naik. 2025. IRIS: LLM-Assisted Static Analysis         Using Code Classification Techniques, See [5].
+     for Detecting Security Vulnerabilities. In Proceedings of the 13th International
+     Conference on Learning Representations (ICLR). Singapore.                            [88] Seunghoon Woo, Hyunji Hong, Eunjin Choi, and Heejo Lee. 2022. MOVERY: A
+                                                                                               Precise Approach for Modified Vulnerable Code Clone Discovery from Modified
+[64] Jiayi Lin, Changhua Luo, Mingxue Zhang, Lanteng Lin, Penghui Li, and Chenx-               Open-Source Software Components. In Proceedings of the 31st USENIX Security
+     iong Qian. 2026. Fuzzing JavaScript Engines by Fusing JavaScript and WebAssem-            Symposium (Security). Boston, MA.
+     bly. In Proceedings of the 48th International Conference on Software Engineering
+     (ICSE). Rio de Janeiro, Brazil.                                                      [89] Chunqiu Steven Xia, Matteo Paltenghi, Jia Le Tian, Michael Pradel, and Lingming
+                                                                                               Zhang. 2024. Fuzz4All: Universal Fuzzing with Large Language Models, See [8].
+[65] LLVM Project. 2026. libFuzzer - a library for coverage-guided fuzz testing.
+     https://llvm.org/docs/LibFuzzer.html. Accessed: 2026-04-23.                          [90] Yang Xiao, Bihuan Chen, Chendong Yu, Zhengzi Xu, Zimu Yuan, Feng Li,
+                                                                                               Binghong Liu, Yang Liu, Wei Huo, Wei Zou, and Wenchang Shi. 2020. MVP:
+[66] Yunlong Lyu, Yuxuan Xie, Peng Chen, and Hao Chen. 2024. Prompt Fuzzing for                Detecting Vulnerabilities using Patch-Enhanced Vulnerability Signatures, See
+     Fuzz Driver Generation, See [6].                                                          [3].
+[67] Odile Macchi. 1975. The coincidence approach to stochastic point processes.          [91] Haoran Xu, Zhiyuan Jiang, Yongjun Wang, Shuhui Fan, Shenglin Xu, Peidai
+     Advances in Applied Probability 7, 1 (1975), 83–122.                                      Xie, Shaojing Fu, and Mathias Payer. 2024. Fuzzing JavaScript Engines with a
+[68] Ruijie Meng, Martin Mirchev, Marcel Böhme, and Abhik Roychoudhury. 2024.                  Graph-based IR, See [6].
+     Large Language Model guided Protocol Fuzzing. In Proceedings of the 31st Annual      [92] Shangzhi Xu, Jialiang Dong, Weiting Cai, Juanru Li, Arash Shaghaghi, Nan
+     Network and Distributed System Security Symposium (NDSS). San Diego, CA.                  Sun, and Siqi Ma. 2025. Enhancing Security in Third-Party Library Reuse -
+[69] OpenAI. [n. d.]. Codex. https://openai.com/codex. Accessed: 2026-04-23.                   Comprehensive Detection of 1-day Vulnerability through Code Patch Analysis,
+                                                                                               See [9].
+[70] Junyoung Park. 2026. ANGLE: [REDACTED]. https://issues.chromium.org/
+     issues/501476576. Accessed: 2026-04-23.                                              [93] Fabian Yamaguchi, Nico Golde, Daniel Arp, and Konrad Rieck. 2014. Modeling
+                                                                                               and discovering vulnerabilities with code property graphs. In Proceedings of the
+[71] Jihyeok Park, Seungmin An, Dongjun Youn, Gyeongwon Kim, and Sukyoung
+                                                                                               35th IEEE Symposium on Security and Privacy (Oakland). San Jose, CA.
+     Ryu. 2021. JEST: N+1-Version Differential Testing of Both JavaScript Engines
+     and Specification. In Proceedings of the 43rd International Conference on Software   [94] Chenyuan Yang, Yinlin Deng, Runyu Lu, Jiayi Yao, Jiawei Liu, Reyhaneh Jab-
+     Engineering (ICSE). Madrid, Spain.                                                        barvand, and Lingming Zhang. 2024. WhiteFox: White-Box Compiler Fuzzing
+                                                                                               Empowered by Large Language Models. In Proceedings of the Annual ACM Con-
+[72] SeRya. 2010. Issue 1374005: Percise rounding parsing octal and hexadecimal
+                                                                                               ference on Object-Oriented Programming, Systems, Languages, and Applications
+     strings.... (Closed). https://codereview.chromium.org/1374005. Accessed: 2026-
+                                                                                               (OOPSLA) 2024. Pasadena, CA.
+     04-23.
+                                                                                          [95] Chenyuan Yang, Zijie Zhao, and Lingming Zhang. 2025. KernelGPT: Enhanced
+[73] Xiangmin Shen, Lingzhi Wang, Zhenyuan Li, Yan Chen, Wencheng Zhao, Dawei
+                                                                                               Kernel Fuzzing via Large Language Models. In Proceedings of the 30th ACM
+     Sun, Jiashui Wang, and Wei Ruan. 2025. PentestAgent: Incorporating LLM Agents
+                                                                                               International Conference on Architectural Support for Programming Languages
+     to Automated Penetration Testing. In Proceedings of the 20th ACM Symposium
+                                                                                               and Operating Systems (ASPLOS). Rotterdam, Netherlands.
+     on Information, Computer and Communications Security (ASIACCS). Ha Noi,
+     Vietnam.                                                                             [96] Yupeng Yang, Shenglong Yao, Jizhou Chen, and Wenke Lee. 2025. Hybrid Lan-
+                                                                                               guage Processor Fuzzing via LLM-Based Constraint Solving, See [10].
+[74] tckwgd. 2026. [BUG] Compaction death spiral - 211 compactions consuming all
+     tokens with zero progress. https://github.com/anthropics/claude-code/issues/         [97] Guixin Ye, Zhanyong Tang, Shin Hwei Tan, Songfang Huang, Dingyi Fang, Xi-
+     24179. Accessed: 2026-04-23.                                                              aoyang Sun, Lizhong Bian, Haibo Wang, and Zheng Wang. 2021. Automated
+                                                                                               conformance testing for JavaScript engines via deep compiler fuzzing. In Pro-
+[75] The Chromium Authors. 2026. Chromium. https://www.chromium.org/Home.
+                                                                                               ceedings of the 2021 ACM SIGPLAN Conference on Programming Language Design
+     Accessed: 2026-04-23.
+                                                                                               and Implementation (PLDI). Virtual.
+[76] Dat Tran and Douwe Kiela. 2026. Single-Agent LLMs Outperform Multi-Agent
+                                                                                          [98] Z.AI. 2026. GLM-5.1. https://docs.z.ai/guides/llm/glm-5.1. Accessed: 2026-04-23.
+     Systems on Multi-Hop Reasoning Under Equal Thinking Token Budgets. arXiv
+     preprint arXiv:2604.02460 (2026).                                                    [99] Kunpeng Zhang, Zongjie Li, Daoyuan Wu, Shuai Wang, and Xin Xia. 2025. Low-
+                                                                                               Cost and Comprehensive Non-textual Input Fuzzing with LLM-Synthesized Input
+[77] Vivek Trivedy. 2026. The Anatomy of an Agent Harness. https://www.langchain.
+                                                                                               Generators, See [10].
+     com/blog/the-anatomy-of-an-agent-harness. Accessed: 2026-04-23.
+[78] V8 Project Authors. [n. d.]. What is V8? https://v8.dev. Accessed: 2026-04-23.
+[79] Toon Verwaest, Leszek Swirski, Victor Gomes, Olivier Flückiger, Darius Mer-
+     cadier, and Camillo Bruni. 2023. Maglev - V8’s Fastest Optimizing JIT. https:
+     //v8.dev/blog/maglev. Accessed: 2026-04-23.
+[80] Liam Wachter, Julian Gremminger, Christian Wressnegger, Mathias Payer, and
+     Flavio Toffalini. 2025. DUMPLING: Fine-grained Differential JavaScript Engine        A     Ethical Considerations
+     Fuzzing, See [9].
+[81] Junjie Wang, Bihuan Chen, Lei Wei, and Yang Liu. 2017. Skyfire: Data-Driven
+                                                                                          As shown in Table 1 and Table 6, all bugs found during our research,
+     Seed Generation for Fuzzing, See [1].                                                including those found in §5.8, were reported to the respective ven-
+[82] Junjie Wang, Bihuan Chen, Lei Wei, and Yang Liu. 2019. Superion: Grammar-            dors (e.g., Google). We redacted some bug details to avoid public
+     Aware Greybox Fuzzing. In Proceedings of the 41st International Conference on        disclosure before each vendor’s disclosure deadline — 90 days after
+     Software Engineering (ICSE). Montreal, Canada.
+                                                                                          a fix is released.
+Agentic Fuzzing: Opportunities and Challenges
+
+
+B     Generative AI Usage                                                 kV8MaxWasmFunctionBrTableSize = 65,520 by reading wasm-limits.h.
+We used generative AI in two ways: as the core component of               Thinking that a single br_table cannot exceed the 16-bit limit, it
+AFuzz and as a development aid. First, AFuzz runs on Claude mod-          decides to use two br_table instructions in opposite arms of an
+els, primarily Claude Opus 4.6 [19]. As described in §4, the agents       if-else, each with 33,000 entries targeting the same outer block, to
+use Claude Opus 4.6 through the Claude Agent SDK [16], and the            trigger the overflow (shown in Figure 1b). Scenario Analyzer
+scenario coverage check (§3.3) uses a lighter Claude model (i.e.,         then initially runs the PoC on a release build, which completes
+Haiku) for semantic comparison. We also used open-source models           without any observable evidence because the integer truncation
+gemma4 [44] and GLM 5.1 [98] for evaluation (§5.8). Therefore, all        silently occurs. Scenario Analyzer then re-runs the same PoC on
+bug reports of AFuzz are produced by generative AI models. We in-         a debug build, where the DCHECK on operations.h fires, confirming
+dependently checked every bug report by reviewing it, reproducing         that the truncation occurs and violates the invariant defined by the
+the PoC, and confirming the claimed behaviors before submitting           DCHECK.
+the report to the respective vendor.                                         Validator independently verifies the bug by re-executing the
+   Second, we used Claude Code [17] with the Opus 4.6 model [19]          PoC on a clean V8 build and observing the same release and debug
+to quickly prototype and develop AFuzz, including the evaluation          results. It confirms that the debug assertion failure matches the
+variants (e.g., the different pipeline designs). We thoroughly su-        hypothesized integer truncation rather than an unrelated one, and
+pervised the entire development process, and we conducted all             that no security-disabling flags or debug-only natives are used in
+experiments and checked all their results manually.                       reproducing the bug. After verification, Validator accepts the sce-
+                                                                          nario and writes a vulnerability report covering summary, trigger
+                                                                          conditions, reproduction steps with both release and debug out-
+C     Example of AFuzz Finding a Bug                                      puts, and a suggested patch with an input-count check before PhiOp
+Using the motivating example (§2.1), we walk through how the              construction.
+pipeline discovers the Turboshaft variant from the Maglev reference
+bug.
+    Given the reference bug CVE-2025-10892 [43] as a URL, Ana-            D    Case Studies
+lyzer starts by fetching the issue contents, including the discus-        Bug #9: parseInt exponent overflow. V8 has a bug in the
+sion, patches, and PoC code. Analyzer then dispatches Explore             JavaScript parseInt function (converts strings to integers) that
+subagents to read relevant source files such as maglev-ir.h,              makes the function return 0 instead of Infinity when parsing
+maglev-graph-builder.cc, and base/bit-field.h. After reading              long strings with a power-of-two radix (e.g., 32). When V8 parses
+these files, Analyzer determines that the root cause of the ref-          a long string whose numeric value exceeds 53-bit precision, it
+erence bug is an integer overflow in a compiler IR metadata field         truncates the low bits of the integer and tracks the excess as
+(i.e., size_t input_count in Operation) that is only guarded by a         an integer exponent. The problem is that for radix 32, the ex-
+debug assertion. Analyzer captures this insight as the bug mech-          ponent can grow large enough to overflow a signed integer
+anism of the reference bug, which is a concise description of the         when a string of more than 429,496,740 characters is parsed (e.g.,
+root cause that later stages can use to search for variants.              parseInt("1".repeat(429496741), 32)). The overflow makes the
+    Investigator takes the report from Analyzer and scans the             exponent negative, so instead of returning Infinity as it should,
+V8 codebase for similar root causes. It starts with Maglev, where         parseInt incorrectly returns 0. This bug has existed since March
+the reference bug was found, and searches for other integer fields        2010 [72], for over 16 years.
+in Maglev’s IR classes that are guarded only by debug asser-                  AFuzz could recognize the tricky trigger conditions of this bug
+tions. After thoroughly searching Maglev code, Investigator               by analyzing the code and reasoning about how the exponent grows
+widens the search to other backends with grep queries such as             with string length and radix. Because the bug requires a string of
+BitField64.*Count and uint16_t.*input_count, and lands on Tur-            over 429 million characters, it needs 64-bit builds to trigger, since
+boshaft, which shares a similar mechanism with Maglev. In Tur-            V8 limits string length to about 512MB (i.e., (1 << 29) − 24) on
+boshaft, the Operation constructor (operations.h) narrows an in-          64-bit builds and about 256MB (i.e., (1 << 28) − 24) on 32-bit builds.
+coming size_t input count to a uint16_t and guards it with a DCHECK.      Among power-of-2 radixes, only the maximum radix 32 has an
+Investigator traces the construction path from the start of graph         overflow threshold that fits under the string length limit, so the bug
+building to the PhiOp construction, and notices that PhiOp does not       is specific to radix 32. Because of these specific and non-obvious
+have an explicit pre-construction check. Investigator hypothe-            trigger conditions, this bug has survived for over 16 years without
+sizes that a PhiOp with more than 65,535 predecessors would cause         being discovered by fuzzing or manual auditing, demonstrating the
+the count to be silently truncated, leading to memory corruption,         effectiveness of AFuzz in finding hard-to-find bugs that require
+and submits a scenario describing the trigger conditions, affected        deep understanding and complex reasoning.
+source locations, and an advisory note pointing to br_table as a          Bug #12: Turboshaft loop unrolling. Turboshaft had a bug in
+way to inflate the predecessor count.                                     its loop unrolling optimization that caused incorrect calculations of
+    Scenario Analyzer takes the scenario from Investigator and            iteration counts for loops that contain subtractions. Before unrolling
+writes a PoC to trigger the vulnerability. It reads the relevant source   a loop, Turboshaft simulates the loop execution to compute how
+files such as turboshaft-graph-interface.cc and ReduceSwitch,             many iterations it will run. However, its simulation logic wrongly
+and learns that each br_if or br_table target adds one prede-             assumes that the subtraction operator is commutative, making it
+cessor at the destination block. It also finds the per-table cap          wrongly compute loop variable updates of i = c - i as if they were
+                                                                         Junyoung Park and Insu Yun
+
+
+1    function f() {
+2      let count = 0;
+3      for (let i = 2; i >= 0; i = (3 - i) | 0) {
+4        // i oscillates: 2 -> 1 -> 2 -> 1 -> ...
+5        count = (count + 1) | 0;
+6        if (count >= 5) break;
+7      }
+8      return count; // should be 5
+9    }
+10   %PrepareFunctionForOptimization(f);
+11   f();
+12   %OptimizeFunctionOnNextCall(f);
+13   f(); // interpreter: 5 (correct), Turboshaft: 2 (wrong)
+
+
+Figure 5: Minified PoC for bug #12. The loop update
+i = (3 - i) | 0 oscillates i between 2 and 1, so count reaches
+5. After loop peeling, which extracts the first iteration and
+makes 𝑖 = 3 − 2 = 1, Turboshaft simulates the update as i - 3
+instead of 3 - i, predicts the loop exits after 1 iteration, and
+unrolls it to return 2.
+
+
+i = i - c. As a result, Turboshaft miscomputes the loop variable’s
+value and predicts the wrong iteration count, which can lead to
+under-unrolling and miscompilation.
+   AFuzz managed to construct a non-trivial oscillating loop to
+trigger this bug, shown in Figure 5. The loop variable i is updated as
+i = (3 - i) | 0, which oscillates i between 2 and 1. The loop body
+increments count and breaks when count >= 5, so the loop runs for
+5 iterations before breaking. However, in the case of Turboshaft,
+after the loop peeling phase extracts the first iteration with i=2,
+the remaining loop has the update i = 3 - i with an initial value
+i=1. Turboshaft then simulates this update as if it were i = i - 3,
+which produces the sequence 1 → 1 − 3 = −2, and predicts the loop
+exits after just 1 iteration. Therefore, it unrolls the loop into only
+two iterations, making the optimized code return 2 instead of 5.
+Agentic Fuzzing: Opportunities and Challenges
+
+
+Table 7: Detailed bug reproducibility across pipeline design choices. Each cell shows the number of times (out of 5 runs) a bug
+was discovered by the given design. Bugs that correspond to entries in Table 1 are annotated with their bug number and ID.
+Three bugs (marked –) were independently fixed before we reported them and are therefore not listed in Table 1.
+
+                                                                                             High                       Medium                     Low
+   #          ID   Detail                                                            Four    Three     One      Four    Three     One      Four    Three   One
+   –           –   Maglev Phi Representation Selector Type Confusion                   1/5      0/5      0/5      0/5      0/5      0/5      0/5     0/5     0/5
+  13   498010834   ARM32 Assembler ClearInternalState Invariant                        5/5      3/5      4/5      5/5      3/5      4/5      4/5     2/5     0/5
+  23   499254996   Missing Immutability Check for using/await using Exports            3/5      1/5      1/5      1/5      0/5      0/5      0/5     0/5     0/5
+   –           –   Stack Overflow in Generate_ResumeGeneratorTrampoline                5/5      5/5      3/5      2/5      3/5      2/5      5/5     1/5     1/5
+  26   499659062   Fast API kUint64 Signed/Unsigned Confusion                          1/5      0/5      0/5      0/5      0/5      0/5      0/5     0/5     0/5
+  24   499323105   Missing PrecededByMember Check in ParseReturnStatement              4/5      1/5      1/5      3/5      3/5      1/5      1/5     0/5     0/5
+  27   499672315   Private Name Resolution via FinalizeBlockScope Skip Bit Loss        1/5      0/5      0/5      0/5      0/5      0/5      0/5     0/5     0/5
+   7   499659070   TurboFan SpeculativeAdditiveSafeIntegerAdd Type Narrowing           1/5      0/5      0/5      0/5      0/5      0/5      0/5     0/5     0/5
+  28   499834467   Deoptimizer Undefined NaN Constant Mishandling                      1/5      0/5      0/5      0/5      0/5      0/5      0/5     0/5     0/5
+  38   499103615   Immutability Bypass in JIT DataView Setters                         3/5      0/5      1/5      1/5      1/5      0/5      0/5     0/5     0/5
+  21   499206651   Missing Escape Sequence Check for using Keyword                     1/5      2/5      3/5      2/5      3/5      1/5      2/5     0/5     1/5
+  22   499254994   Double-Dispose of using in C-style For-Loop                         1/5      1/5      3/5      0/5      1/5      4/5      0/5     2/5     1/5
+  14   498904291   Wrong DCHECK in DependOnContextCell                                 0/5      1/5      1/5      0/5      1/5      0/5      0/5     0/5     1/5
+  20   499188872   Missing Prototype Chain Dependency for ModuleExport                 2/5      0/5      0/5      1/5      1/5      1/5      0/5     0/5     0/5
+  12   491881374   Non-Commutative Subtraction in Turboshaft Loop Unrolling            2/5      1/5      4/5      0/5      0/5      2/5      0/5     0/5     0/5
+  32   500536164   IterableForEach Missing Array Prototype Check                       0/5      0/5      1/5      2/5      1/5      0/5      0/5     1/5     0/5
+  31   500507436   RISCV64 Maglev CompareIntPtrAndBranch Codegen                       0/5      0/5      1/5      0/5      0/5      0/5      0/5     0/5     0/5
+  30   500507435   RISCV64 Maglev ToUint8Clamped Codegen                               0/5      0/5      1/5      0/5      0/5      0/5      0/5     0/5     0/5
+  25   499520013   JSBuiltinsConstructStub Stack Overflow on RISCV/LOONG64/MIPS64      1/5      0/5      0/5      2/5      1/5      0/5      0/5     2/5     2/5
+   –           –   LOONG64 Maglev Branch Offset Overflow                               0/5      0/5      0/5      0/5      1/5      1/5      0/5     0/5     0/5
+  17   499018901   LOONG64 PatchToJump SIGSEGV via Missing RwxMemoryWriteScope         0/5      0/5      1/5      0/5      0/5      1/5      0/5     0/5     1/5
+                   pass@5                                                            15/21     8/21    13/21     9/21    11/21     9/21     4/21    5/21    6/21
+                   Total                                                            32/105   15/105   25/105   19/105   19/105   17/105   12/105   8/105   7/105
+

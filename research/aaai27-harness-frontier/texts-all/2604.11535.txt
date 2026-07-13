@@ -1,0 +1,1355 @@
+                                         Problem Reductions at Scale: Agentic Integration of
+                                                 Computationally Hard Problems
+
+
+                                                                      Xi-Wei Pan* 1 Shi-Wen An* 2, 3 Jin-Guo Liu1, †
+                                                                1
+                                                                    HKUST (GZ) 2 Institute of Science Tokyo 3 RIKEN AIP
+
+
+
+
+arXiv:2604.11535v2 [cs.AI] 7 May 2026
+                                                                                             Abstract
+                                                    Solving an NP-hard optimization problem often requires reformulating it for a spe-
+                                                    cific solver—quantum hardware, a commercial optimizer, or a domain heuristic. A
+                                                    tool for polynomial-time reductions between hard problems would let practitioners
+                                                    route any supported problem to any supported solver through a single interface.
+                                                    Building such a library at scale, however, has remained out of reach. We show that
+                                                    harness engineering, the practice of designing constraints, verification systems,
+                                                    and feedback loops that channel AI coding agents, can overcome this barrier. Our
+                                                    harness combines a no-code contribution route for domain experts, a multilayer veri-
+                                                    fication stack ranging from type-level checks to agentic feature tests (AI agents role-
+                                                    playing as end users), and a fully automated implementation-review-integration
+                                                    pipeline. In about three months, we built a command-line tool backed by a library of
+                                                    100+ problem types and 200+ reduction rules in over 170k lines of Rust. The result
+                                                    suggests that a well-engineered harness lets agents build well-tested software at a
+                                                    scale and pace beyond prior reduction-library efforts. Because the reduction graph
+                                                    composes transitively, a new solver registered for any single problem type instantly
+                                                    becomes available to every problem connected by a reduction path. The source code
+                                                    is available at https://github.com/CodingThrust/problem-reductions.
+
+
+                                        1      Introduction
+                                        1.1     Many Hard Problems, Few Solvers
+
+                                        Combinatorial optimization problems arise throughout science and engineering [34, 48]. An airline
+                                        needs to assign crews to flights [25]. A chip designer needs to allocate registers, commonly modeled
+                                        as graph coloring in compilers [7]. A logistics company needs to route delivery trucks [52]. Each
+                                        of these is an instance of an NP-hard problem [33, 20], a class of problems for which no efficient
+                                        general-purpose algorithm is known, but which can be solved in practice for moderate sizes by
+                                        specialized solvers.
+                                        The difficulty is that each solver speaks its own narrow language. SAT solvers [16, 4] accept Boolean
+                                        satisfiability instances. Integer linear programming (ILP) engines like CPLEX [30], Gurobi [26], and
+                                        HiGHS [29] require problems expressed as linear constraints over integer variables. Semidefinite pro-
+                                        gramming (SDP) relaxations tackle Max-Cut and graph bisection [23] but need a matrix formulation.
+                                        Beyond classical solvers, specialized hardware introduces additional formulations: D-Wave quantum
+                                        annealers [22] solve Quadratic Unconstrained Binary Optimization (QUBO), and Rydberg atom
+                                        arrays [36, 47, 15] natively solve Maximum Independent Set on geometric graphs. Physics-inspired
+                                        methods scale further: graph neural networks solve QUBO at million-variable scale [48], and hybrid
+                                        quantum-GNN methods tackle the Traveling Salesman Problem [27]. These approaches still require
+                                        a QUBO or Ising formulation as input. A practitioner with a crew-scheduling problem cannot reach
+                                        most of these solvers without first translating the problem into a form the solver understands.
+                                              * Equal contribution.   † Corresponding author: jinguoliu@hkust-gz.edu.cn.
+
+
+
+                                        Preprint.
+This translation is called a reduction: an efficient algorithm that converts an instance of one problem
+into an instance of another and maps the target’s solution back to the source. In other words, a
+reduction gives a uniform rule for solving any source instance via the corresponding target instance.
+Each verified reduction is a bridge connecting a new problem to an existing solver.
+
+1.2   Bridging Problems to Solvers
+
+A single reduction between two problems is a primitive
+reduction rule. Primitive rules collectively form a directed            3-SAT
+reduction graph (Figure 1): each node is a problem type,
+each directed edge is a primitive rule. Every edge carries                                         NP-hard
+a reduction overhead: a multivariate polynomial mapping                         𝐴              𝐻   certified
+                                                                      𝑟𝐵←𝐴
+the source’s size measures to the target’s; we write rB←A
+for the overhead of the rule A → B.                                    𝐵
+                                                                                    compose
+
+
+
+
+Reductions compose along directed paths. Chaining A →                  𝑟𝐶←𝐵
+                                                                             𝐶
+B and B → C along the central chain in Figure 1 yields a                              𝑡𝐼 Integer linear
+                                                                 𝑆 𝑡𝑆                    programming
+composite rule A → C with overhead rC←A = rC←B ◦
+rB←A . Two kinds of paths play a special role, marked by
+the highlighted nodes in the figure. 3-SAT serves as the Figure 1: The reduction graph. Two an-
+source of NP-hardness proofs: any path from 3-SAT to a chor problems are highlighted: 3-SAT at
+problem H provides an NP-hardness argument for H. We the top and Integer linear programming
+say H is NP-hard certified by the reduction graph. Integer (ILP) at the bottom right. Edge labels are
+linear programming (ILP) is backed by mature solvers: reduction overheads r·←· ; node labels
+any path from a problem to ILP routes it to one of them, like tS , tI denote the time complexity of
+which is crucial for testing the correctness of reductions. the node’s best known solver.
+The target solver’s time complexity, tI for ILP, thereby
+upper-bounds the end-to-end solving cost of any problem routed to it, up to reduction overhead.
+
+1.3   The Challenge
+
+Scaling an executable reduction graph is an engineering                                        ?
+problem. The literature is far ahead of any implementation:
+Garey and Johnson [20] catalogue over 300 NP-hard prob-
+lems with reduction sketches, yet the largest executable re-
+duction graph (Appendix A) covers fewer than 20 problem
+types. Implementation and maintenance are the bottleneck,
+                                                                      (a) Manual integration
+and two barriers in particular emerge.
+Convention drift. Every reduction rule must conform
+to the same interface, the same file layout, and the same         Issue
+test pattern. Maintaining this uniformity across many
+contributions is precisely what human teams cannot do
+at scale: as contributors accumulate their own patterns,                                   Code
+the codebase fractures. A mathematician who understands
+a new reduction has no way to contribute it without first
+                                                                    (b) Agentic integration
+learning the implementation language and the project’s
+conventions (Figure 2).                                    Figure 2: The integration problem. (a) A
+Effort exhaustion. Every new entry demands the same new reduction does not fit the library’s
+lengthy checklist. Adding a problem type requires resolv- conventions and cannot be integrated
+ing whether the problem is genuinely new or a known without learning the codebase. (b) The
+problem under a different name, writing a formal defi- contributor files a structured issue; an
+nition, and identifying the best known algorithm and its agent handles implementation, review,
+complexity. Adding a reduction rule requires confirming and documentation.
+that both endpoint problems exist, verifying the rule is
+novel and actually improves on existing routes, analyzing the reduction overhead, providing a cor-
+rectness argument, implementing the forward and inverse maps, designing correctness tests, and
+documenting the reduction with a worked example. Repeating this cycle for every entry exhausts
+even dedicated maintainers.
+
+
+                                                   2
+              Many hard problems,                             Harness-engineered
+      (a)                                              (b)                                                        (c) A reduction graph built at scale
+              few solvers                                     agentic workflow
+               NP-hard problem types                                                                                                                                   190
+                                                                           problem-reductions               ···                                                        problem types
+
+                                                                       Open   [Rule] K-Coloring → ILP
+                                                                                                                                     3SAT
+                                                                                                                                                                       220
+                                                                       Algorithm    𝑥𝑣,𝑐 ∈ {0, 1}; one-hot per                                                         concrete type
+                                                                                    𝑣; 𝑥𝑢,𝑐 + 𝑥𝑣,𝑐 ≤ 1 on                                                              of problems
+        3-SAT            Max-Cut       Set Cover                                    edges                                                                              (variants)
+                                                                       Overhead     variables |𝑉 | ⋅ 𝑘,
+                                                        no-code                     constraints |𝐸| ⋅ 𝑘 + |𝑉 |
+                                                      contribution     Reference    Mehrotra & Trick, 1996
+                                                                                                                                                                       265
+                                                                       Example      …                                                                                  reduction rules
+
+
+                                                                                                                                                                       129
+      3-Coloring             TSP           MIS
+                                                                                                                                                                       reducible to
+                                                             Agents under harness (skill-based)                                        ILP                             ILP
+
+
+                                           …                     Implementation Agent                                                                                  78
+                                                                 Picks an issue, implements, submits a PR                                                              reachable from
+      Bin Packing        Partition                                                                                                                                     3-SAT
+                                                                 Review Agent
+                                                                 Reviews PR via parallel sub-agents                                                                    ~170k
+            A problem can reach many solvers;                                                                                                                          lines of Rust
+                  which path is fastest?                                                                                                                               code
+
+
+             Solver formats / backends                                                                                      Growth over time
+                                                        compile-     automated round-trip             agentic
+                                                          time        unit tests verifications        feature                # problem types
+                                                                                                                  200        # reduction rules
+              SAT                    ILP                checks                                         tests
+              CNF formula            𝐴𝑥 ≤ 𝑏, 𝑥 ∈ ℤ𝑛
+                                                                                                                  100
+
+              Annealer
+              QUBO / Ising            …                       Validated Reduction Code                                  0                    4             8               12     week
+                                                              Human reviewed finally, merged into the                                manual      → basic skills → full pipeline
+                                                              codebase
+
+
+
+
+Figure 3: Overview. (a) Many solvers exist, and a problem can usually reach several of them through
+different reductions, but this knowledge is scattered across the literature without a unified executable
+framework. (b) A harness-engineered agentic workflow turns a structured GitHub issue into validated
+code through implementation and review agents under a layered verification stack (the four main
+layers shown; Section 3.4 lists all six). (c) Three months of this pipeline produced a reduction graph
+with 190 problem types and 265 rules; the inset shows growth over time.
+
+
+AI coding agents offer a way forward, but only when paired with a harness: the engineered constraints,
+feedback loops, and automatic checks that channel agents toward reliable output [44]. The engineer’s
+job is no longer to write the code, but to design the harness that makes the agent’s code trustworthy. We
+build a domain-specific harness that addresses both convention drift and effort exhaustion; Section 3
+details its components.
+
+1.4         Contributions
+
+We make three contributions, each addressing one actor in the workflow.
+For end users. The first comprehensive and executable library of computationally hard problem
+reductions: 265 reductions among 190 problem types and 170k lines of Rust code, an inventory that
+would have taken years by hand but landed in three months with a small team and AI agents.
+For maintainers. Our harness uses skills to guide agents through the full pipeline, from coding to
+the final review, under a layered correctness gate. Maintainers are freed from routine work to focus
+on the intellectual work.
+For domain experts. A no-code contribution route that turns a structured GitHub issue into validated
+implementation, with no familiarity with the implementation language needed.
+
+2       System Architecture
+We implement the reduction graph as a Rust crate, organized in three layers (Figure 4).
+
+2.1         Interface Layer
+
+The library exposes two interfaces, both designed for humans and AI agents: the pred command-line
+interface (CLI) and a PDF manual.
+
+
+                                                                                         3
+          1. Interface Layer                 >   pred CLI                              PDF Manual
+          Entry points for human users and       • create a problem instance           • problem definitions
+          AI agents.                             • reduce to another problem           • reduction proofs
+                                                 • solve and evaluate                  • worked examples
+
+
+
+          2. Library Layer                                                  Example Database
+          Registered problem types and
+          the reductions between them.
+                                                    Problem Types                         Reduction Rules
+
+
+
+          3. Infrastructure Layer
+                                                 Solvers                           𝑓(𝑥) Symbolic Engine
+          Backends that serve each               • for round-trip testing              • reduction overheads
+          problem and rule.                      • ILP or brute-force                  • algorithm complexities
+
+
+Figure 4: System architecture. Three layers separate concerns: the interface layer (top) is what users
+and agents touch, the library layer (middle) holds the reduction graph itself, and the infrastructure
+layer (bottom) provides the computational backends: solvers for instances and a symbolic engine for
+overhead and complexity.
+
+
+Through the CLI, create emits a problem instance as JSON, reduce transforms it along any
+reduction path, and the resulting JSON pipes into external solvers or downstream tools. solve closes
+the loop for quick checks. See Appendix B for a worked session.
+Compiled from Typst, the manual collects the library’s formal mathematics: each problem and
+reduction has a definition, a worked example, a diagram, and a proof sketch. Domain experts review
+it for correctness, and agents register a new entry whenever they add a model or rule, keeping code
+and mathematics in lockstep.
+
+2.2   Library Layer
+
+The library layer is a collection of problem types and the reduction rules between them.
+Problem types. Every problem type implements a uniform interface for problems, such as input
+domain, solution type and size measures. Each type defines its own size measures and best-known
+algorithm complexity, for example, Maximum Independent Set (MIS) is parameterized by |V | and
+|E|, with a known O(1.1996|V | ) algorithm [58]. A problem type may have variants: restricting
+the input domain to a narrower class preserves the combinatorial objective but can change the
+complexity. Each variant occupies a distinct node in the reduction graph. For
+                                                                          √ instance, general MIS
+                  |V |                                                  O( |V |)
+requires O(1.1996 ) time, whereas MIS on unit disk graphs admits a 2             algorithm, which is
+subexponential, unlike the general case [12].
+Reduction rules. Each rule requires two mappings, a forward map and an inverse map. The forward
+map converts a source problem instance to a target problem instance. After solving the target problem,
+the inverse map extracts source solutions from target solutions. Each rule also carries a reduction
+overhead: a set of multivariate polynomials mapping the source’s size measures to the target’s.
+For example, the 3-SAT → MIS reduction creates one vertex per literal occurrence in the formula,
+yielding O(L) vertices and O(L2 ) edges where L is the total number of literal occurrences.
+Example database. Each problem type defines a canonical instance, such as the Petersen graph for
+Maximum Independent Set. The same instance drives the test suite and serves as the worked example
+in the PDF manual.
+
+2.3   Infrastructure Layer
+
+The infrastructure layer provides the computational backends that the library layer builds on: back-
+end solvers for exact verification, and a symbolic engine for analyzing computational complexity.
+Appendix C presents the engineering details of the Rust crate.
+
+
+                                                               4
+Solvers. Every problem type needs a minimal but reasonably efficient solver, because testing requires
+solving each problem exactly. Most types (e.g., Maximum Independent Set, Traveling Salesman,
+flow-shop scheduling) have a reduction path to ILP. The default validation strategy reduces the
+problem to ILP and solves it with HiGHS [29], an open-source solver. For problems without an
+ILP path, the library provides customized exact solvers that exploit problem structure. For example,
+functional-dependency closure for Minimum Cardinality Key [37], and cycle enumeration with
+branch-and-bound for Partial Feedback Edge Set [2]. The remaining problems fall back to brute-force
+enumeration on small instances.
+Symbolic engine. Both reduction overheads and algorithm complexities are represented as symbolic
+expressions. The symbolic engine supports three operations: composition substitutes one edge’s
+output polynomial into the next edge’s input, often used to determine the composite overhead
+of a multi-step reduction path; comparison determines whether a symbolic expression has lower
+asymptotic growth than another, used for finding the cheapest reduction path; and evaluation evaluates
+a symbolic expression.
+
+2.4   Why Rust?
+
+None of the maintainers had written Rust before this project. The language was chosen in large part
+for properties that benefit agents.
+Strict compiler, actionable errors. Rust rejects many invalid programs before execution, and reports
+precise type, ownership, and lifetime errors. These diagnostics give agents a concrete repair target.
+Fast feedback. Cargo provides a standard loop for building, testing, and formatting. Incremental
+compilation and unit tests make that loop fast enough for agent iteration.
+
+
+3     Harness Design
+
+3.1   Anatomy of the Harness
+
+Definition 1 (Harness System). A harness system constrains agent behavior through five components:
+a project specification auto-loaded into every agent session, a set of tools the agent may invoke, a
+progressively-disclosed knowledge base, a set of automation skills (executable checklists that compose
+the previous three into multi-step pipelines), and a set of advisor skills for human contributors
+onboarding.
+
+The five components address successive needs in an agent session: what conventions to follow, what
+actions to take, what domain knowledge to consult, and how to orchestrate these into workflows.
+Project specification files at the repository root (CLAUDE.md, AGENTS.md) encode how to find the
+remaining four components and what conventions to follow. Every agent session loads these files
+automatically on startup, ensuring that a new agent inherits the same conventions as every prior
+session, without human briefing.
+Tools include command-line interfaces (CLI), model context providers (MCP), and external search
+services. The CLI and the language’s built-in test harness are the agent’s hands. In this project, the
+pred CLI lets agents create problem instances, run reductions, invoke solvers, and inspect topological
+connectivity in the reduction graph. ArXiv MCP and web search retrieve references, and Typst
+compiles the PDF manual and its documentation artifacts.
+Knowledge base. Domain knowledge includes Garey and Johnson’s catalogue [20], reference
+papers converted to Markdown for agent consumption, and reference implementations already in the
+codebase. This body of material is too large to fit in a single agent context window. The harness
+organizes this knowledge for progressive disclosure [42]: agents discover relevant files through search
+and read full content (formal definitions, proof sketches, worked examples) only when a specific task
+demands it.
+Skills are plain-Markdown documents that orchestrate specification, tools, and knowledge into multi-
+step, repeatable workflows. We divide skills into two kinds (Figure 5): automation skills that agents
+execute end-to-end, and advisor skills that bring humans into the loop at decision points.
+
+
+                                                  5
+ (a)                            human
+                                          domain expert,   (b)
+                                          user, reviewer                         CLAUDE.md / AGENTS.md
+
+                     stays in loop
+
+ advisor skill   SKILL.md        agent             tools
+                                                                 user         contributor    maintainer         agent
+                                                               find-solver       propose      fix-issue       check-issue
+                                          human or other    find-problem                     final-review    run-pipeline
+                                invoker
+                                          agents
+                                                                                              dev-setup     review-pipeline
+                     only triggers
+  automation                                                                                   release
+                 SKILL.md        agent             tools
+     skill
+                                                                             advisor skill       automation skill
+
+
+Figure 5: Skills architecture. (a) The two skill kinds: advisor skills keep humans in the loop with the
+agent throughout, while automation skills run end-to-end once invoked. Other interactions with agents
+are omitted for clarity. (b) The skill catalogue, grouped by invoker (user, contributor, maintainer, or
+agent). Blue boxes are advisor skills; white boxes are automation skills.
+
+
+
+Automation skills can include abstract steps that traditional automation (Makefiles, shell scripts) can-
+not express: like “implement the reduction algorithm”(run-pipeline skill in Figure 5(b)), “review
+the pull request for correctness”(review-pipeline skill) and “make a new release”(release skill).
+These steps require judgment and are interpreted by the agent using its own capabilities. Unlike bare
+prompts, skills break a complex task into concrete, ordered steps small enough for an agent to execute
+faithfully, preventing the drift and omissions that occur when agents plan from scratch.
+Advisor skills involve humans for two purposes: training humans to use the library or contribute
+to it, and utilizing humans for tasks agents cannot reliably perform, such as critical decisions, hard
+mathematical reasoning, and creative work like designing canonical examples. Training skills flatten
+the learning curve: end users invoke find-solver skill (Figure 5(b)) to go from a real-world problem
+to a concrete solving strategy by exploring the reduction graph, or find-problem to discover what
+problems a given solver covers; contributors invoke propose skill to brainstorm a new problem
+or reduction in mathematical language and file a well-formed GitHub issue, with no programming
+required. Utilizing skills retain humans for critical correctness work: maintainers invoke fix-issue
+to identify and address quality defects such as unsound proofs or low-quality examples interactively,
+and final-review to catch dangerous commits or correctness gaps before merge. These skills lower
+the usage barrier from “knows the library” to “knows the problem,” and the contribution barrier from
+“knows the programming language” to “knows the mathematics.”
+Appendix E excerpts one skill of each kind: propose (advisor) and add-rule (automation).
+
+
+3.2    What Cannot Be Delegated
+
+Four responsibilities must remain with humans: se- Human
+lecting which reduction to pursue, verifying the al-                        Harness engineering
+gorithm’s correctness, constructing canonical ex-
+                                                                            Strategic planning
+amples, and authorizing merges. Selecting which
+rules to pursue requires understanding the needs                            Merge authorization
+of the community; the human is the information                              Canonical examples
+source. Verifying the algorithm’s correctness re-                           Mathematical verification
+quires deep reasoning. Reasoning ability of large                           Code review
+language models degrades sharply with problem com-
+                                                                            Implementation
+plexity [39, 49, 14]. Research-level mathematics re-
+mains largely unsolved [21, 6, 38]. Constructing                            Convention enforcement
+                                                       Agent
+canonical examples requires creative work; the hu-                 Human   Agent
+man is the end user and the best judge. Authorizing
+merges is security critical; a human with long-term Figure 6: Delegation spectrum. Tasks sorted
+memory must be responsible.                          from fully human (top) to fully automated
+Figure 6 summarizes the division of labor, sorted by (bottom); bars show the human–agent split.
+how replaceable each task is by agents.
+
+
+                                                           6
+3.3     Automation Pipeline
+
+   Domain Expert
+    (propose)
+                                  picks issue           creates PR                                  posts verdict
+      Backlog             Ready            In Progress              Review Pool        Under Review           Final Review           Done
+            Maintainer triages                                                                                         Maintainer merges
+                                       Impl. Agent (run-pipeline)                 Review Agent (review-pipeline)
+         (fix-issue)                                                                                                (final-review)
+
+
+Figure 7: Contribution pipeline as a state machine on the GitHub project board. Each box is a board
+column (state); arrows show the single allowed transition direction. Four roles drive the flow: a
+domain expert files issues (brown), a maintainer triages and merges (orange), an implementation
+agent picks issues and creates PRs (blue), and a review agent runs parallel reviews and posts verdicts
+(teal). If any stage fails, the item moves to On Hold (not shown) for human triage.
+
+Adding a reduction to the graph involves six stages; the first five are mirrored as columns on a GitHub
+project board (Figure 7), while Stage 6 runs as a post-merge community call. Each column is a state;
+progress flows left to right. If any stage fails, the item moves to OnHold for human triage. Four roles
+drive the flow: a domain expert files issues, a maintainer triages and merges, and two agents (one for
+implementation, one for review) handle the routine work in between.
+Stage 1: Propose ( → Backlog ). A domain expert clones the repository and invokes the propose
+skill (Appendix E) in Claude Code or a similar agentic coding tool. The skill conducts a structured
+brainstorming session (one question at a time) to elicit the core content of the contribution: which
+problem or reduction rule to add, its formal definition, etc. The expert answers in mathematical
+language; no programming is required. The agent runs a topology analysis to avoid duplicates and to
+identify high-value gaps in the reduction graph, then pre-validates the draft against Stage 2’s quality
+checks. The output is a structured GitHub issue filed into Backlog .
+Stage 2: Validate ( Backlog → Ready ). A maintainer invokes the fix-issue skill to triage each issue
+in Backlog . The agent first evaluates the proposal along four dimensions: usefulness (does a cheaper
+path already exist?), effort (what is the effort to implement this rule?), correctness (do cited references
+support the claims?), and writing quality (are all symbols defined, all examples fully worked?). It then
+auto-corrects mechanical failures (undefined symbols, missing metrics) and brainstorms substantive
+fixes with the maintainer interactively. Only issues passing all four checks move to Ready .
+Stage 3: Implement ( Ready → Review Pool ). An implementation agent reads the run-pipeline
+skill, picks an issue automatically from Ready column, implements it1 , submits a pull request (PR)
+and moves the issue to Review Pool . All of this happens in headless mode, with no human in the loop.
+Stage 4: Review ( Review Pool → Final Review ). Similarly, a review agent reads the review-pipeline
+skill, claims an issue from Review Pool , moves it to Under Review , dispatches three read-only sub-agents:
+structural completeness, code quality, and agentic feature testing (AI agents role-playing as end users;
+Section 3.4), and posts a review report on the PR and moves the issue to Final Review . All in headless
+mode.
+Stage 5: Merge ( Final Review → Done ). A maintainer invokes the final-review skill to review
+the PR. Agent claims a PR from Final Review , checks the review report, performs mechanical fixes,
+walks the maintainer through the agentic verdict, and lets the maintainer make the final decision. The
+maintainer either merges the PR to main branch (issue moved to Done ) or holds the PR with a reason
+(issue moved to OnHold ).
+Stage 6: Verify. The maintainer invites the domain expert who filed the original issue to a community
+call, and walks through the PDF manual and CLI. This closing-the-loop step catches errors invisible
+to automated tests: subtle misinterpretations of the problem statement or proof arguments.
+Stages 3–4 (implement and review) run in headless mode via OpenAI Codex [43] (gpt-5.4, xhigh
+reasoning effort). The remaining stages use Claude Code [1] (opus-4.6) for interactive sessions
+with the maintainer and domain expert. Anecdotally, we found gpt-5.4 more reliable for code
+implementation and opus-4.6 stronger in interactive dialogue, though we did not evaluate this
+systematically.
+  1 The engineering workflow builds on Superpowers [53]
+
+
+
+
+                                                                        7
+3.4   Correctness Assurance
+
+Correctness is enforced by six layers: issue review (Stage 2), compile-time type checks, unit tests,
+round-trip tests, agentic feature tests (Stage 4) and manual verification (Stage 5 and 6).
+Unit tests and round-trip tests. Unit tests cover individual problems, solvers, and helper functions.
+Round-trip tests cover each reduction rule end-to-end: from a small canonical source instance, reduce,
+solve the target, lift the solution back, and compare against a direct solve of the source (an oracle the
+rule never invokes).
+Agentic feature tests. Libraries normally stabilize through community use, but a niche library cannot
+wait for that community to form. Agentic feature tests approximate user feedback by simulating
+realistic use scenarios before real users arrive. The mechanism has three phases. First, the main agent
+launches a sub-agent in a fresh context window (one that has never seen the implementation) and
+injects a user profile: a structured persona with domain expertise and a concrete use case (Appendix F).
+The fresh context is essential; an agent that has just written the code cannot objectively test it. Second,
+the sub-agent role-plays the persona end-to-end: it reads only the project’s documentation, picks a
+problem it recognizes from its domain, builds an instance with realistic data, discovers a reduction
+path through the CLI, solves, and verifies the result against its own expectation. Third, the sub-agent
+steps out of character. The main agent interviews it about what worked, what was confusing, and
+where the output diverged from expectation, then writes a structured report. This report surfaces
+usability gaps, documentation omissions, and semantic errors that unit tests cannot reach.
+Agentic feature tests on the pred CLI surfaced ∼50 defects in command behavior, help text, and end-
+to-end pipelines (Appendix G). Unit and round-trip tests encode the developer’s expectations and miss
+them; agentic feature tests probe the CLI from a fresh user’s perspective, exposing documentation
+drift and overlooked edge cases.
+
+4     Evidence
+The pipeline produced a substantive reduction library and an agent-callable interface.
+
+4.1   Library Status
+
+Figure 3(c) summarizes the library at v0.5.0: 190 problem types (220 variants), 265 reduction rules,
+129 types (68%) with a reduction path to ILP, and 78 reachable from 3-SAT. Each ILP path grants
+standard solver access via the pred CLI; each 3-SAT path provides a tested NP-hardness argument
+backed by executable code rather than pen-and-paper proofs. In 12 weeks of development, most of
+the library was built after week 8.5, once the full skill-based pipeline was in place (Appendix H).
+
+4.2   Case Study on End-User Utility
+
+The simplest use of pred starts from a high-performance solver and asks what problems it can serve.
+For an Ising machine that takes QUBO input, pred can list all 138 library problems that reach QUBO
+within three hops (Appendix D).
+The harder direction starts from a problem stated in everyday language and asks an AI agent to use
+pred to deliver a fast and good solver end-to-end. To check whether pred helps in this direction,
+we set up a case study where the agent receives a problem in everyday language. In our instance, a
+manager wants to split a 150-person organization into two product teams to maximize the sum of
+pair-wise cross-team scores. Mathematically, this is NP-hard Maximum Cut (full setup in Appendix I).
+To answer, the agent has to recognize the underlying mathematical model, pick a reduction path to a
+solver-friendly endpoint, choose a solver for that endpoint, and write the code that ties them together.
+Each of these steps depends on prior knowledge that may be wrong, partial, or out of date; pred
+replaces the reduction-path step with a walk over a verified graph.
+Beyond pred, the other obvious way for an agent to reach external information is to search the web.
+To tell apart pred’s contribution from generic web access, we compare four configurations that toggle
+the two independently (the four rows of Table 1). Each configuration is run on ten random instances,
+with one-shot solver wall-time capped at 90 s. For each run we record three quantities: tokens spent
+overall, solver wall-time, and the objective value obtained by the solver.
+
+
+                                                    8
+Table 1 summarizes the outcomes. With pred, the agent picks the right reduction every time. Every
+pred-enabled run lands on the same path (spin-glass / QUBO) and the same solver (simulated
+annealing on the Ising form), matches the best-of-four objective on every instance, and cuts solver
+wall-time by a factor of 3–6, at the cost of roughly 2× more AI tokens (details in Appendix Table 5).
+Without pred , solver choice is unreliable. The bare configurations scatter over mixed-integer linear
+programming (MILP), constraint-programming SAT (CP-SAT), simulated annealing, tabu search,
+and ad-hoc heuristics; the misses always fall on solvers that do not perform well at the 90 s budget.
+Bare AI misses the best-of-four on 3/10 instances (worst 19.1% below); bare + web misses on 2/10,
+but its two missed runs fail catastrophically in one-shot execution.
+Web access alone does not close the gap. It exposes the agent to more candidate solvers but gives
+no structural guarantee that any of them will work in the budget; on this case study, that broader
+exposure is net harmful. Appendix I has more details.
+
+Table 1: Outcomes on the team-split instance class (10 instances per configuration; 90 s solver-wall
+cap). Agent: Claude Opus 4.7 with extra-high reasoning effort. Higher objective is better; Best-match
+reports how many of the ten instances each configuration achieves the best-of-four objective.
+      Configuration   Mean obj. ↑   Min obj. ↑   Best-match   Mean AI tokens    Mean solver time (s)
+      Bare AI           12,306        9,966         7/10          37,379                37.1
+      Bare AI + web     10,014          0           8/10          41,504                26.1
+      + pred            12,603       12,187        10/10          70,523                12.9
+      + pred + web      12,603       12,187        10/10          80,592                 6.5
+
+
+
+5     Conclusion and Discussion
+5.1    Conclusion
+
+In about three months, a small team and AI agents built a verified reduction graph of 190 problem
+types and 265 reduction rules. The resulting library gives those problems verified paths to standard
+solver targets and executable hardness witnesses. Building a reduction library at this scale was
+previously out of reach. What made it tractable is AI coding agents working under the harness we
+design. The harness loads a project specification into every agent session so contributions compose
+rather than collide, drives work through role-typed skills, and enforces a layered correctness gate
+from compile-time checks through unit tests, round-trip tests, agentic feature tests, and final human
+verification. Speed and rigor reinforce each other in this design: the same harness that accelerates
+contribution also enforces the checks that prevent drift.
+
+5.2    Discussion
+
+The evolving role of humans. Harness engineering shifts where human effort is spent, from writing
+code to designing constraints. The carefully designed harness enforces uniform conventions and qual-
+ity control across contributors. The most unsettling fact is that none of us is genuinely irreplaceable.
+We are all replaceable “plugins” for responsibilities, creativity, and deep reasoning. Even if a key
+maintainer stops maintaining the project, a new domain expert can get onboarded quickly with the
+help of the advisor skills.
+Automation and advisor skills. Skills can delegate routine work to AI agents. We find them most
+useful when they guide human contributors. Advisor skills keep humans more actively involved.
+They support onboarding by lowering the barrier to learning the project’s conventions and draw on
+human expertise for critical decisions. We found this distinction useful when designing the harness.
+We expect it to become standard vocabulary in harness design.
+Further Directions. The reduction graph at scale opens several research directions: one is under-
+standing how computationally hard problems are clustered in problem space; another is identifying
+high-value missing reduction rule to guide automated reduction-rule discovery. This reduction graph
+can be improved in several directions: one is to refine fine-grained cost prediction for a given instance
+rather than rely on asymptotic complexity; another is to extend beyond NP to other complexity classes
+(#P, PSPACE, etc.).
+
+
+                                                   9
+References
+ [1] Anthropic. Claude Code, 2025. URL https://github.com/anthropics/claude-code.
+     Accessed: 2026-04-13.
+ [2] Ali Baharev, Hermann Schichl, Arnold Neumaier, and Tobias Achterberg. An exact method
+     for the minimum feedback arc set problem. ACM J. Exp. Algorithmics, 26, April 2021. ISSN
+     1084-6654. doi: 10.1145/3446429. URL https://doi.org/10.1145/3446429.
+ [3] Joel Becker, Nate Rush, Elizabeth Barnes, and David Rein. Measuring the impact of early-2025
+     ai on experienced open-source developer productivity, 2025. URL https://arxiv.org/abs/
+     2507.09089.
+ [4] Armin Biere, Tobias Faller, Katalin Fazekas, Mathias Fleury, Nils Froleyks, and Florian Pollitt.
+     CaDiCaL, Gimsatul, IsaSAT and Kissat entering the SAT Competition 2024. In Marijn Heule,
+     Markus Iser, Matti Järvisalo, and Martin Suda, editors, Proc. of SAT Competition 2024 – Solver,
+     Benchmark and Proof Checker Descriptions, volume B-2024-1 of Department of Computer
+     Science Report Series B, pages 8–10. University of Helsinki, 2024.
+ [5] Birgitta Böckeler. Harness engineering for coding agent users, 2026. URL https://
+     martinfowler.com/articles/exploring-gen-ai/harness-engineering.html. Ac-
+     cessed: 2026-04-13.
+ [6] Center for AI Safety, Scale AI & HLE Contributors Consortium. A benchmark of expert-level
+     academic questions to assess AI capabilities. Nature, 649(8099):1139–1146, 2026.
+ [7] Gregory J Chaitin, Marc A Auslander, Ashok K Chandra, John Cocke, Martin E Hopkins, and
+     Peter W Markstein. Register allocation via coloring. Computer languages, 6(1):47–57, 1981.
+ [8] Claude. Agent skills in the sdk, 2026. URL https://code.claude.com/docs/en/
+     agent-sdk/skills. Accessed: 2026-04-13.
+ [9] CodeRabbit. State of AI vs. human code generation report, 2025. URL https://www.
+     coderabbit.ai/whitepapers/state-of-AI-vs-human-code-generation-report.
+     Accessed: 2026-04-13.
+[10] Carles Creus, Pau Fernández, and Guillem Godoy. Automatic evaluation of reductions between
+     NP-complete problems. In Theory and Applications of Satisfiability Testing – SAT 2014, pages
+     415–421, Cham, 2014. Springer International Publishing. ISBN 978-3-319-09284-3.
+[11] D-Wave Systems. D-Wave documentation, 2026. URL https://docs.ocean.dwavesys.
+     com. Accessed: 2026-04-13.
+[12] Mark de Berg, Hans L. Bodlaender, Sándor Kisfaludi-Bak, Dániel Marx, and Tom C. van der
+     Zanden. A framework for exponential-time-hypothesis–tight algorithms and lower bounds in
+     geometric intersection graphs. SIAM Journal on Computing, 49(6):1291–1331, 2020.
+[13] Xiang Deng, Jeff Da, Edwin Pan, Yannis Yiming He, Charles Ide, Kanak Garg, Niklas Lauffer,
+     Andrew Park, Nitin Pasari, Chetan Rane, Karmini Sampath, Maya Krishnan, Srivatsa Kundurthy,
+     Sean Hendryx, Zifan Wang, Vijay Bharadwaj, Jeff Holm, Raja Aluri, Chen Bo Calvin Zhang,
+     Noah Jacobson, Bing Liu, and Brad Kenstler. SWE-Bench Pro: Can AI agents solve long-
+     horizon software engineering tasks?, 2025. URL https://arxiv.org/abs/2509.16941.
+[14] Nouha Dziri, Ximing Lu, Melanie Sclar, Xiang Lorraine Li, Liwei Jiang, Bill Yuchen Lin,
+     Sean Welleck, Peter West, Chandra Bhagavatula, Ronan Le Bras, et al. Faith and fate: Limits
+     of transformers on compositionality. Advances in neural information processing systems, 36:
+     70293–70332, 2023.
+[15] Sepehr Ebadi, Alexander Keesling, Madelyn Cain, Tout T Wang, Harry Levine, Dolev Bluvstein,
+     Giulia Semeghini, Ahmed Omran, J-G Liu, Rhine Samajdar, et al. Quantum optimization of
+     maximum independent set using Rydberg atom arrays. Science, 376(6598):1209–1215, 2022.
+[16] Niklas Eén and Niklas Sörensson. An extensible SAT-solver. In International conference on
+     theory and applications of satisfiability testing, pages 502–518. Springer, 2003.
+
+
+                                                10
+[17] Yukang Feng, Jianwen Sun, Zelai Yang, Jiaxin Ai, Chuanhao Li, Zizhen Li, Fanrui Zhang,
+     Kang He, Rui Ma, Jifan Lin, Jie Sun, Yang Xiao, Sizhuo Zhou, Wenxiao Wu, Yiming Liu,
+     Pengfei Liu, Yu Qiao, Shenglin Zhang, and Kaipeng Zhang. LongCLI-Bench: A preliminary
+     benchmark and study for long-horizon agentic programming in command-line interfaces, 2026.
+     URL https://arxiv.org/abs/2602.14337.
+[18] Yannick Forster, Dominique Larchey-Wendling, Andrej Dudenhefner, Edith Heiter, Dominik
+     Kirst, Fabian Kunze, Gert Smolka, Simon Spies, Dominik Wehr, and Maximilian Wuttke. A
+     Coq library of undecidable problems. In CoqPL 2020 The Sixth International Workshop on Coq
+     for Programming Languages, 2020.
+[19] Xuanzhao Gao, Xiaofeng Li, and Jinguo Liu. Programming guide for solving constraint
+     satisfaction problems with tensor networks. Chinese Physics B, 34(5):050201, 2025.
+[20] Michael R. Garey and David S. Johnson. Computers and Intractability: A Guide to the Theory
+     of NP-Completeness. W. H. Freeman & Co., 1990. ISBN 978-0-7167-1045-5.
+[21] Elliot Glazer, Ege Erdil, Tamay Besiroglu, Diego Chicharro, Evan Chen, Alex Gunning,
+     Caroline Falkman Olsson, Jean-Stanislas Denain, Anson Ho, Emily de Oliveira Santos, Olli
+     Järviniemi, Matthew Barnett, Robert Sandler, Matej Vrzala, Jaime Sevilla, Qiuyu Ren, Elizabeth
+     Pratt, Lionel Levine, Grant Barkley, Natalie Stewart, Bogdan Grechuk, Tetiana Grechuk,
+     Shreepranav Varma Enugandla, and Mark Wildon. FrontierMath: A benchmark for evaluating
+     advanced mathematical reasoning in AI, 2025. URL https://arxiv.org/abs/2411.04872.
+[22] Fred Glover, Gary Kochenberger, and Yu Du. Quantum bridge analytics I: a tutorial on
+     formulating and using QUBO models. 4or, 17(4):335–371, 2019.
+[23] Michel X Goemans and David P Williamson. Improved approximation algorithms for maximum
+     cut and satisfiability problems using semidefinite programming. Journal of the ACM (JACM),
+     42(6):1115–1145, 1995.
+[24] Sharon Goldman.      Cursor used a swarm of AI agents powered by OpenAI to
+     build and run a web browser for a week—with no human help. here’s why de-
+     velopers are buzzing, January 2026.    URL https://fortune.com/2026/01/23/
+     cursor-built-web-browser-with-swarm-ai-agents-powered-openai/. Accessed:
+     2026-04-13.
+[25] Balaji Gopalakrishnan and Ellis L Johnson. Airline crew scheduling: State-of-the-art. Annals
+     of Operations Research, 140(1):305–337, 2005.
+[26] Gurobi Optimization, LLC. Gurobi, 2026. URL https://www.gurobi.com. Accessed:
+     2026-04-13.
+[27] Haoqi He. Quantum annealing and GNN for solving TSP with QUBO. In Algorithmic Aspects
+     in Information and Management (AAIM), pages 134–145. Springer, 2024. doi: 10.1007/
+     978-981-97-7801-0_12.
+[28] Werner Heijstek.   We analyzed the code of Cursor’s ai-built browser FastRen-
+     der, January 2026.   URL https://www.softwareimprovementgroup.com/blog/
+     quality-of-fastrender/. Accessed: 2026-04-13.
+[29] QHJAJ Huangfu and JA Julian Hall. Parallelizing the dual revised simplex method. Mathemati-
+     cal Programming Computation, 10(1):119–142, 2018.
+[30] IBM. IBM ILOG CPLEX optimization studio, 2026. URL https://www.ibm.com/
+     products/ilog-cplex-optimization-studio. Accessed: 2026-04-13.
+[31] Joseph T. Iosue. qubovert: a Python package for formulating, simulating, and solving problems
+     in boolean and spin form, 2022. URL https://github.com/jtiosue/qubovert. Accessed:
+     2026-04-13.
+[32] Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and
+     Karthik R Narasimhan. SWE-bench: Can language models resolve real-world github issues?
+     In The Twelfth International Conference on Learning Representations, 2024. URL https:
+     //openreview.net/forum?id=VTF8yNQM66.
+
+
+                                                11
+[33] Richard M. Karp. Reducibility among Combinatorial Problems, pages 85–103. Springer US,
+     Boston, MA, 1972. ISBN 978-1-4684-2001-2. doi: 10.1007/978-1-4684-2001-2_9. URL
+     https://doi.org/10.1007/978-1-4684-2001-2_9.
+[34] Bernhard Korte and Jens Vygen. Combinatorial optimization: theory and algorithms. Springer,
+     2008.
+[35] Jin-Guo Liu, Xun Gao, Madelyn Cain, Mikhail D. Lukin, and Sheng-Tao Wang. Computing
+     solution space properties of combinatorial optimization problems via generic tensor networks.
+     SIAM Journal on Scientific Computing, 45(3):A1239–A1270, 2023. doi: 10.1137/22M1501787.
+[36] Andrew Lucas. Ising formulations of many NP problems. Frontiers in physics, 2:74887, 2014.
+[37] Cláudio L. Lucchesi and Sylvia L. Osborn. Candidate keys for relations. Journal of
+     Computer and System Sciences, 17(2):270–279, 1978. ISSN 0022-0000. doi: https://doi.
+     org/10.1016/0022-0000(78)90009-0. URL https://www.sciencedirect.com/science/
+     article/pii/0022000078900090.
+[38] William Merrill and Ashish Sabharwal. The expressive power of transformers with chain of
+     thought, 2024. URL https://arxiv.org/abs/2310.07923.
+[39] Iman Mirzadeh, Keivan Alizadeh, Hooman Shahrokhi, Oncel Tuzel, Samy Bengio, and Mehrdad
+     Farajtabar. GSM-Symbolic: Understanding the limitations of mathematical reasoning in large
+     language models, 2025. URL https://arxiv.org/abs/2410.05229.
+[40] Nicholas Nethercote, Peter J. Stuckey, Ralph Becket, Sebastian Brand, Gregory J. Duck, and
+     Guido Tack. MiniZinc: Towards a standard CP modelling language. In Christian Bessière,
+     editor, Principles and Practice of Constraint Programming – CP 2007, pages 529–543, Berlin,
+     Heidelberg, 2007. Springer Berlin Heidelberg. ISBN 978-3-540-74970-7.
+[41] Minh-Thi Nguyen, Jin-Guo Liu, Jonathan Wurtz, Mikhail D. Lukin, Sheng-Tao Wang, and
+     Hannes Pichler. Quantum optimization with arbitrary connectivity using Rydberg atom arrays.
+     PRX Quantum, 4:010316, Feb 2023. doi: 10.1103/PRXQuantum.4.010316. URL https:
+     //link.aps.org/doi/10.1103/PRXQuantum.4.010316.
+[42] Jakob Nielsen. Progressive disclosure. Nielsen Norman Group, 2006. URL https://www.
+     nngroup.com/articles/progressive-disclosure/.
+[43] OpenAI. Codex, 2026. URL https://openai.com/codex/. Accessed: 2026-04-13.
+[44] OpenAI. Harness engineering: Leveraging Codex in an agent-first world, 2026. URL https:
+     //openai.com/index/harness-engineering/. Accessed: 2026-04-13.
+[45] Xi-Wei Pan, Huan-Hai Zhou, Yi-Ming Lu, and Jin-Guo Liu. Encoding computationally hard
+     problems in triangular Rydberg atom arrays, 2025. URL https://arxiv.org/abs/2510.
+     25249.
+[46] Laurent Perron and Vincent Furnon. OR-Tools. URL https://developers.google.com/
+     optimization/.
+[47] Hannes Pichler, Sheng-Tao Wang, Leo Zhou, Soonwon Choi, and Mikhail D. Lukin. Quantum
+     optimization for maximum independent set using Rydberg atom arrays, 2018. URL https:
+     //arxiv.org/abs/1808.10816.
+[48] Martin JA Schuetz, J Kyle Brubaker, and Helmut G Katzgraber. Combinatorial optimization
+     with physics-inspired graph neural networks. Nature Machine Intelligence, 4(4):367–377, 2022.
+[49] Parshin Shojaee, Iman Mirzadeh, Keivan Alizadeh, Maxwell Horton, Samy Bengio, and
+     Mehrdad Farajtabar. The illusion of thinking: Understanding the strengths and limitations of
+     reasoning models via the lens of problem complexity, 2025. URL https://arxiv.org/abs/
+     2506.06941.
+[50] Yohei Tamura and Masahiro Sakai. qubogen: QUBO matrix generator for major combinato-
+     rial optimization problems written in Python, 2020. URL https://github.com/tamuhey/
+     qubogen. Accessed: 2026-04-13.
+
+
+                                               12
+[51] Minh V. T. Thai, Tue Le, Dung Nguyen Manh, Huy Phan Nhat, and Nghi D. Q. Bui. SWE-
+     EVO: Benchmarking coding agents in long-horizon software evolution scenarios, 2026. URL
+     https://arxiv.org/abs/2512.18470.
+[52] Paolo Toth and Daniele Vigo. Vehicle routing: problems, methods, and applications. SIAM,
+     2014.
+[53] Jesse Vincent et al. Superpowers: A plugin for building better AI coding agents, 2025. URL
+     https://github.com/obra/superpowers. Accessed: 2026-04-13.
+[54] Xingyao Wang, Boxuan Li, Yufan Song, Frank F. Xu, Xiangru Tang, Mingchen Zhuge, Jiayi
+     Pan, Yueqi Song, Bowen Li, Jaskirat Singh, Hoang H. Tran, Fuqiang Li, Ren Ma, Mingzhang
+     Zheng, Bill Qian, Yanjun Shao, Niklas Muennighoff, Yizhe Zhang, Binyuan Hui, Junyang Lin,
+     Robert Brennan, Hao Peng, Heng Ji, and Graham Neubig. OpenHands: An open platform for AI
+     software developers as generalist agents, 2025. URL https://arxiv.org/abs/2407.16741.
+[55] Scott Wu. Introducing Devin, the first AI software engineer. Cognition Blog, March 2024. URL
+     https://cognition.ai/blog/introducing-devin.
+[56] Pedro Maciel Xavier, Pedro Ripper, Tiago Andrade, Joaquim Dias Garcia, Nelson Maculan,
+     and David E. Bernal Neira. QUBO.jl: A Julia ecosystem for quadratic unconstrained binary
+     optimization, 2023. URL https://arxiv.org/abs/2307.02577.
+[57] Chunqiu Steven Xia, Zhe Wang, Yan Yang, Yuxiang Wei, and Lingming Zhang. Live-SWE-
+     agent: Can software engineering agents self-evolve on the fly?, 2025. URL https://arxiv.
+     org/abs/2511.13646.
+[58] Mingyu Xiao and Hiroshi Nagamochi. Exact algorithms for maximum independent set. Infor-
+     mation and Computation, 255:126–146, 2017.
+[59] John Yang, Carlos E Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik
+     Narasimhan, and Ofir Press. Swe-agent: Agent-computer interfaces enable automated software
+     engineering. Advances in Neural Information Processing Systems, 37:50528–50652, 2024.
+[60] Mashiyat Zaman, Kotaro Tanahashi, and Shu Tanaka. PyQUBO: Python library for mapping
+     combinatorial optimization problems to QUBO form. IEEE Transactions on Computers, 71(4):
+     838–850, 2021. doi: 10.1109/TC.2021.3063618.
+[61] Chenhao Zhang, Jason D. Hartline, and Christos Dimoulas. Karp: a language for NP reductions.
+     In Proceedings of the 43rd ACM SIGPLAN International Conference on Programming Language
+     Design and Implementation, PLDI 2022, page 762–776, New York, NY, USA, 2022. Association
+     for Computing Machinery. ISBN 9781450392655. doi: 10.1145/3519939.3523732. URL
+     https://doi.org/10.1145/3519939.3523732.
+
+
+A    Related Work
+Reduction libraries and tools. Prior work falls along a ladder of executability and scope (Table 2):
+paper catalogues and formulation surveys, executable per-rule tools, single-endpoint modeling
+libraries, and an earlier inter-type prototype. The present library extends this line by connecting
+many source types to many targets with composable overhead and inverse maps, under AI-assisted
+maintenance.
+Two adjacent traditions warrant mention. Optimization modeling languages such as MiniZinc [40] let
+a user write a high-level constraint or optimization model once and dispatch it to many solver back-
+ends via a shared intermediate representation; the mechanism is modeling-to-solver via flattening
+rather than problem-to-problem reduction between NP-hard types. Formal verification frameworks,
+notably the Coq Library of Undecidable Problems [18], formalize reduction chains whose correctness
+is machine-checked by proof rather than tested on canonical examples; they target undecidable
+problems and incur substantially higher development cost than the present library.
+AI coding agents: capabilities and limitations. SWE-agent [59], Devin [55], OpenHands [54],
+and Claude Code [1] resolve isolated issues with increasing reliability [57], but longer-horizon
+
+
+                                                13
+             Table 2: Reduction libraries and tools, ordered by executability and scope.
+
+ Work                               Form                  Scope
+ Karp [33]; Garey and Johnson [20]; Paper catalogue       Reduction sketches and Ising formulas; not exe-
+ Lucas [36]                                               cutable
+ Karp DSL [61]                      Executable per-rule   25 reductions from a textbook; isolated rules, no
+                                                          reusable graph
+ REDNP [10]                         Executable per-rule   DSL for student exercises; new problems boot-
+                                                          strap via reduction to SAT
+ PyQUBO [60]; qubovert [31]; Executable library           Many problems to single endpoint (QUBO/Is-
+ QUBO.jl [56]; D-Wave Ocean [11]                          ing)
+ ProblemReductions.jl [19, 35]   Executable graph         18 types; inter-type reduction graph; manually
+                                                          maintained
+ This work                          Executable graph      190 types, 265 rules; composable inverse maps;
+                                                          AI-assisted maintenance
+
+
+benchmarks reveal a capability cliff: frontier agents resolve up to ∼70% of single-file issues on
+SWE-bench Verified [32], yet SWE-bench Pro [13] reports only ∼23% on multi-file tasks and
+SWE-EVO [51] ∼21%; LongCLI-Bench [17] finds pass rates below 20% on long-horizon CLI
+tasks. Quality concerns are equally sharp: AI co-authored code carries 1.7× more major defects [9];
+the METR randomized trial found experienced developers 19% slower with AI tools on their own
+repositories [3]; Cursor’s FastRender (3M+ lines generated by parallel agents) scored 1.3/5 for
+maintainability [24, 28].
+Harness engineering. To tame this variance, harness engineering [44, 5] shifts the engineer’s
+role from code authorship to environment design. Persistent project instructions and composable
+skills [8, 53] keep agents aligned with repository conventions across sessions; verification pipelines
+reject incorrect output before it enters the codebase. Our approach instantiates this pattern for
+a mathematical domain, exploiting the project’s uniform, verifiable structure so that each agent
+invocation is short, self-contained, and human-reviewable.
+
+B    CLI Usage
+We introduce the pred CLI through one example. The instance is weighted MaxCut on a 4-cycle
+(0-1, 1-2, 2-3, 3-0) with unit weights. Build the instance:
+         pred create MaxCut --graph 0-1,1-2,2-3,3-0 -o instance.json
+
+Enumerate downstream models.
+         pred from MaxCut/SimpleGraph/i32 --hops 2
+
+prints the reachable downstream cone (two branches, each three hops from QUBO/f64):
+         MaxCut/SimpleGraph/i32
+           |– MinimumCutIntoBoundedSets/SimpleGraph/i32 -> ILP/bool
+           |– SpinGlass/SimpleGraph/i32 -> SpinGlass/SimpleGraph/f64
+
+Compare reduction paths.
+         pred path MaxCut/SimpleGraph/i32 QUBO/f64 --all
+
+enumerates both paths and reports their per-step overhead. The endpoints differ by orders of
+magnitude:
+        • Path 1 (via SpinGlass): num_vars = O(|V |) at the QUBO endpoint.
+        • Path 2 (via MinimumCutIntoBoundedSets and ILP/bool): num_vars = O(|V |4 ).
+Path 2 inflates because the intermediate ILP encoding adds a constraint per cut edge before being
+quadratised into QUBO; Path 1 keeps the variable count linear. To save Path 1 so that downstream
+reductions consume the same choice deterministically:
+
+
+                                                  14
+                                                       Problem trait
+                                       NAME · Value: Aggregate · dims() · evaluate()
+
+
+
+                                  Max<W>                   Min<W>                    Or
+                               NP optimization          NP optimization           NP decision
+
+                                    And                   Sum<W>                Extremum<V>
+                                co-NP decision           #P counting            LP optimization
+
+
+
+                                                                 ReduceTo<T>
+
+
+                                                   ReductionResult<T>
+                                            target_problem() · extract_solution()
+
+
+                                                                 #[reduction(overhead = {...})]
+
+
+                           Compile-time validation
+                           • Variable names → getter methods
+                           • Expr AST: symbolic overhead expressions
+                           • declare_variants! → compile-time registry
+
+
+
+Figure 8: Trait hierarchy and compile-time validation. The Problem trait defines a universal
+evaluation interface; ReduceTo<T> requires both forward and inverse maps; procedural macros
+validate overhead expressions and variant registrations at compile time.
+
+
+         pred path --cost minimize:num_vars -o path.json
+
+Reduce, solve, lift.
+         pred reduce instance.json --via path.json -o bundle.json
+
+forward-reduces the instance along the saved path; the bundle carries the original instance under
+source, the reduction trace under path, and the resulting 4-variable QUBO under target. After an
+external solver returns a target-space configuration (on this instance, alternating colours [1,0,1,0]
+achieve the QUBO minimum −8), the call
+         pred extract bundle.json --config 1,0,1,0
+
+inverse-maps the QUBO solution back through every reduction step and reports the source-space
+evaluation Max(4) (Appendix C): every edge of the 4-cycle is cut. extract composes the inverse of
+every reduction in the path.
+
+Other subcommands.
+
+       • pred show <variant>: prints a problem’s definition, schema, complexity, and neighbour-
+         ing reductions.
+       • pred list: enumerates all registered problem types with their complexities.
+       • pred evaluate <instance>.json --config <csv>: scores a candidate configuration
+         against the instance directly, useful for verifying solutions independently of the solver.
+       • pred solve <instance>.json: runs an end-to-end solve via the cheapest reduction path
+         with a built-in default solver.
+
+C    Implementation Details
+The library’s type system reduces the space of possible agent errors by making incorrect code fail
+to compile. This appendix describes the key design decisions: the aggregation-based problem
+representation, the solver priority system, and the variant registry (Figure 8).
+
+Problems and variants. Every problem type implements Problem, which requires: a con-
+stant name, an associated Value type, a method returning the configuration space dimensions,
+an evaluate() method that maps any configuration to a value, and variant metadata. The
+Value type is an aggregation wrapper that determines how individual evaluations combine across
+
+
+                                                             15
+the configuration space. Six wrappers cover the standard problem classes (Table 3). Each
+wrapper implements an Aggregate trait with identity(), combine(), and optional witness-
+tracking methods, so a brute-force solver reduces to a single fold over the configuration space:
+configs.map(evaluate).fold(identity, combine). Wrappers that support witness recovery
+can track which configuration achieved the optimal value; those that cannot (counting and co-NP)
+only produce aggregate values. This distinction propagates to the reduction traits.
+
+
+                    Table 3: Aggregation wrappers and their complexity classes.
+                  Wrapper             Class                  Witness     Example
+                  Max<W>              NP optimization        Yes         Max. Indep. Set
+                  Min<W>              NP optimization        Yes         Min. Vertex Cover
+                  Or                  NP decision            Yes         k-Satisfiability
+                  Sum<W>              #P counting            No          k-th Largest m-Tuple
+                  And                 co-NP decision         No          (reserved)
+                  Extremum<V>         NP optimization†       Yes         Integer Lin. Prog.
+              † Extremum differs from Max/Min only in that the optimization sense is chosen at runtime.
+
+
+
+A single problem type admits multiple variants: parameterizations by graph type (SimpleGraph,
+PlanarGraph, BipartiteGraph, KingsSubgraph, UnitDiskGraph, etc.) and weight type (unit,
+i32,√f64). Each variant may have a better complexity bound: MIS on king’s subgraphs runs in
+2O( |V |) [12] versus O(1.1996|V | ) on general graphs [58]. The declare_variants! macro regis-
+ters each concrete instantiation with its best-known complexity, a factory for JSON deserialization,
+and a solve function. All variable names in complexity expressions are validated at compile time
+against the problem’s getter methods. This registry produces the registered variants from 100+ base
+problem types.
+
+Decision problems. A generic Decision<P> wrapper converts any optimization problem P (whose
+value type is Max<W> or Min<W>) into a decision problem with value type Or: given a bound k, it
+asks whether a configuration meeting or exceeding k exists. The wrapper implements Problem
+automatically via the DecisionProblemMeta trait, which supplies the decision variant’s name. The
+reduction from the decision wrapper to its inner optimization type is derived generically, so adding
+a decision variant requires only a one-line macro invocation (register_decision_variant!).
+Three problem types currently have decision variants: Maximum Independent Set, Minimum Vertex
+Cover, and Minimum Dominating Set.
+
+Reduction rules. The type system enforces a split based on witness capability. ReduceTo<T>
+requires a ReductionResult that bundles target_problem() and extract_solution(), a
+map from a target configuration back to a source configuration. An agent cannot compile a
+forward reduction without providing the inverse map; incomplete reductions are compile errors.
+ReduceToAggregate<T> requires an AggregateReductionResult with extract_value() in-
+stead, a map from a target value back to a source value, with no witness recovered. Each reduction
+also carries a compile-time-validated overhead: the #[reduction(overhead = {...})] procedu-
+ral macro attaches symbolic size expressions, and variable names are checked against getter methods
+on the source type, so a typo causes a compile error, not a silent bug.
+
+Solvers. When the user invokes pred solve, the system selects a solver in priority order. First, if
+the problem has a dedicated solver that exploits its structure (currently six problem types), the system
+uses it. Second, if a witness-capable reduction path to Integer Linear Programming (ILP) exists, the
+system reduces along the cheapest path (by Dijkstra) and solves with HiGHS. Third, the brute-force
+enumerator is always available: it folds over all configurations using the aggregation interface. Brute
+force remains essential for testing, where correctness matters more than speed.
+
+Reduction graph construction. Problem variants and reduction rules compose into the directed
+graph described in Section 2.2. For subtype edges (e.g., MIS on a king’s subgraph to MIS on a general
+graph), a generic ReductionAutoCast implements both reduction traits with an identity solution
+map. At runtime, type-erased blanket implementations (DynReductionResult) let the reduction-
+
+
+                                                        16
+graph engine chain reductions along Dijkstra-discovered paths without knowing the concrete types at
+compile time.
+
+D    QUBO Coverage
+Specialized hardware for combinatorial optimization is one of the fastest-growing frontiers of AI
+infrastructure. Ising machines, quantum annealers [22], and physics-inspired neural solvers [48] all
+promise substantial speedups over conventional CPU solvers, and the field has converged on a single
+input format: QUBO. The catch is that the speedup is only available after the user has hand-translated
+their problem into QUBO, a step that has historically required a domain expert per problem and a
+fresh paper per reduction. This is exactly where the reduction graph pays off.
+Treating QUBO as one registered solver target, pred to QUBO --hops 3 reports 138 problem
+variants that route to it with witness recovery in the current library. Table 4 samples ten and lists the
+composed overhead rQUBO←A , the polynomial mapping source size to QUBO variable count. All
+ten share one invocation, pred reduce - --to QUBO, and only the input changes. By contrast,
+solver-specific compilers such as PyQUBO [60] and qubovert [31] accept QUBO input but provide
+no inter-problem reductions, leaving the translation step to the user.
+
+Table 4: Ten problems reaching QUBO within three hops, sampled from 138 reachable variants. A
+QUBO-capable solver inherits all of them via one command.
+             Problem                           Hops      rQUBO←A                 Application
+             GraphPartitioning                 1         O(V )                   VLSI partitioning
+             3-Satisfiability                  1         O(C + V )               Verification, planning
+             Knapsack                          1         O(n + b)                Resource allocation
+             TravelingSalesman                 1         O(V 2 )                 Logistics, PCB drilling
+             KColoring                         1         O(V 2 )                 Register allocation
+             Partition                         2         O(n + b)                Load balancing
+             MaximumClique                     2         O(V 3 )                 Bioinformatics
+             BinPacking                        2         O(n3 )                  VM/container packing
+             MultiprocessorScheduling          2         O(P T 2 + P 2 T )       Cloud scheduling
+             MaximumIndependentSet             3         O(V 3 )                 Wireless scheduling
+                  V : vertices; C: clauses; n: items; b: encoding/slack bits; P, T : processors, tasks.
+
+
+
+E    Skill Excerpts
+Figure 9 reproduces the two skills referenced in Section 3.3: propose (advisor skill that gates issue
+creation by domain experts) and add-rule (automation skill that drives implementation from a
+validated issue).
+
+F    Agent Profile Example
+Figure 10 shows a representative agent profile used by the agentic feature tests described in Section 3.4.
+The persona’s domain knowledge lets the sub-agent judge whether reduction outputs are plausible
+without access to ground-truth labels.
+
+G    Agentic Feature Test Findings
+The ∼ 50 pred defects of Section 3.4 fall into two categories. Every defect is faithfully recorded
+in the project’s development history (GitHub issues and pull requests), which will be made public
+alongside the paper.
+
+Help text drifts from actual behaviour. A user only knows what the program tells them, so any
+disagreement between the documentation and the running code propagates into every later decision
+the user makes. As one example, in pred v0.3.0 typing pred with no subcommand printed the
+
+
+                                                          17
+   propose — advisor skill (excerpts)                             add-rule — automation skill (excerpts)
+    ---                                                            ---
+    name : propose                                                 name : add - rule
+    description :                                                  description : Adding a new reduction
+      Guides domain experts through brainstorm -                     rule to the codebase , either from
+      ing and files a GitHub issue                                   an issue or interactively
+    ---                                                            ---
+
+   No programming knowledge required. This skill works            Required Information Checklist
+   entirely in mathematical / domain language.                    1. Reduction algorithm — how to transform
+  <HARD-GATE>                                                        source instance to target, with BibTeX refer-
+  Do NOT write any code, create any files, or invoke                 ence.
+  implementation skills. The ONLY output of this skill is         2. Size overhead — how target size relates to
+  GitHub issues filed via gh issue create.                           source size, used for estimating the overhead
+  </HARD-GATE>                                                       of the reduction.
+                                                                  3. Concrete example — a small worked-out in-
+   Run topology analysis first to identify the most impactful        stance, used for testing and documentation.
+   missing reductions [. . . ]                                    4. . . .
+    cargo run -- example \                                        Do NOT proceed until the checklist is complete.
+        detect_isolated_problems
+    cargo run -- example \
+        detect_unreachable_from_3sat                              Reference Implementations — Read these first:
+                                                                  src/rules/mvc_mis.rs [. . . ]
+   Pre-validation — Run check-issue on draft before filing:
+   1. Usefulness — does a cheaper reduction path already exist?   Document in paper. Write a reduction-rule
+   2. Effort — effort to implement?                               entry in the Typst paper with theorem body, proof
+   3. Correctness — do cited references support the claims?       (construction, correctness, solution extraction), and
+   4. Writing quality — all symbols defined, examples worked?     a worked example with concrete numbers. Run
+   Only issues passing all four checks are filed.                 make paper — must compile without errors.
+
+
+Figure 9: Two skills that bookend the contribution pipeline. propose (left) gates issue creation by
+domain experts: the hard gate enforces no-code contribution, topology analysis guides experts toward
+strategic reduction-graph gaps, and pre-validation checks four quality dimensions before the issue
+enters the pipeline. add-rule (right) drives implementation from a validated issue: the checklist
+encodes the mathematical knowledge every reduction requires, reference implementations prevent
+convention drift, and the paper entry ensures visual verifiability by human reviewers.
+
+
+top-level menu and then appended roughly seventy lines of unrelated pred solve help, which may
+lead the user to believe a solve invocation is required by default. A simulated first-time user found
+this on the very first command and reported the confusion. An AI agent writing unit tests thinks about
+the code it has just built, not about how a user would first meet the tool.
+
+Counterexamples and edge cases the test author missed. Verifying every reduction rule without
+formal proof or automated theorem proving has no clean solution. The project mitigates this in two
+layers. The first layer frontloads correctness: domain experts file high-quality issues drawn from their
+experience and from canonical references (like Garey and Johnson [20]), and each problem type ships
+with a non-trivial canonical example chosen to trigger the structural features the reductions must
+respect. Current AI cannot reliably construct such examples (Section 3.2); it defaults to toy cases that
+satisfy the type contract but miss the structure that makes the reduction non-trivial. That structure is
+difficult to articulate in language, and AI can be nudged toward less trivial cases only through explicit
+proxies such as variable count or edge density. The second layer is agentic feature tests, which run the
+real CLI pipeline on those canonical examples from the outside and catch contract violations that the
+existing tests miss. As one example, an instance of an NP-hard problem typically has many distinct
+valid solutions, and a reduction’s inverse map must lift any of them back to a valid source solution;
+unit tests check this property using only the one solution a brute-force solver happens to return, and
+an agentic-test sweep caught four reductions whose inverse maps worked there but silently produced
+invalid source configurations when the CLI’s default ILP solver returned a different valid solution. As
+another, the --cost-bound flag of pred create ProductionPlanning was declared as a signed
+integer but cast to an unsigned integer without a non-negativity check, so a simulated user typing
+a negative bound silently received a problem with an effectively unbounded cost, which the solver
+
+
+                                                          18
+    Agent Profile: Dr. Sarah Chen — CLI Tool (pred)
+    Use case. An algorithm engineer reads the project documentation to learn what problems and reductions
+    exist, then uses the pred CLI to model and solve their own optimization problems. Each session: pick a
+    problem from the paper, create an instance with real-world-style data, find a reduction path to a solver, solve
+    it, and verify the result.
+    Persona. Senior algorithm engineer at a logistics company with ten years of experience in vehicle routing,
+    scheduling, and layout optimization. Knows these problems map to graph coloring, independent set, set
+    cover, and similar NP-hard formulations because she has hand-coded reductions before. Found this project’s
+    paper and wants to try the CLI instead of writing reductions herself. Has never used pred before.
+    Behavior. Reads the paper and docs first, then picks a problem she recognizes. Figures out the CLI by
+    reading its help output. After each step, compares the output against her expectation. If something does not
+    match, investigates before moving on.
+
+
+Figure 10: A representative agent profile used in agentic feature testing. The persona’s domain
+knowledge (logistics optimization) lets the agent judge whether reduction results are plausible
+without access to ground-truth labels.
+
+
+declared trivially feasible. Agentic feature tests do not remove this intrinsic difficulty, but by probing
+for counterexamples from a user’s perspective they progressively harden the library against the inputs
+that real use produces.
+Both categories share an origin: agentic feature tests evaluate the program from the outside, using
+only the documentation and realistic data, and find what an unguarded user would find.
+
+H       Development Phases
+In Phase 1 (weeks 0–7), the team and AI agents ported reduction rules from existing packages
+(ProblemReductions.jl [19], UnitDiskMapping.jl [41, 45], and qubogen [50]) and from Garey and
+Johnson’s catalogue [20]. Growth was steady but slow: roughly 20 problem types and 55 rules by
+week 7. Through this process, the skill-based automation pipeline was established and iteratively
+refined. In Phase 2 (weeks 7–8.5), basic skills were introduced, but the pipeline was not yet end-to-end
+automated. In Phase 3 (weeks 8.5–13), the full pipeline became operational. Both curves accelerate
+sharply: problem types grew from 23 to 187, and reduction rules from 52 to 239, in under five weeks.
+External domain experts began contributing through the propose skill, filed structured issues in
+mathematical language while agents handled implementation.
+
+I     End-User Utility Experiment Details
+This appendix expands on the controlled experiment summarised in Section 4.2.
+
+Instance generator. Each of the ten seeds (the primes 7, 11, 13, 17, 19, 23, 29, 31, 37, 41)
+deterministically produces one team-split scenario: 150 engineers with a dense signed-weight survey
+over the 150-choose-2 pair graph. Each pair is independently sampled with probability 0.5 and, if
+sampled, receives an integer weight drawn uniformly from [−5, 12] (zeros skipped). Positive weights
+mean the pair benefits from being on different teams; negative weights mean they belong on the
+same team. The resulting graph has roughly 5,300 edges (density ≈ 0.48) with mixed signs. The
+corresponding mathematical model is signed-weight Maximum Cut on a 150-vertex dense graph.
+
+Four configurations. The agent runs in one of four configurations differing on two binary axes
+(2×2 factorial over web search and pred access):
+
+         • Bare AI (A): no pred, no web. The agent works from training-time priors only.
+         • Bare AI + web (B): no pred, but WebSearch/WebFetch allowed.
+         • + pred (C): pred CLI available, no web.
+         • + pred + web (D): both pred and web available.
+
+
+                                                          19
+Each cell runs ten seeds under the same environment settings (Solver environment below); A
+and B receive only the user-facing prompt, while C and D additionally receive a Markdown skill
+(solve-instance-offline for C, solve-instance for D).
+
+Scope of pred’s contribution (C and D). In C and D the only thing we add on top of A and B is
+a Markdown skill explaining how to use the pred CLI to walk the reduction graph; the skill says
+nothing about which solver to run. It guides the agent through two steps. The first is reduction-path
+selection: match the user’s problem description to a known model, query pred for downstream
+endpoints ranked by overhead and worst-case complexity, save a chosen path, forward-reduce along
+it, and inverse-map the solver’s answer back to the original variables (Appendix B shows an example).
+The second is solver selection: given the endpoint pred returned, pick an off-the-shelf solver that
+handles instances of that size and structure within the time budget. The skill lists no candidate solvers
+and expresses no preference; C relies on the agent’s training-time knowledge for this step, and D
+additionally uses WebSearch/WebFetch. This split keeps the comparison fair: pred only helps with
+picking the reduction endpoint, and the choice of solver on top of that endpoint is left entirely to the
+agent.
+
+Solver environment. Each run uses a fresh working directory and a fresh Python virtual-
+environment created via uv; the agent installs whatever solver package it picks. All four configurations
+follow the same single-pass protocol: the agent commits to one algorithm and one hyperparame-
+ter configuration, invokes the solver exactly once as timeout 90 python solve.py, and reports
+whatever target-space configuration the call returns (no retries, no method chaining, no polish stage).
+Each run is handled by Claude Opus 4.7 at extra-high reasoning effort (claude-opus-4-7-xhigh)
+in its own workdir.
+
+User-facing prompt. All four configurations receive the same engineer-voice prompt rendered
+from a shared template (Figure 11). The template carries no model or solver hint. The placeholders
+{NUM_PEOPLE}, {LAST_ID}, and {NUM_PAIRS} are interpolated per seed.
+
+  User-facing prompt template (rendered identically for all four configurations)
+   Hi - I run people - ops for a { NUM_PEOPLE } - person engineering org and we ’ re
+   about to do our annual team re - org . The CTO wants to split the whole org
+   into exactly two product teams ( call them Team A and Team B ) , and she
+   wants the split chosen to maximize total cross - team collaboration value .
+
+   Here ’ s the model :
+   We have { NUM_PEOPLE } engineers ( id 0..{ LAST_ID }) . HR has run a yearly
+   survey asking everyone about who they ’ ve worked with productively , who
+   they ’ ve clashed with , and so on . From that I built a per - pair score :
+
+     - score > 0 means putting these two on DIFFERENT teams is GOOD .
+     - score < 0 means they ’ re better off on the SAME team .
+     - pairs not in the CSV have score = 0.
+
+   The objective we ’ re maximizing is :
+
+        sum over all listed pairs of   score_pair ,
+        ONLY IF the two people end up on different teams .
+
+   There is no team - size constraint - Team A can be any size from 0 to
+
+   { NUM_PEOPLE } , and Team B gets the rest . We just want the split that
+   maximizes the cross - team value sum .
+
+   I ’ ve attached the per - pair scores as ‘ pairs . csv ‘ in your workdir
+   ({ NUM_PAIRS } rows total - the survey is dense ) . Each row is
+   ‘a ,b , score ‘ (3 columns , no header ) , with engineer ids in 0..{ LAST_ID }.
+
+   Please write a script that picks the split and prints the resulting total
+   cross - team value . Save the answer as ‘ answer . json ‘ with structure :
+
+        { " team_a ": [3 , 7 , 19 , 42 , ...] }
+
+   I ’ d like the algorithm to be both fast and good . Thanks !
+
+
+               Figure 11: Shared user-facing prompt rendered to all four configurations.
+
+
+                                                         20
+Per-instance solver picks. Table 5 lists the solver each agent selected on every instance. With-
+out pred, the bare baselines drift across MILP (HiGHS, PuLP+CBC), OR-Tools CP-SAT [46],
+simulated annealing (dwave-neal / dwave-samplers [11]), dwave-tabu [11], and Goemans–
+Williamson [23] (PICOS+CVXOPT). The two failure modes show why pred is non-trivial. A’s
+misses are MILP and CP-SAT runs whose LP relaxation is too loose for branch-and-bound to close in
+90 s. B’s misses are sharper: prompted by web search, the agent picks fancier methods (tabu on seed
+13, SDP on seed 29) and trips on integration details that documentation snippets do not surface. The
+tabu run misreads a solver-parameter convention and ends up asking for a compute budget orders of
+magnitude beyond the 90 s wall, so the call is killed before any answer is returned. The SDP run pairs
+Goemans–Williamson with a free open-source backend (CVXOPT) that cannot finish on a problem
+of this size in 90 s, where a commercial backend (MOSEK, SDPA) would have converged. In both
+cases the chosen method is sound on this problem; what fails is matching it to a working API call
+and a backend that scales. pred addresses precisely this gap. The fundamental difference is in the
+search space the agent navigates: without pred, the agent picks from any solver web search surfaces,
+including fancier methods whose APIs and backends are easy to misuse; with pred, the reduction
+graph routes the problem to a target form (here, the Ising / QUBO family) whose standard solvers are
+mature and well-integrated. The agent still picks its own solver on top of that endpoint, but the choice
+is now made in a region where the integration is well-trodden by construction. A natural extension is
+to annotate each endpoint in the reduction graph with richer solver-level information (recommended
+packages, working API patterns, known backend choices for given problem sizes), narrowing the
+agent’s remaining choice further still.
+With pred (C and D), every run reduces the problem to QUBO via the SpinGlass route and solves
+it with simulated annealing on the Ising form, matching the best-of-four on all ten instances. pred
+makes this route the default rather than one option among many. Its overhead-aware ranking (O(|V |)
+for SpinGlass vs. O(|V |4 ) for the ILP route) surfaces the SpinGlass endpoint, where signed-weight
+MaxCut maps directly to an Ising Hamiltonian (each edge weight becomes a coupling) without
+auxiliary variables. On that form simulated annealing’s local spin flips converge to low-energy
+configurations well inside the 90 s budget for a 150-variable problem.
+
+
+Table 5: Solver picked on each instance by each configuration. SA = simulated annealing on
+the Ising / QUBO reduction (dwave-neal or dwave-samplers); MILP = mixed-integer linear
+program (HiGHS or PuLP+CBC); CP-SAT = OR-tools constraint programming; Tabu = D-Wave
+TabuSampler; SDP = Goemans–Williamson semidefinite relaxation (PICOS+CVXOPT). Bold cells
+are the largest gaps to the best-of-four.
+                       Seed      Bare AI    Bare AI + web    + pred    + pred + web
+                         7       SA         SA               SA        SA
+                        11       SA         SA               SA        SA
+                        13       CP-SAT     Tabu             SA        SA
+                        17       MILP       SA               SA        SA
+                        19       SA         SA               SA        SA
+                        23       SA         SA               SA        SA
+                        29       SA         SDP              SA        SA
+                        31       SA         SA               SA        SA
+                        37       MILP       SA               SA        SA
+                        41       SA         SA               SA        SA
+                  solver families 3         3                1         1
+
+
+
+Raw per-run data. Table 6 lists the objective and corresponding solver wall-time for each (config-
+uration, instance) pair. Bold objectives mark misses below the best-of-four.
+
+Role of web access. Comparing A and B isolates the effect of web access on the bare configurations.
+Web has real but two-sided effects: it can steer the agent away from exact methods like MILP that do
+not scale to this problem size (B’s match rate rises to 8/10 from A’s 7/10), but the broader candidate
+pool also exposes the agent to fancier methods whose integrations are subtle, and two of B’s runs
+return 0 (dragging its mean to 10,014, below A’s 12,306). Web changes which solver the agent picks
+but provides no structural guarantee about budget feasibility; the net effect on this case study is
+
+
+                                                   21
+Table 6: Raw per-instance objective and solver wall-time for each configuration. Bold objectives fall
+below the best-of-four (right column). The 90 s OS-enforced kill cutoff bounds wall-times; entries
+near 80–90 s indicate the solver was running until killed.
+
+                      Bare AI          Bare AI + web           + pred           + pred + web
+           Seed    Obj.    Time (s)    Obj.    Time (s)    Obj.     Time (s)    Obj.     Time (s)   Best of 4
+            7     12,962    13.0      12,962     25.3     12,962      1.3      12,962     1.2        12,962
+            11    12,641     6.5      12,641      6.4     12,641      15.3     12,641     11.9       12,641
+            13    12,552    75.0         0       90.0     12,944       6.1     12,944     11.7       12,944
+            17     9,966    83.0      12,326      3.2     12,326      2.9      12,326     1.2        12,326
+            19    12,915    12.5      12,915      3.0     12,915      14.7     12,915      5.9       12,915
+            23    12,240    12.1      12,240      6.3     12,240      59.7     12,240      1.2       12,240
+            29    12,944    25.0         0       90.0     12,944      12.6     12,944      5.8       12,944
+            31    12,401    32.8      12,401      1.3     12,401      3.0      12,401     11.6       12,401
+            37    12,250    85.1      12,471     32.5     12,471      12.5     12,471     14.4       12,471
+            41    12,187    26.2      12,187      3.4     12,187      1.2      12,187     0.6        12,187
+          mean    12,306    37.1      10,014     26.1     12,603      12.9     12,603      6.5       12,603
+
+
+
+unreliable. The agent still needs domain-specific tools and skills (here pred) to reliably pick an
+effective solver.
+On C and D every run lands on simulated annealing (SA), so the only remaining decision is the
+SA budget. Table 7 shows that the two configurations pick similar budgets on most seeds, but D’s
+largest budgets stay well below C’s. The reason shows up in D’s logs: D queries WebSearch for
+typical dwave-neal budgets and anchors its choices near the documented values, while C, lacking
+that reference, occasionally inflates the budget as a safety margin.
+
+Table 7: Simulated-annealing budget chosen by each pred-enabled run and the resulting solver
+wall-time. Each cell shows num_reads × num_sweeps.
+                                         + pred                         + pred + web
+                     Seed       reads × sweeps      time (s)       reads × sweeps       time (s)
+                      7           200 × 2,000            1.3        200 × 2,000           1.2
+                      11         1,000 × 5,000          15.3       400 × 10,000          11.9
+                      13         200 × 10,000            6.1       400 × 10,000          11.7
+                      17         1,000 × 1,000           2.9        200 × 2,000           1.2
+                      19         1,000 × 5,000          14.7       200 × 10,000           5.9
+                      23        2,000 × 10,000          59.7        200 × 2,000           1.2
+                      29         200 × 20,000           12.6       200 × 10,000           5.8
+                      31          200 × 5,000            3.0       200 × 20,000          11.6
+                      37         200 × 20,000           12.5       500 × 10,000          14.4
+                      41          200 × 2,000            1.2        200 × 1,000           0.6
+
+Taken together, A vs B and C vs D give a consistent picture of what web access does and does not
+do in one-shot solving. Web has real effects in both directions. Without pred’s structural guardrail,
+those effects are unreliable: web changes which solver the agent picks, sometimes for the better and
+sometimes catastrophically for the worse. With pred fixing the solver class, web takes on a narrower
+role: it can serve as a documentation lookup that anchors parameter choices to known-good ranges.
+This split reflects a more general fact: there are few universal priors for solver parameters; choices
+are usually case-by-case, and even experienced practitioners reach good settings through grid search
+over plausible values rather than a single recipe. pred contributes on the solver-selection axis, where
+structure provides a reliable criterion; tuning a chosen solver’s parameters is naturally layered on top
+as an iterative grid-search refinement.
+
+
+
+
+                                                          22
+

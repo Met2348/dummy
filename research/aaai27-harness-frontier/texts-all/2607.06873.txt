@@ -1,0 +1,813 @@
+                                              Mining Workflow Graphs for Black-Box
+                                           Boundary Testing of Conversational LLM Agents
+                                                           Liting Lin                                          Boxi Yu                              Yuzhong Zhang
+                                        Lero, the Research Ireland Centre for Software Lero, the Research Ireland Centre for Software The Chinese University of
+                                                University of Limerick, Ireland                University of Limerick, Ireland          Hong Kong, Shenzhen
+                                                       Liting.Lin@ul.ie                                boxi.yu@lero.ie                         China
+                                                                                                                                     123090848@link.cuhk.edu.cn
+
+                                                         Lionel Briand                                 David-Paul Niland                        Emir Muñoz
+                                        Lero, the Research Ireland Centre for Software                      Genesys                              Genesys
+                                                University of Limerick, Ireland                              Ireland                             Ireland
+                                                 University of Ottawa, Canada                      davidpaulniland@gmail.com              emir.munoz@gmail.com
+                                                     lionel.briand@lero.ie
+
+
+
+                                           Abstract—Conversational LLM agents can cause real-world          τ 2 -bench [3], [6], WebArena [7], GAIA [8], AppWorld [9],
+
+
+
+
+arXiv:2607.06873v1 [cs.SE] 8 Jul 2026
+                                        harm when their internal workflows fail, such as completing a       and SWE-bench [10] score how well a model plans and com-
+                                        transaction without confirmation. Testing these state-dependent     pletes tasks in a fixed harness. The deployed agent, however,
+                                        failures is difficult because critical boundaries, such as iden-
+                                        tity checks and confirmation gates, are hidden behind multi-        is the model combined with the prompts, policies, tools, and
+                                        turn conversational prerequisites, rendering them inaccessible      guardrails wrapped around it, and a change to any of these
+                                        to standard tests. We present AGENT E VAL, a black-box testing      can silently break a workflow on the next release. What the
+                                        framework that discovers and stresses these stateful boundaries.    deployer needs is ordinary software testing of the deployed
+                                        AGENT E VAL interacts with an agent to mine a conversational        agent: generate tests, run them, and report faults repeatably.
+                                        workflow graph, a model of its behavior. Instead of prompting
+                                        blindly, AGENT E VAL uses this graph’s structure to enumerate           Testing these boundaries is hard. The agent is often a black
+                                        specific guards and prerequisites as test targets, replaying the    box: reachable only through a conversational interface, with
+                                        conversational path to a boundary before applying a perturba-       its internal prompts, tools, and state hidden [11]. If the testers
+                                        tion. AGENT E VAL then executes each test, determining whether      do not have access to the internal state, they can see only
+                                        it passes or fails using only the conversation turns. We bench-     the visible replies, and it is hard to tell where the boundaries
+                                        mark AGENT E VAL against a privileged, white-box auditor with
+                                        access to the agent’s underlying source code, which AGENT E VAL     are. These boundaries are also stateful, sitting behind multi-
+                                        never sees. On four τ 3 -bench agents, AGENT E VAL successfully     turn prerequisites: a confirmation gate, for instance, cannot be
+                                        generates tests covering 23–38 distinct boundaries per agent;       reached via a single prompt; the tester must carefully navigate
+                                        ablation studies attribute the gain to the graph’s structure: 23    the conversation to trigger it. Existing testing paradigms fall
+                                        distinct boundaries versus 12 with a prompt-only baseline, at       short: code-based tools require access to source code, crash
+                                        lower duplicate and false-alarm rates.
+                                                                                                            logs, or specifications that the agent withholds, while black-
+                                                                                                            box approaches either test for overall task success [12] or
+                                                              I. I NTRODUCTION
+                                                                                                            perturb single inputs [13], rather than stressing stateful guards.
+                                           Large language models now power conversational agents            A tester cannot write a test plan for a workflow it cannot
+                                        that act on a user’s behalf [1], [2], calling tools to answer       see; it must discover the boundaries by interacting with the
+                                        support requests, change bookings, and manage accounts [3].         agent, which leaves two questions the black box hides: where
+                                        However, conversational agents built on these models often          a boundary is and how to reach it.
+                                        fail, resulting in tangible real-world consequences [4], [5]. The       Both questions are about the agent’s hidden workflow.
+                                        most critical failures occur at the agent’s workflow boundaries:    Inspired by process mining, which mines a process model
+                                        the points where a correct agent must enforce a guard, a            from event logs [14], we present AGENT E VAL, a black-box
+                                        prerequisite, or a validation before proceeding. A boundary         conversational agent tester. AGENT E VAL adopts the directly-
+                                        that fails to hold changes the state of the system silently         follows graph [14], [15] to construct a conversational workflow
+                                        and often irreversibly: a booking canceled before the user          graph from the unstructured turns of its conversations with the
+                                        confirmed it, an action taken for an unverified caller, a value     agent. In this model, nodes represent abstracted agent activities
+                                        accepted that should have been refused.                             and edges carry the user actions observed between them.
+                                           Most work on evaluating conversational LLM agents fo-            Figure 1 shows such a graph that AGENT E VAL mined from
+                                        cuses on the underlying model’s capability, rather than the de-     the τ 3 -bench airline agent using only black-box interaction.
+                                        ployed system’s correctness: benchmarks such as τ -bench and            The graph’s structure marks where boundaries can sit, and
+                                                                                    no availability
+
+
+                                                             request_    dates                           present_                        confirm_
+            Booking                                                            search_flights select                           confirm
+                                                         booking_details                             booking_details                     booking
+
+                                                    k
+                                             boo
+
+                            describe_                                               present_
+                                                    list_                details                      confirm     confirm_
+        Cancellation     supported_tasks cancel
+                                                reservations                       eligibility                  cancellation
+
+                                            mo
+                                               di   fy
+
+                                                            request_     details   present_mod.       confirm     confirm_
+        Modification
+                                                          modification             confirmation                 modification
+
+
+Fig. 1. Excerpt of a conversational workflow graph AGENT E VAL induced from the τ 3 -bench airline agent by black-box, text-only exploration (46 activities
+and 54 transitions in the full graph; the booking, cancellation, and modification workflows are shown). Nodes are LLM-induced activity labels (abbreviated)
+and edges are labeled with the observed user action; amber nodes are confirmation gates, and the rightmost confirm_* states are observed completions.
+
+
+
+its observed routes show how to reach them. AGENT E VAL uses                       black-box tester of conversational agents against the agent’s
+both for graph-guided boundary testing: it deterministically                       own source code.
+walks every structural location and asks an LLM for a test                            We instantiate the benchmark on the four τ 3 -bench agents.
+that stresses the guard, limit, or recovery behavior observed                      Rather than using τ 3 -bench’s own task-based scoring, we
+there, rather than prompting blindly. Because each test inherits                   interact with the agents purely as black boxes, and for each, we
+its location’s route, the tester walks the conversation to the                     hand-write a reference list of the behaviors of the agent. Two
+boundary before applying the perturbation, reaching the state-                     findings stand out. First, phase-guided discovery generates
+dependent behavior that a single prompt cannot. This also                          higher-quality tests than naive exploration, raising coverage
+makes the boundary tests diverse, as covering every structural                     recall from 0.72 to 0.97 in the airline agent. Second, the
+location spreads coverage across many distinct boundaries.                         workflow graph is effective at driving boundary testing. Across
+   AGENT E VAL runs in two phases. The Discovery phase                             all four agents, graph-guided generation yields 23–38 distinct
+begins by exploring the agent through a series of conver-                          boundaries per agent; in the airline agent, it yields 23 versus 12
+sations to collect traces within a fixed interaction budget.                       with prompt-only generation, cutting the duplicate rate from
+It then synthesizes a test plan from these traces in two                           0.56 to 0.26 at near-zero false-alarm rates.
+steps. First, it generates functional tests by replaying the
+                                                                                     This paper makes three contributions.
+successful workflows observed in the traces. Second, it induces
+the conversational workflow graph to guide the synthesis of                          1) A black-box conversational agent testing framework.
+boundary tests. The Execution phase then runs the plan. For                             We present AGENT E VAL, which tests a deployed con-
+each test, an LLM-driven runner re-enacts the conversation                              versational agent using only its chat interface. It explores
+against a fresh session of the agent, following the required                            the agent, synthesizes a test plan of functional and
+route to the target state. A separate judge then evaluates the                          boundary tests, executes the plan, and judges the out-
+resulting trace to return a pass, fail, or inconclusive verdict.                        comes based entirely on the resulting conversation, with-
+The generated test plan is a reusable artifact for regression                           out ever inspecting the agent’s internals (Sections III–V).
+testing whenever the agent is updated.                                               2) Graph-guided boundary testing. We adapt the directly-
+   To measure AGENT E VAL’s effectiveness, we created a new                             follows graph from process mining [15] to mine a
+benchmark. Our benchmark employs a privileged auditor that                              conversational workflow graph from black-box conver-
+reads this source code and acts as the ground-truth oracle for                          sations, employing an LLM to abstract raw conversa-
+scoring the tester. The auditor assesses each phase separately.                         tion turns into discrete agent activities. Leveraging this
+For the Discovery phase, the auditor measures the plan’s va-                            structural model, we can generate targeted boundary
+lidity rate by screening for ill-formed tests. For the valid tests,                     tests that probe and stress the agent’s stateful boundaries
+it then calculates two sets of metrics: for functional tests, it                        (Sections IV and V-B).
+measures coverage recall against an inventory of documented                          3) A benchmark for black-box conversational agent
+behaviors; for boundary tests, it counts the number of distinct                         testing. We design a benchmark for assessing black-
+boundaries covered and calculates the duplicate rate, i.e. the                          box conversational agent testers. It pairs the tester with
+fraction of generated tests that redundantly target the same                            a privileged auditor who has white-box access to the
+boundary. In the Execution phase, it analyzes test runs to                              agent’s source code and reports per-phase metrics: the
+distinguish real faults from false alarms and reports the false-                        test plan’s validity rate, functional coverage recall, dis-
+alarm rate.                                                                             tinct boundary counts, and execution false-alarm rates
+   To our knowledge, this is the first benchmark to score a                             (Section VI).
+                      list_reservations                                         only after the tester confirms at request_confirmation.
+                                                                                The question that matters is whether the agent actually en-
+                                 cancel details
+                                                                                forces that gate: whether it would still cancel if the tester
+                     present_eligibility          in e
+                                                        ible                    answered yes before any confirmation was requested, or would
+                                                     lig
+                                                                  deny_and_     push it to cancel the booking it had just refused as ineligible.
+  premature                                                    explain_policy   Reaching that question means first walking the conversation
+  confirm?          request_confirmation
+
+                                 confirm
+                                                                                to the gate and only then applying the perturbation, which is
+                                                                                exactly what graph-guided boundary testing is built to do.
+                      confirm_completion                  cancel
+                                                         anyway?                   An example session trace σ:
+                                                                                   u1 : “Hi, I’m olivia_gonzalez_2305. List my reservations and
+                    observed          perturbation              gate
+                                                                                   cancel one.”
+                                                                                   r1 : “You have Z7GOZK, K67C4W, and THY2DG. Which should I
+Fig. 2. A workflow-graph fragment AGENT E VAL induces from the τ 3 -bench          cancel, and why?”
+airline agent (real activity labels, abbreviated). Solid edges are observed        u2 : “Cancel Z7GOZK; my plans changed.”
+transitions labeled with the user action or condition that caused them; the        r2 : “Reservation Z7GOZK is eligible to cancel. Shall I go ahead
+shaded (amber) node is a confirmation gate. The two dashed edges (premature        and cancel it?”
+confirm? and cancel anyway?) are boundary perturbations that tests will            u3 : “Yes.” r3 : “Done. Reservation Z7GOZK has been canceled.”
+attempt, not observed transitions; deny_and_explain_policy is the
+observed branch for an ineligible reservation.
+                                                                                C. Fault Model
+                         II. P RELIMINARIES                                        We target workflow faults: behaviors that violate the rules
+                                                                                a service workflow is expected to enforce. Most involve
+A. Interaction Model
+                                                                                the agent acting past a guard: it cancels a booking before
+   Let A be the conversational agent under test. The tester                     presenting eligibility or before the user confirms, accepts a
+has exactly two operations: reset(A) starts a fresh session,                    reservation code it has already rejected, or claims to complete a
+and invoke(A, u) → r sends one user utterance u and returns                     modification it never performed. What makes these faults hard
+the visible reply r. Nothing else is observable: no prompts,                    to find is that each appears only at a particular workflow state
+no tool calls, no logs, no database state. A session trace                      and only when a specific input or precondition is perturbed. A
+(or simply trace) is the ordered sequence of turns σ =                          fault is in scope only if it is visible in the trace; behavior
+⟨(u1 , r1 ), . . . , (um , rm )⟩, where each turn (ui , ri ) pairs a user       that never surfaces in the agent’s text is out of reach for
+utterance with the agent’s visible reply, and the number of                     AGENT E VAL and for any black-box method.
+turns m is bounded by a turn budget. A test is an executable
+objective: a goal (e.g., “cancel a reservation”), optional ex-                  D. The Conversational Workflow Graph
+ecution hints, observable success criteria, observable failure                     A conversational workflow graph is the model AGENT E VAL
+criteria, and a turn budget. Every test verdict must be justified               builds of an agent’s workflow from visible session traces alone.
+by the trace alone.                                                             We build it as a directly-follows graph, one of the standard
+                                                                                process-mining discovery algorithms [14], which links two
+B. Running Example                                                              activities whenever one is observed immediately after the
+   We use one running example throughout, drawn from the                        other [15]; Section IV gives the construction. We choose
+airline domain of τ 3 -bench [16]. The agent books, changes,                    it for two properties that fit black-box testing: it is built
+and cancels flight reservations under a hidden policy, and the                  deterministically by frequency counting, with no search or
+tester reaches it only through chat: it sends user messages                     tuning, so AGENT E VAL can build it efficiently once discovery
+and sees the agent’s replies, nothing else. In one exploration                  has collected its traces; and it reads like a flowchart whose
+session, the tester poses as the customer, provides a user                      activities and transitions are easy to enumerate and target.
+identifier, and asks the agent to list that customer’s reservations             The deeper structure that the graph cannot capture is left
+and cancel one. The agent returns the customer’s bookings                       to AGENT E VAL’s LLM-driven components, as later sections
+and asks which one to cancel and why. The tester names the                      describe. Formally,
+reservation Z7GOZK and provides a reason; the agent looks
+                                                                                                        G = (V, E, S, T ).
+it up, reports that the booking is eligible for cancellation,
+and asks for explicit confirmation: “Shall I go ahead and                       V is the set of observed activity states: the recurring agent
+cancel reservation Z7GOZK?” Only after the tester answers yes                   behaviors seen across the traces, each given a short label such
+does the agent report the cancellation complete. In a second                    as request_confirmation or confirm_completion
+session, the tester asks to cancel a different booking; because                 in Figure 2. Each state records its support, the number of
+that booking is ineligible, the agent refuses and explains the                  observed agent replies mapped to it. E ⊆ V × V is the set
+policy instead. From these visible replies alone, AGENT E VAL                   of observed transitions: an edge (v, v ′ ) exists whenever some
+abstracts each turn into an activity and induces the graph                      trace moves from activity v at one turn to activity v ′ at the next.
+fragment of Figure 2. The confirmation step is a gate: in every                 Each edge records its frequency, how often that succession
+observed session, the agent reaches confirm_completion                          was seen, and the user actions that drove it: the user’s labeled
+                       1    Discovery                                                                                        2     Execution
+
+                            exploration                            synthesis
+                                                                                                                                   Test
+                                                                                                  Test plan                        · goal: …
+                                                                                                                                   · step_hints: …
+                                       ×𝑅!"#$                                                     functional tests                 · success criteria: …       Results
+                                                            Functional synthesizer                   cancel reservation            · failure criteria: …
+                                                                                                                                                               ✓ pass
+            interact                                                   Sec. V-A                      modify booking     for each
+                                                                                                  …                                                            ✗ fail
+                                                traces                    target                                                                               ~ inconclusive
+ target agent          planner        driver                                                      boundary tests
+                                                                         selection
+   black box                                                                                        skip confirm gate                                          one verdict per test
+                              Sec. III-A
+                                                         workflow graph             boundary        override eligibility                    traces
+                                                                                   synthesizer    …                              runner                judge
+                                                             Sec. IV                 Sec. V-B                                             Sec. III-B
+
+
+
+Fig. 3. AGENT E VAL overview, in two phases that share the black-box agent. Discovery explores the agent over Rdisc rounds and collects traces. From those
+traces AGENT E VAL synthesizes functional tests directly and induces the workflow graph; the graph then drives boundary-test synthesis. Execution drives each
+test turn by turn with the agent and makes a judgment from the resulting session trace. The LLM generates labels and tests; a separate judge decides each
+verdict from the trace.
+
+
+moves in between, such as an intent, a value, or a continuation                                  to explore and the driver carries it out by conversing with the
+like confirm. S and T collect the activities seen first and last                                 agent. At the start of a round, the planner sets an exploration
+in a session, the graph’s entry points and terminal states. A                                    phase (the kind of exploration to run), an objective (the goal
+transition is replayable when its user actions can be re-issued                                  the session should reach), and a strategy (a short tactical plan
+verbatim in a fresh session; in Figure 2 every solid edge is                                     for how the driver pursues that goal). AGENT E VAL defines
+replayable. This matters because a non-entry state, one that                                     three kinds of exploration phases, each with a default objective
+is not an entry point and so appears only partway through                                        and strategy. Capability discovery maps what the agent says
+a session, can be reached only by replaying the observed                                         it can do and what inputs it requires. Happy-path carries one
+user actions that lead to it. The model does not mark which                                      ordinary workflow through to completion, so the trace records
+states act as gates or which change state, because that is not                                   its full path rather than only the entry steps. Consistency check
+observable from the replies (Section IV explains why).                                           repeats a previously observed request, verbatim or lightly
+                                                                                                 rephrased, and checks whether the agent asks for the same
+E. Assumptions                                                                                   information and reaches the same outcome.
+    AGENT E VAL assumes the agent can be reset to a fresh                                           To ensure broad coverage before probing deeper, discov-
+session, a standard requirement for automated testing en-                                        ery begins with a predefined warm-up schedule: it executes
+vironments; that interaction is budget-bounded, so the goal                                      mcap capability-discovery sessions, then mhp happy-path ses-
+is effective testing rather than exhaustive learning; and that                                   sions, then mcc consistency-check sessions. In these warm-
+the agent exhibits recurring interaction patterns (routing, slot                                 up rounds, the phase follows the warm-up schedule and the
+filling, validation, and confirmation) for the graph to capture,                                 objective and strategy are the phase defaults. The planner
+as is typical for conversational agents executing structured                                     makes no LLM call in these rounds. Afterward an LLM
+workflows.                                                                                       planner reads the traces collected so far and which phases
+                           III. A PPROACH OVERVIEW                                               it has already covered, then writes the phase, objective, and
+                                                                                                 strategy itself, choosing a behavior not yet well represented in
+   Figure 3 shows the AGENT E VAL pipeline, including two
+                                                                                                 the traces.
+phases: discovery and execution. Discovery explores the agent
+over Rdisc rounds, where each round is one fresh session that                                       In every round the driver, which is also driven by an LLM,
+yields a single trace of at most Bturn turns. It induces the                                     executes the strategy in a fresh session, generating and sending
+workflow graph and then synthesizes the test plan from the                                       one plain user message per turn through invoke and stopping
+collected traces. Execution drives each test turn by turn with                                   when the objective is met or the turn budget is reached.
+the agent and judges the resulting trace. Discovery is paid                                         Discovery stops when the round budget is exhausted. Once
+once: the resulting plan is a reusable artifact that execution                                   discovery stops, AGENT E VAL’s test generators synthesize a
+re-runs whenever the target agent’s code or model changes,                                       test plan from the collected traces. The plan contains two
+verifying that the updated agent still passes the plan’s tests, as                               kinds of test, functional tests and boundary tests. Functional
+in CI/CD regression testing.                                                                     tests are synthesized directly from the collected traces, without
+                                                                                                 the graph: each replays an observed workflow (Section V-A).
+A. Phase-Guided Discovery                                                                        Boundary tests stress the guards a workflow enforces—
+  Discovery is a planner–driver loop over fresh sessions,                                        confirmation gates, eligibility checks, value validation—at
+both LLM-driven: in each round, the planner decides what                                         structural locations selected from the workflow graph induced
+                                raw turns                workflow activities        Algorithm 1 Constructing the conversational workflow graph
+                                                                                    Require: abstracted traces Σ; each trace is a turn sequence
+                       user: “I’d like to cancel a          user action                 ⟨(a1 , u1 ), . . . , (am , um )⟩ of agent activity ai and user
+                       flight.”                       request_cancellation
+                                                                                        action ui
+                                                                                    Ensure: graph G = (V, E, S, T ) with per-node support and
+                                                                                        per-edge frequency and user actions
+                       agent: “What is your
+                       reservation code?”                                            1: V, E, S, T ← ∅
+
+
+
+    surface variants
+                                                                                     2: for each trace σ ∈ Σ with m turns do
+                       agent: “Could you give me           agent activity
+                       the booking reference?”
+                                                                                     3:     for i ← 1 to m do
+                                                     request_reservation_code
+                                                                                     4:          add ai to V ; increment its support
+                       agent: “Please provide the                                    5:     end for
+                       confirmation number.”
+                                                                                     6:     for i ← 1 to m − 1 do
+Fig. 4. Event abstraction maps each turn to a user action (from the user
+                                                                                     7:          add edge (ai , ai+1 ) to E; increment its frequency
+utterance) and an agent activity (from the agent reply). Differently worded          8:          add ui+1 to the edge’s user actions
+replies that express the same activity (surface variants) receive the same agent-    9:     end for
+activity label and merge into one node.
+                                                                                    10:     add a1 to S (entry); add am to T (terminal)
+                                                                                    11: end for
+                                                                                    12: return G = (V, E, S, T )
+from those same traces (Section V-B).
+B. Execution
+   Execution runs each test in the plan as an isolated session:                     the collected sessions and labels each turn with a user action,
+an LLM driven runner resets the agent to a clean state, then                        an agent activity, and a one-sentence summary. A user action
+reads the test’s goal and hints and issues one user message                         is a step taken by the user, such as requesting cancellation,
+at a time, adapting to the agent’s replies, up to the test’s                        providing a booking reference, or answering “yes”. An agent
+turn budget. A separate judge then reads the whole session                          activity is the visible workflow state the reply created, such as
+trace and returns a verdict against the test’s visible criteria:                    request_confirmation or confirm_completion.
+pass when the trace satisfies the success criteria and avoids                       Turns that differ only in wording, like the three phrasings
+the failure criteria, fail when it violates a success criterion or                  above, are surface variants of one activity. The model pro-
+triggers a failure criterion, and inconclusive when the trace                       duces labels that fit the trace and assigns the same label to all
+does not settle whether those criteria were met, for example                        surface variants of an activity; because the mining step creates
+when a prerequisite was never reached or the turn budget ran                        one node per distinct label (Section IV-B), these variants map
+out. The judge makes its verdict independently of the runner                        to a single activity state (Figure 4).
+and the test generator. Figure 5 shows one functional test and
+one boundary test, including the goal, hinted user turns, and                       B. Graph Construction
+pass and fail criteria that the runner and judge act on.                               Once discovery has finished, AGENT E VAL builds G from
+ IV. M INING THE C ONVERSATIONAL W ORKFLOW G RAPH                                   all collected session traces by the standard directly-follows
+                                                                                    construction over the abstracted events (Algorithm 1). Each
+   Process mining starts from an event log: a collection of
+                                                                                    distinct agent activity becomes a node, carrying its support.
+cases, each an observed execution of a process, represented
+                                                                                    Whenever one activity directly follows another within a ses-
+as an ordered sequence of events [14]. In our setting, a case
+                                                                                    sion, AGENT E VAL adds the edge between them or reinforces
+is a single session trace, and its events are the user utterances
+                                                                                    it, carrying its frequency and the user actions that drove it;
+and agent replies. One difference separates our setting from
+                                                                                    this is the directly-follows relation that defines the graph. The
+classic process discovery: these events are natural language,
+                                                                                    first and last activities of each session are recorded as entry
+so AGENT E VAL must abstract them into user actions and
+                                                                                    and terminal states. The user actions along an observed path
+activity states before counting. This section describes how
+                                                                                    from the session start to an activity v form a route to v, which
+AGENT E VAL abstracts trace events and builds the graph from
+                                                                                    is replayable when those actions can be re-issued in a fresh
+the collected traces once discovery has finished; the graph in
+                                                                                    session; in Figure 2, the route to request_confirmation
+Figure 1 is what this procedure produces.
+                                                                                    is to list the reservations, give the cancellation details, and
+A. Event Abstraction                                                                continue through the presented eligibility. The graph is built
+                                                                                    exactly once from the full trace set; its only consumer is the
+   Raw wording is unstable: “What is your reservation code?”,
+                                                                                    boundary-test generator in Section V-B.
+“Could you give me the booking reference?”, and “Please
+provide the confirmation number” may express the same ac-
+                                                                                                        V. T EST G ENERATION
+tivity. Process mining faces the same problem when low-level
+events are too fine-grained to mine [17], [18]; AGENT E VAL                           AGENT E VAL generates two kinds of test, both LLM-
+abstracts each turn before counting. A single LLM pass reads                        generated and grounded in the discovery traces: functional
+    Functional test (replay the cancellation workflow).                                                       TABLE I
+                                                                                     S TRUCTURAL BOUNDARY TARGETS ENUMERATED FROM THE GRAPH .
+    Goal: check several reservations and explain the cancellation policy
+                                                                                     E ACH LOCATION BECOMES A TARGET; THE LLM RANKS TARGETS BY
+    by cabin class.
+                                                                                       BOUNDARY POTENTIAL AND GENERATES TESTS GROUNDED IN THE
+    User turns: (1) “user ID mia_li_3668; cancel AIXC49”;
+                                                                                                 BEHAVIOR OBSERVED AT THE LOCATION .
+    (2) “reason: change of plan”; (3) “check HKEG34 instead, with
+    details and insurance status?”
+    Pass if the agent denies AIXC49 with a policy reason, reports                  Target     Graph element         What stressing it tests
+    HKEG34 as business class and cancellable, and offers to cancel it;             Node       an observed ac-       whether the agent guards, clarifies, or re-
+    fail if it skips HKEG34 or calls business class non-cancellable. Turn                     tivity (v ∈ V )       covers when its required context is per-
+    budget: 3.                                                                                                      turbed
+                                                                                   Edge       an observed tran-     whether the agent handles a skipped, in-
+    Boundary test (target: node show_reservation_details,                                     sition ((v, v ′ ) ∈   complete, ambiguous, or unsupported con-
+    premature activity without prerequisite context).                                         E)                    tinuation visibly
+                                                                                   Start      an entry activity     whether the agent asks for required con-
+    Goal: when details are requested before any lookup, the agent must
+                                                                                              (v ∈ S)               text before proceeding from an alternate
+    look up first or ask which reservation.
+                                                                                                                    or incomplete start
+    User turn (the single perturbation): “user ID
+                                                                                   End        a terminal activ-     whether the agent handles continuation or
+    olivia_gonzalez_2305; show me the details of my
+                                                                                              ity (v ∈ T )          unsupported follow-up after an observed
+    reservation.”
+                                                                                                                    end
+    Pass if the agent asks for a reservation ID or offers to look up first
+    and reveals no details; fail if it shows details without establishing
+    which reservation. Turn budget: 3.
+
+                                                                                   boundaries are instead stateful: the confirmation gate, the slot
+Fig. 5. Two tests AGENT E VAL generated for the τ 3 -bench airline agent
+(abbreviated from the run artifacts), one of each kind. Both use the test schema   that validates an identifier, the prerequisite that must precede
+of Section II: a goal, user-turn hints, observable pass and fail criteria, and a   an action. AGENT E VAL targets these workflow boundaries di-
+turn budget. The boundary test also specifies the graph location it targets and    rectly: it selects a location in the observed graph and generates
+the type of boundary.
+                                                                                   a test that stresses the behavior observed there, without any
+                                                                                   fixed catalog of perturbations (Algorithm 2).
+tests synthesized directly from them, and boundary tests                              Target selection. AGENT E VAL deterministically enumer-
+guided by the workflow graph.                                                      ates one boundary target per structural location of the graph:
+   Figure 5 shows one generated test of each kind, both drawn                      every node, every edge, every entry activity, and every ter-
+from the running example’s cancellation workflow and both                          minal activity (Table I). Each target inherits the support and
+using the schema of Section II. They differ in what they                           user actions of its location, plus a fixed description of what
+test: the functional test (top) checks that the agent completes                    perturbing near it can test. Because a full graph usually yields
+the multi-turn workflow correctly, while the boundary test                         more targets than a test budget (i.e., the cap on how many
+(bottom) perturbs a single step—requesting reservation details                     boundary tests to generate) allows, AGENT E VAL asks an LLM
+before any lookup has fixed which reservation—and passes                           to score each target’s boundary potential: a value in [0, 1]
+only when the agent visibly asks for the missing context.                          estimating how likely stressing that location is to expose a
+                                                                                   guard, limit, prerequisite, or recovery behavior worth testing.
+A. Functional Test Synthesis                                                       The LLM reads the behavior observed at the target—the
+   AGENT E VAL builds functional tests with an LLM in a series                     agent activity and user actions there—and scores it high when
+of rounds. In each round the LLM reads the raw discovery                           that behavior already shows a guarded or stateful step, such
+traces and proposes a small batch of new tests, each replaying                     as a confirmation, an eligibility check, or a required input,
+a workflow the agent was seen performing; AGENT E VAL adds                         and low when it shows an ordinary step with nothing to
+rounds up to a cap of Nf tests and stops early once new tests                      stress. AGENT E VAL keeps the highest-scoring targets within
+stop appearing. Every test follows the schema of Section II,                       the budget, each with a concise label indicating the boundary
+and AGENT E VAL fills it entirely from the traces rather than                      it would stress (for example, cancel without confirmation at
+inventing anything: the goal is the workflow being replayed,                       the cancellation gate).
+the hints are the user messages that drive it, and the pass                           Boundary test generation. For each selected target, an
+and fail criteria come from the outcome the trace shows.                           LLM generates boundary tests that perturb the workflow near
+Every concrete value a test names—an identifier, a date, a                         that location, for instance requesting an action while skipping
+status, an expected result—is copied from a quoted trace turn                      a prerequisite, supplying an incomplete or ambiguous value,
+or a benchmark-provided seed. Across rounds, AGENT E VAL                           attempting a premature continuation, or continuing after an
+carries forward the tests it has already accepted so the LLM                       observed end. The boundary test in Figure 5 is one such case
+does not repeat them.                                                              at the show_reservation_details activity: its single
+                                                                                   perturbation requests that activity—“show me the details of my
+B. Graph-Guided Boundary Test Synthesis                                            reservation”—before any lookup has fixed which reservation,
+  Boundary value analysis perturbs the inputs of a single                          the prerequisite context the activity normally has. Each test
+call [11], [19], and classic robustness testing deliberately                       expects an observable response, the agent limiting, clarifying,
+excludes state [20]. A conversational agent’s most dangerous                       protecting, correcting, or recovering rather than silently pro-
+Algorithm 2 Graph-guided boundary test synthesis                  and graph-guided boundary testing. To attribute the gains, we
+Require: workflow graph G, budget Nb                              ablate the functional and boundary stages separately on the
+ 1: L ← enumerate node/edge/start/end targets of G                airline domain, each with its own set of configurations.
+ 2: L ← rank L by LLM-scored boundary potential, keep top            Functional testing configurations vary only the discovery
+    Nb                                                            strategy and are scored on the functional plan (Table IV).
+ 3: P ← ∅                                                         Naive uses naive, unguided discovery; Phase-guided uses the
+ 4: for each selected target ℓ ∈ L (up to Nb ) do                 phase-guided discovery of Section III-A.
+ 5:     generate boundary tests stressing ℓ, grounded in ℓ’s         Boundary testing configurations all build on phase-guided
+    observed behavior; add them to P                              discovery and vary only in how the workflow graph informs
+ 6: end for                                                       boundary generation, scored on the boundary tests (Table V).
+ 7: return P                                                      Prompt-only generates boundary tests by prompting from the
+                                                                  traces alone, with no graph. Graph-context builds the graph
+                                                                  but feeds it to the generator only as a textual summary inside
+ceeding past the stressed condition; the figure’s test passes     the prompt. Ours generates a boundary test at each structural
+only if the agent asks which reservation or offers to look one    location enumerated from the graph (Section V-B).
+up, and fails if it reveals details for an unspecified booking.
+Each generated test must stress a boundary rather than merely     B. Benchmark Design
+walk an ordinary successful workflow.                                An asymmetric oracle. Scoring a black-box tester is itself
+   Because AGENT E VAL covers every structural location           an oracle problem: seeing only the chat interface, the tester
+rather than the few salient flows a free-form prompt tends to     cannot certify that its own tests are valid or that a flagged
+repeat, the generated boundary tests spread across the whole      failure is a real fault. The benchmark resolves this with a
+graph, which Section VI measures as a lower duplicate rate        privileged auditor that sees everything the tester sees and
+and a higher distinct-boundary count.                             more—the same conversations, plus the subject’s source code,
+                        VI. E VALUATION                           a trace of its tool calls, and a fixed functionality inventory (a
+   To evaluate AGENT E VAL, we run the full system across         list of documented behaviors the target agent should support).
+all four τ 3 -bench domains to assess its effectiveness and       The asymmetry is one-way: these privileged inputs never reach
+generalization, and conduct ablation studies on the airline       the tester, whose workflow graph and boundary targets come
+domain to isolate which parts of the system contribute. Every     solely from visible text. The auditor’s judgments therefore
+result we report comes from a privileged LLM auditor, whose       serve as an independent ground truth, and it scores both the
+model we select in the setup (Section VI-C); we then ask five     test plan from discovery and the run results from execution.
+questions of the method: how effective is its functional and         Discovery-phase metrics. For T generated tests with valid
+boundary testing, where does the boundary gain come from,         subset Tv , the validity rate |Tv |/|T | is the fraction the auditor
+whether the judge behind every verdict is reliable, and what      accepts; it is reported for both functional and boundary tests
+it all costs.                                                     under a kind-specific criterion: a functional test is valid if it is
+   1) RQ1 (Functional Testing Effectiveness). Across the          grounded, actionable, and covers at least one inventory item; a
+       four domains, how valid and complete are the functional    boundary test if it describes a real boundary (not an ordinary
+       tests AGENT E VAL synthesizes, and does phase-guided       success path) whose expected and forbidden behaviors are
+       exploration improve them over naive exploration?           decidable from the trace and grounded in the scenario. For
+   2) RQ2 (Boundary Testing Effectiveness). Across the            the valid functional tests, coverage recall |C|/|I| is the
+       four domains, how many distinct, valid boundaries does     fraction of the documented-behavior inventory I they cover.
+       graph-guided generation cover, and at what duplicate,      Boundary tests have no fixed catalog, so for the valid ones the
+       invalid, and false-alarm rates?                            auditor extracts a boundary card (c, g, p, e, f ) from each—
+   3) RQ3 (Ablation on Workflow Graph). Does the                  capability, stressed guard, perturbation, expected behavior,
+       boundary-testing gain come from the graph’s structural     forbidden behavior—and clusters cards describing the same
+       target selection, or merely from supplying the graph as    boundary: two match only when they share the same c, g,
+       prompt context?                                            p, and e, compared semantically so paraphrases merge and
+   4) RQ4 (Judge Reliability). Does AGENT E VAL’s                 conservatively so ambiguous pairs stay separate. The number
+       execution-phase judge reliably tell a real fault from      of resulting clusters is the distinct-boundary count |U |, and
+       correct behavior, from the visible conversation alone?     the duplicate rate is 1 − |U |/|Tv |.
+   5) RQ5 (Efficiency). What do AGENT E VAL’s discovery,             Execution-phase metrics. For both functional and bound-
+       functional, and boundary stages cost in LLM calls,         ary tests, the auditor labels each valid test’s run against the
+       tokens, and wall-clock time?                               agent’s source code as TP (the run flagged a failure, and the
+                                                                  trace shows a real fault caused it), FP (the run flagged a failure,
+A. Configurations                                                 but the agent was actually correct), TN, FN, or inconclusive
+  The full-system results (Table III) run every component at      (the run did not test the target behavior—the state was never
+once: phase-guided discovery, trace-only functional synthesis,    reached, the turn budget ran out, or the target agent errored
+                            TABLE II                                 principal workflows as graphs of 46–153 activities (Figure 1
+AUDITOR - MODEL SELECTION ( AIRLINE , 26 SCENARIOS ); AGREEMENT IS   shows an airline excerpt). The trace-only functional generator
+  THE JACCARD OVERLAP WITH AN EXPERT ’ S COVERED - ITEM SET.
+                                                                     produces a high fraction of valid tests everywhere (validity rate
+             Auditor model       Recall   Agreement                  0.91–1.00); inventory coverage (CovRec) spans 0.53–1.00,
+             Human reference       0.82           —
+                                                                     high on the transactional airline and retail domains, mid on
+             GLM-5.2 (chosen)      0.82         0.94                 telecom, and lowest on the knowledge-heavy banking domain.
+             MiMo-v2.5-pro         0.90         0.91                 Functional false-alarm rates stay low (FAR 0.00–0.07): on a
+             DeepSeek-v4-pro       0.90         0.91
+             GPT-5.4-mini          0.85         0.86
+                                                                     mostly-correct agent the run audit almost never misattributes a
+                                                                     passing interaction as a real functional fault, so the functional
+                                                                     suite is trustworthy. Discovery strategy itself matters: on the
+at runtime; a judge-inconclusive run is inconclusive here too).      airline domain, phase-guided exploration produces a far better
+From these it reports the false-alarm rate FAR = FP/(FP +            functional plan than naive exploration (Table IV), raising
+TN), accuracy Acc = (TP + TN)/N , and inconclusive rate              coverage recall from 0.72 to 0.97 at unchanged validity (1.00).
+Inc = INC/N (with N = TP + FP + TN + FN + INC).                         RQ2: Boundary testing effectiveness across domains.
+                                                                     Table III also reports the full system’s graph-guided boundary
+C. Setup                                                             pass. With a budget of 50 boundary tests per domain, AGEN -
+   We evaluate on the four text domains of τ 3 -bench [16]:          T E VAL covers 23–38 distinct boundaries, at duplicate rates of
+airline, retail, and telecom from τ 2 -bench [6], and banking        0.16–0.26, validity rates of 0.78–0.98, and false-alarm rates
+from τ -Knowledge [21].We use these environments only as             of 0.00–0.09 on the unmodified agent. The result holds across
+black-box targets; we do not run τ 3 -bench’s official tasks, user   very different agents—transactional booking (airline, retail),
+simulators, or reward functions, and none of that machinery          manual-policy support (telecom), and knowledge retrieval
+is visible to the tester. The functionality inventory is written     (banking)—each yielding a large, low-duplicate, low-false-
+from each domain’s policy and tool documentation, yielding           alarm boundary suite whose distinct-boundary count tracks the
+39 items for airline, 31 for retail, 30 for telecom, and 45 for      size and branching of its mined graph. The lower boundary
+banking (145 in total). The tester and its judge run MiMo-           validity on airline and retail (0.78 and 0.79, vs. 0.97 and
+v2.5-pro; the auditor runs GLM-5.2, a different model family         0.98 on telecom and banking) is a synthesis limitation rather
+selected based on the comparison below; the subject agent runs       than a testing failure: the generator is instructed to bind each
+DeepSeek-v4-flash, a fast and reliable model. Using distinct         boundary scenario to one real customer whose data state
+families is deliberate: the auditor differs from the tester so the   matches the boundary, drawn from the same golden session,
+audit is not a self-evaluation, and the subject is independent of    but the model does not consistently honor this and pairs the
+both. All roles are served over an OpenAI-compatible API at          authenticated caller with an order or reservation that belongs
+temperature 0. We set Rdisc = 12 discovery rounds; Bturn = 6         to a different customer. The identity-aware validity auditor
+turns per session; a phase warm-up of mcap = 1 capability-           catches the mismatch—a correct agent would refuse to act
+discovery, mhp = 2 happy-path, and mcc = 1 consistency-              on another user’s record, leaving the boundary unreachable—
+check sessions before free phase choice; and a target of Nf =        and marks these scenarios invalid, which accounts for most of
+50 functional tests, plus an additional Nb = 50 boundary tests       the invalid boundary tests in the two transactional domains.
+for boundary-enabled configurations. We fixed these values to           RQ3: Ablation on the workflow graph—what about it
+balance coverage against experimentation cost (LLM calls and         drives the gain? Table V ablates boundary generation on
+wall-clock time).                                                    the airline domain, varying only how the graph is used. With
+   Auditor model. Because every reported number comes                no graph, prompting the generator from the traces yields 12
+from the auditor, we deliberately select its model. We hold          distinct boundaries at a high duplicate rate (0.56): a free-
+one discovery run and its replayed tests fixed (airline, 26          form prompt clusters on a few salient flows and repeats them.
+scenarios) and swap only the auditor model, re-running the           Supplying the same mined graph as a textual summary in the
+coverage audit each time; each candidate reads the agent’s           prompt (Graph-context) lowers duplication (to 0.40) but yields
+source code and documented-behavior inventory and decides            no more distinct boundaries (9) than the no-graph baseline—
+which items the scenarios cover. We score each by agreement          a free-form prompt still treats the graph as loose context.
+with an expert human reference—the Jaccard overlap of the            Only when the graph’s structural locations become explicit
+two covered-item sets (Table II)—and adopt GLM-5.2, which            boundary targets (Ours) does coverage jump, to 23 distinct
+agrees most closely (0.94) and matches the expert’s coverage         boundaries at the lowest duplicate rate (0.26), nearly 2× the
+recall (0.82) exactly.                                               no-graph baseline. Because Graph-context and Ours build an
+                                                                     identical graph, this jump isolates the cause: the gain comes
+D. Results                                                           from the structural target selection of Section V-B, not from
+   RQ1: Functional testing effectiveness across domains.             the mere presence of a graph. False-alarm rates stay near zero
+Table III reports, for the full system on each domain, the           throughout (0.04, 0.00, 0.00), so the gain incurs no loss of
+size of the mined graph and the quality of the trace-only            trustworthiness.
+functional plan. Black-box exploration recovers each domain’s           RQ4: Judge reliability. Every verdict in the results above
+                                                                  TABLE III
+        F ULL - SYSTEM RESULTS ACROSS THE FOUR τ 3 - BENCH DOMAINS . Valid: VALIDITY RATE ; CovRec: COVERAGE RECALL ; Act./Tr.: GRAPH
+  ACTIVITIES / TRANSITIONS ; Distinct: DISTINCT- BOUNDARY COUNT; Dup.: DUPLICATE RATE ; FAR/Acc/Inc: FALSE - ALARM / ACCURACY / INCONCLUSIVE
+                                                                    RATES .
+
+
+                                      Functional tests                    Graph                          Boundary tests
+           Domain     Valid         CovRec    FAR        Acc     Inc    Act.     Tr.    Distinct     Valid     Dup.    FAR          Acc          Inc
+           Airline      1.00           0.97    0.07    0.93     0.04      46     54             23    0.78      0.26    0.00        1.00     0.03
+           Retail       0.97           1.00    0.00    0.97     0.00      50     51             26    0.79      0.16    0.06        0.94     0.00
+           Telecom      0.91           0.73    0.05    0.95     0.05      55     59             28    0.97      0.24    0.09        0.91     0.05
+           Banking      0.94           0.53    0.00    1.00     0.00     153    139             38    0.98      0.19    0.02        0.98     0.04
+
+
+
+                              TABLE IV                                                                      TABLE VI
+ D ISCOVERY ABLATION ON THE AIRLINE FUNCTIONAL PLAN (NAIVE VS .                    J UDGE RELIABILITY ON process/guard FAULTS ( AIRLINE , SEEDED
+             P HASE - GUIDED ); METRICS AS IN TABLE III.                                        SINGLE - TURN TRANSCRIPT EDITS ).
+
+
+       Discovery       Valid        CovRec    FAR     Acc      Inc                     Injected fault class            Seeded        Caught        Rate
+       Naive            1.00          0.72    0.00    1.00     0.13                    Confirmation gate removed               6             4
+       Phase-guided     1.00          0.97    0.07    0.93     0.04                    Identity prerequisite dropped           4             3
+                                                                                       Eligibility check skipped              14            12
+                                                                                       Invalid value accepted                  3             3
+                           TABLE V                                                     Total                                  27            22      0.81
+   B OUNDARY- GENERATION ABLATION ON THE AIRLINE DOMAIN (50
+           BOUNDARY TESTS ); METRICS AS IN TABLE III.
+
+
+Boundary generation    Distinct      Valid    Dup.    FAR      Acc     Inc                                TABLE VII
+                                                                                   J UDGE RELIABILITY ON value/accuracy FAULTS ( AIRLINE , LIVE
+Prompt-only                    12     0.96    0.56    0.04     0.96    0.00      TOOL - OUTPUT MUTATIONS ); Rel. COUNTS RELEVANT TESTS , AND A
+Graph-context                   9     1.00    0.40    0.00     1.00    0.00                 MUTANT IS KILLED IF ≥ 1 TEST CATCHES IT.
+Ours                           23     0.78    0.26    0.00     1.00    0.03
+                                                                                        Live tool-output mutation      Rel.        Caught        Killed
+                                                                                        Insurance status flipped         5              2              ✓
+is the execution-phase judge’s call, read from the visible trace                        Reservation price doubled       10              1              ✓
+alone, so we check that this judge tells a real fault from                              Search price inflated           14              8              ✓
+                                                                                        Flight status masked            11              1              ✓
+correct behavior, testing it on two fault classes. For process
+                                                                                        Total                           40             12          4/4
+and guard violations, we seed faults by minimally editing a
+single agent turn of a passing recorded run so the reply acts
+before confirmation, proceeds without establishing identity,
+grants an action whose precondition is unmet, or accepts an
+invalid value, then replay the mutated trace through the same                  how directly its corrupted value reaches the user: an inflated
+judge; a fault is caught when the judge fails the run, and the                 search fare, which the agent quotes to the user as the booking
+unmodified traces are the false-alarm control. Across 27 such                  price, is caught in 8 of 14 relevant tests, whereas a doubled
+faults on airline scenarios—the validity audit confirms each                   stored reservation price is caught in only 1 of 10, because the
+surfaces in the agent’s words—the judge catches 22 (0.81;                      agent quotes the wrong figure but then executes the change by
+Table VI) at a low false-alarm rate on the controls, showing                   reading the true stored price (the mutation only alters what the
+high sensitivity to violations that surface in behavior. For value             lookup returns, not what the database stores), recomputing the
+and accuracy faults—a wrong fare, amount, or status, which                     correct total, so the outcome the test checks is usually right.
+need not read as a policy violation—we inject the fault live                      RQ5: Efficiency. Table VIII reports the cost of the airline
+into the running agent rather than by editing a transcript:                    ablation. The Naive baseline makes 142 LLM calls and con-
+we corrupt the value a lookup tool returns (a reservation’s                    sumes 0.60M tokens; the full system (Ours) makes 285 calls
+insurance status, a stored or searched fare, a flight status) and              and consumes 1.55M tokens in roughly two and a half hours,
+let the real agent relay it, replaying each test with its golden               with the boundary pass accounting for most of the increase
+reference recorded so the judge compares the reply against                     and the graph induction adding only a single labeling pass
+the expected value instead of verifying it. All four mutants                   over the collected traces. Read per distinct boundary, Ours
+are killed (Table VII): for each one, a test that passed on the                is the most economical boundary generator, at roughly 67K
+unmodified agent fails on the mutated agent, and the auditor                   tokens per distinct boundary, against 108K for Prompt-only
+confirms the injected fault caused the failure. Recording the                  and 149K for Graph-context, which yields the fewest distinct
+expected value in the test plan thus makes value and accuracy                  boundaries for comparable cost; structural targeting spends its
+faults detectable. How often a mutant is caught depends on                     budget on distinct boundaries rather than duplicates.
+                           TABLE VIII                               external knowledge graph [25]; LLMs have also been used
+   C OST OF EACH CONFIGURATION ON THE AIRLINE ABLATION : LLM        to reverse-engineer black-box systems [26]. These explore or
+              CALLS , TOKENS , AND WALL - CLOCK TIME .
+                                                                    adapt tasks, but none first induces a behavioral model of
+       Configuration     LLM calls   Tokens (M)   Time (h)          the agent under test and then tests systematically against it.
+                                                                    AGENT E VAL does both: it discovers the agent by interaction,
+       Naive                   142         0.60        1.3
+       Prompt-only             268         1.30        2.3          synthesizes tests from the mined model, and judges each run
+       Graph-context           274         1.34        2.4          with an oracle that reads only the conversation.
+       Ours                    285         1.55        2.5             Mining behavioral models. AGENT E VAL’s graph is a
+                                                                    mined behavioral model. Specification mining infers models
+E. Threats to Validity                                              from execution traces [27], [28], including state-machine in-
+                                                                    ference such as GK-tail and CSight [29], [30]; process mining
+   Construct. Every metric comes from the LLM auditor, so           discovers process models from event logs [14], [31], [32],
+an unreliable auditor would corrupt them all. We run it on a        with directly-follows graphs the pragmatic workhorse [15]—
+different model family from the tester (GLM-5.2 vs. MiMo-           which can imply paths never observed as full traces—on
+v2.5-pro) to avoid self-audit bias, and validate its coverage       which we build, alongside event abstraction for low-level
+audit against an expert reference (Section VI-C); its run-audit     logs [17], [18]. The name workflow graph also denotes a
+labels behind FAR are not independently validated, however,         design-time business-process formalism [33]; ours has the op-
+so residual auditor error there remains a threat that a human-      posite provenance, induced from the running system’s traces.
+validated label sample would address. The distinct-boundary         Active automata learning reconstructs machines through mem-
+count relies on LLM-proposed same-boundary clusters the             bership and equivalence queries [34] that a conversational
+code then counts deterministically; stricter independent pair-      target does not answer, while dialog-structure induction and
+wise judgments are left to future work.                             user simulators build models from conversations for analysis,
+   Internal. The numbers are from a single run per configu-         training, or evaluation [35]–[38]. All of these mine a model
+ration, so small differences (for instance, the few-point spread    to describe behavior; AGENT E VAL mines one to act on it—
+in functional coverage recall) should not be overread; the          generating tests, replaying routes to target states, and stressing
+boundary-count gap, by contrast, is large, and the duplicate        them under a tester that chooses what to observe next.
+rate falls monotonically across the ablation (0.56, 0.40, 0.26).       Model-based and stateful API testing. Model-based test-
+The Graph-context variant and Ours AGENT E VAL share the            ing derives tests from behavioral models [39], but those models
+same mined graph, discovery, and budget, and differ only            are typically authored and serve as the test oracle; ours is
+in whether the graph is passed as prompt text or used to            mined from the system under test, so it can guide test genera-
+enumerate targets structurally; that Ours still wins isolates       tion but cannot itself judge correctness. Our prerequisite routes
+structural target selection as the cause.                           correspond to the transfer sequences, or preambles, that FSM
+   External. We study four τ 3 -bench text domains, all of          conformance testing uses to drive a stateful system into the
+which are tool-using service agents driven by a single model        state under test [40], [41]. Stateful REST API testing infers op-
+family; other architectures, modalities, and non-service do-        eration dependencies to build executable sequences: RESTler
+mains may differ. AGENT E VAL also assumes a recurring inter-       from specifications [42], EvoMaster by search [43], Morest
+action structure (routes, slots, validation, confirmation gates)    with an execution-refined property graph [44], and KAT with
+that is observable in bounded traces; for highly open-ended         LLM-built dependency graphs [45]; see Golmohammadi et al.
+or non-repeatable agents, the mined graph may remain thin,          for a survey [46]. The conversational workflow graph serves
+yielding fewer boundary targets than a trace-only baseline.         as the dependency model, but is mined from natural-language
+   Oracle scope. AGENT E VAL’s run oracle judges only the           conversations, and its routes replay user actions rather than
+visible conversation, as a deployed black-box tester must, so       API calls.
+faults that never surface there are out of reach by construction.      LLM test generation, oracles, and boundary testing.
+Our seeded-fault study makes this concrete: mutants that            LLM-based test generators validate candidates against exe-
+corrupt backend state while the reply stays correct—a tool that     cutable signals—compilation, coverage, a crashing oracle—
+silently alters a refund amount—pass the oracle even though         and repair the rest: TestPilot [47], CoverUp [48], Chat-
+the privileged auditor confirms a real fault, so seeded-fault       Tester [49], CodaMosa [50], and TestART [51]. A black-box
+validation is meaningful only for faults visible in behavior.       conversational agent exposes none of these signals, so the
+                                                                    oracle problem [52] is acute: classical pseudo-oracles need an
+                       VII. R ELATED W ORK                          independent implementation or checker [53], [54], LLM-as-
+  Evaluating and testing LLM agents. Agent benchmarks               judge is biased [55], and intrinsic self-correction is unreliable
+rank model capability on fixed task suites with programmatic        without external grounding [56]–[59]. AGENT E VAL’s answer
+or simulated-user scoring [3], [7]–[10], [22]. Closer to test-      is to separate the actor from the oracle and leave every
+ing, TRACE evolves benchmark tasks under a validate-by-             verdict to a judge confined to the visible trace—the weak
+reproduce oracle [23], TestAgent sequences follow-up probes         black-box analogue of a pseudo-oracle. For the perturbations
+adaptively [24], and Graph2Eval seeds agent tasks from an           themselves, boundary value analysis targets the edges of input
+domains [11], [19], robustness testing perturbs single calls                      [10] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and
+while excluding state [20], and metamorphic testing relates                            K. Narasimhan, “SWE-bench: Can language models resolve real-world
+                                                                                       GitHub issues?” in International Conference on Learning Representa-
+outputs when no oracle exists [60], while prompt-injection                             tions (ICLR), 2024.
+studies motivate one family of perturbation [61], [62]; AGEN -                    [11] G. J. Myers, C. Sandler, and T. Badgett, The Art of Software Testing,
+T E VAL lifts the boundary idea from input edges to workflow-                          3rd ed. Wiley, 2011.
+                                                                                  [12] S. Y. Ahmed, S. Feng, C. Bae, C. Barrus, and X. Zhang, “SpecOps:
+state preconditions, which is precisely where conversational                           A fully automated AI agent testing framework in real-world GUI
+agents fail.                                                                           environments,” in Proceedings of the 48th IEEE/ACM International
+                                                                                       Conference on Software Engineering (ICSE), 2026.
+                          VIII. C ONCLUSION                                       [13] L. Sorokin, I. Vasilev, K. E. Friedl, and A. Stocco, “STELLAR: A
+                                                                                       search-based testing framework for large language model applications,”
+   We presented AGENT E VAL, a black-box testing framework                             arXiv preprint arXiv:2601.00497, 2026.
+for conversational LLM agents that targets state-dependent                        [14] W. M. P. van der Aalst, Process Mining: Data Science in Action, 2nd ed.
+workflow failures. To overcome the inaccessibility of hidden                           Springer, 2016.
+boundaries like confirmation gates, AGENT E VAL mines a                           [15] ——, “A practitioner’s guide to process mining: Limitations of the
+                                                                                       directly-follows graph,” in International Conference on Enterprise In-
+conversational workflow graph from observed interactions.                              formation Systems (CENTERIS), Procedia Computer Science vol. 164,
+It then uses this graph’s structure to guide the generation                            2019, pp. 321–328.
+of tests that replay conversational paths to these boundaries                     [16] Sierra Research, “τ 3 -bench: From text-only to multimodal, knowledge-
+                                                                                       aware agent evaluation,” https://github.com/sierra-research/tau2-bench,
+before applying targeted perturbations. We find that this graph-                       2026, accessed: 2026-06-30.
+guided approach uncovers a larger, more diverse set of critical                   [17] N. Tax, N. Sidorova, R. Haakma, and W. M. P. van der Aalst, “Event
+boundaries than methods without such structural guidance,                              abstraction for process mining using supervised learning techniques,” in
+                                                                                       Intelligent Systems Conference (IntelliSys), 2016, pp. 251–269.
+providing a repeatable foundation for regression testing these                    [18] S. J. van Zelst, F. Mannhardt, M. de Leoni, and A. Koschmider,
+complex systems.                                                                       “Event abstraction in process mining: Literature review and taxonomy,”
+                                                                                       Granular Computing, vol. 6, no. 3, pp. 719–736, 2021.
+                         DATA AVAILABILITY                                        [19] F. Dobslaw, F. G. de Oliveira Neto, and R. Feldt, “Boundary value
+                                                                                       exploration for software analysis,” in IEEE International Conference on
+  The code, prompts, and data used in this paper will be made                          Software Testing, Verification and Validation Workshops (ICSTW), 2020,
+available upon acceptance.                                                             pp. 346–353.
+                                                                                  [20] N. P. Kropp, P. J. Koopman, and D. P. Siewiorek, “Automated robustness
+                        ACKNOWLEDGEMENTS                                               testing of off-the-shelf software components,” in International Sympo-
+  This work has emanated from research jointly funded by                               sium on Fault-Tolerant Computing (FTCS), 1998, pp. 230–239.
+                                                                                  [21] Q. Shi, A. Zytek, P. Razavi, K. Narasimhan, and V. Barres, “τ -
+Taighde Éireann – Research Ireland under Grant Number.                                knowledge: Evaluating conversational agents over unstructured knowl-
+13/RC/2094 2, and by Genesys Cloud Services, Inc.                                      edge,” arXiv preprint arXiv:2603.04370, 2026.
+                                                                                  [22] Y. Qin, S. Liang, Y. Ye, K. Zhu, L. Yan, Y. Lu, Y. Lin, X. Cong, X. Tang,
+                              R EFERENCES                                              B. Qian, S. Zhao, L. Hong, R. Tian, R. Xie, J. Zhou, M. Gerstein,
+                                                                                       D. Li, Z. Liu, and M. Sun, “ToolLLM: Facilitating large language
+ [1] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao,             models to master 16000+ real-world APIs,” in International Conference
+     “ReAct: Synergizing reasoning and acting in language models,” in                  on Learning Representations (ICLR), 2024.
+     International Conference on Learning Representations (ICLR), 2023.
+                                                                                  [23] D. Guo, T. Zhou, D. Liu, C. Qian, Q. Ren, S. Shao, Z. Fan, Y. R. Fung,
+ [2] T. Schick, J. Dwivedi-Yu, R. Dessı̀, R. Raileanu, M. Lomeli, E. Hambro,
+                                                                                       K. Wang, L. Zhang, and J. Shao, “Towards self-evolving benchmarks:
+     L. Zettlemoyer, N. Cancedda, and T. Scialom, “Toolformer: Language
+                                                                                       Synthesizing agent trajectories via test-time exploration under validate-
+     models can teach themselves to use tools,” in Advances in Neural
+                                                                                       by-reproduce paradigm,” arXiv preprint arXiv:2510.00415, 2025.
+     Information Processing Systems (NeurIPS), 2023.
+ [3] S. Yao, N. Shinn, P. Razavi, and K. Narasimhan, “τ -bench: A benchmark       [24] W. Wang, Z. Ma, X. Wang, Y. Zhang, P. Liu, and M. Chen, “TestAgent:
+                                                                                       Automatic benchmarking and exploratory interaction for evaluating
+     for tool-agent-user interaction in real-world domains,” arXiv preprint
+     arXiv:2406.12045, 2024.                                                           LLMs in vertical domains,” arXiv preprint arXiv:2410.11507, 2024.
+ [4] S. McGregor, “Preventing repeated real world AI failures by cataloging       [25] Y. Chen, X. Hu, Y. Liu, Z. Wang, Z. Liao, L. Chen, F. Wei, Y. Qian,
+     incidents: The AI incident database,” in Proceedings of the AAAI                  B. Zheng, K. Yin, and S. Zhang, “Graph2Eval: Automatic multimodal
+     Conference on Artificial Intelligence (IAAI track), vol. 35, no. 17, 2021,        task generation for agents via knowledge graphs,” arXiv preprint
+     pp. 15 458–15 463.                                                                arXiv:2510.00507, 2025.
+ [5] P. Le Jeune, J. Liu, L. Rossi, and M. Dora, “RealHarm: A collection of       [26] J. Geng, H. Chen, D. Arumugam, and T. L. Griffiths, “Are large language
+     real-world language model application failures,” in Proceedings of the            models reliable AI scientists? assessing reverse-engineering of black-box
+     First Workshop on Large Language Model Security (LLMSEC), 2025,                   systems,” arXiv preprint arXiv:2505.17968, 2025.
+     pp. 87–100.                                                                  [27] G. Ammons, R. Bodı́k, and J. R. Larus, “Mining specifications,” in
+ [6] V. Barres, H. Dong, S. Ray, X. Si, and K. Narasimhan, “τ 2 -bench:                ACM SIGPLAN-SIGACT Symposium on Principles of Programming
+     Evaluating conversational agents in a dual-control environment,” arXiv            Languages (POPL), 2002, pp. 4–16.
+     preprint arXiv:2506.07982, 2025.                                             [28] J. E. Cook and A. L. Wolf, “Discovering models of software processes
+ [7] S. Zhou, F. F. Xu, H. Zhu, X. Zhou, R. Lo, A. Sridhar, X. Cheng, T. Ou,           from event-based data,” ACM Transactions on Software Engineering and
+     Y. Bisk, D. Fried, U. Alon, and G. Neubig, “WebArena: A realistic                 Methodology, vol. 7, no. 3, pp. 215–249, 1998.
+     web environment for building autonomous agents,” in International            [29] D. Lorenzoli, L. Mariani, and M. Pezzè, “Automatic generation of
+     Conference on Learning Representations (ICLR), 2024.                              software behavioral models,” in International Conference on Software
+ [8] G. Mialon, C. Fourrier, C. Swift, T. Wolf, Y. LeCun, and T. Scialom,              Engineering (ICSE), 2008, pp. 501–510.
+     “GAIA: A benchmark for general AI assistants,” in International Con-         [30] I. Beschastnikh, Y. Brun, M. D. Ernst, and A. Krishnamurthy, “Inferring
+     ference on Learning Representations (ICLR), 2024.                                 models of concurrent systems from logs of their behavior with CSight,”
+ [9] H. Trivedi, T. Khot, M. Hartmann, R. Manku, V. Dong, E. Li, S. Gupta,             in International Conference on Software Engineering (ICSE), 2014, pp.
+     A. Sabharwal, and N. Balasubramanian, “AppWorld: A controllable                   468–479.
+     world of apps and people for benchmarking interactive coding agents,” in     [31] W. M. P. van der Aalst, T. Weijters, and L. Maruster, “Workflow mining:
+     Annual Meeting of the Association for Computational Linguistics (ACL),            Discovering process models from event logs,” IEEE Transactions on
+     2024, pp. 16 022–16 076.                                                          Knowledge and Data Engineering, vol. 16, no. 9, pp. 1128–1142, 2004.
+[32] S. J. J. Leemans, D. Fahland, and W. M. P. van der Aalst, “Discov-           [53] M. D. Davis and E. J. Weyuker, “Pseudo-oracles for non-testable
+     ering block-structured process models from event logs—a constructive              programs,” in Proceedings of the ACM ’81 Conference, 1981, pp. 254–
+     approach,” in Application and Theory of Petri Nets and Concurrency,               257.
+     LNCS 7927, 2013, pp. 311–329.                                                [54] E. J. Weyuker, “On testing non-testable programs,” The Computer
+[33] W. Sadiq and M. E. Orlowska, “Applying graph reduction techniques                 Journal, vol. 25, no. 4, pp. 465–470, 1982.
+     for identifying structural conflicts in process models,” in International    [55] L. Zheng, W.-L. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang, Z. Lin,
+     Conference on Advanced Information Systems Engineering (CAiSE),                   Z. Li, D. Li, E. P. Xing, H. Zhang, J. E. Gonzalez, and I. Stoica, “Judging
+     LNCS 1626, 1999, pp. 195–209.                                                     LLM-as-a-Judge with MT-Bench and Chatbot Arena,” in Advances
+[34] D. Angluin, “Learning regular sets from queries and counterexamples,”             in Neural Information Processing Systems (NeurIPS), Datasets and
+     Information and Computation, vol. 75, no. 2, pp. 87–106, 1987.                    Benchmarks Track, 2023.
+[35] W. Shi, T. Zhao, and Z. Yu, “Unsupervised dialog structure learning,”        [56] J. Huang, X. Chen, S. Mishra, H. S. Zheng, A. W. Yu, X. Song, and
+     in Conference of the North American Chapter of the Association for                D. Zhou, “Large language models cannot self-correct reasoning yet,” in
+     Computational Linguistics (NAACL-HLT), 2019, pp. 1797–1807.                       International Conference on Learning Representations (ICLR), 2024.
+[36] S. Burdisso, S. Madikeri, and P. Motlicek, “Dialog2Flow: Pre-training        [57] K. Stechly, K. Valmeekam, and S. Kambhampati, “On the self-
+     soft-contrastive action-driven sentence embeddings for automatic dia-             verification limitations of large language models on reasoning and
+     log flow extraction,” in Conference on Empirical Methods in Natural               planning tasks,” arXiv preprint arXiv:2402.08115, 2024.
+     Language Processing (EMNLP), 2024, pp. 5421–5440.                            [58] A. Madaan, N. Tandon, P. Gupta, S. Hallinan, L. Gao, S. Wiegreffe,
+[37] J. Schatzmann, B. Thomson, K. Weilhammer, H. Ye, and S. Young,                    U. Alon, N. Dziri, S. Prabhumoye, Y. Yang, S. Gupta, B. P. Majumder,
+     “Agenda-based user simulation for bootstrapping a POMDP dialogue                  K. Hermann, S. Welleck, A. Yazdanbakhsh, and P. Clark, “Self-Refine:
+     system,” in Human Language Technologies: Conference of the North                  Iterative refinement with self-feedback,” in Advances in Neural Infor-
+     American Chapter of the Association for Computational Linguistics                 mation Processing Systems (NeurIPS), 2023.
+     (NAACL-HLT), Short Papers, 2007, pp. 149–152.                                [59] Z. Gou, Z. Shao, Y. Gong, Y. Shen, Y. Yang, N. Duan, and W. Chen,
+[38] Q. Zhu, Z. Zhang, Y. Fang, X. Li, R. Takanobu, J. Li, B. Peng,                    “CRITIC: Large language models can self-correct with tool-interactive
+     J. Gao, X. Zhu, and M. Huang, “ConvLab-2: An open-source toolkit                  critiquing,” in International Conference on Learning Representations
+     for building, evaluating, and diagnosing dialogue systems,” in Annual             (ICLR), 2024.
+     Meeting of the Association for Computational Linguistics (ACL), System       [60] T. Y. Chen, F.-C. Kuo, H. Liu, P.-L. Poon, D. Towey, T. H. Tse, and Z. Q.
+     Demonstrations, 2020, pp. 142–149.                                                Zhou, “Metamorphic testing: A review of challenges and opportunities,”
+[39] M. Utting, A. Pretschner, and B. Legeard, “A taxonomy of model-                   ACM Computing Surveys, vol. 51, no. 1, pp. 4:1–4:27, 2018.
+     based testing approaches,” Software Testing, Verification and Reliability,   [61] K. Greshake, S. Abdelnabi, S. Mishra, C. Endres, T. Holz, and M. Fritz,
+     vol. 22, no. 5, pp. 297–312, 2012.                                                “Not what you’ve signed up for: Compromising real-world LLM-
+[40] D. Lee and M. Yannakakis, “Principles and methods of testing finite               integrated applications with indirect prompt injection,” in ACM Work-
+     state machines—a survey,” Proceedings of the IEEE, vol. 84, no. 8, pp.            shop on Artificial Intelligence and Security (AISec), 2023, pp. 79–90.
+     1090–1123, 1996.                                                             [62] F. Perez and I. Ribeiro, “Ignore previous prompt: Attack techniques for
+[41] T. S. Chow, “Testing software design modeled by finite-state machines,”           language models,” in NeurIPS ML Safety Workshop, 2022.
+     IEEE Transactions on Software Engineering, vol. SE-4, no. 3, pp. 178–
+     187, 1978.
+[42] V. Atlidakis, P. Godefroid, and M. Polishchuk, “RESTler: Stateful REST
+     API fuzzing,” in International Conference on Software Engineering
+     (ICSE), 2019, pp. 748–758.
+[43] A. Arcuri, “RESTful API automated test case generation with Evo-
+     Master,” ACM Transactions on Software Engineering and Methodology,
+     vol. 28, no. 1, pp. 3:1–3:37, 2019.
+[44] Y. Liu, Y. Li, G. Deng, Y. Liu, R. Wan, R. Wu, D. Ji, S. Xu, and M. Bao,
+     “Morest: Model-based RESTful API testing with execution feedback,”
+     in International Conference on Software Engineering (ICSE), 2022, pp.
+     1406–1417.
+[45] T. Le, T. Tran, D. Cao, V. Le, T. N. Nguyen, and V. Nguyen, “KAT:
+     Dependency-aware automated API testing with large language models,”
+     in IEEE Conference on Software Testing, Verification and Validation
+     (ICST), 2024.
+[46] A. Golmohammadi, M. Zhang, and A. Arcuri, “Testing RESTful APIs: A
+     survey,” ACM Transactions on Software Engineering and Methodology,
+     vol. 33, no. 1, pp. 27:1–27:41, 2023.
+[47] M. Schäfer, S. Nadi, A. Eghbali, and F. Tip, “An empirical evaluation of
+     using large language models for automated unit test generation,” IEEE
+     Transactions on Software Engineering, vol. 50, no. 1, pp. 85–105, 2024.
+[48] J. Altmayer Pizzorno and E. D. Berger, “CoverUp: Effective high
+     coverage test generation for Python,” Proceedings of the ACM on
+     Software Engineering, vol. 2, no. FSE, 2025.
+[49] Z. Yuan, M. Liu, S. Ding, K. Wang, Y. Chen, X. Peng, and Y. Lou,
+     “Evaluating and improving ChatGPT for unit test generation,” in ACM
+     International Conference on the Foundations of Software Engineering
+     (FSE), 2024, pp. 1703–1726.
+[50] C. Lemieux, J. P. Inala, S. K. Lahiri, and S. Sen, “CodaMosa: Escaping
+     coverage plateaus in test generation with pre-trained large language
+     models,” in International Conference on Software Engineering (ICSE),
+     2023, pp. 919–931.
+[51] S. Gu, Q. Zhang, K. Li, C. Fang, F. Tian, L. Zhu, J. Zhou, and Z. Chen,
+     “TestART: Improving LLM-based unit testing via co-evolution of auto-
+     mated generation and repair iteration,” arXiv preprint arXiv:2408.03095,
+     2024.
+[52] E. T. Barr, M. Harman, P. McMinn, M. Shahbaz, and S. Yoo, “The
+     oracle problem in software testing: A survey,” IEEE Transactions on
+     Software Engineering, vol. 41, no. 5, pp. 507–525, 2015.
+

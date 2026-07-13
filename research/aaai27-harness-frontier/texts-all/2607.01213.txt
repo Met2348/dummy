@@ -1,0 +1,1089 @@
+                                        RepoRescue                                                                                             Preprint
+
+
+
+
+                                           RepoRescue: An Empirical Study of LLM Agents on
+                                                Whole-Repository Compatibility Rescue
+                                                            Zhihao Lin1      Mingyi Zhou1              Zhensu Sun2   Yizhuo Yang1
+                                                                          Renyu Yang1         David Lo2        Li Li1,*
+                                                 1                                            2
+                                                     Beihang University, Beijing, China           Singapore Management University, Singapore
+                                                     {mathieulin, zhoumingyi, yangyizhuo, renyuyang}@buaa.edu.cn, lilicoding@ieee.org
+                                                                         zhensuuu@gmail.com, davidlo@smu.edu.sg
+                                                                                   *
+
+
+
+
+arXiv:2607.01213v1 [cs.SE] 1 Jul 2026
+                                                                                       Corresponding author.
+
+
+
+
+                                          Abstract. Open-source libraries and tools are widely reused, but compatibility maintenance is
+                                          expensive. Once maintainers leave, otherwise useful repositories can stop working as runtimes and
+                                          dependencies evolve. We study whether LLM agents can perform this form of maintenance: adapting
+                                          old repositories so that they work on modern environments. We call this task compatibility rescue.
+                                          Unlike bug repair, where a program violates its intended behavior in the environment for which it was
+                                          written, compatibility rescue starts from a repository that still works in its original environment and
+                                          then fails after the runtime or dependency ecosystem changes. RepoRescue gives the agent only the
+                                          repository and its failing modern environment. The agent must diagnose the failure, locate the affected
+                                          code, and produce a source-code rescue that restores the whole historical suite. We build RepoRescue
+                                          from 193 Python and 122 Java repositories, each checked to pass in its historical environment and fail
+                                          after modernization before agents attempt a rescue. We run five deployed agent systems on Python
+                                          and three on Java. Pass rate tells us whether the test suite was restored. To check whether the patch
+                                          repaired source code, we also rerun each submitted patch after removing test-file edits; we call this
+                                          source-only evaluation because it asks whether the remaining source changes alone restore the suite.
+                                          We further add a runtime-enforced regime that blocks test edits during the session and practical-use
+                                          validation for repositories whose original suites pass after rescue. We report four findings: (1) All
+                                          four Claude Code systems sometimes edit failing tests even when the prompt forbids it; when test
+                                          edits are blocked at runtime, Kimi still rescues 41.5% of repositories. (2) The systems succeed on
+                                          different repositories, and their union (62.7%) exceeds the best single system (51.8%) by 10.9 percentage
+                                          points. (3) Difficulty tracks the amount of cross-file reasoning required. On 14 repositories that need
+                                          coordinated whole-codebase changes, GPT-5.2 through Codex is recorded as passing all 14, while every
+                                          Claude Code system passes at most 2; the traces point to gaps in planning and coordination. (4) A
+                                          passing test suite is only a first signal: among 34 unmaintained Python candidates whose original suites
+                                          pass after rescue, 22 work in realistic scenarios, and 12 pass bug-hunt with patches that address the
+                                          compatibility failure. As a benchmark, RepoRescue measures these capabilities jointly and labels
+                                          each rescue on a reasoning-level hierarchy, from mechanical edits to whole-codebase coordination.
+
+
+
+
+                                        1 Introduction
+                                        Software often outlives its maintainers. Libraries can stop receiving releases for many reasons:
+                                        maintainers move on, funding ends, or the project becomes stable enough that no one keeps updating
+
+                                                                                                   1
+RepoRescue                                                                                                                                                   Preprint
+
+
+
+     historical                     Phase 0:                       ecosystem drift:            Phase 1:                       Phase 2:             Evaluation
+    environment               historical env passes              runtime dependencies       modern env fails             source-only rescue
+
+                                                                                                                                                   1     Full
+                                           runtime                                                     runtime                                          patch
+         </>                                                                                                                                             pass
+                     filter
+                                    12         3.7        8                                     20       3.12    17
+                                                                    1.x    2.x       3.x                                                           2   Sour ce-
+                                                                                                                                                        only
+                                                                                                dependencies                                            audit
+                                          dependencies
+                                                                    2.x    3.x       4.x                                   agent gets no issue /
+                                                                                                                           no fault localization
+       Old but                                                                                                                                     3   Runtime-
+    valuable r epo                 libA        libB      libC                                  libA      libB    libC                                   blocked
+                                   1.2.0      2.3.0      3.1.0      3.x    4.x       5.x       3.4.0     4.1.0   5.2.0                                  r egime
+                                                                                                                                    no issue
+
+        tests pass                                                                                                                   no fault      4
+                                            tests pass              12     18        20                 tests fail                 localization         Scenar io
+                                                                                                                                                       validation
+                                                                                                                             </>
+                                                                                                                                   sour ce-only
+                                                                    3.7   3.11       3.12
+
+
+                                                                    8      11        17
+
+
+
+
+Figure 1: Overview of RepoRescue. We admit repositories that pass in a historical environment
+(Phase 0) and fail after ecosystem drift (Phase 1), then ask an agent to produce a source-only rescue
+(Phase 2). We evaluate each outcome through full-patch pass, source-only audit, runtime blocking,
+and realistic scenario validation.
+
+it. The code may still be useful, but the environment around it does not stand still because Python,
+Java, build tools, and dependencies continue to change. Over time, a project that worked in its
+original environment can lose compatibility with the current one, and new users can no longer import,
+build, or reuse it.
+   These projects can remain useful after maintenance stops. Across 47 unmaintained but still-
+depended-on Python libraries, we found 2,851 forks created after maintenance stopped. That number
+shows downstream demand, and it also shows fragmentation: no single fork replaced the original
+maintainer, and downstream consumers were left choosing among partially maintained copies [1, 2].
+If such projects could be kept compatible with modern environments, prior engineering effort
+could remain available to more developers instead of being repeatedly reimplemented or patched
+downstream. In this paper, we call this task compatibility rescue: adapting historically working
+software to a modern runtime or dependency environment without changing its intended behavior.
+Figure 1 summarizes the setting: we first establish that an old repository worked, then confirm that
+ecosystem drift breaks it, and finally ask an agent to restore source compatibility. Compatibility
+rescue is different from general bug repair. Its object is historical software that once worked, then
+lost compatibility as runtimes and dependencies changed. The maintenance problem is to adapt that
+working software to a modern environment without changing its intended behavior; §2 formalizes
+the task and its boundary with adjacent forms of repair.
+   At ecosystem scale, this maintenance work is expensive. A maintainer has to recover an old
+environment, reproduce the breakage under a modern one, and then change the source while preserving
+the library’s behavior. Developers can use tools such as pyupgrade [3] and OpenRewrite [4] to
+automate part of this work. Their coverage is strongest for predefined migration patterns, while
+many broken repositories require project-specific diagnosis. LLM agents create a different possibility
+because compatibility adaptation often requires more than syntactic rewrites: an agent may need to
+run tests, inspect dependency source, read changelog-shaped failures, propagate API substitutions
+across files, and decide whether source changes restore the intended behavior. Existing agent studies
+have not yet measured whole-repository adaptation from only a failing modern environment, or how
+
+
+                                                                                 2
+RepoRescue                                                                                     Preprint
+
+
+agent behavior changes when shortcuts such as editing tests are unavailable.
+   To fill this gap, we build RepoRescue, a benchmark and empirical study of LLM agents on
+whole-repository compatibility rescue. The benchmark contains 193 Python repositories and 122 Java
+repositories. Each task is admitted only after the repository passes in its historical environment and
+fails after modernization; agents then try to restore the original suite through source-code changes.
+The detailed dataset construction, including unmaintained projects and time-travel snapshots, is in
+§3.1.
+    The benchmark size reflects this admission standard rather than raw repository availability. For
+Python, a candidate must show reuse signal, survive manual removal of forks, mirrors, and demos, pass
+its original unmodified suite in a reconstructed historical environment, and fail deterministically only
+after modernization. This filter shrinks the unmaintained track from 213 already-filtered candidates
+to 47 validated rescue subjects. We then add 146 time-travel snapshots only when a maintainer’s
+subsequent compatibility fix gives additional ground truth. For Java, a separate Maven filter starts
+from 232 dormant candidates; historical and modern environment checks plus build-configuration
+normalization leave 122 repositories that still require source-code changes. RepoRescue therefore
+trades raw scale for high-confidence tasks in which the starting state, failure trigger, and rescue
+target are all testable.
+   Using this benchmark, we ask how far deployed LLM agents can go, where their successes
+complement or diverge, what makes a rescue hard, and whether a restored test suite is enough for
+practical reuse. RQ1 asks whether deployed agents can rescue compatibility failures. Across 193
+Python repositories, full-patch pass rates reach 36.8–51.8%, but source-only auditing lowers the
+four Claude Code systems to 19.7–24.4%, while GPT-5.2 through Codex retains 49.7%. Blocking
+test edits during the run changes behavior: Kimi still rescues 41.5% of repositories. RQ2 asks
+whether systems solve the same repositories. The five-system union is 10.9 pp above the best single
+system, so the benchmark points to routing and portfolio questions. RQ3 asks what makes rescues
+hard. Difficulty is concentrated in coordinated whole-codebase repairs: GPT-5.2 through Codex
+is recorded as passing all 14 L4 repositories, while every Claude Code system passes at most 2.
+RQ4 asks whether passing the original suite is enough for reuse. Among 34 unmaintained Python
+candidates whose original suites pass after rescue, 22 work in realistic scenarios and 12 pass bug-hunt
+with patches that address the compatibility failure. The Java track adds a related caution: in 6
+repositories, test edits damage otherwise working source.
+  This paper makes three contributions:
+1. A benchmark for compatibility rescue. RepoRescue contains 193 Python repositories
+   (47 unmaintained and 146 time-travel, the latter carrying maintainer ground-truth fixes) and
+   122 unmaintained Java repositories. Its validation protocol checks that each task starts from
+   historically working code, fails after the runtime or dependency environment is modernized, and
+   is then evaluated under the original test command.
+2. An empirical study of deployed LLM agents. We run 965 Python primary trials, 386 Python
+   enforced re-runs, and 366 Java trials to measure how often agents restore compatibility, how
+   much apparent success depends on test edits, and where different systems solve complementary
+   repositories.
+3. An analysis of rescue difficulty and practical usability. We label successful repairs by
+   reasoning level (L1–L4, κ=0.76), validate 34 unmaintained Python rescues beyond the original
+   suite, and analyze 108 Java rescue outcomes to show how static typing exposes shortcut harm.
+
+
+                                                   3
+RepoRescue                                                                                      Preprint
+
+
+
+2 Compatibility Rescue
+In our setting, a repository qualifies for compatibility rescue only if it once passed its own tests in
+an original environment but fails after the runtime or dependency ecosystem is modernized. A valid
+rescue restores compatibility in the modern environment while preserving the behavior encoded by
+the historical test suite. This separates rescue from bug repair, which fixes a defect in the environment
+for which the program was written, and from project build repair, which may legitimately change
+dependency specifications or build scripts to make a repository runnable. RepoRescue focuses
+instead on version adaptation of historically working code.
+   The need is practical because old but still-used libraries break across source, tests, and dependency
+specifications as their base runtime moves forward. For example, Python 3.13 removes cgi and
+distutils, while NumPy 2 drops legacy type aliases. Java has analogous pressure from JDK 21’s
+module system and the javax-to-jakarta move. These changes leave the libraries’ intended behavior
+intact while removing assumptions once supplied by the environment. Many such libraries still sit on
+active dependency paths: requests-html, for instance, has had no release since 2019 yet still draws
+over a million PyPI downloads per month. This also matters for agentic software engineering. Many
+old developer tools remain useful, and today they can be exposed to agents through a thin MCP [5]
+wrapper. The wrapper still depends on the underlying library running on a modern runtime. Later,
+we use PyCG [6], wrapped behind FastMCP [7], as one example: the historical suite can pass while
+the main downstream call path still fails.
+   Existing deterministic modernizers cover the regular syntactic part of this space. Tools such as
+pyupgrade [3] and OpenRewrite’s UpgradeToJava21 [4] rewrite well-defined patterns; compatibility
+rescue also requires dependency-source inspection, changed runtime contracts, and coordinated
+semantic edits across files. Compatibility rescue gives LLM agents a benchmark setting centered
+on historical software, suite-wide failure, and runtime or dependency drift. The benchmark must
+establish three facts: the repository once worked, modernization breaks the same repository, and a
+passing repair reflects source adaptation. The rest of the paper makes these facts observable through
+historical and modern environment validation, source-only auditing, and realistic-use checks for
+rescues whose historical suite passes.
+
+3 Benchmark Construction and Evaluation
+3.1 Dataset Construction
+To instantiate the task in §2, we build a benchmark, RepoRescue, which comprises 193 Python
+repositories and 122 Java repositories. We filter repositories through two environment checks. We
+first construct an original environment for each candidate with agent assistance, because the rescue
+task only makes sense when the project can still be shown to work in its own historical setting. We
+keep the candidate only if its unmodified test suite passes in that environment. We then move the
+same repository to a modern environment, using Python 3.13 or JDK 21 with current dependencies.
+We keep it only if the same suite now fails for a compatibility reason. We call these two checks
+Phase 0 and Phase 1, and use them to define the benchmark subjects.
+    Python: unmaintained repositories (47). We collect these repositories from GitHub using
+filters meant to capture projects with both downstream value and long-term dormancy. Concretely,
+a candidate must have at least 100 stars, no commits and no Python 3.10–3.13 pull requests for at
+least 24 months, a last release before Python 3.10 (October 2021), and a non-archived status. These
+filters yield 213 candidates. Manual inspection removes forks, mirrors, and demonstration projects,
+
+                                                   4
+RepoRescue                                                                                  Preprint
+
+
+leaving 94 repositories. We then construct and freeze the Phase 0 and Phase 1 environments for each
+candidate with agent assistance. After rerunning each repository’s original test command in the
+frozen environments, 47 repositories remain, each passing in the historical environment and failing
+after modernization.
+   Python: time-travel (146). The unmaintained track gives only 47 high-quality candidates
+after the GitHub filters, manual inspection, and Phase 0 and Phase 1 environment checks. Python’s
+fast-moving dependency ecosystem often breaks a dormant suite even under its original interpreter,
+so the suite no longer passes Phase 0. We therefore broaden the benchmark with active repositories
+that expose the same kind of compatibility breakage. We harvest 260 of them, scan each project’s
+history for a commit in which the maintainer fixed a compatibility problem, and check out the
+commit immediately before that fix. This pre-fix snapshot breaks on a modern runtime in the same
+way an unmaintained project would. After the same Phase 0 and Phase 1 checks, 146 snapshots
+remain. Unlike the unmaintained set, each snapshot comes with the maintainer’s own subsequent
+fix, which we keep as ground truth.
+   Java: 122 unmaintained repositories. For Java, we use a separate GitHub filter for Maven-
+based projects with at least 10 stars and no commits for at least 12 months. This yields 232
+candidates. After the Phase 0 and Phase 1 checks, 192 candidates remain. Many Java failures,
+however, stem from aged build configuration rather than source code, so we first normalize this layer
+uniformly. We bump source and target levels, upgrade plugins, add –add-opens, and migrate
+javax to Jakarta. This normalization is applied before task admission and is not counted as an agent
+rescue action; its purpose is to remove aged build configuration as the dominant failure mode. After
+normalization, 122 repositories still break and thus require source-code modification, which are the
+ones we keep. This upfront step isolates source-level faults and makes the compile-versus-runtime
+distinction clean. Among the 122 repositories, Phase 1 failures split into 52 compilation errors and
+70 runtime or test failures.
+   Dataset summary and deterministic baselines. The 193 Python repositories exercise roughly
+68,895 Phase 0 tests, with a median of 165 tests per repository. They span Python 2.7 through 3.13,
+with Python 3.10 the most common, and contain 2 to 1,847 source files each. Their main breakage
+causes are dependency API changes (113 repositories), standard-library module removals (40), and
+standard-library API removals (27). The Java track is dominated by API removal and tightened
+reflection. As simple deterministic baselines, pyupgrade [3] rescues 28 of 193 Python repositories
+(14.5%), and OpenRewrite’s UpgradeToJava21 [4] rescues 3 of 122 Java repositories (2.5%) under
+the same source-only scoring.
+
+3.2 Validation Protocol
+Recovering the historical environment (Phase 0). An author rebuilds the environment each
+repository originally ran in, one repository at a time, with Codex only as an assistant. From the
+project’s own lockfile, or from a PyPI snapshot bounded by its last-commit date plus its documented
+build steps, we assemble the environment with uv and pin the era-matched interpreter. We admit
+a repository only when its own unmodified test suite passes; that test result is the evidence of a
+recovered working state. We then freeze the site-packages for reproducibility. Since admission is
+decided by the suite, not by any model, and the frozen environment is later handed identically to
+every system at Phase 2, this assistance advantages no system at adaptation time.
+  Exposing modern breakage (Phase 1). We move the same repository to a modern environment.
+For Python, this is a fresh Python 3.13 virtual environment with no version pins, so the suite runs
+
+
+                                                 5
+RepoRescue                                                                                     Preprint
+
+
+against current dependencies. For Java, this is the JDK 21 environment described above. Every
+Phase 1 failure is re-validated on a clean rebuild to confirm that it is deterministic.
+   Evaluating the rescue (Phase 2). We hand the agent the pre-built Phase 1 environment and
+the repository tree. The task input contains the failing project state, with no issue description, fault
+localization, or incompatibility label. The agent diagnoses by running the tests, reads the installed
+dependencies’ source on disk to discover changed APIs, and edits the repository’s own source. The
+harness forbids test-file edits, dependency-specification edits, and package installation through pip
+or mvn install. Phase 2 re-runs the project’s historical test command verbatim, including any
+pre-existing –ignore flags or test-path scoping; this keeps the test surface aligned with what the
+maintainer originally configured. A repository passes Phase 2 only if the suite reports no failures
+and the passing-test count is within 5% of Phase 0, on both Python and Java.
+
+3.3 Evaluation Protocol
+We use source-only evaluation operationally. After an agent finishes, we remove any edits to test
+files from its submitted patch and rerun Phase 2; this asks whether the remaining source-code
+changes are sufficient to restore the historical suite. The Phase 2 task instruction also forbids
+dependency-specification edits and package installation, but agents may still attempt forbidden
+actions in the soft-constraint setting. Full-patch evaluation reruns the suite with every submitted
+edit and therefore measures submitted-patch suite restoration. Post-hoc source-only evaluation is
+the test-edit-removal rerun described above. Runtime-blocked source-only evaluation prevents test
+writes, dependency-specification edits, and package installation during the session, asking how the
+same agent behaves when the shortcut path is unavailable. We use the runtime-blocked setting as a
+targeted ablation on Kimi K2.5 and GLM-5, two systems that share the Claude Code framework
+but show different post-hoc shortcut patterns in §5.1.
+
+3.4 Validation Beyond the Historical Suite
+Passing Phase 2 means that the original suite is green again. We treat that as suite restoration,
+then ask whether the repaired package is still usable outside that suite. For each Phase 2-passing
+unmaintained Python candidate, we first audit whether the repository actually needed rescue and
+whether the patch changed source code related to the Python 3.13 failure. We then install the
+rescued package in a clean virtual environment and exercise realistic entry points. For reproducibility,
+each scenario script imports and exercises at least three public submodules when available, includes
+at least one call path related to the Phase 1 break surface, and asserts returned values, raised
+exceptions, or observable side effects rather than merely checking imports. When a maintained
+downstream package or wrapper exists, we also run a small downstream scenario against the rescued
+library. Targeted bug-hunt probes then check the behavior touched by the rescue patch, so we can
+count rescue-caused regressions separately from upstream or pre-existing issues.
+
+4 Methodology
+4.1 Research Questions
+We organize the study around four questions that determine whether agent-based compatibility rescue
+is useful in practice. RQ1. Can deployed agents rescue compatibility failures in real repositories?
+RQ2. Do agent systems solve the same repositories, or do their successes complement each other?
+RQ3. What makes a rescue task hard for agents? RQ4. When the original tests pass, does the
+
+
+                                                   6
+RepoRescue                                                                                  Preprint
+
+
+rescued library work in realistic use? Together, these questions move from rescue capability, to
+cross-system complementarity, to task difficulty, and finally to usability beyond the original test
+suite.
+
+4.2 Agent Systems
+We use system to mean an LLM paired with an agent framework, and treat that pair as the unit of
+behavioral observation. The distinction matters because the harness can affect context construction,
+tool use, retries, and stopping decisions; recent work argues that agent comparisons can misattribute
+harness effects to backend models when the harness is not disclosed [8]. We therefore report behavior
+at the system level before discussing model-side or framework-side mechanisms.
+   Our primary comparison stays within one framework. The four Claude Code systems share the
+same harness (prompts, tool schema, retry logic), so differences among them approximate model
+differences, though provider-side sampling defaults remain a residual confound. GPT-5.2 runs
+through the Codex framework. We treat its result as a cross-framework observation throughout and
+report the framework as one candidate mechanism for its gap rather than crediting the model alone.
+   On the Python track we run Claude Code CLI [9] with Claude Sonnet 4.6, GLM-5, Kimi K2.5, or
+MiniMax M2.5, together with GPT-5.2 through Codex CLI [10]. On the Java track we run GPT-5.2
+through Codex, GLM-5 through Claude Code, and Kimi K2.5 through Claude Code.
+
+4.3 Implementation Details
+Each repository×system pair is a single trial, giving 965 primary Python trials, 366 Java trials,
+and 386 runtime-enforced re-runs, for 1,717 in total. We report rates as observations under this
+deployment snapshot, each with a 95% Wilson confidence interval [11], and group repositories into
+difficulty tiers by how many systems pass them: Easy (at least four), Medium (one to three), and
+Hard (none).
+
+5 Results
+On Python, the four checks separate different behaviors: source-only and enforced scoring distinguish
+source repairs from test-edit shortcuts (RQ1); union and intersection counts measure complementar-
+ity (RQ2); reasoning levels locate coordination failures (RQ3); and post-PASS validation tests what
+Phase 2 leaves untested (RQ4). We then use Java as a cross-ecosystem extension of RQ1 and RQ2,
+because compilation failures and runtime failures can be separated more cleanly there. All rates
+are single-trial estimates for the deployed-system snapshot in §4. We evaluate model–framework
+pairings in their practical form: GPT-5.2 through Codex, Sonnet 4.6 through Claude Code, and
+GLM-5, Kimi K2.5, and MiniMax M2.5 in the shared Claude Code framework. Since the framework
+affects context construction, tools, retries, and stopping behavior, our comparisons stay at the
+system-behavior level.
+
+5.1 RQ1: Can deployed agents rescue compatibility failures in real repositories?
+Agents can rescue compatibility failures, but a raw pass rate is too broad: a patch may pass because
+it fixes the source, or because it changes the tests. We therefore use source-only success (success
+after removing test-file edits) as the main capability measure, following SWE-bench’s convention
+of evaluating a patch after removing inadmissible test edits [12]. The gap between full-patch and
+source-only measures dependence on test edits. The post-hoc audit strips those edits after the run;
+the runtime-enforced ablation, run for Kimi K2.5 and GLM-5, blocks the shortcut during the session
+
+                                                 7
+RepoRescue                                                                                   Preprint
+
+
+
+                                  Full-patch          Source-only         Enforced
+
+
+    Sonnet 4.6            19.7% (38)                             41.5% (80)
+                                               ret. 48%
+
+MiniMax M2.5                  22.8% (44)                    36.8% (71)
+                                               ret. 62%
+                                                     41.5% (80)
+     Kimi K2.5                22.8% (44)                      44.6% (86)
+                                              ret. 51%
+                                          29.5% (57)
+         GLM-5                 24.4% (47)                          51.3% (99)
+                                                   ret. 48%
+
+        GPT-5.2                                           49.7% (96)     51.8% (100)
+                                                                  ret. 96%
+
+          Union                                               54.9% (106)         62.7% (121)
+                                                                        any system
+                   0                   20                   40                   60
+                                                Pass rate (%)
+Figure 2: Python rescue outcomes on 193 repositories. Sonnet, MiniMax, Kimi, and GLM-5 run
+through Claude Code; GPT-5.2 runs through Codex. Each row connects full-patch success (blue)
+to post-hoc source-only success (red); marker labels report pass rate with passing-repository count
+in parentheses. The inline “ret.” label is source-only retention relative to full-patch success. Green
+diamonds show runtime-blocked results for Kimi and GLM-5. Wilson confidence intervals [11] are
+reported in the artifact.
+
+and asks whether the agent chooses a different repair.
+   Figure 2 quantifies the gap. The four Claude Code systems reach 36.8–51.3% full-patch success,
+but source-only scoring lowers them to 19.7–24.4%. The 14–27% drop means that 38–53% of their
+apparent successes depend on forbidden test edits. GPT-5.2 through Codex behaves differently,
+retaining 96% of its full-patch successes under the same audit. Within the Claude Code group,
+much of the full-patch spread therefore comes from shortcut frequency rather than a clean capability
+separation, although provider-side sampling defaults remain a residual confound. For scale, human
+maintainers in the time-travel set modify tests in 9.9% of compatibility fixes. The Claude Code
+systems do so in 38–53% of apparent successes, and GPT-5.2 through Codex in 4%.
+   Runtime enforcement shows that a low post-hoc source-only score can understate repair capability.
+Compared with full-patch scoring, GLM-5 drops by 21.8 pp (51.3%→29.5%), while Kimi drops by
+only 3.1 pp (44.6%→41.5%). Compared with the post-hoc source-only audit, however, both systems
+improve: Kimi rises from 22.8% to 41.5%, and GLM-5 from 24.4% to 29.5%. At repository level, 19
+of GLM-5’s 54 shortcut repositories and 24 of Kimi’s 43 shortcut repositories pass once test writes
+are blocked. The same agent can make a source repair it skipped when test edits were available.
+   Manual inspection explains why post-hoc stripping is still needed. About 90% of shortcut edits
+are plausible API adaptations inside tests, such as nose → pytest rewrites; the remaining 10%
+are direct bypasses such as skip/xfail injection or assert relaxation. In cerberus, for example,
+
+
+                                                  8
+RepoRescue                                                                                      Preprint
+
+
+pkg_resources appears in both source and tests. Under post-hoc scoring, agents migrate source to
+importlib.metadata and also edit the test; the audit then strips the test edit. Under enforcement,
+Kimi instead adds a small pkg_resources.py compatibility shim that preserves the original test
+wording. The repair path depends on what the harness permits as much as on what the model can
+infer.
+   The source-only gap between GPT-5.2 through Codex and the Claude Code systems (49.7%
+versus 19.7–24.4%) remains a deployed-system observation. It may come from the underlying LLM,
+instruction following, patch granularity, framework behavior, prompt guardrails, or their interaction.
+
+ Finding RQ1: capability and compliance are different
+ Full-patch pass rates combine source repair with test-edit shortcuts. Under source-only audit,
+ 38–53% of Claude Code apparent successes disappear, while GPT-5.2 through Codex uses such
+ shortcuts in only 4%; when test writes are blocked at runtime, Kimi still reaches 41.5%. The
+ evaluation regime changes what agents attempt, not only how we score them.
+
+5.2 RQ2: Do agent systems solve the same repositories, or do their successes
+    complement each other?
+The systems cover different parts of the repository set, and that spread remains after the source-only
+audit. Among the four Claude Code systems, the full-patch union is 110 of 193 repositories (57.0%),
+above the best single-system rate of 51.3% (GLM-5), while their intersection is only 55 of 193 (28.5%).
+Adding GPT-5.2 through Codex raises the union to 121 of 193 (62.7%) full-patch and 106 of 193
+(54.9%) source-only. Those are 10.9 pp full-patch and 5.2 pp source-only above that system alone,
+and 34.2 pp above the four-system intersection.
+   Two checks point in the same direction. Among pairs where both systems pass, file-level Jaccard
+on edited source files falls from 0.56 on Easy repositories to 0.43 on Medium repositories; the Hard
+tier has no both-passing pairs. Majority voting also loses to best-of-N, reaching only 45.1% at a
+threshold of at least three of five systems. If successful repairs converged on the same edit locations,
+majority voting would lose less. In the 11 repositories where GPT-5.2 through Codex is the only
+successful system, trace inspection finds more coherent multi-file edits in its sessions, including
+parallel renames in at least four files. Claude Code sessions more often revert after intermediate test
+failures. Because model and framework are coupled, this is deployed-system trace evidence.
+
+ Finding RQ2: systems cover complementary parts of the rescue set
+ The five-system union reaches 54.9% source-only, 5.2 pp above GPT-5.2 through Codex alone
+ and 34.2 pp above the Claude Code intersection. Edited-file Jaccard among both-passing pairs
+ falls from 0.56 to 0.43 as tasks get harder, so the complementarity reflects different repair profiles
+ rather than sampling noise.
+
+5.3 RQ3: What makes a rescue task hard for agents?
+Repository size and broad incompatibility labels explain only part of the difficulty. The sharper
+boundary appears when a patch has to keep assumptions consistent across files. We therefore classify
+each rescue hunk by the amount of coordination it requires. L1 covers syntactic replacement, L2
+covers local single-file API adaptation, L3 covers changes that propagate across files or dependency
+boundaries, and L4 covers repairs where interacting components must be migrated together. The
+levels range from typing.List → list at L1 and inspect.getargspec → getfullargspec at L2,
+to NumPy 2.0 or nose → pytest migrations at L3 and async or ABI refactoring at L4.
+
+                                                   9
+RepoRescue                                                                                      Preprint
+
+
+
+Table 1: Python Phase 2 pass rate by success-anchored reasoning level on the 116 labelled repositories
+that are also in the current 193-repository benchmark. Cells show passing repositories with pass
+rate in parentheses; the row total appears in n. The table is a difficulty slice, not the full aggregate
+in Figure 2. The short Codex column label denotes GPT-5.2 through Codex; Sonnet, GLM-5, Kimi,
+and MiniMax run in Claude Code.
+
+Level          n          Sonnet           GLM-5              Codex             Kimi          MiniMax
+L1             4           4 (100)          4 (100)           4 (100)         4 (100)             4 (100)
+L2            60           47 (78)          54 (90)           51 (85)         47 (78)             43 (72)
+L3            38           25 (66)          35 (92)           28 (74)         30 (79)             23 (61)
+L4            14            2 (14)           2 (14)         14 (100)           2 (14)               0 (0)
+
+   Table 1 reports this analysis on the 116 hunk-labelled repositories that are also in the current
+193-repository benchmark. Because this is a labelled subset, the table is not another full-benchmark
+total; it is a slice for asking whether success changes with the reasoning level of the patch. The main
+break is between local migration and whole-codebase coordination. L1 and L2 repairs are mostly
+routine (72–100%). L3 keeps the cross-system spread seen in RQ2, with Sonnet at 66% and GLM-5
+at 92%. At L4, where 14 labelled repositories require whole-codebase reasoning, GPT-5.2 through
+Codex is recorded as passing all 14 while every Claude Code system passes at most two. Phase 2
+preserves the historical test suite, so L4 often rewards repairs that keep the old API surface coherent
+under the new runtime, including compatibility shims and adapters. That is a reasonable target
+for abandoned dependents that still call the old interface, but it can also favor bridge-building over
+deeper redesign. The reasoning-level axis also tracks much of the incompatibility-type axis, with
+module removals usually falling into L1 or L2, NumPy and pandas churn into L3, and plugin or
+async refactoring into L4.
+   The L4 pattern is clearest in flexx. Its patch has to align an event-loop migration (asyncio.
+coroutine → async def), a websocket layer ported away from the removed asyncio.async, and a
+JS-Python bridge that retypes message envelopes. GPT-5.2 through Codex produces a patch that
+compiles, imports, runs the round-trip suite, and survives the post-hoc audit. The Claude Code
+systems often identify correct local migrations, but the partial fixes do not compose. One repair
+breaks the bridge, while another preserves the bridge and misses the event loop. The failed traces
+therefore make coordination the main issue, even when API knowledge is present.
+   The pass-count tiers leave a smaller group of likely recoverable failures. We classify 65 repositories
+as Easy (≥4 systems pass), 61 as Medium (1–3 pass), and 67 as Hard (none pass). Among the Hard
+repositories, 25 are near-misses with at least 95% of tests passing; 7 fail on a single test, and 8 are
+hand-labelled as solvable by trivial L1 changes. These cases suggest 5–8% headroom, although the
+trace sample cannot cleanly separate missing reasoning from premature termination. The rest of the
+Hard set is dominated by C-extension build failures and whole-codebase async refactoring.
+   The traces also show that some failures are about stopping as well as repair knowledge. Agents
+rarely ask for human input; most sessions, including failed ones, end with a self-declared completion.
+Three patterns recur, matching behavior reported for issue-driven repair [13–15]. In false-completion
+cases, final messages remain optimistic while visible test failures persist. A keyword detector flags
+62–98% of failed sessions per system, and a 30-session stratified validation sample gives 69% precision
+and 95% recall, for a precision-adjusted prevalence of 32–76%. In regression cycles, 30% of failed
+sessions either reach a clean intermediate test run or lose at least 20% of the best in-session pass
+count by termination, which means agents often fail to return to the best state they have found.
+
+
+                                                   10
+RepoRescue                                                                                     Preprint
+
+
+Effort–effectiveness inversion appears when turn count grows without improving outcomes. Session
+length ranges from 21 to 206 messages at the framework level with no positive correlation to success;
+within a system, failed sessions use 29–58% more turns than successful ones (p < 0.01). The
+framework-level length gap and the within-system failure gap are distinct mechanisms, even though
+both appear in turn count.
+
+ Finding RQ3: hard rescues become a coordination cliff
+ In the labelled Python slice, L1 and L2 repairs are routine, but L4 whole-codebase coordination
+ separates systems: GPT-5.2 through Codex is recorded as passing all 14 L4 repositories, while
+ Claude Code systems pass at most two. Part of this gap comes from the benchmark’s preference
+ for coherent adapters that preserve historical API surfaces. Failed traces add another failure
+ mode: agents often stop confidently even when tests still fail, an intermediate clean state has
+ been lost, or the failed run has already taken more turns than successful runs.
+
+5.4 RQ4: When the original tests pass, does the rescued library work in realistic
+    use?
+Phase 2 PASS establishes suite restoration, not practical reuse. For each Phase 2-passing unmain-
+tained Python candidate, RQ4 asks three additional questions: whether the repaired package works
+in realistic entry-point scenarios, whether targeted bug-hunt probes reveal rescue-caused regressions,
+and whether the patch actually addresses the Python 3.13 compatibility failure rather than making
+an unrelated or unnecessary change.
+   We apply these checks to the 34 unmaintained Python candidates with a Phase 2 PASS. Five
+provide weak rescue evidence because the patch changes no source that could address the Python 3.13
+break, adds an unrelated shim, or re-audit shows that the candidate already passed without rescue.
+Seven others pass Phase 2 but still fail an intended-use scenario. In these cases, a required dependency
+or service is absent, a clean install misses packaged data or a binary, the configured test scope misses
+the broken feature, or the main async and HTTP2 path still crashes. The remaining 22 work in
+realistic scenarios. Bug-hunt on those candidates finds five rescue-caused regressions, five upstream or
+pre-existing issues, and 12 rescues with no observed regression. Thus, of the 34 candidates that pass
+Phase 2, 22 pass realistic scenarios and 12 both pass bug-hunt and contain a patch that addresses
+the compatibility failure.
+   We use PyCG → Scalpel as a detailed case (Figure 3) because it shows why the additional
+checks matter: the historical suite passes after rescue, but the meaningful compatibility question
+appears only when the library is exercised through a modern downstream path. We then summarize
+the downstream patterns among rescues that pass realistic scenarios and the five rescue-caused
+regressions found by bug-hunt.
+   PyCG [6], a Python call graph generator whose last commit was in November 2023, gives the
+clearest depth case. Its failure is a two-layer cascade, which puts it beyond a single syntactic
+replacement. The cascade generalizes beyond FastMCP [7]; it appears whenever a usage path
+exercises Python 3.13’s lazy metadata loader while PyCG installs its path hook. FastMCP is a
+current example of the broader pattern, where an old library is wrapped behind a newer tool surface
+and the wrapper exposes a latent compatibility fault.
+  We wrap PyCG’s call-graph generator behind a FastMCP [7] tool on Python 3.13 with
+setuptools 82, and the scenario exposes two failure layers (Figure 3, region 1). Layer 1 is a
+module-removal crash where the removed pkg_resources module makes PyCG fail at import
+
+
+                                                  11
+RepoRescue                                                                                                                                                                 Preprint
+
+
+
+             PyCG -> Scalpel: Transitive Rescue Cascade
+
+                      UPSTREAM                                                 SOURCE RESCUE                                        DOWNSTREAM
+               1 PyCG breaks                                             2     Patch PyCG                                      3    Scalpel recovers
+
+              Original PyCG on Python 3.13            FAIL             Two source-level fixes unblock
+                                                                                                             PASS            call_graph.py depends on an importable PyCG
+                                                                       the library
+
+
+                  ! Metadata    API break
+                    Requirement API moved away from                        1    Replace API                                     ⚙ Wrapper update
+                     pkg_resources                                              pkg_resources -> packaging                          replace pkg_resources version lookup
+
+
+
+                  ! Import-hook reentry                                         Guard reentry
+                     metadata query re-enters PyCG loader                  2    preserve ImportManager invariants
+                                                                                                                                ✓ Call graph works                PASS
+                                                                                                                                    on Python 3.13
+
+
+
+
+              ▦   Outcome matrix                                                   ◎    Both conditions are necessary
+                                           Original          Patched
+                                           Scalpel           Scalpel
+                     Original
+                      PyCG                  FAIL              FAIL                   ✓ Rescued PyCG                 +   ⚙   Patched Scalpel                    ✓ WORKS
+                     Rescued
+                      PyCG                  FAIL             PASS
+
+
+
+              ✓
+
+
+
+Figure 3: PyCG → Scalpel: mechanism of a transitive rescue cascade. Region 1 shows the two-layer
+upstream failure in PyCG on Python 3.13 + setuptools 82. Region 2 shows the two source-level
+fixes that bring PyCG back. Region 3 shows the downstream Scalpel dependency and the small
+Scalpel-side compatibility edit.
+
+time before any of its code runs. Layer 2 appears only after Layer 1 is patched. ImportManager.
+install_hooks() installs a custom path hook and then calls invalidate_caches(). On
+Python ≥ 3.12, that call lazily loads importlib.metadata through the just-installed hook before
+PyCG has set a current-module context. The bug lives at the intersection of new Python, old
+PyCG, and path hooks installed during normal usage, which helps explain why PyCG’s 29 unit tests
+miss it. Two repairs pass validate.py, a 3-file, 98-line reference fix written by an author and a
+2-file, 95-line fix produced by GPT-5.2 through Codex. Both handle Layer 1 in the same way but
+choose different mechanisms for Layer 2 (Figure 3, region 2). The agent fix minimizes patch surface,
+while the reference fix also preempts a known Python 3.14 ast follow-up. Both produce the same
+FastMCP-path outcome, which shows that a rescue can be sufficient without covering every future
+deprecation.
+   A restored unit-test suite is strongest when the dependent code still works. The original unit tests
+may rarely exercise that boundary. PyCG makes this visible through Scalpel [16], a Python static
+analysis library that reuses PyCG for its call_graph feature. Figure 3, region 3 shows that both
+sides must be adapted. The original Scalpel call-graph wrapper transitively crashes through PyCG;
+rescued PyCG plus a two-line Scalpel-side swap (pkg_resources.get_distribution → importlib.
+metadata.version) makes the harness pass. PyCG carries the harder share, a multi-file re-entrance
+bug versus a single-line downstream swap.
+   The four downstream cascades among the 22 realistic-scenario successes follow three patterns.
+In two cases, one upstream rescue plus a one-line downstream edit is enough (PyCG → Scalpel;
+flask-restful → swagger). In another, the upstream rescue provides compatibility shims that
+the downstream reaches only through restricted API paths (pyasn1-modules → cryptography,
+partial cascade). In the fourth, upstream and downstream patches touch different Python 3.13 break
+surfaces but still compose cleanly (pymorphy2 → yargy). The Layer 2 re-entrance bug also shows
+why rule-based modernizers miss some cross-version runtime interactions, because the failure depends
+
+
+                                                                                          12
+RepoRescue                                                                                       Preprint
+
+
+
+Table 2: Java rescue results (JDK 21) by Phase 1 failure type. The short Codex column label denotes
+GPT-5.2 through Codex; GLM-5 and Kimi run in Claude Code. Cells show pass count and pass
+rate except retain rows, where Retain means source-only relative to full-patch.
+
+Failure                    n            Codex            GLM-5                  Kimi              Union
+Compile                   52          45 (86.5)          33 (63.5)          45 (86.5)           49 (94.2)
+Runtime or test           70          46 (65.7)          33 (47.1)          57 (81.4)           59 (84.3)
+Overall, full            122          91 (74.6)          66 (54.1)         102 (83.6)          108 (88.5)
+Overall, source          122          87 (71.3)          58 (47.5)          76 (62.3)           95 (77.9)
+Retain, overall            –               96%                88%                75%                 88%
+Retain, compile            –              84%                76%                 73%                    –
+Retain, runtime            –             107%               100%                 75%                    –
+
+on the execution order between Python’s lazy metadata loader and PyCG’s path-hook installation.
+   The same checks apply beyond PyCG. Four rescues that pass realistic scenarios directly unblock
+a live downstream consumer on Python 3.13 (PyCG → Scalpel, pymorphy2 → yargy, pyasn1-
+modules → cryptography, flask-restful → swagger-3), and four can be exposed as FastMCP-
+style agent tools. Full per-repository traces are in the artifact. As in the aggregate counts, a restored
+test suite is useful evidence, while scenario use and uncovered regressions still require separate checks.
+   Bug-hunt summary. We applied bug-hunt to every rescue that passed the realistic scenarios.
+Five rescues exhibit rescue-caused regressions missed by the original suite, including blanket exception
+handlers, silently mangled merge markers, lost subprocess history, stdlib-method shadowing, and
+dropped failing-URL exception paths. Full per-rescue diffs are in the artifact. Regression-shaped
+issues that trace to upstream or pre-existing causes are excluded from the rescue-caused count.
+
+ Finding RQ4: practical reuse needs checks beyond the historical suite
+ Among 34 unmaintained Python candidates that pass Phase 2, 22 work in realistic scenarios and
+ 12 pass bug-hunt with patches that address the compatibility failure. Seven still fail intended-use
+ scenarios, five introduce uncovered regressions, and five pass Phase 2 without a meaningful
+ compatibility repair. Four downstream cascades show why this matters: rescued libraries are
+ often reused through dependents and tool wrappers that the original suite never exercises.
+
+5.5 Cross-ecosystem extension: what Java separates
+The four RQs are evaluated primarily on Python. We use Java as a cross-ecosystem extension of
+RQ1 and RQ2, not as a fifth research question or a direct rate comparison. We run three systems on
+the 122 unmaintained Java repositories of §3.1: GPT-5.2 through Codex, GLM-5 through Claude
+Code, and Kimi K2.5 through Claude Code. Because static typing separates compilation failures
+from runtime failures, Java lets us ask whether shortcut behavior and complementarity persist when
+the failure type is more observable.
+   When test edits hurt. Java makes one Python-invisible effect visible: test edits can damage an
+otherwise working source repair. On six Java repositories, test modifications from GPT-5.2 through
+Codex introduced compile or runtime errors, and stripping those edits restored Phase 2 PASS. This
+pushes the system’s Runtime retain to 107% (Table 2). GPT-5.2 through Codex and GLM-5 through
+Claude Code retain near-perfectly on runtime failures (107%, 100%) but drop on compile failures
+(84%, 76%); 21 of 122 (17%) Java outcomes from GPT-5.2 through Codex are perturbed by test
+
+
+                                                   13
+RepoRescue                                                                                     Preprint
+
+
+edits in either direction. The same data suggests a system-level policy difference: GPT-5.2 through
+Codex and GLM-5 through Claude Code modify tests selectively, mostly when no source compile fix
+is available, while Kimi K2.5 through Claude Code uses them as a general tactic. All 7 of Kimi K2.5
+through Claude Code’s structural test edits collapse under source-only audit.
+   Complementarity carries over to Java. The three-system Java union reaches 88.5% full-patch and
+77.9% source-only, 6.6 pp above the best single system (GPT-5.2 through Codex, 71.3% source-only).
+This gap is slightly larger than the within-Python five-system source-only gap of 5.2 pp. GPT-5.2
+through Codex contributes the most unique source-only solves (13) despite Kimi K2.5 through
+Claude Code’s higher full-patch rate, paralleling the divergence between Codex and Claude Code in
+§5.2.
+   Java pass rates are higher than Python (three-system union 88.5% versus five-system union 62.7%),
+but several protocol differences shape that comparison. The Java protocol includes pre-admission
+pom.xml normalization, uses an unmaintained-only dataset, lacks an enforced ablation, and benefits
+from sharper compile-time error signals and more standardized tooling. We therefore report the gap
+qualitatively and leave Java post-PASS validation as future work.
+
+ Finding Java: static typing exposes shortcut harm
+ Java reveals an effect hidden in Python: in 6 repositories, stripping test edits from GPT-5.2
+ through Codex restores Phase 2 PASS, producing 107% runtime retain. Complementarity also
+ transfers: the three-system union reaches 77.9% source-only, 6.6 pp above that system alone. The
+ higher absolute Java pass rate remains qualitative because dataset and protocol confounds are
+ substantial.
+
+6 Related Work
+RepoRescue is closest to LLM-agent repair and code-migration benchmarks, but differs in both
+the task input and the evidence required for success. Repair benchmarks usually start from an issue,
+a failing test, or some fault-localization signal; migration benchmarks often constrain the change to a
+known API, library, or target version. RepoRescue starts from a whole repository whose suite fails
+after modernization, and the agent receives the failing state without a supplied symptom or location.
+It also treats a green test suite as the first signal: source-only auditing, runtime enforcement, and
+post-PASS validation separate source repair from test-edit shortcuts and from usability beyond the
+historical suite. We organize adjacent work into two strands: repair and migration benchmarks, and
+behavioral or ecosystem studies.
+
+6.1 Repair and Migration Benchmarks
+SWE-bench [12] and agents built on it (SWE-agent [17], Agentless [18]) supply an issue and evaluate
+against its target test. Localized repair systems (RepairAgent [19], UniDebugger [20], TSAPR [21],
+CodeAgent [22], HAFixAgent [23], DynaFix [24], RGFL [25]) likewise assume a failing test and
+often fault localization; recent repository-scale work (Chen et al. [26], RepoRepair [27], SgAgent [28],
+Yang et al. [29], RepoAI [30], RepoAudit [31]) broadens the spatial scope while keeping a supplied
+symptom or location. Chen et al. [26] is closest in scope, but still starts from a localized bug report
+tied to a specific failing test; RepoRescue starts from suite-wide failure at collection time and
+scores source repair despite root causes spanning dependency manifests and stdlib removals.
+  Function-level benchmarks (Almeida et al. [32], CodeMEnv [33], GitChameleon [34]) and library-
+migration tools (PCART [35], MigrateLib [36], PyMigBench [37]) bound the change to a single API or
+
+
+                                                  14
+RepoRescue                                                                                      Preprint
+
+
+library. FreshBrew [38] is closest in spirit: 228 Java projects to JDK 17 with a coverage-preservation
+guard. RepoRescue adds an enforced-runtime ablation and a per-repository test-count guard, so it
+can distinguish final-patch shortcuts, shortcut attempts during the run, and test deletion.
+
+6.2 Behavioral and Ecosystem Studies
+ExecutionAgent [39] studies how agents build arbitrary projects. Software-aging and abandonment
+studies explain why useful projects lose maintainers [1, 2, 40]. Dependency-supply-chain studies
+measure the other side of the same pressure: libraries lag behind current releases [41, 42], developers
+often delay dependency updates [43], package ecosystems propagate churn and vulnerabilities through
+dependency networks [44, 45], and build reproducibility can fail when environments drift [46–48].
+RepoRescue turns these ecosystem observations into executable rescue tasks: each subject is
+admitted only after the old environment passes, the modern environment fails, and the same historical
+suite can judge a source-only adaptation.
+  Methodologically closest are recent agent-behavior studies (Watanabe et al. [13], Jin and Chen [14],
+Nashid et al. [15], Zhu et al. [49]) that look beyond final PASS or FAIL outcomes at trajectory
+dynamics. We extend that line to a whole-repository no-issue setting and use the contrast between
+post-hoc auditing and runtime enforcement as a second way to observe shortcut behavior.
+
+7 Discussion
+What the benchmark makes measurable. RepoRescue turns a common maintenance problem
+into an observable agent task. The task starts from code that once worked, gives the agent a
+failing modern environment with no issue report or fault localization, and asks the agent to recover
+compatibility under a source-only constraint. This matters because many compatibility breaks
+combine runtime drift, dependency churn, stale tests, and downstream reuse; they rarely reduce to a
+single API replacement. A dataset with Phase 0, Phase 1, and Phase 2 validation can separate those
+parts instead of treating every green suite as the same kind of success.
+   What the findings say about agents. The results support treating deployed agents as
+model–framework systems. Closing the test-edit shortcut changes Kimi’s observed behavior, so
+compliance is part of capability rather than a post-processing detail. The union-vs.-single gap shows
+that systems fail on different repositories, and the L4 cliff shows where that difference becomes most
+visible: coordinated edits that preserve an old API surface across interacting files. The reasoning-level
+hierarchy therefore gives a way to state capability claims at the granularity where the failures actually
+separate.
+   How the results can be used. The larger use case is to make dependency paths movable
+again, because a single abandoned library can block a modernized application or tool. Modernization
+failures often surface at the top-level project, while the hard break may sit in a dormant transitive
+dependency. Common cases include an import that no longer loads, missing packaged data, an
+old API still called by downstream code, or an intermediate library that cannot be wrapped as an
+agent tool. RepoRescue treats each such library as a repairable link. When the broken links along
+a supply chain are rescued under source-only constraints and then checked through downstream
+scenarios, the path has a route to a modern runtime without replacing every package at once. This
+view suggests a practical workflow. Benchmark designers should keep post-hoc source-only scoring,
+runtime enforcement, and post-PASS validation separate, because they answer different questions.
+Tool builders can route L4-like tasks to systems that handle cross-file coordination better and add
+in-flight checks for false completion or regression cycles. Maintainers can rank abandoned libraries by
+
+                                                   15
+RepoRescue                                                                                     Preprint
+
+
+downstream reach, rescue the load-bearing intermediate packages first, and validate them through
+real dependents or tool wrappers. The PyCG → Scalpel cascade illustrates the pattern: once PyCG’s
+deeper failure is repaired, the downstream Scalpel-side edit is small, and the combined path works
+on Python 3.13. This remains path-level evidence, with downstream execution and regression probes
+strengthening what the historical suite can show.
+
+8 Threats to Validity
+Following standard validity categories for empirical software engineering [50,51], the following threats
+bound how far the behavioral claims should be read: RepoRescue is the instrument through which
+we observe agent behavior, not a calibrated estimator of underlying capability.
+   Construct and comparison. Rates describe what systems did under our protocol, not what
+they could do under different prompting or sampling. Single-trial-per-cell design gives union and
+intersection counts ±5–10 repository drift; qualitative regularities are robust to it. The four Claude
+Code systems share infrastructure, while GPT-5.2 through Codex differs in both LLM and framework,
+so we report it as a separate observation; provider-side sampling defaults remain a residual confound
+on the within-framework spread. The L1–L4 hierarchy is also a construct: two annotators reach
+Cohen’s κ [52] = 0.76 (per-system 0.70–0.81), with ∼half the disagreement at the L2 versus L3
+boundary. Table 1 therefore uses only the 116 repositories that are both hunk-labelled and present
+in the current benchmark, and we use the hierarchy for the L4-cliff finding rather than fine L2 versus
+L3 distinctions.
+   Dataset and harness integrity. Python combines 47 unmaintained repositories and 146 time-
+travel snapshots; repo_type is not significant in our GEE [53] regression after controlling for size,
+system, and incompatibility type (p=0.75), and unmaintained-only rates equal or exceed combined
+rates, the opposite of a memorisation explanation. Claims specific to unmaintained projects (RQ4)
+use the 47-repository subset only. The Python Phase 2 protocol preserves the historical test command
+verbatim; auditing 965 RQ1 trial logs found 6 of 436 (1.4%) PASS outcomes with a “no tests ran”
+signal concentrated in wssh, bounding aggregate pass-rate inflation by 1.4 pp, with per-trial flags
+shipped in the artifact.
+   External validity. Python’s dynamic typing creates a specific breakage profile; qualitative
+patterns recur on Java despite the asymmetric design, but rate comparisons partly reflect dataset
+composition. Forbidding dependency changes abstracts away a channel real maintainers use (29.8%
+of time-travel fixes); this isolates source reasoning rather than claiming source-only is the realistic
+deployment mode. RQ4 adds scenario and bug-hunt probes because Phase 2 PASS establishes suite
+restoration, not semantic correctness.
+
+9 Conclusion
+RepoRescue starts from a common maintenance problem: useful repositories can outlive the
+environments that made them work. We turn that problem into a benchmark by requiring each
+subject to pass in its historical environment, fail after modernization, and be rescued through
+source-code changes under the original test command. This construction lets the study ask whether
+agents can make old software usable again and what kind of repair a restored test suite actually
+represents. Agents can restore many compatibility failures, and different systems cover complementary
+repositories. At the same time, full-patch success often hides test-edit shortcuts, whole-codebase
+coordination remains a sharp difficulty boundary, and passing the historical suite does not by itself
+
+
+                                                  16
+RepoRescue                                                                                   Preprint
+
+
+establish practical reuse. The broader lesson is that compatibility rescue needs an evaluation stack:
+source-only scoring and runtime enforcement to separate source repair from shortcuts, reasoning-level
+analysis to locate coordination limits, and scenario or regression checks to decide whether a rescued
+library can be used again.
+
+References
+ [1] J. Coelho and M. T. Valente, “Why modern open source projects fail,” in Proceedings of the
+     11th Joint Meeting on Foundations of Software Engineering (ESEC/FSE), 2017, pp. 186–196.
+
+ [2] G. Avelino, E. Constantinou, M. T. Valente, and A. Serebrenik, “On the abandonment and
+     survival of open source projects: An empirical investigation,” in Proceedings of the ACM/IEEE
+     International Symposium on Empirical Software Engineering and Measurement (ESEM), 2019.
+
+ [3] A. Sottile, “pyupgrade: A tool to automatically upgrade syntax for newer versions of Python,”
+     https://github.com/asottile/pyupgrade, 2024.
+
+ [4] Moderne, Inc., “OpenRewrite: Large-scale automated source code refactoring,” https://docs.
+     openrewrite.org/, 2024, accessed: 2025-12-01.
+
+ [5] Model Context Protocol, “Model Context Protocol: Specification,” https://modelcontextprotocol.
+     io/specification/2025-11-25, 2025, accessed: 2026-06-17.
+
+ [6] V. Salis, T. Sotiropoulos, P. Louridas, D. Spinellis, and D. Mitropoulos, “PyCG: Practical call
+     graph generation in Python,” in Proceedings of the IEEE/ACM 43rd International Conference
+     on Software Engineering (ICSE), 2021, pp. 1646–1657.
+
+ [7] PrefectHQ, “FastMCP: The fast, Pythonic way to build MCP servers and clients,” https:
+     //github.com/PrefectHQ/fastmcp, 2024.
+
+ [8] Y. Zhang, J. Wang, Y. Ge, W. Xu, J. Hamm, and C. K. Reddy, “Stop comparing LLM agents
+     without disclosing the harness,” arXiv preprint arXiv:2605.23950, 2026.
+
+ [9] Anthropic, “Claude Code: Overview,” https://docs.anthropic.com/en/docs/claude-code/
+     overview, 2026, accessed 2026-06-25.
+
+[10] M. Chen, J. Tworek, H. Jun, Q. Yuan et al., “Evaluating large language models trained on
+     code,” arXiv preprint arXiv:2107.03374, 2021.
+
+[11] E. B. Wilson, “Probable inference, the law of succession, and statistical inference,” Journal of
+     the American Statistical Association, vol. 22, no. 158, pp. 209–212, 1927.
+
+[12] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and K. Narasimhan, “SWE-bench:
+     Can language models resolve real-world GitHub issues?” in Proceedings of the 12th International
+     Conference on Learning Representations (ICLR), 2024.
+
+[13] M. Watanabe, H. Li, Y. Kashiwa, B. Reid, H. Iida, and A. E. Hassan, “On the use of agentic
+     coding: An empirical study of pull requests on GitHub,” arXiv preprint arXiv:2509.14745, 2025.
+
+[14] H. Jin and H. Chen, “Uncovering systematic failures of LLMs in verifying code against nat-
+     ural language specifications,” in Proceedings of the IEEE/ACM International Conference on
+     Automated Software Engineering (ASE), 2025.
+
+                                                 17
+RepoRescue                                                                                    Preprint
+
+
+[15] N. Nashid, D. Ding, K. Gallaba, A. E. Hassan, and A. Mesbah, “Beyond accuracy: Behavioral
+     dynamics of agentic multi-hunk repair,” arXiv preprint arXiv:2511.11012, 2025.
+
+[16] L. Li, J. Wang, and H. Quan, “Scalpel: The Python static analysis framework,” 2022,
+     arXiv:2202.11840; presented at EuroPython 2022.
+
+[17] J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan, and O. Press, “SWE-
+     agent: Agent-computer interfaces enable automated software engineering,” arXiv preprint
+     arXiv:2405.15793, 2024.
+
+[18] C. S. Xia, Y. Deng, S. Dunn, and L. Zhang, “Agentless: Demystifying LLM-based software
+     engineering agents,” arXiv preprint arXiv:2407.01489, 2024.
+
+[19] I. Bouzenia, P. Devanbu, and M. Pradel, “RepairAgent: An autonomous, LLM-based agent for
+     program repair,” in Proceedings of the IEEE/ACM 47th International Conference on Software
+     Engineering (ICSE), 2025, arXiv:2403.17134.
+
+[20] C. Lee, C. S. Xia, L. Yang, J.-t. Huang, Z. Zhu, L. Zhang, and M. R. Lyu, “UniDebugger:
+     Hierarchical multi-agent framework for unified software debugging,” in Proceedings of the
+     2025 Conference on Empirical Methods in Natural Language Processing (EMNLP), 2025, pp.
+     18 248–18 277.
+
+[21] H. Hu, C. Shang, W. Sun, and H. Zhang, “TSAPR: A tree search framework for automated
+     program repair,” arXiv preprint arXiv:2507.01827, 2025.
+
+[22] K. Zhang, J. Li, G. Li, X. Shi, and Z. Jin, “CodeAgent: Enhancing code generation with
+     tool-integrated agent systems for real-world repo-level coding challenges,” in Proceedings of the
+     62nd Annual Meeting of the Association for Computational Linguistics (ACL), 2024.
+
+[23] Y. Shi, H. Li, B. Adams, and A. E. Hassan, “HAFixAgent: History-aware program repair agent,”
+     arXiv preprint arXiv:2511.01047, 2025.
+
+[24] Z. Huang, L. Xu, C. Liu, W. Sun, X. Zhang, Y. Lei, M. Yan, and H. Zhang, “DynaFix: Iterative
+     automated program repair driven by execution-level dynamic information,” arXiv preprint
+     arXiv:2512.24635, 2025.
+
+[25] M. Sepidband, H. Taherkhani, H. V. Pham, and H. Hemmati, “RGFL: Reasoning guided
+     fault localization for automated program repair using large language models,” arXiv preprint
+     arXiv:2601.18044, 2026.
+
+[26] Y. Chen, J. Wu, X. Ling, C. Li, Z. Rui, T. Luo, and Y. Wu, “When large language models
+     confront repository-level automatic program repair: How well they done?” in Proceedings
+     of the 2024 IEEE/ACM 46th International Conference on Software Engineering: Companion
+     Proceedings (ICSE-Companion), 2024, arXiv:2403.00448.
+
+[27] Z. Pan, C. Li, W. Zhong, Y. Feng, B. Luo, and V. Ng, “RepoRepair: Leveraging code docu-
+     mentation for repository-level automated program repair,” arXiv preprint arXiv:2603.01048,
+     2026.
+
+[28] Q. Zhang, C. Gao, Y. Han, Y. Shang, C. Fang, Z. Chen, and L. Xiao, “SGAgent: Suggestion-
+     guided LLM-based multi-agent framework for repository-level software repair,” arXiv preprint
+     arXiv:2602.23647, 2026.
+
+                                                 18
+RepoRescue                                                                                    Preprint
+
+
+[29] B. Yang, J. Ren, S. Jin, Y. Liu, F. Liu, B. Le, and H. Tian, “Enhancing repository-level software
+     repair via repository-aware knowledge graphs,” arXiv preprint arXiv:2503.21710, 2025.
+
+[30] N. Chondamrongkul, M. P. P. Kyaw, S. M. Ko, P. P. Paing, M. K. T. Swe, and T. Hongthong,
+     “RepoAI: Automated code refactoring through multi-agent LLM orchestration and retrieval-
+     augmented generation,” Science of Computer Programming, vol. 253, p. 103477, 2026.
+
+[31] J. Guo, C. Wang, X. Xu, Z. Su, and X. Zhang, “RepoAudit: An autonomous LLM-agent for
+     repository-level code auditing,” in Proceedings of the 42nd International Conference on Machine
+     Learning (ICML), 2025.
+
+[32] A. Almeida, L. Xavier, and M. T. Valente, “Using Copilot agent mode to automate library
+     migration: A quantitative assessment,” arXiv preprint arXiv:2510.26699, 2025, accepted at
+     AGENT 2026, co-located with ICSE.
+
+[33] K. Cheng, X. Shen, Y. Yang, T. Wang, Y. Cao, M. A. Ali, H. Wang, L. Hu, and D. Wang,
+     “CODEMENV: Benchmarking large language models on code migration,” in Findings of the
+     Association for Computational Linguistics: ACL, 2025.
+
+[34] D. Misra, N. Islah, V. May, B. Rauby, Z. Wang, J. Gehring, A. Orvieto, M. Chaudhary, E. B.
+     Muller, I. Rish, S. E. Kahou, and M. Caccia, “GitChameleon 2.0: Evaluating AI code generation
+     against Python library version incompatibilities,” arXiv preprint arXiv:2507.12367, 2025.
+
+[35] S. Zhang, G. Xiao, J. Wang, H. Lei, G. He, Y. Liu, and Z. Zheng, “PCART: Automated repair
+     of python API parameter compatibility issues,” arXiv preprint arXiv:2406.03839, 2024.
+
+[36] M. Islam, A. K. Jha, M. Mahmoud, and S. Nadi, “MigrateLib: A tool for end-to-end python
+     library migration,” arXiv preprint arXiv:2510.08810, 2025.
+
+[37] M. Islam, A. K. Jha, S. Nadi, and I. Akhmetov, “PyMigBench: A benchmark for python library
+     migration,” in Proceedings of the 20th IEEE/ACM International Conference on Mining Software
+     Repositories (MSR), 2023, pp. 511–515.
+
+[38] V. May, D. Misra, Y. Luo, A. Sridhar, J. Gehring, and S. S. Ribeiro Junior, “FreshBrew: A
+     benchmark for evaluating AI agents on Java code migration,” arXiv preprint arXiv:2510.04852,
+     2025.
+
+[39] I. Bouzenia and M. Pradel, “You name it, I run it: An LLM agent to execute tests of arbitrary
+     projects,” Proceedings of the ACM on Software Engineering, vol. 2, no. ISSTA, pp. 1054–1076,
+     2025, arXiv:2412.10133.
+
+[40] M. Valiev, B. Vasilescu, and J. Herbsleb, “Ecosystem-level determinants of sustained activity in
+     open-source projects: A case study of the PyPI ecosystem,” in Proceedings of the 26th ACM
+     Joint Meeting on European Software Engineering Conference and Symposium on the Foundations
+     of Software Engineering (ESEC/FSE), 2018, pp. 644–655.
+
+[41] J. Cox, E. Bouwers, M. C. J. D. van Eekelen, and J. Visser, “Measuring dependency freshness in
+     software systems,” in Proceedings of the 37th International Conference on Software Engineering
+     (ICSE), 2015, pp. 109–118.
+
+
+
+
+                                                 19
+RepoRescue                                                                                 Preprint
+
+
+[42] A. Decan, T. Mens, and E. Constantinou, “On the evolution of technical lag in the npm package
+     dependency network,” in Proceedings of the 2018 IEEE International Conference on Software
+     Maintenance and Evolution (ICSME), 2018, pp. 404–414.
+
+[43] R. G. Kula, D. M. German, A. Ouni, T. Ishio, and K. Inoue, “Do developers update their library
+     dependencies?” in Empirical Software Engineering, vol. 23, 2018, pp. 384–417.
+
+[44] A. Decan, T. Mens, and P. Grosjean, “An empirical comparison of dependency network evolution
+     in seven software packaging ecosystems,” in Empirical Software Engineering, vol. 24, 2019, pp.
+     381–416.
+
+[45] C. Liu, S. Chen, L. Fan, B. Chen, Y. Liu, and X. Peng, “Demystifying the vulnerability
+     propagation and its evolution via dependency trees in the NPM ecosystem,” in Proceedings of
+     the ACM/IEEE International Conference on Software Engineering (ICSE), 2022, pp. 672–684.
+
+[46] S. Mukherjee, A. Almanza, and C. Rubio-González, “Fixing dependency errors for Python build
+     reproducibility,” in Proceedings of the ACM SIGSOFT International Symposium on Software
+     Testing and Analysis (ISSTA), 2021, pp. 439–451.
+
+[47] A. Bartlett, C. C. S. Liem, and A. Panichella, “The last dependency crusade: Solving Python de-
+     pendency conflicts with LLMs,” in Proceedings of the 40th IEEE/ACM International Conference
+     on Automated Software Engineering Workshops (ASEW), 2025, pp. 169–178, arXiv:2501.16191.
+
+[48] B. P. Vangala, A. Adibifar, A. Gehani, and T. Malik, “AI-generated code is not reproducible
+     (yet): An empirical study of dependency gaps in LLM-based coding agents,” arXiv preprint
+     arXiv:2512.22387, 2025.
+
+[49] X. Zhu et al., “An empirical study of bugs in modern LLM agent frameworks,” arXiv preprint
+     arXiv:2602.21806, 2026.
+
+[50] P. Runeson and M. Höst, “Guidelines for conducting and reporting case study research in
+     software engineering,” Empirical Software Engineering, vol. 14, pp. 131–164, 2009.
+
+[51] B. A. Kitchenham, S. L. Pfleeger, L. M. Pickard, P. W. Jones, D. C. Hoaglin, K. El Emam, and
+     J. Rosenberg, “Preliminary guidelines for empirical research in software engineering,” in IEEE
+     Transactions on Software Engineering, vol. 28, no. 8, 2002, pp. 721–734.
+
+[52] J. Cohen, “A coefficient of agreement for nominal scales,” Educational and Psychological
+     Measurement, vol. 20, no. 1, pp. 37–46, 1960.
+
+[53] K.-Y. Liang and S. L. Zeger, “Longitudinal data analysis using generalized linear models,”
+     Biometrika, vol. 73, no. 1, pp. 13–22, 1986.
+
+
+
+
+                                                20
+

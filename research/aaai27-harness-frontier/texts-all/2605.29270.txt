@@ -1,0 +1,901 @@
+                                         Indexing the Unreadable: LLM-Native Recursive Construction and Search
+                                                                  of Service Taxonomies
+
+                                                       Wei Zheng Yang Yan Yiyang Shao Jinyang Li Zeze Chang
+                                                        Yukuang Jia Qiming Mao Chihyung Wang Jingbin Zhou
+                                                                                         openJiuwen A2X
+                                                                                         zhengw@vt.edu
+
+
+                                                               Abstract                           endpoints (Google, 2025), function-tool catalogs,
+                                                                                                  reusable skill packages (Anthropic, 2025a), and an
+                                             The era of the Internet of Agents (IoA) is taking    increasing variety of other services are all becom-
+
+
+
+
+arXiv:2605.29270v1 [cs.AI] 28 May 2026
+                                             shape: LLM agents are expected to fulfill user       ing agent-callable.
+                                             goals by orchestrating fast-growing popula-
+                                             tions of Model Context Protocol (MCP) servers,          However, this expansion collides directly with
+                                             Agent-to-Agent (A2A) endpoints, reusable             an intrinsic limitation of today’s LLMs: effective
+                                             skills, and other LLM-callable services. Yet         context is a scarce resource that does not scale with
+                                             LLMs face a structural mismatch with this            the number of services. Two failure modes follow.
+                                             regime: effective context is a scarce resource       First, token bloat: for an agent with 1,000 MCP
+                                             that does not scale with the number of ser-          tools, the catalog alone persistently occupies about
+                                             vices. Concatenating thousands of service de-
+                                                                                                  500 K tokens of context (Anthropic, 2025b; Hasan
+                                             scriptions into a prompt overflows the context
+                                             window, and even when the window is large            et al., 2026). Second, Lost-in-the-Middle (Liu et al.,
+                                             enough, models systematically under-attend           2024): even when the window is nominally large
+                                             to information in the middle of long inputs,         enough, models systematically under-attend to in-
+                                             the well-documented Lost-in-the-Middle phe-          formation placed in the middle of long inputs, and
+                                             nomenon. This is fundamentally a question of         recent long-context evaluations (Hsieh et al., 2024)
+                                             context management for service discovery.            confirm that accuracy does not scale linearly with
+                                             To address this, we propose an LLM-native
+                                                                                                  context length, so scarce effective context, not raw
+                                             progressive-disclosure scheme and its concrete
+                                             instantiation, A2X (Agent-to-Anything ser-
+                                                                                                  window size, is the binding constraint.
+                                             vice discovery): an LLM-driven pipeline that            Confronted with this mismatch, one line of
+                                             automatically organizes the registered services      work bypasses the LLM’s context constraint via
+                                             into a hierarchical taxonomy and walks it layer      embedding-based retrieval (Gan and Sun, 2025;
+                                             by layer at query time, so that every LLM call       Fei et al., 2025), at the cost of giving up the
+                                             sees only a small candidate set highly relevant      LLM’s semantic-understanding strength on cross-
+                                             to the user query. This decouples effective-
+                                                                                                  vocabulary, multi-constraint, and long-tail queries,
+                                             context scarcity from registry size and signif-
+                                             icantly reduces token consumption while im-          which becomes a recall bottleneck in complex sce-
+                                             proving retrieval accuracy. Compared to full-        narios (Mo et al., 2025; Shi et al., 2025). This
+                                             context dumping, A2X achieves a 6.2-point Hit        paper takes the other path: building an efficient and
+                                             Rate gain at one-ninth the prompt-token cost;        accurate LLM-native service discovery, whose
+                                             compared to the state-of-the-art open-source         core research question is context management
+                                             embedding-based baseline, A2X improves Hit           for service discovery: how should a large, dy-
+                                             Rate by more than 20 points.
+                                                                                                  namic registry be organized and selectively dis-
+                                                                                                  closed to an LLM so that every decision is taken
+                                         1   Introduction
+                                                                                                  over a short candidate set highly relevant to the
+                                         We are entering the era of the Internet of Agents        user query, while the registry as a whole remains
+                                         (IoA), in which LLM agents are expected to take a        discoverable?
+                                         goal stated in natural language and orchestrate the         Recent work on tree-structured LLM reasoning,
+                                         online services needed to fulfill it. The pool of such   including Chain-of-Thought (Wei et al., 2022) and
+                                         services is expanding rapidly. Model Context Pro-        Tree-of-Thoughts (Yao et al., 2023a), has shown
+                                         tocol (MCP) servers (Anthropic, 2024) alone now          that decomposing a complete decision into a se-
+                                         number in the thousands; Agent-to-Agent (A2A)            quence of local decisions significantly improves
+LLM accuracy and controllability on complex rea-         (iii) At the empirical level (§4), A2X strictly dom-
+soning tasks. We approach service discovery in           inates standard baselines on Hit Rate and Recall
+the same spirit, as a problem to be solved by LLM-       on the ToolRet benchmark in both English and
+native progressive disclosure: organize the registry     Chinese while consuming an order of magnitude
+into a hierarchical taxonomy such that each local        fewer tokens than full-context dumping. (iv) At
+decision sees only one node’s children rather than       the paradigm level (§5), we discuss LLM-native
+the whole structure; then, at query time, recursively    discovery as the natural endpoint of the trajectory
+descend the taxonomy along branches matching             along which inference cost continues to fall, and
+the query, so each LLM call weighs only a small          outline usage-aware refinement as a forward exten-
+candidate set highly relevant to the query. Service      sion.
+catalogs admit such a taxonomy naturally: Travel
+divides into flights, hotels, and currency; Finance      2   Related Work
+into payments, lending, and analytics.                   LLM context control. Lost-in-the-Middle (Liu
+   Realizing this approach comes with non-trivial        et al., 2024) and the RULER long-context bench-
+implementation difficulty: manual taxonomy con-          mark (Hsieh et al., 2024) establish that even when
+struction is costly, and one-shot LLM construction       the input window is nominally large, models sys-
+fails because the LLM cannot ingest thousands of         tematically under-attend to information placed in
+services in a single context. We therefore deliver       the middle of a long prompt: the binding constraint
+A2X (Agent-to-Anything service discovery) (Fig-          is effective context rather than raw window size,
+ure 1): an LLM-native pipeline that constructs the       and accuracy degrades smoothly as the prompt
+taxonomy from raw service names and descriptions         grows. A unifying response across LLM tasks is de-
+by recursive splitting, and at query time walks it       composition into local decisions, which replaces a
+via recursive descent through the categories fol-        single global judgment over the full context with a
+lowed by service selection at the reached leaves,        sequence of focused local ones, so that each call in-
+producing a high-quality taxonomy with no human-         spects only a small portion of the candidate space.
+curated ontology in the loop. By construction,           In multi-step reasoning, Chain-of-Thought (Wei
+A2X neutralizes both token bloat and Lost-in-the-        et al., 2022) breaks a complex inference into inter-
+Middle: every LLM call follows a short, focused          mediate steps, and Tree-of-Thoughts (Yao et al.,
+recursive path and weighs only one node’s children.      2023a) organizes those steps into a search over
+Both index and retriever can be recomputed as the        partial-solution branches. Least-to-Most prompt-
+registry grows, and inherit multilingual capability      ing (Zhou et al., 2023) takes the idea further by
+from the underlying LLM. The full implementation         first generating a list of ordered subproblems and
+is presented in §3.                                      then solving each in turn, so that the original ques-
+   On the ToolRet benchmark (1,839 services,             tion is never put to the LLM in one shot. In agent
+1,714 queries), A2X reaches 92.6 % Hit Rate, beat-       execution, ReAct (Yao et al., 2023b) interleaves
+ing full-context dumping by 6.2 absolute points          reasoning traces with environment actions, so that
+at one-ninth the prompt-token cost and exceeding         each LLM call addresses only a small local subtask
+the state-of-the-art open-source embedding-based         conditioned on accumulated observations rather
+baseline by more than 20 Hit Rate points. The ad-        than the entire trajectory. The shared pattern is to
+vantage carries to Chinese ToolRet, demonstrating        push attention away from a single long prompt and
+cross-lingual robustness.                                toward a sequence of short, focused ones.
+Contributions. (i) We reframe agent-side service         Retrieval for service discovery. Two paradigms
+discovery as a problem of context management and         dominate: LLM-only retrieval and embedding-
+adopt LLM-native progressive disclosure as our ap-       based retrieval. The former, the standard MCP-
+proach to it (§3.1). (ii) At the implementation level,   client pattern, concatenates every service descrip-
+we deliver A2X, an LLM-native instantiation that         tion into the prompt; token cost grows linearly
+automatically constructs the hierarchical taxonomy       with the registry, and both the context-window ceil-
+from raw service descriptions (§3.2) and walks it        ing and Lost-in-the-Middle degradation make this
+layer by layer at query time (§3.3), resolving the       route infeasible at scale. The latter, the current
+implementation difficulty that manual construction       mainstream, replaces enumeration with dense vec-
+does not scale and one-shot LLM construction fails.      tor similarity search backed by vector stores such as
+Figure 1: A2X system overview. Top-left: an LLM automatically builds the hierarchical taxonomy from the
+registered services. Top-right: progressive disclosure recursively retrieves query-relevant categories and services.
+Bottom: LLM-native search over the taxonomy; solid colored arrows mark selected branches, gray dashed lines
+mark pruned ones.
+
+
+Chroma (Chroma, 2024), and retrieval-augmented             language description. Given a user query q, the
+MCP frameworks such as RAG-MCP (Gan and                    goal is to return a small candidate set R̂ ⊆ S that
+Sun, 2025) and MCP-Zero (Fei et al., 2025); how-           contains all services relevant to q. The service-
+ever, fixed-dimensional embeddings struggle to             discovery problem is to realize a function R̂ =
+capture the rich query-to-service semantic mapping         F(q, S), where F may invoke an LLM one or more
+an LLM can perform, and consequently miss rel-             times. Let τ (F ; q, S) denote the maximum prompt
+evant services: LiveMCPBench (Mo et al., 2025)             length any single LLM call inside F must process
+attributes nearly half of MCP failures to the re-          on input (q, S). As established in §1, an LLM’s
+trieval step. Beyond these two, a third line uses          effective context is bounded by some budget B that
+hand-curated hierarchical taxonomies (Du et al.,           is small relative to a full registry, even when the
+2024; Agntcy Collective, 2025). These suffer from          nominal window is large (Liu et al., 2024; Hsieh
+high maintenance cost and structural lag, making           et al., 2024). Reliable retrieval therefore requires
+it difficult to keep pace with the rapidly growing         τ (F; q, S) ≤ B for all (q, S), with B independent
+and diversifying service population of the Internet-       of N . The research question of this paper, con-
+of-Agents era. In adjacent (non-service-discovery)         text management for service discovery, is how to
+domains, several LLM-assisted human-in-the-loop            design F satisfying the context-management con-
+taxonomy-construction schemes have been pro-               straint, while also maximizing retrieval accuracy
+posed (Kargupta et al., 2025; Golde et al., 2026;          and minimizing token consumption.
+Shah et al., 2025), but they rely on domain-specific          Our principal solution to this research question
+prior knowledge and still require humans to pro-           is context isolation via progressive disclosure:
+vide or assist in constructing an initial taxonomy,        we realize the retrieval function F as a chain of
+which makes them hard to port directly to service          local LLM calls f1 , . . . , fK acting on a shrinking
+discovery.                                                 sequence of candidate sets V1 , . . . , VK ⊆ S, with
+                                                           R̂ = (fK ◦ · · · ◦ f1 )(q, S) and |Vk | ≤ B for ev-
+3     Method                                               ery k, so that each call sees only the content un-
+                                                           der a single node of a hierarchical structure rather
+3.1   Problem formulation
+                                                           than any entire layer of S. The research question
+A registry contains N services S = {s1 , . . . , sN },     thereby decomposes into two concrete implementa-
+each described by a name and a free-text natural-          tion problems. (i) Manual taxonomy construction is
+Algorithm 1 BFS Taxonomy Construction                             pirical depth of real service catalogs (e.g., Travel
+Require: services S, θkw =500, θleaf =40, D=3                     → Flights → International); deeper trees increase
+ 1: Create root node r containing all of S; queue Q ← {r}         build cost without recovering meaningful axes. All
+ 2: while Q non-empty do
+ 3:     v ← Q.pop()                                               three are exposed as command-line flags and can be
+ 4:     if |v| > θkw then                                         retuned for registries with different size and depth
+ 5:          K ← BATCHED K EYWORD E XTRACT(v)                 ▷   profiles.
+    |v|/50 LLM calls
+ 6:          C ← D ESIGN F ROM K EYWORDS(K)                          Context overflow at large nodes makes one-
+ 7:     else
+ 8:          C ← D ESIGN F ROM D ESCRIPTIONS(v)
+                                                                  shot category design infeasible: concatenating
+ 9:     end if                                                    N =1,839 descriptions at the root of ToolRet ex-
+10:     if v = r then C ← VALIDATE ROOT(C)                        ceeds 200k tokens and triggers Lost-in-the-Middle
+11:     end if
+12:     repeat                           ▷ at most 3 iterations   even when the window fits (Liu et al., 2024). For
+13:          assign each s ∈ v to children C in parallel          nodes with more than θkw services we therefore use
+14:          collect Sgen (matched >|C|/3 children), Sun          a keyword-first strategy: a KeywordExtractor
+    (matched no child)
+15:          if Sgen ∪ Sun = ∅ then break                         processes services in batches of 50, extracting up to
+16:          end if                                               five functional keywords each, deduplicates across
+17:          C ← R EFINE(C, Sgen , Sun )                          batches, and feeds a frequency-weighted keyword
+18:     until converged or iteration cap
+19:     delete subcategories with ≤ 2 services                    list to the designer. The resulting table is typically
+20:     enqueue children c ∈ C if |c| > θleaf and                 around 200 entries for N =1,839, compact enough
+    depth(c) < D
+21: end while
+                                                                  to fit in a single design prompt; the designer never
+22: C ROSS D OMAINA SSIGN(leaves) ▷ multi-parent phase            sees raw descriptions at scale, only an aggregated
+                                                                  keyword distribution, keeping each prompt well
+                                                                  under B.
+high-cost and slow to update; how can an LLM con-                    Axis mixing is the first design-time difficulty:
+struct the taxonomy automatically offline under the               when asked to organize a diverse service set, the
+context-management constraint (§3.2)? (ii) Given                  LLM mixes orthogonal classification axes such as
+such a taxonomy, how do we use it efficiently at                  technology, operation type, or functional domain,
+query time (§3.3)?                                                so that a flight-booking API could plausibly be-
+                                                                  long to “Travel,” “API Services,” and “Transaction
+3.2    Auto-constructed functional taxonomy                       Processing” simultaneously, destroying the tree’s
+Algorithm 1 summarizes the construction. The                      ability to prune. We address this with a single-
+build is a Breadth-First Search (BFS) that starts                 axis constraint: the design prompt requires that all
+from a single root containing every service. At                   sibling categories within a node share one classifi-
+each step we pop a node whose service count ex-                   cation axis, and selects that axis along a preference
+ceeds the leaf threshold θleaf and split it via a node            chain. The chain prefers user-facing functional
+splitter that runs four substeps: (1) category design,            domains such as “Travel & Tourism,” “Personal
+(2) classification, (3) refinement loop, (4) edge                 Finance,” or “Health & Fitness”; if those fail to
+handling. After BFS terminates, a separate cross-                 cover the node’s services cleanly, it falls back to
+domain pass reassigns services that should live un-               operation object, then operation type, and only as a
+der multiple top-level domains. The paragraphs                    last resort technical approach such as “AI Services”
+below describe each mechanism together with the                   or “Cloud APIs.”
+build-time difficulty it addresses.                                  Sibling-boundary ambiguity is the second diffi-
+   The three hyperparameters above admit short,                   culty: even within one axis, sibling categories can
+principled defaults. θkw = 500 marks the size                     be semantically close, for instance “Finance” and
+above which packing service descriptions into one                 “Business,” or “Health” and “Fitness,” leaving bor-
+design prompt would risk context overflow and                     derline services hard to disambiguate. We address
+Lost-in-the-Middle degradation, so larger nodes                   this with an explicit boundary clause attached to
+route through the keyword-first compression de-                   every category in the design prompt: a “NOT here”
+scribed below. θleaf = 40 matches the per-call                    statement that names what the category does not
+service-selection budget; a node at or below this                 cover, giving both the build-time classifier and the
+size is handled by a single leaf-level LLM call                   search-time navigator a clear disambiguation signal
+without further splitting. D = 3 reflects the em-                 at every borderline.
+Algorithm 2 Progressive-Disclosure Retrieval                    and finally issues one parallel LLM call per merged
+Require: query q, taxonomy T , mode m, θmerge =30               group to pick the relevant services.
+ 1: function NAVIGATE(v, q)                                        The same algorithm supports three modes that
+ 2:     C ← children(v)
+ 3:     if C = ∅ then return {(v, services(v))}                 differ only in the system prompts. Quoting from
+ 4:     end if                                                  our implementation: get_all asks the LLM to “se-
+ 5:     Ĉ ← LLM(C ATEGORY P ROMPT(m, q, C))                ▷   lect all categories that could contain query-relevant
+    Ĉ ⊆ C: selected children
+ 6:
+               S
+        return c∈Ĉ NAVIGATE(c, q)                 ▷ parallel   services,” tuned for high recall; get_important
+ 7: end function                                                asks the LLM to “select all categories that could
+ 8: L ← NAVIGATE(root(T ), q)                                   contain query-relevant services, but deduplicate
+ 9: L ← D EDUPLICATE(L)             ▷ first-come-first-served
+10: G ← M ERGE S MALL G ROUPS(L, θmerge )                       services with the same function”; get_one asks
+11: R ← ∅                                                       the LLM to “always select the single most relevant
+12: for all g ∈ G in parallel do                                branch.”
+13:     R ← R∪ LLM(S ERVICE P ROMPT(m, q, g))
+14: end for                                                        The number of LLM calls per query is approxi-
+15: return R                                                    mately d · b + g, where d is the average navigation
+                                                                depth, b is the average branching factor selected
+                                                                per level (typically much smaller than the taxon-
+   Two run-time safety nets complement these
+                                                                omy’s branching factor B), and g is the number of
+design-time constraints. First, classifications may
+                                                                merged leaf groups visited during service selection.
+still match too many children or none at all; A2X
+                                                                Under a balanced taxonomy with branching factor
+therefore runs a classification–refinement loop
+                                                                B, d = Θ(logB N ); both b and g depend on query
+in the spirit of harness engineering (Hashimoto,
+                                                                specificity rather than on N – empirically (§4.2)
+2026), where services matching more than 1/3 of
+                                                                they are bounded by small constants on ToolRet.
+the children flag unclear boundaries and services
+                                                                The total prompt-token cost per query therefore
+matching no child flag incomplete coverage, both
+                                                                grows sub-linearly in N under registry growth
+fed back to the designer for a refined set of children.
+                                                                that preserves the branching structure; we do not
+Second, a strict single-parent tree forces a binary
+                                                                claim an asymptotic O(log N ) bound, since the
+choice for services that legitimately span multiple
+                                                                constants in b and g are data-dependent. A per-N
+top-level domains and so harms recall; subcate-
+                                                                scaling characterization across 102 –105 is left to
+gories with two or fewer services are merged back
+                                                                future work (§Limitations).
+into the parent, and a CrossDomainAssigner asks,
+for every leaf, “which of these services should also            4     Experiments
+appear under other top-level domains?”, placing
+accepted candidates in the best target leaf to give             4.1    Datasets and metrics
+the taxonomy a multi-parent structure.                          We use a cleaned variant of ToolRet (Shi et al.,
+                                                                2025) as our tool-retrieval benchmark, filtering out
+3.3   Progressive-disclosure search                             low-quality entries (e.g., “the tool that opens the
+Algorithm 2 formalises the search procedure in                  navigation bar,” which even a human reader can-
+two named steps. Parallel recursive descent                     not interpret without context). The cleaned variant
+(CategoryNavigator) walks the taxonomy top-                     contains 1,839 services and 1,714 queries. We addi-
+down. At each node we present the children                      tionally use ToolRet_CN, a Chinese version of the
+C to the LLM as a numbered list of name:                        same benchmark with the same service inventory
+description pairs and ask for the indices of rel-               and query set, to test cross-lingual robustness. For
+evant children, denoted Ĉ ⊆ C; the call is short,              the cross-dataset comparison in §4.4, we addition-
+focused, and returns a comma-separated list. The                ally evaluate on publicMCP (1,387 publicly avail-
+selected children Ĉ are recursed into in parallel; the         able MCP servers from https://github.com/
+rest of the subtree is pruned and never inspected,              modelcontextprotocol/servers paired with
+and multiple selected nodes can be processed in                 50 queries) and its Chinese counterpart pub-
+parallel. Service selection (ServiceSelector)                   licMCP_CN. Datasets are released alongside this
+collects the leaf hits, deduplicates services across            paper to support future work on tool retrieval.
+leaves (first-come), merges groups with fewer than                 We report Hit Rate and Recall. Hit Rate mea-
+θmerge services using a least-common-ancestor dis-              sures whether the returned set contains at least one
+tance heuristic to keep group sizes LLM-friendly,               ground-truth relevant service; Recall is the frac-
+Figure 2: Service-discovery method comparison. Embedding-based methods (columns 1–2: vector approximate-
+nearest-neighbor (ANN) retrieval and rewrite-retrieve) and the naive LLM-native baseline (column 3: full-context
+LLM) each suffer a distinct failure mode that surfaces as insufficient recall or context overflow. A2X (column 4) is
+also LLM-native, but pairs a hierarchical taxonomy with progressive disclosure, turning service discovery into a
+sequence of short, focused LLM decisions that achieve sub-linear token cost in N (full cost model in §4.2) while
+preserving recall and precision.
+
+
+tion of relevant services that are returned; Preci-           Method            Tok/q   HR ↑ (%)     Recall ↑ (%)
+sion (reported in the appendix only) is the fraction          Pure-LLM         67,619         86.4           84.7
+of returned services that are relevant. We delib-             A2X (get_all)     7,069         92.6           89.2
+erately do not report Precision as a primary met-
+ric: large-scale tool-retrieval benchmarks face an         Table 1: Search-side comparison on ToolRet (1,839
+                                                           services, 1,714 queries). Both methods are evaluated
+inherent annotation challenge where functionally
+                                                           on the full 1,714-query test set. A2X improves Hit
+equivalent services are hard to label exhaustively,        Rate by 6.2 absolute points and Recall by 4.5 points
+so the measured Precision systematically underes-          over pure-LLM full-context retrieval, while consuming
+timates the true relevance ratio; the consequences         roughly 1/9 the prompt tokens.
+are discussed further in §Limitations. The remain-
+der of §4 reports three comparison studies that
+isolate the search-side gain (§4.2), the build-side
+gain (§4.3), and the gain over embedding-based
+retrieval together with a cross-lingual evaluation         Middle effects (Liu et al., 2024). A2X instead
+(§4.4). All baselines use the same underlying LLM          makes a sequence of focused decisions over short
+(DeepSeek-V3.2) where applicable.                          candidate lists: each navigation step presents only
+                                                           about 8 category options to the LLM (vs. 1,839
+4.2   Study 1: A2X search vs pure-LLM                      services for the baseline), and each leaf-group call
+      full-context retrieval                               presents about 12 services after recursive-descent
+                                                           pruning. Following the cost model in §3.3, the
+This study isolates A2X’s search-side contribu-            per-query LLM-call count is d · b + g, where
+tion. With the taxonomy already built, we com-             d = Θ(logB N ) under a balanced taxonomy of
+pare A2X’s progressive-disclosure search against           branching B, while b (selected branches per level)
+a pure-LLM baseline that concatenates every ser-           and g (visited leaf groups) depend on query speci-
+vice description into a single prompt and asks the         ficity rather than N . The per-query token cost is
+LLM to return relevant service IDs. Tool input             therefore (d · b + g) · c where c is the per-call
+schemas are excluded from this baseline’s catalog          prompt budget bounded by the LLM’s effective
+payload, matching A2X’s setting; including them            context window. This grows sub-linearly in N : em-
+would raise the per-query input to approximately           pirically on ToolRet (N = 1,839) A2X averages
+204k tokens.                                               8.0 LLM calls and 7,069 tokens per query, a 9× re-
+   The pure-LLM baseline scans all 1,839 services          duction over full-context dumping’s 67,619 tokens,
+in a single LLM call, exposing it to Lost-in-the-          alongside the 6.2-point hit-rate gain.
+   Build method              HR ↑ (%) Recall ↑ (%)     even the strongest open-source embedding in our
+   One-shot (baseline)         59.7       54.6         lineup still trails A2X by 23.5 HR and 27.4 Recall
+   + Freq table                70.8       66.3         points on EN (MiniLM), and by 29.4 HR / 32.0
+   + Refine loop               71.5       66.8
+   + Single-axis               66.6       62.4
+                                                       Recall on CN (BGE-M3). We additionally test
+   A2X recursive BFS (all)     92.6       89.2         MCP-Zero with the prompt template released
+                                                       by Fei et al. (2025), which underperforms its
+Table 2: Build-side comparison and additive module     retrieval backbone (BGE-M3) by 2.7 HR on
+ablation on ToolRet (1,839 services, 1,714 queries).   our benchmark. The embedding-based family
+Search HR and Recall reported after running A2X
+                                                       thus shares one bottleneck, namely insufficient
+search (get_all mode) over each taxonomy.
+                                                       recall. The LLM-native A2X sidesteps this
+                                                       paradigm by recasting service discovery as a
+4.3   Study 2: Contribution of each A2X build          sequence of discrete LLM decisions over short,
+      module                                           focused candidate lists drawn from a taxonomy of
+                                                       functional categories, while also interpreting the
+This study isolates A2X’s build-side contribution.
+                                                       various positive and negative preferences a user
+A2X’s BFS recursive construction issues many
+                                                       may attach to a query. A2X also achieves accuracy
+short, focused LLM calls. We compare it against a
+                                                       on the Chinese dataset comparable to English,
+pure-LLM baseline, one-shot build: the LLM reads
+                                                       demonstrating its cross-lingual strength.
+all service descriptions in a single call and emits
+the taxonomy skeleton, after which parallel LLM
+                                                       5   Discussion
+calls assign each service to one of its leaves. We
+then evaluate downstream search on the resulting       The core insight behind A2X is a division of labor
+taxonomy using the same A2X search procedure           that plays to the LLM’s strengths while avoiding its
+as Study 1, so any quality difference traces back      weaknesses. LLMs excel at the kind of semantic
+to the taxonomy itself. We additionally test the       reasoning service discovery demands, mapping a
+effect of each build module individually. Adding       vague goal such as “plan a trip to Tokyo” to func-
+any one module to the one-shot baseline lifts Recall   tional categories like Flights, Hotels, and Currency,
+by 7.8 to 12.2 absolute points, with the refinement    and disambiguating positive and negative prefer-
+loop the strongest single contributor (+12.2 R) and    ences in the query. They degrade, however, when
+the keyword frequency table a close second (+11.7      forced to scan thousands of candidates in a sin-
+R) at less than half its token cost. Enabling all      gle pass, the Lost-in-the-Middle effect that gives
+three modules and combining them with recursive        rise to the context-management constraint of §3.1.
+BFS subdivision closes the remaining gap to 89.2       The taxonomy resolves this tension by interpos-
+Recall.                                                ing between query and registry: every LLM call
+                                                       sees only one node’s children, never more than a
+4.4   Study 3: A2X vs embedding-based                  dozen options, and irrelevant branches are pruned
+      retrieval                                        before they reach the model. This same design
+This study compares A2X against the dominant re-       choice, context isolation via progressive disclosure,
+trieval paradigm of dense vector similarity search.    underlies all three results in §4: the search-side
+We test four open-source embedding baselines           gain, the build-side gain, and the gap against the
+(MiniLM, BGE-large-en, text2vec-base-chinese for       strongest dense embeddings. A single mechanism
+the Chinese setting, and the multilingual BGE-         thus addresses both the LLM-context bottleneck
+M3), plus the LLM-query-rewriting baseline MCP-        and the recall ceiling that limits embedding-based
+Zero (Fei et al., 2025). All embedding baselines       discovery.
+rank candidates by cosine similarity to the query;        The contrast with embedding-based retrieval is
+MCP-Zero uses BGE-M3 as its retrieval backbone.        paradigmatic rather than incremental. Dense re-
+We evaluate on both datasets (introduced in §4.1)      trievers compress both query and service into fixed-
+and their Chinese counterparts (ToolRet_CN / pub-      dimensional vectors and rank by cosine similar-
+licMCP_CN) for cross-lingual robustness.               ity, leaving little room for fine-grained intent or
+   Compared to LLM-native approaches,                  domain-specific tool vocabulary that an LLM can
+embedding-based methods struggle to cap-               still parse from the raw text. Hierarchical alter-
+ture the complex query-service semantic mapping:       natives such as AnyTool (Du et al., 2024) depend
+             Dataset      Method                             EN                         CN
+                                                  HR ↑ (%)    Recall ↑ (%)   HR ↑ (%)    Recall ↑ (%)
+                          MiniLM                      69.1           61.8           –              –
+                          BGE-large-en                68.0           61.7           –              –
+                          text2vec-base-chinese          –              –        41.4           36.9
+             ToolRet
+                          BGE-M3                      64.8           58.0        60.9           54.4
+                          MCP-Zero                    62.1           55.9        58.6           52.4
+                          A2X                         92.6           89.2        90.3           86.4
+                          MiniLM                      80.0           49.8           –              –
+                          BGE-large-en                70.0           40.5           –              –
+                          text2vec-base-chinese          –              –        28.0           11.4
+             publicMCP
+                          BGE-M3                      70.0           41.8        74.0           43.3
+                          MCP-Zero                    52.0           27.5        48.0           23.3
+                          A2X                        100.0           94.9        98.0           88.9
+
+Table 3: Comparison against embedding-based retrieval on ToolRet and publicMCP. Embedding baselines
+return the top-K cosine-nearest candidates; here we show K=5 for ToolRet (mean 1.34 ground-truth services per
+query) and K=10 for publicMCP (mean 2.78). Full K sweep in Appendix E.3.
+
+
+on a human-curated category structure that ages          points.
+out as the registry grows. A2X discards both as-            Looking forward, the LLM-native discovery
+sumptions: each navigation step is a discrete LLM        layer scales naturally in two directions. At Internet
+decision rather than a vector-similarity score, and      scale it can act as a unified discovery layer across
+it operates on candidate lists drawn from a tax-         heterogeneous services, agents, and protocol entry
+onomy that the LLM builds autonomously. The              points, providing what amounts to an agent DNS
+cross-lingual robustness in §4.4 is a concrete con-      across organizational and platform boundaries; in-
+sequence of the same design: language coverage           side an organization, the same mechanism becomes
+is inherited from the underlying LLM rather than         a governable service catalog over internal tools,
+from per-language embedding engineering, so the          endpoints, and workflow nodes. Because every nav-
+discovery layer evolves with the LLM itself rather       igation step is an LLM decision rather than a vector
+than with a separate retrieval stack.                    lookup, users can encode richer constraints in the
+                                                         query, namely budgets, exclusions, and negative
+6   Conclusion                                           preferences, while long-tail and specialized service
+                                                         providers gain reliable discoverability without de-
+We presented A2X (Agent-to-Anything service              pending on a small number of traffic platforms. As
+discovery), an LLM-native service-discovery sys-         the agent ecosystem grows toward registries an or-
+tem that reframes the registry as a problem of           der of magnitude larger than today’s benchmarks,
+context management for service discovery and ad-         we therefore view LLM-native discovery not as a
+dresses it through context isolation via progres-        niche alternative to embedding-based retrieval but
+sive disclosure: an LLM-built hierarchical taxon-        as its natural successor.
+omy is walked layer by layer at query time, so
+that every LLM call sees only one node’s chil-           Limitations
+dren rather than the whole registry. The pipeline
+is fully autonomous: an LLM builds the taxon-            Static taxonomy. Our build pipeline treats ser-
+omy directly from raw service descriptions, and          vices as static and is invariant to query fre-
+an LLM navigates it at query time via recursive          quency. A natural next step is usage-aware re-
+descent through the categories followed by ser-          finement: once a deployment collects service-
+vice selection at the reached leaves. On ToolRet,        usage logs, the taxonomy can be analyzed under
+A2X reaches 92.6 % Hit Rate in English and 90.3 %        a minimum-cost
+                                                             P              objective (expected query cost
+in Chinese at roughly one-ninth the prompt-token         = s frequency(s) × depth(s)) to identify high-
+cost of full-context dumping, strictly dominating        frequency services placed at deep nodes and long-
+the full-context LLM baseline by 6.2 absolute HR         tail services placed at shallow nodes; the resulting
+points and exceeding the strongest open-source           signal can be fed back to the LLM as a soft hint to
+embedding-based baseline by more than 20 HR              lift frequently queried services to shallower posi-
+tions and push long-tail services deeper, shortening    datasets used in this work (ToolRet and publicMCP,
+the expected navigation path.                           each in English and Chinese) are public collections
+                                                        of API and tool descriptions; they do not contain
+Language coverage. Our cross-lingual evalua-            personal data. Our LLM API usage went through
+tion (§4.4) covers machine-translated Chinese ver-      standard commercial endpoints under their pub-
+sions of both ToolRet and publicMCP and shows           lished terms of service; we logged no personally
+strong results. However, the Chinese data is            identifiable information. Service registries can am-
+machine-translated, not natively authored. Perfor-      plify whichever services are indexed, and a de-
+mance on natively non-English registries, partic-       ployed A2X instance inherits the curation choices
+ularly languages where service descriptions and         of its maintainers; we encourage operators of agent
+queries draw on incompatible vocabularies, may          registries to publish their indexing policies.
+require taxonomy rebuilds rather than translation,
+and remains to be studied.
+                                                        References
+LLM dependency. Both the build pipeline and
+the retrieval algorithm rely on a capable underlying    Agntcy Collective. 2025.      Agent Directory Ser-
+                                                          vice (ADS).       https://docs.agntcy.org/dir/
+LLM. Our experiments use a cost-efficient com-
+                                                          overview/. Cisco-led open initiative; agent direc-
+mercial endpoint (DeepSeek-V3.2 via the official          tory built on the OASF hierarchical skill taxonomy.
+API); a substantially weaker model would likely
+degrade taxonomy quality and, in turn, retrieval ac-    Anthropic. 2024.   Model context protocol spec-
+                                                          ification. https://modelcontextprotocol.io/
+curacy. We have not characterised this degradation        specification. Open protocol for LLM-tool in-
+curve.                                                    tegration.
+Precision under-reporting. As discussed in              Anthropic. 2025a. Claude agent skills. https://www.
+§4.1, ground-truth annotations in tool-retrieval          anthropic.com/news/skills. Reusable skill pack-
+benchmarks are systematically incomplete, so tra-         ages for Claude agents.
+ditional Precision metrics under-report the quality     Anthropic. 2025b. Code execution with MCP: Building
+of high-recall methods. The pattern is visible in         more efficient AI agents. https://www.anthropic.
+Table 10 (Appendix E.3): A2X’s Precision sits             com/engineering/code-execution-with-mcp.
+                                                          Anthropic Engineering Blog.
+within ±3 points of the strongest embedding base-
+line on each dataset (ToolRet 16.2 / 12.0 vs. 15.3 /    Chroma. 2024. Chroma: Open-source search infrastruc-
+13.5; publicMCP 10.5 / 9.9 vs. 13.0 / 11.8), while        ture for AI. https://www.trychroma.com. Open-
+A2X’s Recall leads by 27–32 points on ToolRet             source vector database.
+and 45+ points on publicMCP. Under incomplete           Yu Du, Fangyun Wei, and Hongyang Zhang. 2024. Any-
+labels, the high-Recall method correctly retrieves        Tool: Self-reflective, hierarchical agents for large-
+more services that are functionally relevant but un-      scale API calls. In Proceedings of the 41st Interna-
+labeled, and each such item is counted as a false         tional Conference on Machine Learning (ICML).
+positive against it. We therefore read the Precision    Xiang Fei, Xiawu Zheng, and Hao Feng. 2025. MCP-
+gap as label-coverage noise rather than evidence          Zero: Active tool discovery for autonomous LLM
+of weaker selection, but it does limit our ability to     agents.
+make strong precision claims against prior work         Tiantian Gan and Qiyao Sun. 2025. RAG-MCP: Mitigat-
+that reports Precision-based scores.                       ing prompt bloat in LLM tool selection via retrieval-
+                                                           augmented generation.
+Build cost at registry scale. Our build experi-
+ments target registries of ∼2k services. Larger reg-    Jonas Golde, Nicolaas Jedema, Ravi Krishnan, and
+                                                          Phong Le. 2026. Hierarchical text classification with
+istries (tens of thousands of services, multiple up-      LLM-refined taxonomies.
+dates per day) will exercise the incremental-rebuild
+path of the system, which is implemented in proto-      Google. 2025. Agent2Agent (A2A) protocol. https://
+type form but not yet benchmarked at scale.               a2aproject.github.io/A2A/. Open protocol for
+                                                          agent-to-agent communication.
+Ethics Statement                                        Mohammed Mehedi Hasan, Hao Li, Gopi Krishnan Ra-
+                                                         jbahadur, Bram Adams, and Ahmed E. Hassan. 2026.
+A2X is a retrieval algorithm and does not gener-         Model context protocol (MCP) tool descriptions are
+ate new content or take autonomous actions. The          smelly! towards improving AI agent efficiency with
+  augmented MCP tool descriptions. arXiv preprint              models. In International Conference on Learning
+  arXiv:2602.14878.                                            Representations (ICLR).
+Mitchell Hashimoto. 2026. My AI adoption journey.          Denny Zhou, Nathanael Schärli, Le Hou, Jason Wei,
+  Blog post. Introduced the term “harness engineer-          Nathan Scales, Xuezhi Wang, Dale Schuurmans,
+  ing”.                                                      Claire Cui, Olivier Bousquet, Quoc Le, and Ed Chi.
+                                                             2023. Least-to-most prompting enables complex rea-
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-
+                                                             soning in large language models. In International
+  tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang,
+                                                             Conference on Learning Representations (ICLR).
+  and Boris Ginsburg. 2024. RULER: What’s the real
+  context size of your long-context language models?
+  In Proceedings of the First Conference on Language       Appendix Contents
+  Modeling (COLM).
+                                                               • Appendix A: Implementation Details (hyper-
+Priyanka Kargupta, Nan Zhang, Yunyi Zhang, Rui                   parameters, models, reproducibility).
+   Zhang, Prasenjit Mitra, and Jiawei Han. 2025.
+   TaxoAdapt: Aligning LLM-based multidimensional              • Appendix B: Datasets (ToolRet cleaning pro-
+   taxonomy construction to evolving research corpora.           tocol; publicMCP construction).
+   In Proceedings of the 63rd Annual Meeting of the
+  Association for Computational Linguistics (ACL).             • Appendix C: Taxonomy Structure (taxonomy
+Nelson F. Liu, Kevin Lin, John Hewitt, Ashwin Paran-             size statistics; branching factor discussion).
+  jape, Michele Bevilacqua, Fabio Petroni, and Percy           • Appendix D: Additional Experimental Results
+  Liang. 2024. Lost in the middle: How language mod-
+  els use long contexts. Transactions of the Association         (search modes, build cost, DeepSeek V4 ro-
+  for Computational Linguistics, 12:157–173.                     bustness check).
+Guozhao Mo, Wenliang Zhong, Jiawei Chen, Qianhao               • Appendix E: Baseline Implementation Details
+  Yuan, Xuanang Chen, Yaojie Lu, Hongyu Lin, Ben                 (pure-LLM, one-shot build, embedding base-
+  He, Xianpei Han, and Le Sun. 2025. LiveMCPBench:               lines, MCP-Zero).
+  Can agents navigate an ocean of MCP tools? arXiv
+  preprint arXiv:2508.01780.
+                                                           A     Implementation Details
+Chirag Shah, Ryen W. White, Reid Andersen, Georg
+  Buscher, Scott Counts, Sarkar Snigdha Sarathi Das,       Build                     hyperparameters. We
+  Ali Montazer, Sathish Manivannan, Jennifer Neville,      use                    keyword_threshold=500,
+  Xiaochuan Ni, Nagu Rangan, Tara Safavi, Siddharth        max_service_size=40,
+  Suri, Mengting Wan, Leijie Wang, and Longqi Yang.
+  2025. Using large language models to generate, vali-     max_depth=3,                 generic_ratio=1/3,
+  date, and apply user intent taxonomies. ACM Trans-       max_categories_size=20,
+  actions on the Web, 19(3).                               max_refine_iterations=3,
+Zhengliang Shi, Yuhan Wang, Lingyong Yan, Pengjie          keyword_batch_size=50.            Parallelism is
+  Ren, Shuaiqiang Wang, Dawei Yin, and Zhaochun            set to 20 worker threads.
+  Ren. 2025. Retrieval models aren’t tool-savvy:
+  Benchmarking tool retrieval for large language mod-      Search hyperparameters. Search uses the leaf-
+  els. In Findings of the Association for Computational    group merge threshold θmerge . Modes get_all,
+  Linguistics: ACL 2025.                                   get_important, get_one share the same machin-
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten           ery and differ only in their prompt instructions
+   Bosma, Brian Ichter, Fei Xia, Ed Chi, Quoc V. Le,       (quoted in §3.3).
+   and Denny Zhou. 2022. Chain-of-Thought prompt-
+   ing elicits reasoning in large language models. In      Models. All LLM calls in build, search, and
+  Advances in Neural Information Processing Systems        the one-shot baseline use a chat-completion
+  (NeurIPS).
+                                                           endpoint at temperature 0. We use a cost-
+Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran,          efficient commercial endpoint (DeepSeek-V3.2);
+  Thomas L. Griffiths, Yuan Cao, and Karthik               the algorithm is model-agnostic.       Embed-
+  Narasimhan. 2023a. Tree of thoughts: Deliberate
+  problem solving with large language models. In Ad-       ding baselines use, in increasing capacity:
+  vances in Neural Information Processing Systems          sentence-transformers/all-MiniLM-L6-v2
+  (NeurIPS).                                               (384d), BAAI/bge-large-en-v1.5 (1,024d), and
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak
+                                                           the multilingual BAAI/bge-m3 (1,024d). For
+  Shafran, Karthik Narasimhan, and Yuan Cao. 2023b.        the Chinese-only open-source baseline we use
+  ReAct: Synergizing reasoning and acting in language      shibing624/text2vec-base-chinese (768d).
+Reproducibility. The full build and search code,               clones). When two tools have the same ef-
+the prompt templates, the dataset processing scripts,          fective function and roughly interchangeable
+the one-shot baseline, the MCP-Zero baseline, and              descriptions, we keep one representative.
+the evaluation harness are released with the paper.        3. Description too short. We drop tools whose
+Each experiment in §4 has its own output directory            description is a single fragment of fewer than
+under results/, containing a summary.json and                 roughly fifteen tokens, which is below the
+a per_query.jsonl for full audit.                             floor at which any classifier (human or LLM)
+                                                              can place the tool with confidence. Example
+B     Datasets                                                removed: toolbench_tool_4327, “Retrieves
+B.1     ToolRet (cleaned)                                     an order”.
+                                                           4. Description not self-contained or not
+The original ToolRet collection (Shi et al.,
+                                                              human-interpretable. We drop tools whose
+2025) aggregates 44,453 tools from a dozen up-
+                                                              description requires substantial out-of-band
+stream sources (toolACE, toolbench, apigen,
+                                                              context to understand. Two recurring pat-
+toolalpaca, ultraTool, gorilla, toolink,
+                                                              terns: (a) platform-specific action stubs (e.g.,
+toolLens, reversechain, webtools, metatool,
+                                                              “the tool that opens the navigation bar”, a de-
+and others). Across these sources the per-tool
+                                                              scription that is meaningful only inside one
+documentation has very uneven quality: some en-
+                                                              fixed UI and to a reader familiar with it); (b)
+tries are well-described public APIs, others are
+                                                              lambdas whose name and one-line docstring
+unlabeled lambda functions or near-duplicate auto-
+                                                              are opaque without seeing the body (e.g.,
+generated stubs. Because A2X organizes services
+                                                              toolink_tool_1123, “goats_per_cow: To
+by their user-facing functional description, the
+                                                              calculate the number of goats equivalent to
+build pipeline is sensitive to description quality: a
+                                                              one cow”, which the original code reveals to
+service whose description is too short, too generic,
+                                                              mean a unit-conversion expression that returns
+or too platform-specific to be self-contained will
+                                                              the constant 21/15).
+degrade both the build (the LLM cannot reliably
+categorize it) and the search (the LLM cannot re-        Outcome. The cleaned variant retains 1,839
+liably distinguish it from its neighbors). To ob-        tools, a 4.1% subset of the original ToolRet, paired
+tain a reliable benchmark we therefore curated the       with 1,714 English queries whose ground-truth
+cleaned variant used throughout the paper.               sets are entirely contained in the retained tools
+                                                         (mean ground-truth set size 1.34 services per
+Process. The reviewer was shown the candidate            query). Coverage is preserved across the major
+tools alongside the query set, and was asked to flag     upstream sources (toolACE, apigen, toolbench,
+any tool that triggered one of the four exclusion        reversechain, toolLens, ultraTool, webtools,
+criteria below. The reviewer’s flags were then rec-      metatool, toolalpaca, with the original mix’s
+onciled with the query coverage and merged into          long tail still represented). We additionally pub-
+the kept set. The cleaned dataset is released, the       lish a Chinese variant, ToolRet_CN, produced by
+rejected entries can be diffed against the original      translating each retained tool’s name and descrip-
+by id, and the criteria are stated below in full.        tion and the matching queries while preserving the
+                                                         ground-truth mapping. Both variants are released
+Exclusion criteria.
+                                                         alongside this paper.
+    1. No corresponding query. The original Tool-        B.2    publicMCP
+       Ret contains many tools that no query in the
+                                                         publicMCP is a 1,387-entry catalog of publicly
+       benchmark ever points at. Retaining them in-
+                                                         available MCP server implementations that we as-
+       flates the registry without affecting any HR /
+                                                         sembled to test cross-dataset robustness on a reg-
+       Recall measurement; we drop tools with zero
+                                                         istry whose composition differs from ToolRet’s.
+       ground-truth coverage.
+                                                         The catalog draws from the official MCP servers
+    2. Near-duplicate of another retained tool.          repository,1 which its own README character-
+       Several upstream sources are dense with auto-     izes as “a collection of reference implementations
+       generated variants of the same underlying API        1
+                                                              https://github.com/modelcontextprotocol/
+       (e.g., paginated read endpoints, locale-shifted   servers
+      Statistic             ToolRet   ToolRet_CN             Mode             Recall ↑ (%)   Tokens/q   Calls/q
+      Total categories          352           358            get_one                 42.99      3,648     3.42
+      Leaf categories           324           328            get_important           74.51      5,210     5.71
+      Max depth                   3             3            get_all                 89.19      7,069     7.96
+      Avg services / leaf      12.7          12.5
+                                                            Table 5: Search modes on ToolRet. The same taxonomy
+Table 4: Taxonomy structure statistics on ToolRet (En-      and the same algorithm are reused; only the per-call
+glish) and ToolRet_CN (Chinese). Sizes are nearly iden-     prompt instructions differ.
+tical, reflecting that A2X inherits its multilingual rea-
+soning from the underlying LLM rather than from any
+language-specific component.
+                                                            binary tree needs ⌈log2 3375⌉ = 12 calls. Our em-
+                                                            pirical configuration (b ∈ [5, 20], D=3) achieves
+for the Model Context Protocol (MCP), as well               an average of 7.96 calls per query on ToolRet.
+as references to community built servers and addi-
+tional resources.” Each entry consists of a name,           D     Additional Experimental Results
+a short functional description (median 115 charac-
+ters, mean 129), and a URL to the source repository
+                                                            D.1    Search modes
+(91.6% on GitHub, with the remainder split across
+npm, GitLab, and project documentation pages).              The same A2X search algorithm supports three
+                                                            modes that differ only in the navigation system
+Queries and ground truth. The catalog is paired
+                                                            prompts and that sweep a smooth precision-recall
+with 50 English natural-language queries describ-
+                                                            trade-off. Table 5 compares them on ToolRet.
+ing concrete agent tasks (e.g., “open a pull request
+and notify the engineering channel”). A Chinese               get_one runs at less than half the cost of
+counterpart publicMCP_CN is produced by trans-              get_all and is the natural choice when the agent
+lating both the service descriptions and the queries        needs the single best tool; get_all maximizes re-
+while preserving the ground-truth mapping.                  call when the agent will downstream-rerank. Vary-
+                                                            ing only the navigation prompts (while keeping the
+C    Taxonomy Structure                                     same taxonomy fixed) sweeps a smooth precision-
+                                                            recall curve, evidence that the taxonomy is gen-
+Table 4 reports the structural properties of the au-        uinely the structural object the LLM is reasoning
+tomatically constructed taxonomies on the English           over.
+and Chinese versions of ToolRet. A2X rebuilds
+the taxonomy independently for each language
+directly from the service descriptions; no cross-           D.2    Build cost analysis
+lingual alignment is performed.                             The taxonomy is built once, fully automatically
+On branching factor. Information-theoretically,             and without human intervention, and reused for all
+a binary tree (b=2) minimizes the maximum num-              subsequent queries. For ToolRet (N =1,839), the
+ber of decisions to reach any leaf: ⌈log2 N ⌉ levels        build issues 18,206 LLM calls consuming ∼29M
+for N services. However, three practical consid-            tokens and completes in approximately 3 hours
+erations lead us to prefer a moderate branching             with 20 parallel workers on a commodity endpoint
+factor (b ∈ [5, 20]). First, every LLM call carries a       (DeepSeek-V3.2), costing roughly $4 to $8 at cur-
+fixed-cost overhead (system prompt, query, instruc-         rent API rates. The BFS splitting phase accounts
+tion template) regardless of how many candidates            for 92% of the cost (16,797 calls); the cross-domain
+are presented; a node with 10 to 15 children amor-          phase adds only 1,409 calls.
+tizes this overhead across more useful decisions              To put this in perspective: serving 4,100 queries
+per call. Second, forced binary splits often produce        under the pure-LLM full-context baseline would
+unnatural partitions (e.g., “Domestic Travel” vs.           consume 4,100 × 67,619 ≈ 277 M tokens, roughly
+“Everything Else”), degrading classification accu-          9.6× the entire build budget, while achieving
+racy. Third, a shallower tree with moderate branch-         lower recall. A2X’s one-time build cost is therefore
+ing reduces the total number of sequential LLM              recouped in fewer than 4,100 queries, after which
+calls: a depth-3 tree with branching factor 15 cov-         every additional query is 9× cheaper than the full-
+ers 153 = 3,375 leaf slots in 3 calls, whereas a            context alternative.
+D.3   DeepSeek V4 robustness check                      a more usable taxonomy (70.5 HR vs. V3.2/V4-
+DeepSeek V4 was released in April 2026 as the           flash’s 59.7–61.6), but it still under-performs the
+next-generation successor to V3.2, in two tiers:        recursive build by a wide margin. The result con-
+deepseek-v4-flash (284B parameters, 13B ac-             firms the Study 2 argument: even a much stronger
+tive) and deepseek-v4-pro (1.6T parameters, 49B         LLM cannot replace the explicit BFS iteration with
+active). Both support the same OpenAI-compatible        a single design call. A second observation cuts
+endpoint as V3.2 and default to thinking mode           deeper on V4: the one-shot A2X taxonomy under-
+on; we disable thinking via the request-body flag       performs even the full-context baseline on every
+"thinking": {"type": "disabled"} for ev-                V4 model (e.g., V4-flash 61.6 vs. 94.0 HR), so on
+ery LLM call, since our classification and selec-       capable models the recursive build is the only con-
+tion prompts do not need a reasoning trace and the      figuration in which the taxonomy approach beats
+trace would inflate output tokens. To verify A2X        simply dumping the registry into the prompt.
+is not tied to one specific model, we fully rebuild
+                                                        E     Baseline Implementation Details
+the taxonomy from raw service descriptions under
+each V4 generation (using both the recursive BFS        We describe each baseline in enough detail to re-
+build and the one-shot baseline) and replay both        produce the numbers in Tables 1–3.
+the search-side (Study 1) and build-side (Study 2)
+comparisons.                                            E.1 Pure-LLM full-context retrieval (Study 1)
+                                                        This baseline concatenates every service in the reg-
+Search-side observations. (i) A2X is model-
+                                                        istry (id, name, description) into a single user
+stable on token cost. Across V3.2 and both V4
+                                                        prompt, prepended by a system instruction asking
+tiers, A2X (recursive build) consumes 5,405–8,088
+                                                        the LLM to return the IDs of all services relevant
+tokens per query, never more than 12% of the cor-
+                                                        to the query. The model is the same DeepSeek-V3
+responding full-context cost on the same model.
+                                                        chat endpoint used by A2X. Each query consumes
+The roughly 9× token-efficiency lead is invariant
+                                                        about 67k input tokens on ToolRet; we evaluate on
+to model generation. (ii) Long-context skill com-
+                                                        the full 1,714-query test set, with parallelism set
+presses A2X’s accuracy lead. V4-flash is unusu-
+                                                        to 20 workers (DeepSeek’s prefix caching of the
+ally strong on long-context: its full-context HR
+                                                        shared 1,839-service catalog keeps wall-clock cost
+jumps from 86.4 (V3.2) to 94.0, partially neutraliz-
+                                                        manageable). The full-1,714 result is reported in
+ing the Lost-in-the-Middle effect at the 68k-token
+                                                        Table 1; per-method Precision in Table 7.
+registry scale. A2X is still slightly ahead on ac-
+curacy here (94.3 vs. 94.0), but the bulk of A2X’s      E.2     One-shot LLM build (Study 2)
+advantage on V4-flash is now cost rather than ac-
+                                                        The one-shot baseline mirrors A2X’s output shape
+curacy. The accuracy gap reopens on V4-pro (89.7
+                                                        (a 3-level hierarchical taxonomy plus per-service
+vs. 86.0, +3.7 HR points) and was largest on V3.2
+                                                        assignments) but produces the structure in a single
+(92.6 vs. 86.4, +6.2). (iii) V4-pro trades recall
+                                                        LLM call. Specifically:
+for precision; A2X passes through the model’s
+selection profile. V4-pro builds a tighter taxon-           1. Design (one call). A single chat-completion
+omy than V4-flash (212 leaves vs. 344) and returns             request is issued with all 1,839 service name:
+fewer but more precise services per query (A2X                 description pairs in the user message. The
+precision 23.8 vs. flash’s 10.6, at the cost of 6 re-          prompt asks the LLM to emit a strict JSON
+call points). This is a model-level preference, not a          tree with 6–10 top-level categories, 3–5 sub-
+method-level limitation; A2X’s algorithmic struc-              categories each, and 3–5 leaf categories each.
+ture is invariant and downstream Hit Rate remains              No single-axis constraint is supplied; no
+in the 90% range across all three generations.                 keyword-first compression; no refinement
+Build-side observations. The recursive BFS                     loop.
+build’s advantage over one-shot construction is sim-        2. Classification (one call per service, in paral-
+ilarly stable across LLMs: the HR drop from re-                lel). The taxonomy from step 1 is serialized as
+cursive to one-shot is 32.9 points on V3.2, 32.7 on            an indented bullet list. For each service, a sep-
+V4-flash, and narrows to 19.2 on V4-pro. V4-pro’s              arate LLM call asks for the leaf path (“Top >
+larger capacity does let one-shot design produce               Sub > Leaf”) the service belongs to. Returned
+                 Setup                 Model       Tok/q   HR ↑ (%)     Recall ↑ (%)      Prec. (%)
+                 Pure-LLM              V3.2       67,619         86.4              84.7        16.8
+                                       V4-flash   68,317         94.0              91.3         9.8
+                                       V4-pro     67,688         86.0              82.3        14.9
+                 A2X (recursive BFS)   V3.2        7,069         92.6              89.2        16.2
+                                       V4-flash    8,088         94.3              91.9        10.6
+                                       V4-pro      5,405         89.7              85.8        23.8
+                 A2X (one-shot)        V3.2        3,456         59.7              54.6        12.0
+                                       V4-flash    3,851         61.6              56.8        11.7
+                                       V4-pro      3,096         70.5              65.7        22.4
+
+Table 6: Search-side and build-side comparisons replayed under three DeepSeek model generations. All A2X rows
+are on the full 1,714-query ToolRet test set. The V3.2 pure-LLM row is also on the full 1,714 queries (matching
+Table 1); the V4-flash and V4-pro pure-LLM rows are still on the 50-query subsample and will be re-run on the full
+set in a future revision. Bold values are the best within each block.
+
+
+     Metric          Pure-LLM     A2X (get_all)              Build method             Build tokens    Precision (%)
+     Precision (%)       16.8          16.2                  One-shot (baseline)            5.5 M         12.0
+                                                             + Freq table                   2.2 M         20.9
+ Table 7: Per-method Precision for Table 1 (Study 1).        + Refine loop                 12.2 M         23.2
+                                                             + Single-axis                  6.7 M         20.6
+                                                             A2X recursive BFS              29 M          16.2
+
+     paths are parsed and reconciled against the           Table 8: Per-build token cost and Precision for Table 2
+     taxonomy node names; classifications whose            (Study 2 additive build ablation). A2X’s build is a one-
+     path cannot be resolved are recorded as fail-         time amortized cost.
+     ures.
+  3. Persistence. The resulting taxonomy plus                    prompt receives this compressed keyword
+     service assignments are written in A2X’s                    vocabulary instead of raw descriptions,
+     taxonomy.json / class.json format so the                    dropping total cost to ∼2.2 M tokens.
+     same evaluator can score downstream search.
+                                                              • + Refine loop. After the initial design, we
+   On ToolRet the one-shot pipeline issues 1,840                run up to max_refine_iterations=3 refine-
+LLM calls (1 design + 1,839 classifications) for a              ment cycles. Each cycle re-classifies all 1,839
+total of ∼5.5M tokens. The resulting taxonomy has               services, scans for misclassified or hard-to-
+160 leaves and successfully assigns 1,715 of 1,839              place items, and feeds the diagnostics back
+services; the remaining 124 services fail classifica-           as a refinement instruction to the LLM. Total
+tion because the unrefined taxonomy lacks a leaf                cost rises to ∼12.2 M tokens.
+they cleanly map into. Downstream A2X search on               • + Single-axis.     We prepend the same
+the produced taxonomy uses identical search-side                single-axis   rules    used    by      A2X’s
+code (get_all mode) as the main A2X result, so                  CATEGORY_DESIGN_TEMPLATE             (“USER
+the search-quality difference is attributable to the            FUNCTIONAL DOMAIN ONLY”) to the
+taxonomy itself rather than to the search procedure.            one-shot design prompt, forbidding splits
+                                                                along non-functional axes (modality, provider,
+Additive variants. We additionally evaluate                     deployment form, etc.). Total cost: ∼6.7 M
+three variants that add a single A2X build mod-                 tokens.
+ule on top of the one-shot baseline. All three reuse
+steps 2 (parallel classification) and 3 (persistence)
+                                                           E.3   Dense embedding baselines (Study 3)
+above unchanged; only step 1 (design) is modified.
+                                                           All dense baselines share the same pipeline: encode
+   • + Freq table.    Before the design call,              every service description with the chosen embed-
+     we extract keyword tokens from all ser-               ding model, build a flat index, then for each query
+     vice descriptions via A2X’s keyword                   encode the raw query text and return the top-K
+     extractor      (keyword_threshold=500,                cosine-nearest services; per-dataset K values are as
+     keyword_batch_size=50).     The design                reported in Table 3 caption, and the full K sweep
+   Dataset      Method                 K                  EN                              CN
+                                           HR ↑ (%) Recall ↑ (%) Prec. (%) HR ↑ (%) Recall ↑ (%) Prec. (%)
+                                      5        69.1            61.8       15.2       –            –         –
+                MiniLM
+                                      10       76.0            69.3        8.7       –            –         –
+                                      5        68.0            61.7       15.3       –            –         –
+                BGE-large-en
+                                      10       75.5            69.2        8.7       –            –         –
+                                      5           –               –          –    41.4         36.9       8.9
+                text2vec-base-chinese
+   ToolRet                            10          –               –          –    49.6         44.3       5.4
+                                      5        64.8            58.0       14.5    60.9         54.4      13.5
+                BGE-M3
+                                      10       72.3            65.9        8.4    71.4         64.9       8.2
+                                      5        62.1            55.9       13.6    58.6         52.4      12.8
+                MCP-Zero
+                                      10       68.8            62.4        7.8    62.2         56.0       6.9
+                A2X                   –        92.6            89.2       16.2    90.3         86.4      12.0
+                                   5           72.0            41.1       21.2       –            –         –
+                MiniLM
+                                   10          80.0            49.8       13.0       –            –         –
+                                   5           60.0            32.7       17.6       –            –         –
+             BGE-large-en
+                                   10          70.0            40.5       11.0       –            –         –
+                                   5              –               –          –    20.0          7.6       4.4
+             text2vec-base-chinese
+   publicMCP                       10             –               –          –    28.0         11.4       3.2
+                                   5           66.0            35.4       18.8    58.0         29.1      16.0
+             BGE-M3
+                                   10          70.0            41.8       11.4    74.0         43.3      11.8
+                                   5           54.0            24.7       14.4    40.0         18.7      10.8
+             MCP-Zero
+                                   10          52.0            27.5        7.6    48.0         23.3       7.0
+             A2X                   –          100.0            94.9       10.5    98.0         88.9       9.9
+
+              Table 9: Full top-K comparison at K=5 and K=10 on ToolRet and publicMCP.
+
+
+  Method (lang.)               ToolRet     publicMCP       E.4        MCP-Zero baseline (Study 3)
+  MiniLM (EN)                   15.2         21.2          We follow the reference implementation released
+  BGE-large-en (EN)             15.3         17.6
+  text2vec-base-chinese (CN)     8.9          4.4          by Fei et al. (2025) (https://github.com/xfey/
+  BGE-M3 (EN)                   14.5         18.8          MCP-Zero). For each query we issue an LLM
+  BGE-M3 (CN)                   13.5         16.0          call with the system_ours_mcptools.prompt system
+  MCP-Zero (EN)                 13.6         14.4
+  MCP-Zero (CN)                 12.8         10.8          prompt and the user_query_without_server.prompt
+  A2X (EN)                      16.2         10.5          user template (“I need to {task_description}.
+  A2X (CN)                      12.0          9.9          Please identify the most appropriate tool for this
+                                                           task.”). The LLM is instructed to reply with a block
+Table 10: Per-method Precision (%) for Table 3 (Study 3
+embedding-based retrieval), at the per-dataset K used
+                                                           of the form
+in Table 3 (K=5 on ToolRet, K=10 on publicMCP).                   <tool_assistant>
+                                                                  server: [platform / service domain]
+                                                                  tool: [specific tool the user needs]
+                                                                  </tool_assistant>
+is in Table 9. We tested four embedding models:
+                                                           We parse the response, extract the tool: ... de-
+sentence-transformers/all-MiniLM-L6-v2
+                                                           scription, embed it with BAAI/bge-m3, and rank
+(384d, English), BAAI/bge-large-en-v1.5
+                                                           services by cosine similarity to the precomputed
+(1,024d,                                 English),
+                                                           service embeddings, returning the top-K under
+shibing624/text2vec-base-chinese (768d,
+                                                           the same per-dataset K policy as §E.3. We use
+Chinese), and BAAI/bge-m3 (1,024d, multilingual).
+                                                           MCP-Zero’s flat (single-stage) retrieval configu-
+Service and query embeddings are cached on
+                                                           ration (the experiment_apibank.py script in the
+disk so repeated runs at different K values do not
+                                                           released code), as ToolRet and publicMCP have
+re-encode; all vectors are L2-normalized explicitly
+                                                           flat service inventories with no server / tool hi-
+before cosine similarity. Similarity computation
+                                                           erarchy. The system prompt, user template, and
+uses NumPy dense matrix multiplication.
+                                                           <tool_assistant> parsing logic follow the re-
+  Table 9 reports the full top-K comparison at both        leased code.
+K=5 and K=10 on both datasets; the rows that
+feed into Table 3 are K=5 on ToolRet and K=10
+on publicMCP.
+

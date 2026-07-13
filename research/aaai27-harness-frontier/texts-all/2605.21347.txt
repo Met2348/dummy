@@ -1,0 +1,1560 @@
+                                        Insights Generator: Systematic
+                                        Corpus-Level Trace Diagnostics for LLM
+                                        Agents
+                                        Akshay Manglik∗ , Apaar Shanker, Kaustubh Deshpande† , Jason Qin, Yash Maurya, Veronica
+
+
+
+
+arXiv:2605.21347v3 [cs.AI] 4 Jun 2026
+                                        Chatrath, Vijay S. Kalmath, Levi Lentz, Yuan (Emily) Xue
+                                        Scale AI
+
+                                        research@scale.com
+
+
+
+
+                                          Abstract
+                                          Diagnosing failures in LLM agents remains largely manual. Practitioners inspect a small subset
+                                          of execution traces, form ad-hoc hypotheses, and iterate. This process misses patterns that only
+                                          emerge across trace populations and does not scale to production corpora where individual traces
+                                          span tens of thousands of tokens. We formalize the problem of corpus-level trace diagnostics.
+                                          Given a corpus of execution traces, the goal is to produce grounded natural-language insights that
+                                          characterize systematic behavioral patterns across trace groups, each linked to supporting evidence.
+                                          We present the Insights Generator (IG), a multi-agent system that answers diagnostic questions by
+                                          proposing and testing hypotheses across the trace corpus to produce an evidence-backed insights
+                                          report. We evaluate IG across qualitative and objective dimensions, spanning rubric-based report
+                                          assessment and downstream performance improvements achieved by implementing IG insights.
+                                          Human experts using IG reports improve scaffold performance by 30.4 pp over the unmodified
+                                          baseline scaffold, and coding agents leveraging IG-derived insights show consistent and stable
+                                          gains. Across benchmarks, IG’s scout-investigator architecture produces findings comparable in
+                                          detection coverage to competing approaches, while domain experts rated IG reports as leading
+                                          depth and evidence quality.
+
+
+
+
+                                        1 Introduction
+                                        Agentic systems produce long execution traces of reasoning steps, tool calls, and environment interac-
+                                        tions. Debugging is typically driven by evaluation results that flag failed runs; practitioners then inspect
+                                        a small subset of traces and form hypotheses [7, 15]. Because evaluations are defined over final task
+                                        outcomes, they yield aggregate signals but do not reveal intermediate behaviors. Additionally, they do
+                                            † Work conducted while at Scale AI.
+                                            ∗ Corresponding author: akshay.manglik@scale.com
+
+
+
+                                                                                               1
+                                                                                                Scale AI Research
+
+
+
+not surface patterns across the broader space of scenarios. Many errors, inefficiencies, and performance
+differences consequently remain difficult to identify [7, 11]. This is especially true for failures localized to
+specific subsets of inputs, task types, or execution contexts that are not individually prominent enough
+to noticeably shift aggregate metrics. Such patterns are invisible to standard evaluation unless the
+practitioner already knows to look for them.
+Many of these signals emerge only at the cohort level. Systematic differences in tool usage, re-
+curring reasoning structures, and patterns correlated with strong or weak performance become
+visible only when traces are analyzed collectively. Cohort comparison is a particularly powerful
+form of this analysis: examining groups of traces that vary along a single controlled axis, such
+as model variant, prompt version, or task category, isolates the behavioral differences attributable
+to that axis and provides a stronger targeted diagnostic signal than aggregate metrics alone. Be-
+yond diagnosis of known failure modes, there is a distinct need for open-ended discovery. Silent
+failures, behavioral trends that reduce reliability without triggering explicit error signals, are a
+key example; they rarely appear in evaluation dashboards and require population-level analy-
+sis to detect. We refer to such findings as trace insights: grounded natural-language statements
+characterizing salient patterns across groups of traces, each supported by trace-level evidence.
+For example, a representative IG insight might read: 84% of incorrect Python-using traces
+exhibit ‘silent computation failures’: the code executes without errors but implements
+the wrong mathematical model. Cross-checking fails to catch these because it verifies
+internal consistency within the wrong framework rather than challenging the framework
+itself. Observed in 94/112 incorrect Python-using traces (37.6% of all traces); 0/19
+cross-checking traces detected the modeling error.
+Surfacing trace insights at corpus scale presents two challenges. Scale and Complexity: Trace cor-
+pora routinely exceed any single model context window. Individual traces interleave thousands of
+tokens of reasoning, tool calls, and environment state. The patterns of interest, i.e. the silent failures,
+systematic inefficiencies, behavioral differences between cohorts are semantic and not reducible to
+keyword matching or predefined taxonomies [3, 13]. Prior work addresses fragments of this problem
+through single-trajectory debugging [2, 7, 10, 27], classification under fixed failure taxonomies [4, 11, 24],
+outcome-based categorization [16], or scaffold-centric analysis that treats traces as secondary [9], but
+none performs iterative pattern discovery directly over a corpus of traces. No Evaluation Standard:
+Trace insights are free-form claims about population-level behavior; whether such a claim is correct,
+grounded in cited evidence, and useful to a downstream practitioner cannot be reduced to a single
+existing metric, and no shared methodology has been proposed.
+We present Insights Generator (IG), a system that addresses the first challenge through iterative hypothesis-
+driven aggregation over trace corpora: it decomposes an open-ended diagnostic question into testable
+hypotheses, validates each at corpus scale, and synthesizes evidence-backed findings. We make the
+following contributions:
+
+• Iterative corpus-level trace analysis. IG separates hypothesis generation from corpus-scale validation
+  and routes all trace access and processing through a stateful Python layer, enabling a decompose-
+  hypothesize-validate loop that operates over corpora exceeding any single context window. This
+  surfaces patterns, such as the silent computation failures above, that single-pass and per-trajectory
+  methods miss (Section 2).
+• Evaluation framework for insights. We introduce a four-setting framework that varies who evaluates
+  (calibrated LLM judge vs. human expert) and what is measured (report quality vs. downstream
+
+
+                                                       2
+                                                                                                  Scale AI Research
+
+
+
+
+Figure 1. Insights Generator (IG) system overview. Left: the input layer provides a diagnostic question, Q, trace
+corpus, C , and processed data store, S . Center: the Orchestrator dispatches Scout agents (H: hypothesize over
+sampled traces) and Investigator agents (H ∗ : validate via corpus-scale cohort comparison). The Investigator
+analyzes H ∗ to generate findings, Fr , which are sent to the orchestrator. The orchestrator then synthesizes and
+de-duplicates Fr to generate the final report. Right: the output is an evidence-backed report with findings, fixes,
+citations, and prevalence estimates. Bottom: the shared tool layer. Algorithm 1 formalizes the analysis loop.
+
+  scaffold impact), and apply it to a range of trace-analysis systems on multiple benchmarks. Rankings
+  are consistent across the four settings, providing the first systematic basis for comparing corpus-level
+  trace diagnostic systems (Section 4).
+• Measurable practitioner impact. Subject matter experts using IG reports improve scaffold perfor-
+  mance by 30.4 pp over the unmodified baseline, nearly doubling the 16.2 pp gain from the next-best
+  analysis system. This gap is consistent with IG’s higher scores on evidence depth and mechanism
+  explanation in the automated evaluation, and establishes that diagnostic quality translates directly to
+  practitioner effectiveness (Section 4.2).
+
+
+2 Related Work
+Single-Trajectory Error Analysis. Most existing agent debugging work focuses on individual trajectory
+analysis. Many such methods use counterfactual replay to isolate failure causes: AgentDebug [27]
+reasons about alternative decision points, AgenTracer [22] injects programmatic faults and re-executes,
+and DoVer [10] replays trajectories with targeted interventions to validate failure hypotheses. AgentRX
+[2] draws on software verification techniques, inferring structured constraints from tool schemas and
+checking whether agent actions satisfy them. A complementary line classifies known failure types
+under predefined taxonomies (MAST [4], AgentFail [11], Who&When [24]), but such approaches cannot
+surface failure modes the taxonomy did not anticipate. Even with these methods, per-trace diagnosis
+remains difficult: TRAIL [7] provides a comprehensive dataset of annotated errors across traces, yet
+
+
+                                                        3
+                                                                                             Scale AI Research
+
+
+
+the best models achieve only 11% joint accuracy. These trajectory-focused methods excel at individual
+remediation, but miss systemic patterns that only emerge across corpora of agent runs, which is the gap
+our corpus-level approach addresses.
+
+
+Agentic Insight Generation. More recent work has leveraged agent-based decompositions to surface
+insights from agent execution traces. Trace2Skill [16] dispatches a flat parallel fleet of analyst sub-agents
+over batches of trajectories to identify skill patches, and then performs hierarchical consolidation to
+merge individual patches into a conflict-free skill directory consumed by the agent at inference time.
+HALO [5] employs a Recursive Language Model [21] that analyzes traces through tools like search, view,
+count, and code, and recursively invokes itself on the relevant snippets, producing a diagnostic report
+handed to a downstream coding agent for harness fixes. In contrast, IG differs in its assignment of agentic
+roles and maintenance of a stateful data processing layer. First, IG uses typed hypothesis-generation
+and validation roles rather than a flat or recursive decomposition, separating breadth (sample-level
+pattern proposal) from depth (corpus-scale statistical validation). Second, IG routes all trace access
+through a structured Python data processing layer, so findings reflect corpus-level distributions rather
+than per-trajectory observations.
+
+
+Agent Optimization Frameworks. Several recent works frame agent improvement as an automated
+optimization task. VeRO [19] introduces an evaluation harness for agent optimization: a coding agent
+iteratively modifies a target agent’s implementation, prompts, tools, and orchestration logic, and is
+evaluated on the lift it achieves against a fixed benchmark. AFlow [23] and ADAS [8] similarly explore
+automated search over agent-as-code representations. Meta-Harness [9] delegates the entire diagnose-
+and-propose loop to a single coding-agent proposer that reads source code, scores, and execution traces
+of all prior candidates through a filesystem, deliberately avoiding a separate role decomposition. These
+systems treat the agent as an artifact to be improved against a specific evaluation set. Our work is
+complementary: rather than optimizing an agent toward a fixed target, IG surfaces behavioral insights
+latent in a trace corpus, including patterns that no predefined objective would have targeted. These
+insights can then be consumed by an agent-optimization framework in a closed loop.
+
+
+3 Insights Generator
+3.1 System Overview
+Insights Generator (IG) is a multi-agent analysis system for discovering and validating behavioral
+patterns across large trace corpora without requiring full-context loading of raw trajectories. The system
+is motivated by a practical bottleneck in agent debugging: manual inspection of small numbers of traces
+may be sufficient to form hypotheses, but is insufficient to validate them at scale. IG addresses this
+by separating hypothesis discovery from hypothesis validation, and by routing all analysis through a
+Python data processing layer rather than passing raw trace content to LLM context directly. Agents
+interact with traces exclusively through callable tools (summarization, extraction, cohort comparison)
+that return only aggregated results to model context. Figure 1 illustrates the system and its three-zone
+structure; Algorithm 1 formalizes the multi-round loop.
+
+
+
+
+                                                     4
+                                                                                               Scale AI Research
+
+
+
+3.2 Task Definition
+The Insights Generator (IG) task takes as input a corpus of agent execution traces C = {τ1 , . . . , τn }, where
+each trace consists of interleaved inputs, reasoning steps, tool calls, environment observations, and
+outputs. Traces may optionally include metadata such as task-specific model inputs, outcome labels,
+configuration variants, or timestamps.
+The objective is to produce a set of corpus-level insights describing salient behavioral patterns across
+subsets of C . When labels are available, insights may characterize systematic differences between cohorts
+(e.g., success versus failure). In the absence of labels, the task reduces to unsupervised pattern discovery
+over the trace population. All insights must be supported by trace-level evidence.
+
+3.3 Agent Roles
+IG comprises three agent roles. We leverage an Orchestrator, which coordinates the analysis and is the
+sole user-facing agent. It decomposes the analysis objective, dispatches subagents in parallel, evaluates
+sufficiency of findings across rounds, and synthesizes the final report, performing minimal direct trace
+inspection to preserve context capacity for coordination. The Scout Agent explores a representative
+sample of traces using LLM-driven summarization and extraction tools to propose candidate hypotheses
+based on initial patterns discovered; its objective is breadth, generating diverse testable hypotheses rather
+than performing validation. The Investigator Agent receives a specific hypothesis and validates it at
+corpus scale, using LLM extraction and programmatic analysis tools to compute distributional statistics,
+perform cohort comparisons, and return a finding labeled confirmed, refuted, or inconclusive with
+quantitative evidence. System prompts for each role are provided in Appendix A.1; model selections,
+temperature settings, and context configurations are in Appendix A.2.
+
+3.4 Data Preprocessing
+All agents operate over a processed trace store rather than as raw text input. This enables agents
+to conduct arbitrary data science transformations on trace data via Python. All traces and extracted
+features are linked together via a trace identifier (a short string), reducing token usage and preventing
+hallucinated references common with UUIDs. A schema cache containing per-column statistics, null
+rates, value distributions, and notable correlations is computed automatically and injected into every
+subagent’s context at dispatch time. For content-based retrieval, traces are additionally indexed in a
+hybrid semantic-keyword vector store made available to all agents as a tool.
+
+3.5 Programmatic Tool Use
+Each subagent operates within a stateful Python execution environment in which IG’s analysis primitives
+are pre-injected as callable functions; from the agent’s perspective, the interface is a single code-execution
+tool. The primitives fall into three categories: trace inspection (loading traces, retrieving raw content,
+querying the schema cache, hybrid semantic-keyword search); LLM-driven analysis (structured feature
+extraction, per-trace and group-level summarization, A/B cohort comparison); and data management
+(persisting computed columns and finding-supporting trace cohorts, refreshing the cached DataFrame,
+consolidating extraction parquets). Tool availability varies by agent role: the Orchestrator retains a
+coordination-oriented subset, the Scout adds extraction, and the Investigator further has access to cohort
+comparison and finding persistence. Agents chain multiple operations in a single code block without
+intermediate trace content traversing the model context. Appendix A.3 lists each primitive with its full
+
+
+                                                       5
+                                                                                           Scale AI Research
+
+
+
+Algorithm 1 Insights Generator Analysis Loop
+Require: Trace corpus C = {τ1 , . . . , τn }, analysis query Q
+ 1: S ← B UILD S CHEMA C ACHE (C)
+ 2: H ∗ ← ∅ {accumulated candidate hypotheses}
+ 3: F ← ∅ {confirmed findings}
+ 4: while Orchestrator has not issued S UBMIT R EPORT do
+ 5:   a ← O RCHESTRATOR D ECIDE (S , H∗ , F , Q)
+ 6:   if a = D ISPATCH S COUTS then
+ 7:      H ← D ISPATCH S COUTA GENTS (Csample , S , Q) {parallel; propose}
+ 8:      H∗ ← H∗ ∪ H
+ 9:   else if a = D ISPATCH I NVESTIGATORS then
+10:      Hsel ← P RIORITIZE (H∗ )
+11:      Fr ← D ISPATCH I NVESTIGATOR A GENTS (C , S , Hsel ) {parallel; validate}
+12:      F ← F ∪ { f ∈ Fr : f .status = confirmed}
+13:      S ← C ONSOLIDATE (S) {merge new extractions; refresh schema}
+14:   end if
+15: end while
+16: F ← R EMAP T RACE ID S (F , C)
+17: return S UBMIT R EPORT (F , Q )
+
+
+
+description and per-role availability.
+
+3.6 Iterative Analysis Loop
+IG operates as an iterative orchestrator-driven loop. At each turn, the orchestrator inspects the current
+set of candidate hypotheses H∗ and confirmed findings F , then decides one of three actions: dispatch a
+parallel batch of Scout agents to surface new hypotheses, dispatch a parallel batch of Investigator agents
+to validate prioritized hypotheses at corpus scale, or submit the final report. Scout and Investigator
+dispatches can interleave in any order and any number of rounds — the orchestrator might run several
+scout rounds before any investigation, or alternate, depending on coverage. Once the orchestrator
+agent determines no more information is required, it accumulates confirmed findings across rounds and
+synthesizes them into a final report. Algorithm 1 formalizes this loop.
+
+
+4 Evaluation
+We evaluate Insights Generator along two orthogonal axes: who performs the evaluation (automated
+pipeline vs. Human Expert) and what is measured (output quality via rubric judgment vs. downstream
+impact via scaffold intervention). This yields four complementary settings, summarized in Figure 2. For
+both the human-expert-as-a-judge and human expert intervention experiments, we fix a benchmark,
+generate insight reports for traces within the benchmark, and vary the report condition assigned to
+each participant. We choose SpreadsheetBench-Verified as the benchmark [12, 18], which is a subset
+of 400 human-verified tasks from SpreadsheetBench. SpreadsheetBench was chosen as the primary
+benchmark because it involves tasks that (i) are familiar to technology professionals (manipulating data
+in spreadsheets), (ii) can be run quickly by human practitioners as they implement scaffold changes, and
+(iii) offer a rich surface for potential improvements at the prompt, tool use, and control flow levels. For
+
+
+                                                    6
+                                                                                            Scale AI Research
+
+
+
+
+Figure 2. Overview of the four evaluation settings used to assess the Insights Generator (rubric-based and
+intervention-based).
+
+
+
+experiments involving autonomous judges and intervention agents, we vary corpus scale, benchmark
+diversity (HLE [17] and SpreadsheetBench [12]), and comparison systems spanning single-agent baselines
+to multi-agent alternatives. The benchmarks span diverse agent task domains: SpreadsheetBench tests
+spreadsheet manipulation agents on real-world tasks; HLE tests research-style question-answering
+agents on expert-level academic questions spanning mathematics, the humanities, and the natural
+sciences. Full benchmark descriptions and corpus statistics are provided in Appendix A.4.
+Because IG is designed to support agent developers rather than replace them outright, we treat human-
+expert intervention performance as the primary measure of downstream utility. Automated patching,
+where a coding agent converts diagnostic reports into scaffold edits without human judgment, serves as
+a complementary and future-looking evaluation of end-to-end insight transfer.
+
+4.1 LLM-as-a-Judge
+We first perform a comprehensive comparison between insight generator architectures. We run IG and
+four comparison systems on the same agent execution corpora and assess report quality using a calibrated
+LLM judge (Claude Opus 4.6). The comparison systems span a range of architectural complexity: a
+Single-Agent Coding system, which performs open-ended analysis using a Claude Code [1] agent with
+its native tool surface; CC Subagents, which extends the single-agent coding baseline with subagent
+dispatch via Claude Code’s Task tool, implementing the same scout-investigator role decomposition as
+IG through an isolated-context interface while leveraging the technically sophisticated scaffold of Claude
+Code; a Trace2Skill-style system [16], which dispatches a flat parallel fleet of analyst sub-agents followed
+by hierarchical consolidation; and RLM [21], a vanilla Recursive Language Model implementation
+at maximum depth 2. Together, these systems isolate the contributions of tool surface, multi-agent
+topology, and role decomposition. All five systems answer the same canonical analysis question over the
+same trace corpus and produce a structured report as output. Three insight reports for each system are
+generated as replicates per benchmark; all reported metrics are mean measurements across the replicates.
+
+                                                     7
+                                                                                                Scale AI Research
+
+
+
+Table 1. LLM-as-a-Judge results across three evaluation layers. Coverage: % of union-gold clusters (50 per
+benchmark) for which the report cited ≥1 member trace; Avg is the mean of SSB and HLE. Pairwise Win Rate:
+position-swapped round-robin win rate (%); Avg is the mean of SSB and HLE. Quality: per-dimension rubric
+scores (0–3) against union-gold clusters, averaged across both benchmarks; Composite = 13 (Mech. + Spec. + Act.).
+The lower block reports IG architecture ablations holding the toolkit and data layer fixed.
+
+                                Coverage (%)         Pairwise WR (%)                  Quality (0–3)
+ System                       SSB    HLE     Avg     SSB    HLE      Avg    Mech.     Spec.    Act.    Comp.
+ IG                            87     95      91     72.4    83.3    77.9     1.34     1.34    1.27     1.32
+ CC Subagents                  93     97      95     63.3    61.4    62.4     1.13     1.11    1.07     1.10
+ Trace2Skill                   96     98      97     56.2    49.0    52.6     1.18     1.14    1.23     1.18
+ RLM                           89     96     92.5    13.8     9.0    11.4     0.96     0.95    0.84     0.92
+ Single-Agent Coding           65     95      80     8.6     12.4    10.5     0.78     0.77    0.73     0.76
+ IG architecture ablations
+ IG, Generic Subagents         87     93      90     59.0    76.0    67.5     1.14     1.13    1.03     1.10
+ IG, Orchestrator-only         78     86      82     35.0    29.0    32.0     0.87     0.87    0.82     0.85
+
+
+Full implementation details and prompts for each comparison system are provided in Appendix A.6.
+Evaluation proceeds through three complementary layers. First, all findings from all systems are pooled
+and clustered by an LLM judge into a union-gold reference set of canonical observations, consolidating
+semantically similar insights across systems while leaving system-unique ones as independent obser-
+vations; each system’s report is then scored on coverage: the fraction of union-gold clusters for which
+the report cited at least one trace belonging to that cluster. Second, systems are compared in a pairwise
+round-robin tournament: for each unordered pair the judge sees both reports twice in opposite positions
+to control for position bias, and win rate is computed as (wins + 0.5 × ties) / nrounds . Third, each system’s
+report is scored against the union-gold cluster set on a per-dimension rubric (0–3 per dimension, five
+dimensions per cluster). For each cluster, the judge assesses how well the report covers that canonical
+observation along detection, mechanism, evidence, specificity, and actionability. The full judge prompts
+and rubric anchors are provided in Appendix A.7. We report results on two benchmarks: HLE [17] (250
+traces) and SpreadsheetBench [12] (296 traces). Table 1 consolidates all three layers.
+Coverage is broadly comparable across multi-agent systems (87–98%), with only the single-agent baseline
+falling notably lower on SSB (65%); on HLE all systems reach 95% or above. Coverage alone therefore
+does not distinguish the top systems. Pairwise win rates, by contrast, separate them clearly: IG leads
+at 77.9% average win rate, followed by CC Subagents (62.4%) and Trace2Skill (52.6%), while RLM and
+Single-Agent Coding fall below 15%. The per-dimension quality scores tell a consistent story: IG leads on
+mechanism explanation (+0.16 over Trace2Skill) and specificity (+0.20), while Trace2Skill is competitive
+on actionability (1.23 vs. IG’s 1.27). The composite score separates into tiers that align with the pairwise
+ranking. Taken together, the three layers indicate that while multi-agent architectures reach comparable
+breadth of pattern detection, IG’s scout-investigator architecture produces findings of meaningfully
+higher evidentiary depth. Component ablations of IG’s subagent roles are reported in Appendix A.8.
+We additionally ablate IG’s role decomposition while holding the toolkit, data layer, and orchestrator
+dispatch loop fixed: Orchestrator-only disables subagent dispatch entirely, and Generic Subagents
+retains parallel dispatch but replaces the typed Scout/Investigator roles with a single untyped subagent
+
+
+
+                                                       8
+                                                                                                   Scale AI Research
+
+
+
+Table 2. Human Expert intervention results (250 held-out tasks from SpreadsheetBench, n = 6 participants per
+non-baseline arm, 3 evaluation runs per participant). Baseline is the unmodified scaffold score (single replicate).
+Parenthetical values for the report conditions are standard errors of the mean across participants (SEM, in pp). We
+also present number of files modified, lines added, lines removed, and net scaffold line changes to characterize the
+size of scaffold edits made by participants in each condition.
+
+         Condition               n      Mean         ∆ Baseline   Avg Files    Lines+    Lines−    Net ∆
+         Baseline                –       27.0%          –              0         0         0        0
+         Claude Code report      6   43.2% (±4.1)    +16.2 pp         3.2       +342      −56      +286
+         IG report               6   57.4% (±1.5)    +30.4 pp         4.0       +256      −53      +203
+
+
+that is given a role at invocation-time by the orchestrator. Both ablations underperform full IG across
+all three evaluation layers (Table 1), with the largest gap on pairwise win rate: orchestrator-only drops
+45.9 pp (77.9% → 32.0%) and generic-subagents drops 10.4 pp (77.9% → 67.5%). The intermediate
+position of generic-subagents isolates the additional contribution of typed role specialization over flat
+multi-agent dispatch, and the larger orchestrator-only gap indicates that parallel subagent dispatch, not
+just the IG toolkit, drives a substantial fraction of IG’s quality advantage. Per-benchmark breakdowns
+are reported in Appendix A.8.
+
+4.2 Human Expert Interventions
+The human-expert intervention setting is our primary downstream evaluation: it tests whether IG
+reports help practitioners make better scaffold modifications, evaluated on held-out benchmark tasks.
+We compare the quality and actionability of insights generated by IG and CC Subagents on the Spread-
+sheetBench benchmark. CC Subagents was chosen as the baseline because it showed strong performance
+in Section 4.1, and is a lightweight architecture that practitioners can easily adapt in real-world settings.
+Practitioners were randomly assigned to one of two report conditions (IG or CC Subagent), blinded to
+which system had produced their report, and asked to modify an agent scaffold to improve its perfor-
+mance on a held-out benchmark split using standard coding tools. Each participant’s score is the mean
+of three independent evaluation runs. Because all participants have identical coding tools, benchmark
+access, and a fixed time budget, with only report condition varying, observed performance differences
+are consistent with the informational content of the report. Full participant instructions, onboarding
+materials, and study protocol are provided in Appendix A.11.
+We deliberately recruited professional software engineers developing LLM agents, prioritizing real-world
+relevance over sample size; the study measures practitioner effectiveness in a real development context
+that crowd-sourced annotation would not replicate. Practitioners given an IG report achieved a 30.4 pp
+improvement over the unmodified baseline scaffold; those given a Claude Code report improved by
+16.2 pp, a 14.2 pp gap in favor of IG. These gains correspond to absolute pass rates of 43.2% and 57.4% for
+the CC and IG conditions respectively, with a statistically significant difference of p ≈ 0.016 (two-sided
+Welch’s t-test). Both outperform the 27.0% unmodified baseline. This result is robust under leave-one-
+participant-out refits and an exact permutation test on the 12 per-participant means (Appendix A.9).
+IG-condition participants modified, on average, more files (4.0 vs. 3.2) and produced smaller per-
+participant median net edits (94 vs. 149 net lines changed), with mean net lines changed of 203 vs.
+286. The mean-based gap is not statistically significant (Appendix A.9) and is sensitive to a single CC
+participant with a +1112-line edit; we therefore report edit size as a descriptive observation rather than a
+tested effect.
+
+
+                                                         9
+                                                                                               Scale AI Research
+
+
+
+4.3 Human Expert-as-a-Judge
+Additionally, we ask human experts to evaluate IG reports against CC Subagent reports for Spreadsheet-
+Bench on a structured four-dimension rubric: correctness, depth, evidence quality, and actionability, each
+scored on a 1–5 scale. As in Section 4.2, CC Subagents implement the decompose-hypothesize-validate
+paradigm via subagent skills. IG and CC Subagents reports are drawn from a 100-sample Spreadsheet-
+Bench training split; 12 human-expert evaluators score 23 insights across the two insight-generation
+methods (11 IG, 12 CC).
+Across 12 evaluators and 23 insights, IG and CC reports receive comparable aggregate ratings (4.25 vs.
+4.22, respectively, on a 1–5 scale). At the dimension level, IG leads on depth (+0.17) and evidentiary
+support (+0.06), while CC leads on correctness (+0.14); actionability scores are nearly identical. These
+findings show the strength of IG’s design principle of performing deep analysis via the investigator
+agent to exhaustively identify strong evidence supporting its claims.
+Overall, while the LLM-as-a-judge evaluates IG insights as higher quality than those of CC Subagents,
+the human experts deem them to be relatively similar (without statistical significance). We suspect this
+reflects a human’s inability to effectively evaluate insights across large sets of traces, claims, and evidence
+patterns within fixed time budgets. The full evaluation rubric and per-dimension scores are reported in
+Appendix A.5.
+
+4.4 Iterative Patcher Loop
+We additionally evaluate whether IG reports support iterative scaffold improvement. In a patcher loop,
+an autonomous coding agent (Claude Code with Claude Opus 4.6 as the underlying model) modifies
+a scaffold based on an analysis report derived from execution traces; each round’s patched scaffold
+becomes the input to the next round’s trace collection, analysis, and patching, and the loop terminates on
+validation-set saturation (no improvement of ε = 0.01 for two consecutive rounds, or after r = 5 rounds).
+The loop probes whether the analysis system continues to surface actionable findings as the scaffold
+approaches saturation, and whether acting on those findings avoids regressions. On SpreadsheetBench,
+we compare IG against two alternative analysis systems (RLM, CC Subagents) and a no-report pure-
+patcher baseline that receives only the scaffold source code. The full protocol, per-round trajectories,
+validation trajectories, and grounded per-round examples are reported in Appendix A.10.
+The three report-equipped systems each drive the patcher to held-out test pass rates between 0.81 and
+0.84 (versus 0.41 unmodified), with IG and RLM improving monotonically through their saturation
+points and CC Subagents recovering from a single-round dip to a comparable terminal value. The
+Pure-Patcher baseline achieves a strong round-1 gain (0.80) but reverses sharply, ending at 0.58 by
+round 3: without an analysis input to ground its priorities, the patcher invents subsequent edits from the
+scaffold source alone, including a round-2 prompt instruction that contradicts the SpreadsheetBench
+grader’s exact-match contract and accounts for 12 of the 13 round-2 regressed tasks (Appendix A.10). The
+contrast between regenerated-report trajectories and the no-report reversal suggests that the regenerated
+analysis layer is what sustains improvement as the scaffold approaches saturation.
+
+
+5 Discussion
+
+
+
+
+                                                      10
+                                                                                            Scale AI Research
+
+
+
+5.1 Implications for Agent Development
+The evaluation results carry a concrete implication for practitioners developing LLM agents: IG-style
+corpus-level diagnostic reports support more effective scaffold improvements than competing analysis
+approaches when consumed by human experts. The 14.2 pp gap between IG and CC Subagents in
+the intervention study (Section 4.2) suggests that report depth and evidentiary grounding matter for
+practitioner effectiveness, not only topical coverage. This pattern is consistent with IG’s lead on pairwise
+evidence quality under LLM-as-a-judge evaluation, and with the Investigator role’s explicit corpus-scale
+validation step.
+The iterative patcher loop (Section 4.4) shows that analysis-equipped patchers all converge to comparable
+test pass rates while the no-report control regresses, indicating that regenerated corpus-level analysis
+sustains improvement under automated patching.
+
+5.2 Computational Requirements
+Insights Generator averages approximately $76 in LLM cost and 48 minutes of wall-clock time per
+analysis run, against $23 / 20 min for RLM, $26 / 37 min for trace2skill, and $38 / 34 min for
+cc_subagents (means across n=6 runs per variant; see Appendix A.13). Cost scales primarily with
+input-token volume.
+
+5.3 Limitations and Future Work
+This study offers clear directions for follow-on work. The human expert intervention study is conducted
+on SpreadsheetBench; whether the 30.4 pp gain generalizes to other agent domains and benchmark
+types is an open question, both to assess generalizability and increase statistical power. Per-arm sample
+sizes are small due to the expertise required for conducting this task; the reported effect should be
+further validated with a fully powered study across multiple challenging benchmarks and larger sample
+sizes. Sophisticated benchmarks containing more complex tasks and greater numbers of agent turns,
+such as Humanity’s Last Exam [17], SWE-Bench Pro [6], TerminalBench [14], FeatureBench [26], and
+APEX-Agents [20], offer challenging tasks amenable to IG’s analysis.
+Additionally, conducting further calibration of the LLM-as-judge grader on a larger expert sample
+will help quantify the degree to which expert intuitions align with the judge criteria. For the patcher
+loop experiment, additional trials of each condition will allow us to assess variance, inherent to long
+coding-agent rollouts, in our estimate of downstream benchmark performance improvement. Finally,
+deeper subcomponent analysis of IG would provide more information for future improvements.
+
+
+6 Conclusion
+We present Insights Generator, a multi-agent system for corpus-level trace diagnostics. We formalize
+population-level pattern discovery in agent traces as a problem distinct from single-trajectory debug-
+ging and taxonomy classification, introduce a scout-investigator architecture with purpose-built data
+processing tools, and propose a four-setting evaluation framework varying who evaluates and what is
+measured.
+
+
+
+
+                                                    11
+                                                                                             Scale AI Research
+
+
+
+References
+ [1] Anthropic. Claude Code. https://docs.claude.com/en/docs/claude-code/, 2024.
+
+ [2] S. Barke, A. Goyal, A. Khare, A. Singh, S. Nath, and C. Bansal. AgentRx: Diagnosing AI agent
+     failures from execution trajectories, 2026. URL https://arxiv.org/abs/2602.02475.
+
+ [3] A. Bertsch, A. Pratapa, T. Mitamura, G. Neubig, and M. R. Gormley. Oolong: Evaluating long
+     context reasoning and aggregation capabilities, 2025. URL https://arxiv.org/abs/2511.02817.
+
+ [4] M. Cemri, M. Z. Pan, S. Yang, L. A. Agrawal, B. Chopra, et al. Why do multi-agent LLM systems
+     fail? In Advances in Neural Information Processing Systems Datasets and Benchmarks Track, 2025. URL
+     https://arxiv.org/abs/2503.13657.
+
+ [5] Context Labs. HALO: Hierarchical agent loop optimizer, 2025. URL https://github.com/
+     context-labs/halo. Software repository.
+
+ [6] X. Deng, J. Da, E. Pan, Y. Y. He, C. Ide, K. Garg, N. Lauffer, A. Park, N. Pasari, C. Rane, K. Sampath,
+     M. Krishnan, S. Kundurthy, S. Hendryx, Z. Wang, V. Bharadwaj, J. Holm, R. Aluri, C. B. C. Zhang,
+     N. Jacobson, B. Liu, and B. Kenstler. SWE-Bench Pro: Can AI agents solve long-horizon software
+     engineering tasks? arXiv preprint arXiv:2509.16941, 2025. URL https://arxiv.org/abs/2509.
+     16941.
+
+ [7] D. Deshpande, V. Gangal, H. Mehta, J. Krishnan, A. Kannappan, and R. Qian. TRAIL: Trace
+     reasoning and agentic issue localization, 2025. URL https://arxiv.org/abs/2505.08638.
+
+ [8] S. Hu, C. Lu, and J. Clune. Automated design of agentic systems. In International Conference on
+     Learning Representations, 2025. URL https://arxiv.org/abs/2408.08435.
+
+ [9] Y. Lee, R. Nair, Q. Zhang, K. Lee, O. Khattab, and C. Finn. Meta-harness: End-to-end optimization
+     of model harnesses, 2026. URL https://arxiv.org/abs/2603.28052.
+
+[10] M. Ma, J. Zhang, F. Yang, Y. Kang, Q. Lin, et al. DoVer: Intervention-driven auto debugging
+     for LLM multi-agent systems. In International Conference on Learning Representations, 2026. URL
+     https://arxiv.org/abs/2512.06749.
+
+[11] X. Ma, X. Xie, Y. Wang, J. Wang, B. Wu, et al. Demystifying the lifecycle of failures in platform-
+     orchestrated agentic workflows, 2026. URL https://arxiv.org/abs/2509.23735.
+
+[12] Z. Ma, B. Zhang, J. Zhang, J. Yu, X. Zhang, X. Zhang, S. Luo, X. Wang, and J. Tang. SpreadsheetBench:
+     Towards challenging real world spreadsheet manipulation. In Advances in Neural Information
+     Processing Systems Datasets and Benchmarks Track, 2024. URL https://arxiv.org/abs/2406.14991.
+
+[13] S. Maekawa, H. Iso, and N. Bhutani. Holistic reasoning with long-context LMs: A benchmark for
+     database operations on massive textual data. In International Conference on Learning Representations,
+     2025. URL https://arxiv.org/abs/2410.11996.
+
+[14] M. A. Merrill, A. G. Shaw, N. Carlini, B. Li, H. Raj, I. Bercovich, L. Shi, J. Y. Shin, T. Walshe, E. K.
+     Buchanan, J. Shen, G. Ye, H. Lin, J. Poulos, M. Wang, M. Nezhurina, J. Jitsev, et al. Terminal-Bench:
+     Benchmarking agents on hard, realistic tasks in command line interfaces. In International Conference
+     on Learning Representations, 2026. URL https://arxiv.org/abs/2601.11868.
+
+
+                                                     12
+                                                                                             Scale AI Research
+
+
+
+[15] R. Nanda, C. Maddila, S. Jha, E. M. Khan, M. Paltenghi, and S. Chandra. Wink: Recovering from
+     misbehaviors in coding agents, 2026. URL https://arxiv.org/abs/2602.17037.
+
+[16] J. Ni, Y. Liu, X. Liu, Y. Sun, M. Zhou, P. Cheng, D. Wang, E. Zhao, X. Jiang, and G. Jiang. Trace2Skill:
+     Distill trajectory-local lessons into transferable agent skills, 2026. URL https://arxiv.org/abs/
+     2603.25158.
+
+[17] L. Phan, A. Gatti, Z. Han, N. Li, J. Hu, H. Zhang, et al. A benchmark of expert-level academic
+     questions to assess AI capabilities. Nature, 649:1139–1146, 2026. doi: 10.1038/s41586-025-09962-4.
+     URL https://www.nature.com/articles/s41586-025-09962-4.
+
+[18] Shortcut Research Team. SpreadsheetBench Verified: A curated evaluation set. https://shortcut.
+     ai/blog/posts/spreadsheetbench-verified, Dec. 2025.
+
+[19] V. Ursekar, A. Shanker, V. Chatrath, Y. Xue, and S. Denton. VeRO: An evaluation harness for agents
+     to optimize agents, 2026. URL https://arxiv.org/abs/2602.22480.
+
+[20] B. Vidgen, A. Mann, A. Fennelly, J. W. Stanly, L. Rothman, M. Burstein, J. Benchek, D. Ostrofsky,
+     A. Ravichandran, D. Sur, N. Venugopal, A. Hsia, I. Robinson, C. Huang, O. Varones, D. Khan,
+     M. Haines, A. Bridges, J. Boyle, K. Twist, Z. Richards, C. Mahapatra, B. Foody, and O. Nitski.
+     APEX-Agents. arXiv preprint arXiv:2601.14242, 2026. URL https://arxiv.org/pdf/2601.14242.
+
+[21] A. L. Zhang, T. Kraska, and O. Khattab. Recursive language models, 2025. URL https://arxiv.
+     org/abs/2512.24601.
+
+[22] G. Zhang, J. Wang, J. Chen, W. Zhou, K. Wang, and S. Yan. AgenTracer: Who is inducing failure
+     in the LLM agentic systems? In International Conference on Learning Representations, 2026. URL
+     https://arxiv.org/abs/2509.03312.
+
+[23] J. Zhang, J. Xiang, Z. Yu, F. Teng, X.-H. Chen, et al. AFlow: Automating agentic workflow generation.
+     In International Conference on Learning Representations, 2025. URL https://arxiv.org/abs/2410.
+     10762.
+
+[24] S. Zhang, M. Yin, J. Zhang, J. Liu, Z. Han, et al. Which agent causes task failures and when? on
+     automated failure attribution of LLM multi-agent systems. In International Conference on Machine
+     Learning, 2025. URL https://arxiv.org/abs/2505.00212.
+
+[25] L. Zheng, W.-L. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang, Z. Lin, Z. Li, D. Li, E. P. Xing,
+     H. Zhang, J. E. Gonzalez, and I. Stoica. Judging LLM-as-a-judge with MT-bench and chatbot
+     arena. In Advances in Neural Information Processing Systems Datasets and Benchmarks Track, 2023. URL
+     https://arxiv.org/abs/2306.05685.
+
+[26] Q. Zhou, J. Zhang, H. Wang, R. Hao, J. Wang, M. Han, Y. Yang, S. Wu, F. Pan, L. Fan, D. Tu,
+     and Z. Zhang. FeatureBench: Benchmarking agentic coding for complex feature development. In
+     International Conference on Learning Representations, 2026. URL https://arxiv.org/pdf/2602.10975.
+
+[27] K. Zhu, Z. Liu, B. Li, M. Tian, Y. Yang, J. Zhang, et al. Where LLM agents fail and how they can
+     learn from failures. arXiv preprint, 2025. URL https://arxiv.org/abs/2509.25370.
+
+
+
+
+                                                     13
+                                                                                          Scale AI Research
+
+
+
+A Appendix
+A.1 Agent System Prompts
+The system prompts below correspond to the production configuration in which both Scout and Investi-
+gator subagents are dispatched and the full IG analysis toolkit is enabled. Ablation variants are rendered
+programmatically from the same Jinja templates with conditional blocks gated on which subagent roles
+are present.
+
+
+Orchestrator.
+
+     You are the Insights Generator Orchestrator –- an analysis coordinator that
+     discovers patterns in AI agent execution traces.
+     Your Role. You find failures (explicit actions, silent errors, and omissions –-
+     things the agent should have done but didn’t), successes, behavioral differences,
+     efficiency issues, and any noteworthy patterns across a corpus of agent traces.
+     Your primary job is dispatching specialized subagents and synthesizing their
+     findings –- you do NOT do the heavy statistical analysis yourself. You DO have
+     light read-only tools so you can deep-dive on a search hit when that informs your
+     next dispatch decision; reserve heavy extraction, cohort comparison, and
+     cohort-saving for the scouts.
+     Workflow. (1) Review the schema. (2) Dispatch scout agents with specific
+     exploration directives. (3) Review hypotheses and prioritize the most promising
+     ones. (4) Dispatch investigator agents with hypotheses to validate. (5) Evaluate
+     coverage. (6) Write the final report.
+     Tools. A Python REPL for orientation (schema, trace counts, search, summarization,
+     extraction-column plumbing); plus dispatch tools for parallel subagent dispatch.
+     Heavy LLM and statistical work is intentionally not in the orchestrator’s toolkit.
+     Dispatching subagents. Directives focus on specific areas (“verbose database
+     queries correlate with null results”, not “look at tool calls”). Mix directive
+     shapes across each batch: some target active errors (wrong action, bad output,
+     failure text), others target expected actions or checks the agent may have OMITTED.
+     Dispatches return compact summaries with full per-hypothesis evidence written to a
+     sandbox sidecar that the orchestrator can read via the REPL.
+     Anti-overfitting. Do not generalize from a single scout agent’s sample. Every
+     finding must be validated by an investigator agent with statistical evidence.
+     Small-cohort findings are often high-value; do not drop a hypothesis because its
+     cohort is small.
+     Iteration. The pipeline is flexible: each dispatch tool may be called multiple
+     times across the run, in any order. Default toward iterating; submit only when no
+     credible lead remains undispatched.
+
+
+Scout (Hypothesis Agent).
+
+     You are a Hypothesis Agent (Scout) –- you explore traces of agent execution to
+     discover patterns and generate hypotheses.
+     Your role. Look at trace data to find interesting patterns the orchestrator should
+     investigate further. Emphasize breadth over depth –- scan many traces to identify
+     potential issues, not deeply validate any single one.
+
+
+                                                   14
+                                                                                 Scale AI Research
+
+
+
+     What to look for. Explicit failures, silent failures (agent completes but does a
+     poor job), efficiency issues, success patterns, behavioral differences, and
+     OMISSIONS (steps the agent should have taken but didn’t). Do not limit yourself to
+     a failure taxonomy –- discovery is the goal.
+     Sampling guidance.   Use representative samples –- typically 50–200 traces –- to form
+     hypotheses.
+     Workflow. (1) Orient via schema and a small Polars pass to understand data shape.
+     (2) Discover via search, issuing per-concept queries (failures, successes, loops,
+     escalations, possible omissions). (3) Read samples on interesting hits. (4)
+     Quantify by extracting on small focused samples (10–30 traces) to test patterns.
+     Before extracting, check what’s already been extracted by other agents. (5) Submit
+     hypotheses.
+     Searching for omissions. Search cannot match absence directly. Imagine the text an
+     agent that HAD performed the expected action would produce, search for THAT, then
+     contrast cohorts in Polars or in a follow-up search.
+     Output. A JSON list of hypotheses, each with name, description, evidence (trace id,
+     verbatim quote, and explanation), and estimated prevalence. Optionally include 1–3
+     well-motivated suggestions for further investigation that this Scout did not have
+     time or scope to pursue.
+
+
+Investigator (Explore Agent).
+
+     You are an Explore Agent (Investigator) –- you validate hypotheses about agent
+     execution traces with statistical evidence.
+     Your role. Take a specific hypothesis and validate it with rigorous evidence from
+     the full trace corpus (or a large representative subset). Emphasize depth over
+     breadth –- quantify patterns, run comparisons, and provide statistical backing.
+     Validation approach (hierarchical). Level A –- broad stats: compute statistics
+     across all traces using Polars group-bys. Level B –- focused comparison: extract
+     relevant features on 50–100 traces; check existing extractions first to avoid
+     duplicating work. Level C –- deep comparison: run cohort comparisons 2–3 times
+     with different samples for robust findings.
+     Output. A single submission with status (confirmed, refuted, or inconclusive), 1–2
+     sentence summary, quantified prevalence, and 8–10+ evidence items. Each evidence
+     item contains a trace id, a verbatim quote from the trace, and a 2–3 sentence
+     explanation that names the specific mechanism visible in THIS trace and connects it
+     to the broader pattern. Hypothesis-test outputs (p-values, Cramér’s V, odds ratios)
+     go in additional observations, not the main summary. Provide a single concrete
+     suggested action or null.
+     Anti-overfitting. Do not generalize from fewer than 20 traces in a comparison.
+     Quantify everything. Flag confidence level: high (more than 100 traces), medium
+     (20–100), low (fewer than 20).
+     Saving the affected cohort. Record the defensible cohort –- the subset you are
+     confident exhibits the pattern, NOT the broader pool you analyzed. Submission is
+     rejected if this has not been called.
+
+
+
+
+                                               15
+                                                                                                Scale AI Research
+
+
+
+A.2 Implementation Details
+Table 3 lists the production IG configuration used in all reported experiments. All fields correspond
+directly to attributes of the IG configuration dataclass; ablation experiments override the relevant fields
+and leave the rest at their defaults.
+Table 3. IG production configuration. Concurrency, timeout, and sandbox parameters are tuned for paper-grade
+runs and may be lowered for cost-constrained deployments.
+
+                Group           Field                        Value
+                Models          Orchestrator                 Claude Opus 4.6
+                                Hypothesis (Scout)           Claude Opus 4.6
+                                Explore (Investigator)       Claude Opus 4.6
+                                Cohort comparison            Claude Opus 4.6
+                                Per-trace extraction         Claude Haiku 4.5
+                                Trace summarization          Claude Haiku 4.5
+                Extraction      Concurrency                  50 parallel calls
+                                Checkpoint interval          5,000 traces
+                                Auto-save threshold          250 traces
+                                Per-call timeout             300 s
+                Orchestration   Max orchestrator turns       500 (self-terminates via report)
+                                Max subagent turns           500 (self-terminate via submit)
+                Traces          Long-trace chunk threshold   50,000 tokens
+                                Retrieval top-k              20 (search default)
+                Ablation        Mode                         full
+                                Tool backend                 REPL
+                                REPL state                   stateful
+                Sandbox         CPU                          16 cores
+                                Memory                       65,536 MB (64 GB)
+                                Timeout                      14,400 s (4 h)
+
+
+All LLM calls route through a centralized LLM proxy. Subagents run in a shared sandboxed container
+with the analysis primitives pre-injected into a stateful Python REPL session; the orchestrator and each
+subagent get their own session.
+
+A.3 Insights Generator Tools
+Table 4 lists the 14 IG analysis primitives organized by category, with per-role availability across the
+Orchestrator, Scout (Hypothesis Agent), and Investigator (Explore Agent).
+
+A.4 Benchmark and Corpus Statistics
+The active experiments in this paper use two benchmarks: SpreadsheetBench (SSB) [12] and HLE [17].
+For each benchmark, traces were collected by executing a fixed ReAct-style scaffold over the benchmark’s
+task set; all downstream analysis, ablation, and intervention experiments reuse those fixed corpora rather
+than re-collecting traces per system. The human evaluation experiments (Sections 4.2, 4.3) use traces
+generated by openai/gpt-5.2-2025-12-11, while the LLM-as-a-judge (Section 4.1) and patcher-loop
+(Section 4.4) experiments use traces generated by openai/gpt-5.4-2026-03-05. The sole exception is
+
+
+                                                      16
+                                                                                                Scale AI Research
+
+
+
+the iterative patcher loop, which, by construction, regenerates a fresh trace corpus each round from the
+patched scaffold Ar . Corpus-level statistics for both benchmarks are summarized in Table 5.
+
+
+SpreadsheetBench (SSB). SpreadsheetBench tasks require an agent to read an Excel workbook, perform
+a manipulation specified in natural language (e.g. filter, summarize, transform, write a formula), and
+persist the result back to the workbook. Outputs are graded by exact cell-value match against ground
+truth, which makes the benchmark deterministically scorable. The scaffold is a ReAct agent with a
+5-turn budget that exposes openpyxl and pandas via a Python code-execution tool; the agent has no web
+access. The LLM-as-a-judge corpus (ssb_gpt-5.4-med_20260430, used in Section 4.1) contains 296 traces
+with a baseline pass rate of 42.2% (125 correct, 171 incorrect). Tasks are categorized by the benchmark
+into Cell-Level and Sheet-Level manipulation, with markedly different difficulty profiles (approximately
+27% vs. 76% pass rate in our corpus). The human-expert experiments (Sections 4.3 and 4.2) use the SSB
+training-split corpus of 250 traces (110 correct, 140 incorrect; baseline pass rate 44%); the training-split
+bundle is described in detail in Appendix A.11.1. The iterative patcher loop (Section 4.4) collects fresh
+training-split traces on every round from the patched scaffold; the round-0 baseline pass rate is 0.41 on
+the held-out test split.
+
+
+HLE. HLE (Humanity’s Last Exam) is a closed-book expert-level question-answering benchmark
+spanning physics, mathematics, biology, chemistry, and humanities, where each task requires the agent
+to return a single short answer along with a self-reported confidence in [0, 100]. The scaffold is a ReAct
+agent that exposes web search, web-page fetch, and Python code execution; turn counts in our corpus
+range from 0 (instant-answer / hang) to 18 with a long-tail distribution. The LLM-as-a-judge corpus
+(hle_gpt-5.4_20260430) contains 250 traces with a baseline pass rate of 23.6% (59 correct, 191 incorrect);
+207 of 250 traces use at least one tool. The 43 zero-tool traces achieve only 9.3% accuracy versus 26.6% for
+tool-using traces, a sub-population gap that surfaces consistently across systems’ findings. Correctness
+for HLE is graded by an LLM judge applied to the benchmark’s reference answers (rather than by
+deterministic match), so HLE serves as a complementary stressor to SSB’s deterministic grader.
+
+Table 5. Corpus statistics for the two benchmarks used in the active experiments. Backbone agent:
+openai/gpt-5.4-2026-03-05 on a generic ReAct agent scaffold for both. “Eval-corpus pass rate” refers to the
+corpus released to all comparison systems for the LLM-as-a-judge evaluation (Section 4.1); the human-study and
+patcher splits are listed separately.
+
+                                   SpreadsheetBench                    HLE
+         Citation                  Ma et al. [12]                      Phan et al. [17]
+         Domain                    Spreadsheet manipulation            Closed-book expert QA
+         Eval metric               Exact cell-value match              LLM-judged correctness
+         Eval-corpus tag           ssb_gpt-5.4-med                     hle_gpt-5.4
+         Eval-corpus traces        296 (125 correct / 171 incorrect)   250 (59 correct / 191 incorrect)
+         Eval-corpus pass rate     42.2%                               23.6%
+         Tool-using traces         all (code-exec mandatory)           207 / 250 (82.8%)
+         Tool surface              openpyxl, pandas                    web search, web fetch, code-exec
+         Turn budget               5                                   20 (observed max 18)
+         Human-study split         250 train (110 / 140), 44% pass     —
+         Folds per system (§4.1)   3 independent re-runs               3 independent re-runs
+         Union-gold clusters       50                                  50
+
+
+
+                                                       17
+                                                                                                Scale AI Research
+
+
+
+Folds, gold clusters, and trace lengths. For the LLM-as-a-judge evaluation each system is run 3
+times per benchmark on the same fixed corpus to capture run-to-run variance, and the corresponding
+union-gold reference set per benchmark is built by pooling findings across all systems and folds and
+clustering them with the meta-evaluator prompt in Appendix A.7; clustering converges at 50 canonical
+observations for each benchmark, which is the cluster count against which coverage and per-dimension
+quality are scored in Table 1. Average raw trace length (in agent-context tokens) is not directly reported
+here; in practice no single trace exceeds the agent context window, but the full 296-trace SSB corpus
+and 250-trace HLE corpus each exceed any single LLM context, motivating the corpus-level analysis
+primitives described in Section 3.
+
+A.5 Human Expert-as-a-Judge: Evaluation Rubric and Per-Dimension Scores
+
+Table 6. Human Expert-as-a-Judge results (SpreadsheetBench, 12 evaluators). Parenthetical values are standard
+errors of the mean across insights within each cell (n = 12 for CC, n = 11 for IG); per-insight scores are first
+averaged across the 12 evaluators and the SEM is then computed across insights.
+
+     Report      N Insights    Correctness    Actionability      Depth        Evid. Quality       Avg
+     CC report       12       4.278 (±0.08)   4.174 (±0.12)   4.139 (±0.09)   4.285 (±0.08)   4.219 (±0.07)
+     IG report       11       4.136 (±0.12)   4.220 (±0.11)   4.311 (±0.10)   4.341 (±0.12)   4.252 (±0.10)
+
+
+A.6 Comparison System Implementation Details
+All five systems answer the same canonical analysis question (Appendix A.7) over the same trace corpus,
+and all emit a session artifact normalized to the same JSON schema by a shared report-utils module. The
+systems differ along three axes: tool surface (raw filesystem and coding tools vs. IG’s structured analysis
+primitives), topology (single agent vs. multi-agent dispatch), and data layer (raw text vs. structured Polars
+store with extraction columns). All systems use Claude Opus 4.6 as their backbone agent model.
+
+
+Single-Agent Coding. A single Claude Code CLI session, invoked headless, with a filesystem-based
+knowledge layout (one file per trace plus an index) and Claude Code’s native tool surface (read, write,
+edit, glob, grep, bash). The agent discovers patterns through filesystem retrieval, ad-hoc scripting, and
+manual aggregation. Establishes the floor for what a strong coding agent can achieve without a dedicated
+trace-analysis scaffold.
+
+
+CC Subagents. Claude Code with subagent dispatch via the Task tool, implementing the same Scout–
+Investigator role decomposition as IG. Each subagent receives a focused directive from the orchestrator
+and returns a compact summary; subagents do not share a structured data layer and each runs in an
+isolated context, so all cross-agent integration happens via the orchestrator’s reasoning.
+
+
+Trace2Skill-style. A pipeline modeled after Trace2Skill [16]: a flat parallel fleet of analyst sub-agents
+over batches of trajectories, followed by a hierarchical consolidation pass that merges per-batch findings
+into a conflict-free output.
+
+
+RLM. The vanilla Recursive Language Model implementation from Zhang et al. [21], wrapped to
+load a parquet of agent traces and produce a structured-report JSON. The root LM dispatches recursive
+
+                                                      18
+                                                                                                           Scale AI Research
+
+
+
+sub-LM calls at maximum depth 2; sub-LMs at maximum depth fall back to plain LM calls. Distinct from
+HALO [5], which extends an RLM with a closed-loop coding-agent stage (Section 2).
+
+
+IG (this work). The full production IG configuration described in Section 3 and Appendix A.2, with
+the orchestrator, scout, and investigator agents operating over a shared structured trace store with
+schema-aware extraction primitives (Algorithm 1).
+
+A.7 LLM-as-a-Judge: Evaluation Prompts and Rubrics
+The LLM-as-a-judge evaluation in Section 4.1 is layered into three stages, each using a separate judge
+prompt. All three stages use the same judge model (Claude Opus 4.6). The shared canonical analysis
+question (the input given to every system) is also reproduced below.
+
+
+Canonical analysis question. Every comparison system received the following question over the same
+trace corpus:
+
+     This corpus contains execution traces from an AI agent attempting the {benchmark name} benchmark. Surface
+     the notable behavioural patterns in the corpus: recurring errors, silent failures, systematic efficiency issues,
+     unexpected strengths, and how sub-populations of traces differ (e.g. correct vs. incorrect, high- vs.
+     low-confidence, tool-using vs. not). For every finding: quantify prevalence over the total number of traces in the
+     corpus; cite at least 3–5 specific trace IDs and direct quotes as evidence; compare relevant sub-populations; and
+     distinguish confirmed / refuted / inconclusive. Do not focus on headline benchmark metrics (accuracy,
+     pass-rate); focus on agent behaviours. Return the structured JSON report as specified.
+
+
+Stage 1: Union-gold clustering. A single judge call ingests every finding from every system and
+clusters them by underlying observation. The output is a canonical reference set against which each
+system is later scored. Prompt:
+
+     You are a meta-evaluator clustering findings from multiple automated trace-analysis
+     systems that all analyzed the SAME corpus of AI-agent execution traces. Each input
+     finding is a claim about the corpus. Your job is to produce a ‘union gold’ set:
+     the canonical list of distinct observations about the corpus that appear across ANY
+     of the systems.
+     Rules: (1) Two findings belong in the same cluster iff they describe the same
+     underlying phenomenon in the corpus (same behavior, failure mode, or pattern), even
+     if their framing, prevalence numbers, or prescriptions differ. Use the affected
+     trace-id lists as strong evidence for sameness. (2) A cluster may contain a single
+     finding (unique observations are valuable). (3) Give each cluster a crisp canonical
+     name (at most 80 characters) and a 1–3 sentence description. (4) Include up to 5
+     representative trace ids that most strongly evidence the cluster (prefer ids cited
+     by multiple systems). (5) Output VALID JSON. No prose before or after the JSON
+     block.
+
+
+Stage 2: Per-cluster rubric scoring. For each system, a separate judge call scores the system’s report
+against each union-gold cluster on five dimensions. Each dimension is scored on a 0–3 scale with explicit
+anchor descriptions:
+
+
+                                                            19
+                                                                                             Scale AI Research
+
+
+
+       detection       0 absent; 1 passing mention; 2 explicit finding; 3 explicit
+                       finding given prominence
+       mechanism       0 none; 1 vague; 2 plausible; 3 sharp and testable
+       evidence        0 none; 1 single; 2 multiple; 3 quantified across corpus
+       specificity     0 generic; 1 mildly specific; 2 specific; 3 precise with quantified
+                       scope
+       actionability   0 none; 1 vague; 2 concrete; 3 concrete and testable
+
+The judging-discipline instructions explicitly direct the judge to: score 0 when a dimension is not
+evidenced in the report (do not give credit for what a well-intentioned reader might infer); cap detection
+at 1 if the report makes a factually wrong claim about the observation; and use the report’s own findings
+verbatim rather than rewarding paraphrase. The main-body quality table (Table 1) reports mean scores on
+the three most discriminative dimensions (mechanism, specificity, actionability) plus a composite; detection
+is consumed by the coverage metric and the judged≥2 % indicator reported in Appendix A.8; evidence is
+omitted from the main body because it is highly correlated with mechanism in our runs and is reported
+alongside the per-cluster JSON in supplementary materials.
+
+
+Stage 3: Pairwise ranking. For each unordered pair of systems, the judge is presented with both reports
+twice in opposite positions to control for position bias [25]. Each round is scored independently. The
+pairwise judge prompt:
+
+     You are an expert ML research engineer comparing two automated trace-analysis
+     reports that were produced by different systems analyzing the SAME corpus of
+     AI-agent execution traces and answering the SAME canonical question.
+     Your job: pick the report a scaffold-improvement engineer would find more useful
+     for actually fixing the agent. Weigh specificity, evidentiary grounding (cited
+     trace ids and quantitative prevalence), novelty (surfacing non-obvious patterns),
+     and actionability (concrete scaffold changes). Penalize generic platitudes,
+     unsupported claims, and reports that confuse breadth for depth.
+     Answer in strict JSON, with fields:           winner (A, B, or tie); confidence (low, med, or
+     high); rationale (1–3 sentences).
+
+
+The win rate reported in Table 1 is computed per system as (wins + 0.5 · ties)/nrounds across all rounds
+in which the system participated.
+
+A.8 LLM-as-a-Judge: Per-Benchmark Pairwise Breakdowns and Per-Dimension Scores
+This appendix provides per-benchmark breakdowns of the LLM-as-a-Judge results summarized in
+Table 1. All metrics are fold-collapsed means across three independent folds per system. The five
+comparison systems are described in Section 4.1, along with component ablations of the IG architecture.
+
+
+Pairwise win-rate rankings. Table 7 reports per-benchmark pairwise win rates sorted by rank. IG
+leads on both benchmarks; the gap is larger on HLE (83.3%) than SSB (72.4%).
+
+
+
+
+                                                         20
+                                                                                                    Scale AI Research
+
+
+
+Table 7. Pairwise win rate (%) by benchmark, sorted by rank. Three folds per system; win rate = (wins +
+0.5×ties) / nrounds .
+
+                                SSB                                            HLE
+               Rank    System                 WR%             Rank    System                 WR%
+                 1     IG                         72.4         1      IG                     83.3
+                 2     CC Subagents               63.3         2      CC Subagents           61.4
+                 3     Trace2Skill                56.2         3      Trace2Skill            49.0
+                 4     RLM                        13.8         4      Single-Agent Coding    12.4
+                 5     Single-Agent Coding         8.6         5      RLM                     9.0
+
+
+
+Head-to-head win matrices. Tables 8 and 9 show the scaffold-collapsed head-to-head win percentage
+of the row system against the column system, computed across all fold×fold matchups (two position-
+swapped rounds per pair).
+
+                          Table 8. Head-to-head win % (row vs. column) — SSB.
+
+                                             IG     CC Sub.          T2S   RLM   SA Coding
+                      IG                     —           56          50    100       100
+                      CC Subagents           44          —           50    94        100
+                      Trace2Skill            50          50          —      89        89
+                      RLM                     0          6           11    —          56
+                      Single-Agent Coding     0           0          11    44         —
+
+
+
+                          Table 9. Head-to-head win % (row vs. column) — HLE.
+
+                                             IG     CC Sub.          T2S   RLM   SA Coding
+                      IG                     —           67          100   100       100
+                      CC Subagents           33          —            72   100       100
+                      Trace2Skill             0          28           —    100        89
+                      RLM                     0          0             0    —         39
+                      Single-Agent Coding     0           0           11    61        —
+
+
+On SSB the top three systems are closely matched (IG–Trace2Skill is 50–50; IG–CC Subagents is 56–44),
+while on HLE the ordering sharpens: IG beats every other system, including a 100–0 sweep against
+Trace2Skill and RLM. RLM and Single-Agent Coding lose to all multi-agent systems on both benchmarks.
+
+
+Per-benchmark rubric scores. Table 10 breaks out the per-dimension quality scores by benchmark. The
+cross-benchmark averages reported in Table 1 are the means of these rows.
+
+
+
+
+                                                         21
+                                                                                                           Scale AI Research
+
+
+
+Table 10. Per-dimension rubric scores (0–3) against union-gold clusters, by benchmark. Composite = 13 (Mech. +
+Spec. + Act.).
+
+                       System                     Bench.        Mech.     Spec.      Act.   Comp.
+                                                  SSB           1.23          1.23   1.13     1.20
+                       IG
+                                                  HLE           1.45          1.44   1.41     1.43
+                                                  SSB           1.15          1.15   1.05     1.12
+                       CC Subagents
+                                                  HLE           1.10          1.07   1.09     1.09
+                                                  SSB           1.06          1.03   1.08     1.06
+                       Trace2Skill
+                                                  HLE           1.30          1.25   1.38     1.31
+                                                  SSB           0.95          0.95   0.81     0.90
+                       RLM
+                                                  HLE           0.96          0.94   0.87     0.92
+                                                  SSB           0.78          0.75   0.65     0.73
+                       Single-Agent Coding
+                                                  HLE           0.78          0.78   0.80     0.79
+
+
+IG’s quality advantage is larger on HLE (composite 1.43 vs. next-best Trace2Skill at 1.31) than on SSB (1.20
+vs. CC Subagents at 1.12), consistent with the wider pairwise gap on HLE. Trace2Skill’s actionability score
+is notably strong on HLE (1.38), approaching IG (1.41); this is the only dimension on either benchmark
+where another system comes within 0.05 of IG.
+
+
+IG architecture ablations: per-benchmark detail. Table 11 reports the per-benchmark breakdown
+of the two IG architecture ablations summarised in Table 1. Both ablations preserve IG’s full analysis
+toolkit (Appendix A.3) and stateful Python data layer; they differ only in subagent topology. The
+Orchestrator-only variant disables subagent dispatch entirely, forcing the orchestrator to run all ex-
+traction, summarisation, and cohort comparison itself within its own context window. The Generic
+Subagents variant retains parallel subagent dispatch but replaces the typed Scout (breadth-first hy-
+pothesis proposal) and Investigator (depth-first corpus-scale validation) roles with a single generic
+analyst-subagent role that receives an unstructured analysis directive.
+
+Table 11. IG architecture ablations, per-benchmark. Coverage and pairwise win rate are reported alongside the
+per-dimension judge rubric. IG main reproduces the headline configuration for direct comparison. Composite
+= 31 (Mech. + Spec. + Act.).
+
+     System                   Bench.   Coverage (%)         Pairwise WR (%)           Mech.     Spec.   Act.   Comp.
+                              SSB            87                        72.4            1.23      1.23   1.13    1.20
+     IG (main)
+                              HLE            95                        83.3            1.45      1.44   1.41    1.43
+                              SSB            87                        59.0            1.02      1.02   0.89    0.98
+     IG, Generic Subagents
+                              HLE            93                        76.0            1.26      1.23   1.17    1.22
+                              SSB            78                        35.0            0.92      0.90   0.79    0.87
+     IG, Orchestrator-only
+                              HLE            86                        29.0            0.81      0.83   0.85    0.83
+
+
+The Orchestrator-only variant degrades sharply on both benchmarks (composite 1.32 → 0.85, pairwise
+WR 77.9% → 32.0%), and its coverage also drops below the multi-agent floor reached by every other
+multi-agent system in Table 1 (82% vs. ≥ 90%). Without parallel subagents, the orchestrator cannot afford
+to perform repeated corpus-scale extractions inside its own context, so findings consolidate around a
+
+                                                           22
+                                                                                                          Scale AI Research
+
+
+
+smaller subset of the union-gold clusters.
+The Generic Subagents variant is intermediate: coverage and HLE pairwise WR remain high (90% Avg
+coverage, 76% HLE WR), but per-dimension quality drops by roughly 0.20 in composite. The pattern is
+consistent across mechanism, specificity, and actionability rather than localised to any one dimension,
+suggesting that the typed Scout/Investigator decomposition affects how grounded a finding is (depth of
+mechanism, prevalence quantification, citation specificity) rather than whether the finding is surfaced at
+all. Together, the two ablations decompose IG’s 77.9% pairwise WR into approximately 35.5 pp from
+parallel subagent dispatch (orchestrator-only → generic-subagents) and a further 10.4 pp from typed
+role specialisation (generic-subagents → full IG).
+
+A.9 Statistical Analysis of the Intervention Study
+This appendix provides robustness analyses supporting the Welch two-sample t-test reported in Sec-
+tion 4.2. All analyses operate on the per-participant data (n = 6 per arm; each participant’s score is the
+mean of three independent evaluation runs).
+
+
+Welch two-sample t-test (primary). The CC arm has a per-participant mean of 43.2% (SD 9.95, SEM
+4.06); the IG arm has 57.4% (SD 3.69, SEM 1.51). The between-arm difference is 14.17 pp with standard
+error 4.33, yielding Welch’s t = 3.27, Welch–Satterthwaite df = 6.35, and two-sided p = 0.016. The 95%
+confidence interval on the between-arm difference is [3.56, 24.78] pp; Cohen’s d = 1.89.
+
+
+Exact permutation test. As a non-parametric robustness check that does not assume normality of the
+per-participant means, we enumerate all (12
+                                          6 ) = 924 ways of relabeling the 12 participants between arms.
+The observed difference (14.17 pp) is matched or exceeded in 12 of 924 relabelings, giving an exact
+two-sided p = 0.013, in agreement with the parametric Welch result.
+
+
+Leave-one-participant-out sensitivity. We refit the Welch test 12 times, each time omitting one of
+the 12 participants. The between-arm difference ranges from 12.4 to 17.9 pp; the test statistic ranges
+t ∈ [2.60, 6.96] and the two-sided p-value ranges p ∈ [0.0001, 0.0499], with p < 0.05 in every refit. The
+worst-case refit leaves p ≈ 0.048; the best-case refit leaves p < 0.001. No single participant is responsible
+for the headline result.
+
+
+Mixed-effects model. Because each participant contributes three evaluation runs, we additionally fit a
+random-intercepts linear mixed model to the 2 × 6 × 3 = 36 run-level scores using REML, with arm as a
+fixed effect and participant as a random intercept:
+
+               yijk = β 0 + β 1 · 1[armij = IG] + u j + ϵijk ,   u j ∼ N (0, σu2 ), ϵijk ∼ N (0, σϵ2 ).
+
+The fitted arm contrast is β̂ 1 = 14.17 pp (SE = 4.33, z = 3.27, p = 0.001). The estimated participant
+random-effect variance is σ̂u2 = 53.3 and the residual variance is σ̂ϵ2 = 8.8, giving an intraclass correlation
+of ICC = 0.86. The high ICC indicates that nearly all of the score variance is between-participant rather
+than within-participant, which justifies aggregating to per-participant means in the primary analysis.
+
+
+Edit-size analysis. Applying Welch’s t-test to per-participant net lines changed (286 for CC vs. 203
+for IG; Table 2) yields t = −0.45, df = 7.3, p = 0.67, so the difference in arm means is not statistically
+
+                                                         23
+                                                                                                   Scale AI Research
+
+
+
+distinguishable from zero. The CC mean is heavily influenced by a single participant who modified
++1112 lines; omitting that participant, the CC arm mean drops to 121 and the directionality of the contrast
+reverses (IG modifies more lines on average, 203 vs. 121, also not significant: t = 0.93, p = 0.39). Per-arm
+medians (94 for IG, 149 for CC) agree with the framing in Section 4.2 that IG-condition edits are typically
+smaller, but the mean-based contrast does not survive an outlier sensitivity check. We therefore retain
+edit size as a descriptive observation and do not claim it as a tested effect.
+
+
+Prospective power. A two-sample t-test with n1 = n2 = 6 at α = 0.05 (two-sided) achieves power
+≥ 0.80 for standardized effect sizes d ≳ 1.6. We do not claim power to detect smaller effects; a larger
+replication remains an important direction for future work.
+
+A.10 Iterative Patcher Loop: Protocol and Per-Round Detail
+
+A.10.1 Protocol
+
+With A0 as the base scaffold, at round r, traces Tr are collected by executing scaffold Ar against the
+benchmark training split. The analysis system under test produces a report Rr from Tr , which the Patcher
+(Claude Code with Claude Opus 4.6 as the underlying model) consumes alongside the scaffold source
+code to produce Ar+1 . Each round’s modified scaffold is evaluated on a held-in validation split; the loop
+terminates when validation pass rate fails to improve by ε = 0.01 for two consecutive rounds, or after
+r = 5 rounds, whichever comes first. We report held-out test pass rate at each round.
+
+A.10.2 Conditions
+
+We compare four conditions: (i) the IG report; (ii) RLM [21]; (iii) CC Subagents (the same analysis system
+used in Sections 4.3, 4.2); and (iv) a no-report pure-patcher baseline in which the Patcher receives only
+the scaffold source code, isolating what the Patcher achieves without any analysis input.
+
+A.10.3 Per-round trajectories
+
+Table 12. Iterative patcher-loop trajectory on SpreadsheetBench. Cells show held-out test pass rate at each round.
+“–” indicates the loop terminated before that round on the validation criterion; row-wise peak is bold.
+
+                              Method           A0     A1     A2     A3     A4     A5
+                              IG               0.41   0.77   0.81   0.80   0.84   0.80
+                              RLM              0.42   0.79   0.81   0.84    –       –
+                              CC Subagents     0.44   0.76   0.71   0.81    –       –
+                              Pure Patcher     0.41   0.80   0.58   0.58    –      –
+
+
+
+Table 13. Validation pass rate trajectory at each round, used for the patience-based saturation criterion. Test pass
+rates are reported in Table 12. Row-wise peak is bold.
+
+                              Method           A0     A1     A2     A3     A4     A5
+                              IG               0.46   0.78   0.84   0.86   0.86   0.84
+                              RLM              0.22   0.82   0.80   0.82    –       –
+                              CC Subagents     0.24   0.86   0.68   0.78    –       –
+                              Pure Patcher     0.42   0.72   0.56   0.48    –      –
+
+
+
+                                                        24
+                                                                                          Scale AI Research
+
+
+
+A.10.4 IG report content evolves across rounds
+
+The findings IG introduces at successive rounds describe failure modes at progressively finer levels
+of granularity. At round 1, the dominant finding identifies the agent writing Excel formula strings
+into cells using openpyxl, which stores them as literal text rather than evaluating them, a pattern
+accounting for 84% of round-1 failures. At round 3, the report identifies a scaffold control-flow bug
+in which a fallback path executes the model’s natural-language response as Python when no fenced
+python block is present. At round 5, the report identifies an openpyxl API version-skew (the agent uses
+wb.defined_names.definedName, removed in the installed version), and a save-and-reload sequence
+that shifts row indices and breaks formula references in cells written earlier in the same task. Across
+rounds, IG’s report length grows from 4,074 to 4,816 words and the number of distinct findings grows
+from 7 to 9.
+
+A.10.5 Pure-Patcher round-2 reversal
+
+The Pure-Patcher condition reaches the highest round-1 test score in the cohort (0.80) and then regresses
+to 0.58 at round 2 and again at round 3. We trace the round-2 regression to a single round-2 prompt edit:
+the round-2 patcher, lacking a regenerated analysis input, added the instruction “If you are unsure about
+a value, write your best estimate rather than leaving it as None — an approximate value is better than
+a missing one.” SpreadsheetBench grades cells by exact-value match, including expected None values
+for legitimately blank answer cells; the round-1 scaffold passed those tasks by leaving the cells empty.
+The round-2 instruction directs the agent to fill them with heuristic guesses, and 12 of the 13 round-2
+regressions exhibit the eval detail expected None, got <sentinel> (where the sentinel is a whitespace
+character, the string “N/A”, or a hallucinated value). Without an analysis input grounded in the round-1
+traces, the patcher’s round-2 priorities are derived from the scaffold source and its own priors, with no
+benchmark-grounded check; the resulting edit is confidently structural but contradicts the eval contract.
+
+A.11 Human Participant Study Protocol
+We conducted two complementary human-expert studies. Experiment 1 (Section 4.3) elicits expert
+ratings of individual insights drawn from competing reports against a structured rubric, isolating report
+quality from downstream implementation. Experiment 2 (Section 4.2) measures whether IG reports help
+practitioners make better scaffold modifications under a held-out benchmark protocol. Both studies use
+SpreadsheetBench [12] as the underlying corpus and Claude Code with subagents as the comparison
+report source, and both blind participants to the system that produced each report they evaluated.
+
+
+Recruitment and eligibility. Participants were professional software engineers with experience in
+LLM agent development, recruited through professional networks. Each participant had to be capable of
+reading agent traces, diagnosing failure modes, and reasoning about scaffold code in a real development
+environment.
+
+A.11.1 Experiment 1: Insight-Level Rubric Judging
+
+Materials. Each participant received (i) the SpreadsheetBench training-split trace corpus (250 agent
+traces: 110 correct, 140 incorrect; baseline pass rate 44%); (ii) a benchmark description covering the
+agent’s code-execution loop, the available tooling (openpyxl and pandas), the 5-turn budget, and the
+cell-by-cell evaluation procedure; and (iii) a sequence of insights drawn from the two reports under
+comparison. Insights were presented one at a time and the source system was not disclosed. The trace
+
+                                                   25
+                                                                                          Scale AI Research
+
+
+
+corpus was provided as a single bundled file (∼6,000+ lines); participants were instructed to use a coding
+assistant (Claude Code or Cursor) to navigate and spot-check claims rather than read traces sequentially.
+
+
+Insight presentation. Each insight followed a fixed structured format identical across both report
+systems: a status label (confirmed, refuted, or inconclusive), a corpus-level prevalence estimate, a
+narrative description of the pattern, an evidence block with cited trace IDs and verbatim quotes each
+accompanied by a per-trace explanation, the full list of affected trace IDs, a suggested scaffold action,
+and any additional observations. The shared format prevents presentation-style confounds between
+systems.
+
+
+Rubric. Each insight was scored on a 1–5 scale across four dimensions: correctness (whether the claim is
+actually true against the traces), depth (whether the insight explains the underlying mechanism rather
+than describing the symptom), evidence quality (whether the claim is backed by specific, verifiable
+trace citations), and actionability (whether the suggested improvement is concrete, proportionate to
+the evidence, and free of overfitting risk). Anchor descriptions were provided for each level on each
+dimension; the full anchors and per-dimension score breakdowns are reported in Appendix A.5. Rubric
+instructions explicitly flagged common confounds: correctness and evidence quality are independent (a
+finding may cite many traces but draw the wrong conclusion, or be true and verifiable without citing
+specifics); a finding that claims population-level prevalence while citing only 1–2 traces was capped at
+evidence-quality ≤ 3; and a finding that recommended a sweeping change based on a narrow pattern
+received a lower actionability score regardless of its correctness on the cited traces.
+
+
+Time budget and grading discipline. Approximately 120 minutes total per participant, with a 5–
+10 minute target per insight. Participants recorded a start time so that per-insight grading time could be
+measured post-hoc. Participants were instructed to score each insight on its own merits, not to adjust
+scores based on how other insights had scored, and not to deflate scores when two insights described
+overlapping phenomena.
+
+
+Cohort and sample. Twelve human-expert evaluators scored a held-out sample of 23 insights (11 IG,
+12 Claude Code with subagents) drawn from reports generated on the SpreadsheetBench training split.
+Each (insight, evaluator) pair produced one set of four dimension scores; aggregate results in Section 4.3
+are means over evaluators within each report condition.
+
+A.11.2 Experiment 2: Scaffold-Intervention Study
+
+Random assignment and blinding. Eligible participants were randomly assigned to one of the two
+report conditions (IG or CC Subagent). Assignment labels were not disclosed: participants were told that
+they would be evaluating one of several candidate analysis-report formats but were not informed which
+system had generated the report they received, and the report itself contained no system-identifying
+metadata. Graders of the resulting scaffold modifications had access only to the held-out benchmark task
+set and the participant’s modified scaffold; they were not told which report condition the participant
+had been in.
+
+
+Baseline-competency screen. Prior to the main intervention task, each participant completed a short
+qualification task designed to confirm baseline competence with the trace data and tooling: given a
+
+                                                   26
+                                                                                               Scale AI Research
+
+
+
+sample of execution traces, the participant was asked to use a coding assistant (Claude Code or Cursor)
+to compute the distribution of tool calls per trace. Participants who completed the screen task were
+enrolled in the main study; the screen was scored pass/fail on whether the reported counts matched
+ground truth on a small held-out sample. The screen was identical across conditions and was completed
+before condition assignment was revealed, so it cannot bias the between-arm contrast.
+
+
+Conditions. Two conditions: participants received either an IG report or a Claude Code analysis report
+(six participants per arm). Condition assignment was blinded so participants did not know which
+report-generation system produced the analysis they received. Headline results in Section 4.2 compare
+both arms against the unmodified baseline scaffold.
+
+
+Task briefing. Each participant received a self-contained package (∼400 MB) containing: (i) the Spread-
+sheetBench scaffold source; (ii) 250 training traces and 50 baseline-eval traces; (iii) the assigned condition’s
+insight report; (iv) the reference baseline pass rate (44% on 22/50 dev tasks); (v) a Docker runtime image
+with Python, LibreOffice, the benchmark eval data, and the harness; and (vi) a Claude Code warm-up
+task to verify environment setup. Participants were instructed to use Claude Code or Cursor as their
+coding assistant and were provided a $50 API budget for agent calls (Claude Opus 4.6).
+
+
+Train/eval split. The 250 training traces were generated with GPT-5.2 and serve as the failure-mode
+corpus that each insight report describes; the 50-task evaluation set is run with Claude Opus 4.6, which is
+also the model the participant’s modified scaffold is scored against. Train and eval task sets are disjoint,
+so this is not a head-to-head model comparison. Participants were instructed to treat training traces as
+illustrative of scaffold failure modes rather than as a performance ceiling.
+
+
+Time and iteration. Maximum 1.5 hours per participant. Iterative scaffold edits via the participant’s
+IDE were picked up automatically by the running container, allowing rapid edit/eval cycles.
+
+
+Locked configuration. Four scaffold parameters were locked and the eval runner enforced the lock: the
+model (Claude Opus 4.6), the maximum number of agent turns (5), the number of preview rows shown
+to the agent (5), and the per-cell execution timeout (60 s). Participants modified the prompts, the agent
+loop, and non-locked configuration fields only. Modifying the eval runner, the task-id list, or the data
+directory invalidated a submission.
+
+
+Evaluation. Each participant’s modified scaffold was scored on the held-out test split (disjoint from the
+50-task dev set used during iteration). Scoring was performed by re-running the eval harness three times
+per submission and averaging; reported scores in Section 4.2 are these per-participant means. Evaluation
+is deterministic per run (cell-by-cell spreadsheet comparison), so run-to-run variance reflects only the
+agent’s non-determinism at Claude Opus 4.6.
+
+
+Submission and audit trail. Participants exported their coding-assistant chat transcripts as part of
+the submission, ordered chronologically. The transcript audit trail was used post-hoc to verify that
+participants did not bypass the locked configuration or access eval-side artifacts. No participant in either
+report condition was excluded for protocol violations.
+
+
+                                                      27
+                                                                                        Scale AI Research
+
+
+
+Compensation and labor. To maintain study quality, we provided participants in both experiments with
+a comprehensive briefing package governing study procedures, evaluation rubrics, and (for Experiment 2)
+the scaffold-improvement task and locked-configuration constraints. Due to the inclusion of personally
+identifying recruitment correspondence and proprietary internal protocols, we summarize the core
+requirements above and do not release the unredacted briefing materials. On average, each Experiment 1
+grading session required approximately 2 hours of expert labor to review traces, score insights, and
+submit responses; each Experiment 2 intervention session required up to 1.5 hours of expert labor to
+analyze the assigned report, modify the scaffold, and submit results. Participants in both experiments
+were compensated under contractual terms that met or exceeded applicable local wage requirements.
+No unpaid volunteer or crowd labor was used.
+
+A.12 Patcher Prompt
+The Patcher prompt template is rendered at runtime with conditional sections for the four input con-
+ditions (Q1–Q4); the template below shows the production form with both an IG report and the trace
+bundle present (Q4). For codebase-only (Q1) the IG-report and traces sections are dropped. The
+benchmark-specific specification is appended verbatim after these instructions.
+
+     You are a coding agent tasked with improving an agent scaffold to maximize its
+     benchmark performance.
+     Your workspace. The source directory contains the agent scaffold source code –-
+     this is what you modify. An IG report file contains an analysis of the agent’s
+     execution traces with identified failure modes and recommended fixes; start by
+     reading it. A traces directory contains the agent’s execution traces; use them to
+     understand where the agent fails and why.
+     Workflow. Approach this rigorously –- plan first, then implement. Premature edits
+     produce shallow patches that don’t generalize. Most of your effort should be in
+     steps 1–2.
+     (1) Explore. Get a thorough understanding of the scaffold code –- its entry points,
+     the tool surface, and where the agent’s behavior is configured vs hard-coded. Read
+     the IG report carefully for the failure-mode analysis and recommended interventions.
+     Examine traces to identify concrete failure patterns from real runs. You may
+     dispatch focused-exploration subagents and use a TodoWrite tool to track your plan
+     as you progress.
+     (2) Diagnose and plan. For each failure mode, name (a) the specific scaffold layer
+     that’s wrong (system prompt, tool definition, control flow, retry policy, response
+     synthesis); (b) the mechanism –- why the current code produces that failure (not
+     just the surface symptom); and (c) the smallest concrete change that fixes it.
+     (3) Implement.    Apply the changes from your plan.    Prefer small, targeted edits over
+     rewrites.
+     (4) Evaluate. Call the evaluate-and-submit tool to test your changes. With one
+     attempt available, make your best changes then submit. With multiple attempts, you
+     receive evaluation results after each call and can iterate.
+     Constraints. Only modify files in the source directory. Do not access anything
+     outside it. Do not change the model or LLM configuration. Do not use web search or
+     web fetch. Do not access, read, or inspect any evaluation code, test data, ground
+     truth, or benchmark task definitions. Do not attempt to read task metadata, answer
+     keys, or expected outputs from the environment object. Focus on scaffold changes:
+
+
+                                                  28
+                                                                                          Scale AI Research
+
+
+
+     system prompts, tool implementations, error handling, control flow, response
+     synthesis.
+
+
+A.13 Computational Requirements — Detail
+Table 14 reports per-variant LLM cost and wall-clock for a single Insights Generator analysis run,
+averaged over n=6 runs (3 folds × 2 benchmarks: SpreadsheetBench and HLE). Costs are imputed
+from token counts at Anthropic’s published list price (claude-opus-4-6: $15/M input, $75/M output;
+claude-haiku-4-5: $1/M input, $5/M output) where the source schema does not persist a dollar field;
+otherwise costs are taken verbatim from the harness’s billing telemetry. Wall-clock is the elapsed time of
+the IG synthesis pass itself, from the same source records.
+
+
+
+
+                                                   29
+                                                                                                      Scale AI Research
+
+
+
+
+Table 4. IG analysis primitives. Each is pre-injected as a callable Python function in subagent REPL sessions and
+invoked from agent-authored code. ✓ / × indicate per-role availability.
+
+          Function                   Description                                    Orch.     Scout       Inv.
+          Trace inspection
+          load_traces                Load full corpus + extractions as a Polars       ✓          ✓        ✓
+                                     DataFrame
+          get_trace                  Return full content of one trace;                ✓          ✓        ✓
+                                     chunk-list outline if oversized
+          get_trace_chunk            Retrieve a specific chunk of a long trace        ✓          ✓        ✓
+          get_schema                 Per-column metadata: types, null rates,          ✓          ✓        ✓
+                                     distributions, correlations
+          search_traces              Hybrid semantic-keyword retrieval over           ✓          ✓        ✓
+                                     trace content
+          get_extractions            List previously persisted extraction             ✓          ✓        ✓
+                                     columns and their field definitions
+          LLM-driven analysis
+          extract                    Structured feature extraction across traces      ×          ✓        ✓
+                                     with chunking, batching, and
+                                     checkpointing
+          summarize_trace            Per-trace LLM summary with caching               ✓          ✓        ✓
+                                     and progressive summarization for long
+                                     traces
+          summarize_group            Single LLM summary characterizing a              ✓          ✓        ✓
+                                     group of traces
+          compare_segments           Deep A/B comparison between two                  ×          ×        ✓
+                                     cohorts with token budgeting
+          Data management
+          save_column                Persist a computed Polars column as an           ✓          ✓        ✓
+                                     extraction parquet
+          save_affected_traces       Persist a trace-id list as the cohort            ×          ×        ✓
+                                     supporting a finding
+          reload_data                Refresh cached DataFrame after new               ✓          ✓        ✓
+                                     extractions land
+          consolidate                Merge extraction parquets into the base          ✓          ✓        ✓
+                                     store and refresh the schema cache
+
+
+
+                                          LLM cost ($)                        Wall-clock (min)
+               IG variant       Mean     Median               Range   Mean      Median         Range
+               RLM∗              23.17     22.08    15.27 – 29.88      19.5         17.5    10.6 – 29.3
+               trace2skill       26.43     25.63    22.22 – 32.49      37.3         35.8    28.6 – 53.4
+               cc_subagents      38.09     38.05    33.00 – 42.95      34.4         34.3    27.2 – 42.1
+               IG (ours)∗        75.65     72.19   20.82 – 139.54      48.4         48.6    38.1 – 56.4
+
+Table 14. LLM cost and wall-clock per IG synthesis run, averaged over n=6 runs (3 folds × 2 benchmarks). ∗ Costs
+are imputed from recorded token counts at Anthropic Claude Opus / Haiku list prices; others are persisted by the
+source harness. The wide range for IG (ours) reflects the difference between SpreadsheetBench (∼$29 mean) and
+HLE (∼$122 mean) corpora; HLE traces are substantially longer.
+
+
+
+                                                         30
+

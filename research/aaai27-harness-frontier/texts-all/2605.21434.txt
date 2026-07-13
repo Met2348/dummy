@@ -1,0 +1,1511 @@
+                                                                     Agentic Model Checking
+                                                  Youcheng Sun†            Jiawen Liu†           Daniel Kroening‡           Jason Xue†
+                                                         †
+                                                             Mohamed bin Zayed University of Artificial Intelligence, UAE
+                                                                                ‡
+                                                                                  Amazon, USA
+
+
+
+                                                                                         Abstract
+
+
+
+
+arXiv:2605.21434v1 [cs.SE] 20 May 2026
+                                                   Verifying LLM-generated systems code is hard: bugs are prevalent, formal specifications
+                                              are missing, and the safety contracts the code relies on are typically encoded implicitly at
+                                              call sites rather than enforced at function boundaries. We propose agentic model checking,
+                                              a verification paradigm that couples LLM agents with a bounded model checking backend
+                                              under the principle that agents propose, solvers verify.
+                                                   Agents handle every task that requires semantic judgment, including inferring per-function
+                                              pre/postconditions, selecting which arithmetic checks are warranted, classifying counterexam-
+                                              ples, and proposing refinements, while a BMC backend discharges every soundness-relevant
+                                              decision. The paradigm rests on three architectural commitments. First, specifications are
+                                              inferred top-down from caller context in a restricted DSL that translates deterministically
+                                              into the backend’s native assume/assert primitives, with functional-correctness clauses that
+                                              lift verification from panic-freeness to behavioural faithfulness. Second, verification is compo-
+                                              sitional: each function is checked in isolation against its spec with callees replaced by stubs
+                                              constrained by their postconditions, so the per-query cost scales with a single function’s
+                                              state space rather than the whole program, and refinements propagate automatically to
+                                              every caller’s harness. Third, counterexamples are not bug reports: they pass through a
+                                              multi-stage validation pipeline (reachability, callee feasibility, dynamic replay, realism audit)
+                                              that distinguishes active in-tree crashes from latent failures at the public-API boundary, while
+                                              witnesses surviving only as modelling artifacts drive a compositional refinement loop rather
+                                              than being suppressed or reported as false positives.
+                                                   The approach is language-agnostic in its agent-driven stages, dispatching to CBMC for
+                                              C and Kani for Rust through per-backend adapters. We instantiate it in BMC-Agent, part
+                                              of the AProver project (https://github.com/agentic-prover/aprover), and evaluate it
+                                              on LLM-generated kernel and compiler code in both C and Rust as well as mature OSS-
+                                              Fuzz-hardened libraries, demonstrating that the same pipeline confirms real defects, produces
+                                              bounded clean verifications on heavily-fuzzed surfaces, and proves functional equivalence for
+                                              selected algorithmic helpers.
+
+                                         Keywords: bounded model checking, LLM agents, specification inference, counterexample
+                                         classification, compositional verification, systems software
+
+                                         1   Introduction
+
+                                         LLM coding assistants now generate substantial bodies of systems-level code, including operating
+                                         systems, compilers, device drivers, and embedded utilities, in both C and increasingly in Rust.
+                                         Verifying this code is hard for reasons that compound: the developers who deploy it rarely
+                                         understand every function in detail, manual specification is infeasible at scale, and the bugs that
+                                         arise are predominantly low-level, integer overflows, off-by-one indices, missing bounds checks on
+                                         malformed input, which by their nature require exhaustive reasoning over all input ranges to
+                                         rule out. An LLM can flag suspicious patterns; it cannot prove their absence.
+                                             A second pattern has become visible as we accumulate evidence across codebases: LLM-
+                                         generated systems code consistently encodes safety contracts implicitly at call sites rather than
+
+                                                                                             1
+enforcing them at function boundaries. The byte-helpers on the public API surface (slice-
+indexing readers, offset-arithmetic writers) lack bounds and overflow guards, while every existing
+caller maintains the missing invariant through surrounding loop or header-validation logic. The
+codebase works end-to-end on well-formed input and fails on adversarial or crafted input through
+the same public functions, even though no in-tree call site is currently exposed. A verifier
+that reports panics without distinguishing in-tree reachability from public-API ingress either
+over-reports (every helper looks broken) or under-reports (every helper looks fine because no
+current caller triggers it). Useful verification of LLM-generated code needs explicit framing:
+which threat model is in scope, and which bugs are active versus latent under that model.
+    The verification community has long-standing techniques for exactly these bugs. Bounded
+model checking (BMC) [4] checks whether a program property is violated within an execution
+of at most k steps. CBMC [9] applies this to C by unrolling loops up to a bound k, encoding
+the path set as a SAT/SMT formula, and either verifying the property or returning a concrete
+counterexample. Kani [15] provides the analogous capability for Rust, lifting CBMC over MIR
+with Rust’s panic semantics baked in. Compositional verification [7] decomposes a system into
+components linked by assume-guarantee contracts, verifying each in isolation under assumptions
+on its environment. Counterexample-guided abstraction refinement (CEGAR) [8] iteratively
+strengthens an abstract model when a spurious counterexample is found. Each of these techniques
+assumes something LLM-generated code does not come with: a specification, a property catalog,
+or annotation work the original author performed.
+    Recent work has begun to address the specification gap by using LLMs themselves to generate
+the missing artifacts. LLM agents, language models augmented with tool use (the ability to
+invoke external programs and observe their outputs within a reasoning loop) [18], have been
+applied to specification generation [11, 16, 17] and loop invariant inference [13]. Two patterns
+dominate, each with limitations. LLM-only pipelines scale and produce readable explanations
+but are unsound for arithmetic and memory safety, where exhaustive path analysis is the whole
+point. LLM-plus-deductive-checker pipelines are sound but depend on infrastructure that does
+not produce concrete counterexamples and struggles with loop-heavy systems code.
+
+Agentic model checking. We propose a new paradigm: LLM agents are coupled with a
+bounded model checking backend under the principle agents propose, solvers verify. Agents
+perform tasks that require semantic judgment: inferring specifications, selecting which arithmetic
+checks each function warrants, classifying counterexamples, proposing precondition refinements,
+and auditing whether findings correspond to states that arise in practice. Every output that
+could change a verification verdict passes through a deterministic check: a DSL parser, a BMC
+reachability query, an solver-based soundness guard, or concrete execution.
+    Bounded model checking is the right backend for this arrangement for three reasons. First,
+BMC produces concrete counterexamples, which enable a classifier that distinguishes real bugs
+from spurious witnesses by running them against the real program rather than guessing at a
+verdict. Second, BMC checks each function in isolation against its spec with callees replaced by
+stubs, so verification parallelizes across the call graph and avoids whole-program state explosion.
+This is the assume-guarantee discipline [7] instantiated at the granularity of individual functions:
+each function’s pre/postconditions form its contract, and each callee’s postcondition becomes the
+assumption used at the call site. Third, when a spurious counterexample triggers a precondition
+tightening, the refined spec immediately improves verification of every caller, because the spec is
+reused as the callee’s stub in every caller’s harness. This is CEGAR [8] lifted from the predicate-
+abstraction level to the specification level, and extended with compositional propagation across
+the call graph.
+
+Contributions.
+
+   1. Agentic model checking, a verification paradigm in which LLM agents handle tasks requiring
+
+                                                 2
+       semantic judgment (specification inference, check selection, counterexample classification,
+       refinement proposal) while a BMC backend discharges every soundness-relevant decision,
+       enabling specification-free verification of LLM-generated systems code in both C (via
+       CBMC) and Rust (via Kani) (§3).
+
+    2. A top-down specification and check-selection layer that infers per-function pre/postcon-
+       ditions from caller context in a DSL translating deterministically into CBMC/Kani as-
+       sumptions and assertions, selects per function which arithmetic checks are semantically
+       warranted, and emits optional functional-correctness specs (reference-equivalence expres-
+       sions, algebraic identities, round-trip properties) that lift verification from panic-freeness
+       to behavioural faithfulness (§3.1–§3.2, §3.1).
+
+    3. A compositional verification architecture that scales BMC to whole codebases by checking
+       each function in isolation against its spec under assume-guarantee contracts, dispatching
+       call-graph layers in parallel, and deduplicating witnesses before validation (§3.3–§3.4).
+
+    4. A validation pipeline (input reachability, callee feasibility, dynamic replay, realism audit)
+       that reports each finding as realistic or unrealistic bugs, and distinguishes active in-tree
+       crashes from public-API ingress hardening tasks (§3.5).
+
+    5. A multi-level refinement loop that lifts CEGAR to the specification level and extends
+       it with compositional propagation: spurious counterexamples drive refinements at the
+       verifier, caller, or callee-contract level, which once cleared by a soundness guard propagate
+       as updated stubs to every caller’s harness and persist across runs in a spec store and
+       witness-pattern library (§3.6–§3.7).
+
+    6. BMC-Agent, evaluated across four corpora spanning both supported languages with promis-
+       ing results pending broader quantitative evaluation: VibeOS (15,000 LoC, LLM-generated
+       ARM64 kernel, C), where it confirms 34 realistic bugs across twelve modules with 16 repro-
+       duced as runtime faults; five mature OSS targets (jq, OpenSSL, libcurl, libxml2, protobuf
+       upb), where it discloses two undefined-behavior defects in jq and produces bounded clean
+       verifications on heavily-fuzzed parser surfaces; an out-of-tree Realtek r8125 Linux driver,
+       where it finds a CAP NET ADMIN-gated MMIO bounds-check bypass in rtl8125 tool ioctl;
+       and claudes-c-compiler, a 50,000-line LLM-generated Rust C compiler, where it confirms 25
+       real bugs (24 panic-class defects on public-API byte helpers plus 1 functional-correctness
+       violation caught only by behavioural specs) and establishes bounded functional equivalence
+       for ELF hash and header-write helpers (§4).
+
+2    Motivating Example
+
+We walk through a real bug from the VibeOS kernel to show each phase of BMC-Agent in
+action. The example is small enough to follow line-by-line, yet exercises the full pipeline:
+specification inference from caller context, BMC discovery of a counterexample, classification,
+dynamic reproduction, and the realism audit.
+
+Code. kapi file size in kernel/kapi.c wraps the VFS layer for the kernel API table (kapi)
+that user applications invoke via function pointers:
+
+                Listing 1: kapi file size from VibeOS’s kernel API dispatcher.
+1   static int kapi_file_size ( void * node ) {
+2       if (! node ) return -1;
+3       vfs_node_t * n = ( vfs_node_t *) node ;
+4       return ( int )n - > size ;
+5   }
+
+
+                                                  3
+    The function guards against a null node but then casts the opaque void* directly to
+vfs node t* without further validation. The null check makes the function look defensive
+to a code reviewer; the spec, generated by BMC-Agent, makes explicit that the null check is
+necessary but not sufficient.
+
+Phase 1 — Specification generation. BMC-Agent’s spec agent reads the function body
+together with the codebase domain summary (which identifies kapi * functions as the user-facing
+kernel API dispatch surface) and generates:
+
+   • Precondition:
+                                     null(node) ∨ valid(node).
+     The precondition admits any caller-supplied void*: either null, or a pointer the solver
+     treats as dereferenceable.
+
+   • Postcondition: if node is null, the function returns −1; otherwise, the returned value is
+     required to equal (int)node->size. This is a stronger obligation than the precondition
+     supplies: the precondition admits any non-null pointer, but the equality only holds when
+     node actually addresses a vfs node t. The gap between the two is the bug.
+
+Phase 2 — BMC finds a counterexample. The harness non-deterministically initialises
+node (admitting null or a symbolically allocated vfs node t), calls kapi file size, and asserts
+the postcondition. CBMC finds a counterexample violating main.assertion.2: the postcondi-
+tion fails on the non-null branch because no constraint forces the witnessed pointer to address a
+real vfs node t. The witness is concrete: a non-null pointer that does not satisfy valid(node).
+
+Phase 3 — Counterexample classification. A call-site scan finds no in-corpus callers of
+kapi file size; the function is registered in the kapi dispatch table as kapi.file size and
+invoked by user applications. BMC-Agent treats it as a system-entry point and proceeds directly
+to feasibility analysis. The classifier confirms: nothing prevents an application from supplying a
+non-null but invalid void*: a dangling pointer, a freed pointer, or an arbitrary integer cast to
+pointer type. Verdict: real bug, tier confirmed system entry.
+
+Phase 3 Stage 3 — Dynamic validation. BMC-Agent compiles a GCC harness that
+supplies a non-null but unallocated pointer to kapi file size and installs handlers for SIGSEGV,
+SIGABRT, SIGFPE, and SIGILL. The null guard passes, but the subsequent read of n->size
+dereferences an invalid address and the harness terminates with SIGSEGV. The signal is on a
+source-level safety violation rather than an assertion property, so the finding is upgraded to tier
+confirmed dynamic.
+
+Phase 3 Stage 4 — Realism audit. The realism agent reviews the full classification record
+and rates the finding realistic: the null check is present but does not protect against non-null
+invalid pointers; the function is exposed to user space via the kapi dispatch table; the only
+defence is the null check, which any non-null value bypasses trivially. No special conditions are
+required to trigger the fault.
+
+The architectural point. A reviewer reading kapi file size in isolation sees a function that
+handles its one obvious failure mode—null input. The bug is what the null check doesn’t protect
+against: the cast from opaque void* to typed pointer is unchecked, and the C type system has
+no way to express the missing obligation. BMC-Agent surfaces it because the LLM-generated
+postcondition makes the obligation explicit (the returned value must equal node->size, which
+requires node to address a real vfs node t); BMC then finds a witness that violates the obligation;
+
+                                                4
+dynamic execution confirms the violation corresponds to a real segfault; and the realism audit
+confirms the witness corresponds to inputs a user application can actually supply. No single
+stage would suffice: the LLM alone cannot prove the postcondition is unviolated across all inputs,
+BMC alone cannot tell whether the witness is reachable, and dynamic execution alone cannot
+find the witness in the first place.
+
+Contrast with LLM-only verification. Asked to review the same function, a state-of-the-art
+LLM coding assistant flags the unsafe void* cast and the missing structural validation as concerns
+worth fixing, but characterizes the function as “not immediately exploitable” and “fragile and
+easy to misuse”, hedges that reflect the limits of pattern-matching review. The LLM can describe
+what a triggering input might look like, but cannot derive one from a sound search of the
+program’s input space, cannot confirm the input crashes under real execution, and cannot tell
+whether such inputs are reachable from any caller in the system. BMC-Agent supplies all three:
+a witnessing non-null invalid pointer (from BMC), a captured SIGSEGV from a compiled harness
+(from dynamic validation), and a confirmation that the kapi dispatch table exposes the function
+to user-space callers who can supply such pointers freely (from system-entry classification and
+realism audit).
+
+3   BMC-Agent Architecture
+
+Figure 1 presents the BMC-Agent architecture. The system combines LLM-driven semantic
+inference with deterministic bounded model checking under the principle: agents propose, solvers
+verify. The pipeline begins by parsing the source code, building the call graph, and constructing a
+compact codebase-wide domain summary from headers, types, function signatures, and optional
+external domain material such as API documentation or hardware specifications.
+
+Backend dispatch. BMC-Agent supports two BMC backends, selected by the input file’s
+language: CBMC [9] for C sources (.c, .h) and Kani [15] for Rust sources (.rs). Both
+expose the same per-function harness interface: a nondeterministic parameter-initialisation
+block, a precondition assumption, the call, and a postcondition assertion. CBMC encodes
+harnesses against C’s memory and arithmetic semantics; Kani encodes them against Rust’s typed
+slice/Vec model and Rust-specific panic primitives (slice index fail, Result::unwrap failed,
+Option::expect failed, allocation capacity overflow, debug-mode integer-overflow). The
+rest of the pipeline (specification generation, flag selection, deduplication, validation, refinement,
+knowledge persistence) is backend-agnostic and runs unchanged on findings produced by either
+solver. Language-specific DSL extensions (e.g. old(EXPR) pre-state references for Rust state-
+mutating functions, §3.1; CPROVER old translation for C) live in per-backend adapter layers.
+    The specification generator (§3.1) infers per-function pre/postconditions top-down along the
+call graph. The flag selector (§3.2) chooses which optional CBMC/Kani arithmetic checks are
+semantically warranted for each function. The BMC engine (§3.3) then synthesizes and discharges
+one BMC harness per function via the selected backend.
+    Each BMC run has two principal outcomes. If the backend finds no violation within the
+configured unwinding bound, BMC-Agent records a bounded, spec-relative verified-clean
+result. If the backend returns a counterexample, the witness is deduplicated and passed to the
+validation pipeline (§3.5). Validation checks input reachability, callee feasibility, optional dynamic
+replay, and realism. Confirmed witnesses become bug reports with evidence tiers.
+    Witnesses classified as unrealistic or uncertain by the realism audit trigger the adaptive
+refinement loop (§3.6). Within the loop, an LLM proposes remediations such as verifier-level
+rules, caller-side strengthening, or callee/function-spec strengthening. A soundness guard checks
+that the proposed refinement does not mask real bugs before the system re-runs the BMC
+
+
+
+                                                  5
+Figure 1: BMC-Agent architecture. The main pipeline parses the program, builds a domain
+summary, infers per-function specifications, selects function-specific BMC checks, and runs
+per-function BMC. Verified-clean results bypass validation and become bounded, spec-relative
+verification outcomes. A failing run yields a concrete counterexample, which is validated for
+reachability, callee feasibility, dynamic replay, and realism. Confirmed realistic findings become
+bug reports. Unrealistic or uncertain witnesses trigger the adaptive refinement loop, where the
+system proposes refinements, checks them with a soundness guard, and re-runs BMC under
+the refined assumptions or specifications. Persistent refinements are stored in the verification
+knowledge base.
+
+
+backend under the refined specifications or assumptions. Accepted refinements are stored in the
+verification knowledge base and reused across future sweeps.
+
+3.1   Specification Generation
+The specification generator is an LLM agent that traverses the call graph top-down, beginning
+from functions with no callers and proceeding layer by layer toward leaf functions. Generating
+specifications top-down derives each function’s intended behavior from how callers invoke it,
+rather than merely restating implementation details.
+   For each function, the agent: (i) retrieves the function body, caller context, and domain
+summary; (ii) drafts a pre/postcondition pair in a restricted DSL; (iii) validates the draft against
+a deterministic parser; and (iv) retries on failure up to a configurable limit.
+Dual-source generation. When enabled, BMC-Agent generates each specification twice using
+different prompts: one emphasizing caller intent and one emphasizing implementation behavior.
+Disagreements are flagged for human review.
+Specification DSL. The DSL is designed to be expressive enough for driver- and OS-style bugs,
+while remaining reliably emittable by an LLM and directly translatable into the BMC backend’s
+native assume/assert primitives. The C path translates deterministically to __CPROVER_assume and
+__CPROVER_assert; the Rust path translates to kani::assume and kani::assert. Predicates that have
+no direct equivalent on one side (e.g. raw pointer validity in Rust harnesses, where references
+
+
+                                                 6
+encode the constraint structurally) are handled by the per-backend adapter, which may map
+them to a no-op or an equivalent type-system encoding.
+Strongly connected components. Mutually recursive functions are condensed into SCC
+nodes and specified as a unit. SCC condensation is computed using Kosaraju’s algorithm.
+Functional-correctness specs. Beyond the defensive pre/post that rule out panic classes, the
+generator emits an optional functional spec clause: a boolean expression specifying what a
+correct implementation would compute, rather than merely what it must not do. The generator
+draws from a small set of templates that cover the common shapes of reference behaviour for
+low-level helpers: reference-equivalence expressions (the result equals a closed-form computation
+over the inputs), algebraic identities (the result satisfies a structural invariant such as alignment
+or modular constraints), fold expressions (the result equals an iterated computation over a
+sequence input), and round-trip properties (encoding followed by decoding returns the original
+value). When present, the functional spec is AND-merged into the postcondition, so the same
+BMC query discharges both panic-freeness and behavioural equivalence against the LLM-inferred
+reference.
+
+3.2     Per-Function Flag Selection
+BMC-Agent uses an LLM-based flag selector to determine which optional backend checks are
+semantically appropriate for each function. This avoids the noise introduced by globally enabling
+all arithmetic and memory checks.
+    For each function on the C path, the selector may enable the corresponding CBMC flags:
+      • --unsigned-overflow-check
+      • --signed-overflow-check
+      • --conversion-check
+      • --pointer-overflow-check
+On the Rust path, the same flag selector chooses among Kani’s analogous flags (e.g. --default-unwind,
+the overflow checks compile flag controlling debug-mode integer overflow panics, and un-
+wind/abort panic strategy selection). The selector runs in parallel across all functions and
+defaults conservatively (all flags off) on any LLM failure, ensuring verification is never blocked.
+
+3.3     Per-Function BMC
+The BMC engine synthesizes a BMC harness for each function. The harness initializes non-
+deterministic inputs, injects environmental assumptions, replays learned invariants from the
+verification knowledge base, translates specifications into BMC assumptions/assertions, invokes
+the target function, and checks postconditions and safety properties.
+    BMC is executed under a configurable unwinding bound k (default 4) and per-function
+timeout (default 120 s). Backend-specific retry chains absorb transient inconclusive results:
+on the C path, when CBMC reports “too many addressed objects”, BMC-Agent retries with
+larger --object-bits settings before declaring the run inconclusive; on the Rust path, when
+Kani reports unwind-exhausted, BMC-Agent retries with the unwind bound quadrupled (default
+4 → 16), and when Kani times out, BMC-Agent retries with a shrunk slice bound (4 → 2 → 1)
+and shorter wall-clock limit to coax verdicts out of state-heavy parser-loop functions. Both retry
+chains are bounded and the worst case yields an inconclusive verdict rather than blocking the
+pipeline.
+    Each run has one of three outcomes: (i) verified clean, (ii) counterexample, or (iii) in-
+conclusive. Verified-clean results are recorded as bounded, spec-relative verification artifacts.
+Counterexamples proceed to deduplication and validation.
+    Functions are dispatched in call-graph order: callees before callers, with parallelism inside
+each layer.
+
+                                                 7
+3.4   Counterexample Deduplication
+A single defect frequently produces many related BMC counterexamples. Before validation,
+BMC-Agent collapses redundant witnesses into representative counterexample classes grouped
+by (function, property type).
+
+3.5   Validation Pipeline
+A BMC counterexample is not treated as a bug report directly. After deduplication, each witness
+passes through four validation stages before emerging with an evidence tier.
+
+Stage 1: Input reachability. BMC-Agent propagates the witness inputs upward through
+the call graph, asking at each step whether the caller can supply the values the BMC backend
+chose. The point at which propagation halts (at a no-caller system boundary, or mid-chain)
+sets the witness’s reachability strength and feeds the final tier (confirmed system entry vs.
+confirmed bmc).
+
+Stage 2: Callee feasibility. BMC witnesses sometimes rest on stub return values no real
+implementation can produce. Stage 2 substitutes the real callee bodies, pins the witness inputs,
+and re-runs BMC. A witness that survives is symbolically reachable from a real call site through
+real callee behaviour.
+
+Stage 3: Dynamic replay. For surviving witnesses, BMC-Agent compiles a GCC harness
+and executes the witness on the host, catching SIGSEGV, SIGABRT, SIGFPE, and SIGILL. A
+captured signal upgrades the finding to confirmed dynamic. Because the harness models only
+the witness state (not the target platform’s allocator, memory protections, or scheduler) signal
+capture is sufficient evidence of a defect, not necessary: many real bugs reproduce only on the
+deployed system.
+
+Stage 4: Realism audit. Stages 1–3 establish symbolic reachability. They do not rule out
+witnesses that are unreachable in deployment for reasons outside the BMC model: impossible
+hardware states, uninitialized framework globals, lifecycle violations, or path-divergent unwind
+artifacts.
+    The audit runs in two layers. Witness-pattern detectors encode known artifact classes as
+deterministic checks, including library-init globals set to NULL, USB-serial framework-managed
+pointers NULL on registered callbacks, NULL-guarded deref contradictions, and path-divergent
+unwinds. A matched witness is rejected without an LLM call. Remaining witnesses pass to
+an LLM audit that reads the specification, harness, witness state, and surrounding source
+context, and classifies the witness as realistic or unrealistic. Witnesses on which the LLM
+cannot commit to a verdict are folded into unrealistic so that any non-realistic finding is
+treated uniformly downstream; an internal confidence flag preserves the distinction for evaluation
+analysis.
+    Realistic witnesses become bug reports. Unrealistic witnesses re-enter the adaptive refinement
+loop with their classification recorded, so subsequent iterations can tighten preconditions or
+model additional framework invariants.
+
+3.6   Adaptive Refinement and Re-verification
+Unrealistic witnesses enter the adaptive refinement loop. The loop does not suppress findings.
+It sharpens the verification model so the next BMC pass either confirms the bug, reaches a
+verified-clean result, or exposes a new witness class.
+
+
+
+                                                8
+Refinement proposal. Given the witness, harness, and source context, an LLM proposes one
+of three remediation classes:
+
+      • Verifier-level : adjust the BMC backend’s parameters such as the unwinding bound, slice
+        bound (Rust path), or active check selection.
+      • Caller-side: tighten the function’s precondition using properties enforced at every observed
+        call site.
+      • Callee/spec: strengthen a stubbed callee’s contract from its actual implementation or from
+        sibling-function behaviour.
+
+Soundness guard. Every proposed refinement passes through a deterministic guard that rejects
+refinements which could mask real bugs, for example over-strong preconditions that exclude
+legitimate caller behaviour or callee contracts incompatible with observed implementations.
+Re-verification. Accepted refinements trigger re-execution of the BMC backend under the
+new assumptions. Each function carries a bounded iteration budget; unresolved witnesses at the
+budget boundary are recorded for later review.
+
+3.7     Feedback Loop and Persistent Knowledge
+Successful refinements persist across verification runs. BMC-Agent maintains two stores:
+
+      • A spec store keyed by function, recording the tightened pre- and post-conditions together
+        with any callee contracts learned during refinement.
+      • A pattern library of deterministic witness-pattern detectors (Section 3.5), extended
+        whenever a witness class recurs often enough to justify codification.
+
+    Over successive runs, recurring unrealistic witness classes are absorbed into the model rather
+than rediscovered. The pattern library short-circuits the LLM audit on known artifacts; the spec
+store reduces redundant spec-generation work on functions already analysed.
+
+3.8     Scalability via Compositional Decomposition and Parallelism
+Applying BMC directly to a whole codebase does not scale: the SAT/SMT encoding of a kernel
+blows up in state space, and loop unwinding compounds the cost. BMC-Agent sidesteps this
+by never posing a whole-program query. Five mechanisms, instantiated in the subsections just
+covered, combine to keep each BMC invocation small while covering the entire codebase.
+Per-function decomposition under assume-guarantee. Each function is checked in isolation
+against its inferred spec, with callees replaced by stubs constrained by their postconditions
+(§3.3). This is the assume-guarantee discipline instantiated at function granularity: a callee’s
+postcondition becomes the assumption used at the call site, so verification of any one function
+never depends on the body of any other. The state space the BMC backend must encode is
+bounded by a single function’s footprint rather than the whole program’s.
+Call-graph-ordered parallel dispatch. Functions are verified in call-graph order, callees
+before callers, so that the spec used as a callee stub is in hand by the time a caller is checked.
+Within each call-graph layer, functions are independent and dispatched concurrently (§3.3). The
+flag selector (§3.2) likewise runs in parallel across all functions as a separate pre-pass. Wall-clock
+verification time is dominated by the longest function in the deepest layer, not the sum across
+the codebase.
+Witness deduplication before validation. A single defect frequently produces many related
+counterexamples. BMC-Agent collapses witnesses into representative classes keyed by (function,
+property type) before validation (§3.4), so the expensive stages (callee inlining, dynamic replay,
+and the LLM realism audit) run once per defect rather than once per witness.
+
+
+                                                  9
+Targeted check selection. Per-function flag selection (§3.2) enables only the arithmetic checks
+semantically warranted for each function, avoiding the encoding overhead and noise that globally
+enabling all checks would produce.
+Cross-run persistence. The spec store and pattern library (§3.7) carry tightened specs and
+witness-pattern detectors across runs. Subsequent sweeps avoid redundant spec-generation work
+and short-circuit the realism audit on recurring artifact classes, so verification cost amortizes
+over the lifetime of a codebase rather than being paid in full on every run.
+   Together these mechanisms decouple BMC’s per-query cost from the size of the program: the
+per-function query scales with a single function’s state space, and the per-codebase cost scales
+with the call graph rather than the program text.
+
+4     Evaluation
+
+4.1     Overall Results
+This section summaries the empirical evidence in one page; detailed artifacts and counterexamples
+appear in the appendix.
+
+Corpora. BMC-Agent has been exercised on four corpora of different shape, spanning both
+supported source languages (C via CBMC, Rust via Kani): (i) VibeOS, a 675-function, 37-module
+hobby kernel targeting bare-metal ARM64 (C; §A.1–§A.6); (ii) five OSS-Fuzz-hardened C
+libraries from the OpenSSF Internet Bug Bounty corpus—jq 1.8.1, OpenSSL master, libcurl,
+libxml2 2.16.0, and protobuf upb (§B); (iii) the out-of-tree Linux driver realtek-r8125-dkms
+(C, four preprocessed translation units: rtltool, r8125 firmware, rtl eeprom, r8125 rss);
+and (iv) claudes-c-compiler (CCC), a 50,000-line LLM-generated Rust implementation of a C
+compiler and ELF linker (Rust; §C).
+
+Confirmed real bugs (62 total).
+      • VibeOS contributes 34 confirmed realistic findings (Table 1, twelve modules): 16
+        dynamically reproduced, 14 reaching a system entry, and four BMC-only model violations.
+
+      • jq 1.8.1 contributes two pointer-arithmetic undefined-behaviour, filed as GHSA-ggc9-rpv2-
+        xgpm and GHSA-gvwx-xj9r-3frq against jqlang/jq.
+
+      • The OOT Linux driver run contributes one: a u32-wrap bounds-check bypass in rtl8125 too
+        l ioctl (rtltool.c) yielding a CAP NET ADMIN-gated arbitrary 32-bit-offset MMIO read-
+        /write, surfaced autonomously once per-function flag selection (§3.2) enabled --unsigned-ov
+        erflow-check and --pointer-overflow-check.
+
+      • CCC (Rust, via Kani) contributes 25 confirmed real bugs: 24 panic-class defects on
+        public-API byte helpers (slice-OOB reads/writes in elf/io.rs, linker common/write.rs,
+        linker common/eh frame.rs, and frontend/preprocessor/utils.rs; u64 overflow in
+        align up 64; Cooper-Harvey-Kennedy dominator-walk OOB in ir/analysis.rs::interse
+        ct) plus one functional-correctness violation in common/types.rs::align up, which
+        silently returns a misaligned value on overflow and is caught only by the behavioural spec
+        (§3.1).
+
+Clean-verify evidence. Beyond confirmed bugs, the pipeline produces positive verification on
+heavily-defended hardened C. On OpenSSL ASN.1, 15 of 24 leaf functions verify clean, including
+every wire-format DER decoder. On libxml2, the pipeline clears pattern.c (54/54), xpointer.c
+(9/9), schematron.c (37/37), and reduces 127 raw CBMC counterexamples on encoding.c to
+zero confirmed bugs after the full pipeline runs. On curl strparse.c, 8 of 20 leaf parsers verify
+
+                                                 10
+clean; on protobuf upb, 3 of 3 leaf wire decoders verify clean. Three of the four OOT r8125 TUs
+verify clean of real bugs after the framework-invariant false-positive class is filtered.
+
+Where the precision comes from. We attribute the precision qualitatively to three mech-
+anisms. Realism-stage witness detectors (USB-serial, PHY, netdev-private back-pointer, path-
+divergent unwind, tagged-union stub disconnect) reject framework-invariant counterexamples
+that would otherwise mask real bugs. Per-function flag selection unlocks finding classes that
+CBMC’s default configuration is silent on (the rtl8125 tool ioctl overflow above; the calloc
+and mouse set pos arithmetic overflows in Case Study 3 and the stbtt * family). The feedback
+loop converts witness patterns observed during a sweep into permanent project invariants (e.g.,
+xmlMalloc != NULL && xmlRealloc != NULL && xmlFree != NULL for libxml2), converging
+specifications without manual intervention. A controlled ablation isolating each mechanism’s
+contribution is left to future work.
+
+4.2    Threats to Validity
+Spec correctness. Each finding depends on the LLM generating a correct spec. In the
+confirmed bugs across our corpora, the inferred specs directly encode the exploited safety
+property, and the dual-source generation mechanism flags precondition-postcondition tensions
+where the two clauses encode different obligations. Over-weak specs cause bugs to be missed
+silently, which is the primary failure mode and the one the pipeline cannot self-detect; the realism
+checker absorbs some spec-mismatch cases by rejecting witnesses it cannot defend, but a spec
+that is uniformly too permissive produces no counterexample at all and leaves no trace.
+
+Unwinding bound. The loop bound k = 4 limits exploration depth. When a function’s loop
+runs against an unconstrained input, BMC fires a loop-unwind artifact that the refinement loop
+suppresses by tightening the precondition before re-running, so loop-artifact counterexamples
+do not silence the underlying defect. Bugs that manifest only at loop depth > 4 under realistic
+preconditions, however, will not be found.
+
+Dynamic harness validity. Dynamic validation in BMC-Agent is a host-side replay step: the
+system compiles a GCC harness for the BMC witness and executes it on x86-64 Linux, catching
+native signals such as SIGSEGV and SIGABRT. These signal labels are therefore evidence from the
+host harness, not claims about POSIX-style signal delivery on stock VibeOS/QEMU. Among the
+16 confirmed dynamic findings, 12 are target-independent API, library, network, or arithmetic
+bugs. The remaining four have target- or initialization-specific caveats (kapi get datetime,
+keyboard irq handler, hal usb get device info, and hal usb mouse poll) and were checked
+separately in the manual review. Findings in the confirmed system entry and con-
+firmed bmc tiers do not rely on captured host-harness signals; their evidence comes from
+system-entry reachability and the CBMC model, respectively.
+
+5     Related Work
+
+LLM agents for verification. The closest related work generates specifications with an
+LLM and discharges them against a checker that is itself an LLM, a deductive solver, or both.
+FM-Agent [11] infers Hoare-style pre/postconditions top-down from caller context and uses LLM
+reasoning to verify each function against its spec; it is effective on semantic and logic bugs, but its
+verification step is not sound for arithmetic or memory safety. AutoSpec [16] synthesizes ACSL
+specifications for Frama-C/Wp by coupling LLM generation with static analysis and a deductive
+checker in a refinement loop. Lemur [17] uses LLMs to generate verification artifacts that a
+solver then checks. Loop-invariant generation work [13] applies the same pattern at the level of
+
+
+                                                  11
+individual invariants. BMC-Agent contributes to this line by using bounded model checking as
+the verification backend, which yields concrete counterexamples that enable a classifier and a
+compositional refinement loop that propagates spec improvements across the call graph.
+
+Traditional driver and kernel verification. SLAM [2], deployed as the Static Driver Verifier
+(SDV) [3], checks fixed catalogs of API-usage properties on Windows device drivers. Smatch [6]
+uses pattern-based static analysis on the Linux kernel. Both check properties defined ahead of
+time by tool authors. BLAST [12] is a related software model checker for C using predicate
+abstraction with CEGAR; like SDV it requires a user-supplied property, but does not ship with
+a fixed catalog. None of these tools easily express codebase-specific invariants that depend on
+how a function is used. BMC-Agent generates function-specific specifications from caller context,
+at the cost of a dependence on LLM judgment that pattern-based tools do not carry.
+
+Symbolic execution. KLEE [5] achieves high path coverage via symbolic execution but
+struggles with unbounded loops and large call graphs. Serval [14] applies symbolic evaluation to
+verified system kernels within decidable fragments. Both differ from BMC-Agent in operating at
+the whole-function or whole-system level rather than per-function with caller-derived specs.
+
+Deductive verification. Frama-C/Wp [10] and related tools support full functional correctness
+within deductive frameworks but require significant manual annotation effort. BMC-Agent targets
+the annotation-free, automated end of the spectrum, sacrificing completeness for scalability and
+concrete counterexamples.
+
+CEGAR. Counterexample-guided abstraction refinement [8] is a classical technique for itera-
+tively refining abstract models when spurious counterexamples are found. BMC-Agent applies
+the CEGAR idea at the specification level (refining LLM-generated specs rather than predicate
+abstractions)and extends it with compositional propagation to callers.
+
+6   Conclusion
+
+We have presented agentic model checking and BMC-Agent, which pairs LLM agents for speci-
+fication inference, counterexample classification, and precondition refinement with a bounded
+model checking backend (CBMC for C, Kani for Rust) as the soundness anchor. The central
+architectural principle—agents propose, solvers verify—assigns to LLMs the tasks that require
+semantic judgment while reserving every soundness-relevant decision for a deterministic check.
+Evaluations on LLM-generated kernel and compiler code in both C and Rust, alongside ma-
+ture OSS-Fuzz-hardened libraries, exercise every pipeline phase and produce confirmed defects,
+bounded clean verifications, and bounded functional-equivalence results on selected helpers.
+Future work. The most important next steps are (i) a broad quantitative evaluation establishing
+precision and recall at scale, with controlled ablations of each pipeline stage and head-to-head
+comparison against BMC-alone baselines; (ii) a deeper answer to the spec-correctness assumption,
+through spec triangulation across multiple sources and a measured audit of LLM-inferred
+references; (iii) evaluating BMC-Agent on historical buggy corpora to assess generalisation
+beyond LLM-generated code; and (iv) reducing token cost via spec-store reuse and stage-level
+distillation, so that whole-codebase sweeps amortise across runs rather than paying full cost each
+time.
+
+References
+
+ [1] Vibeos. https://github.com/kaansenol5/VibeOS, 2026. GitHub repository, accessed
+     2026-05-18.
+
+                                               12
+ [2] Thomas Ball, Rupak Majumdar, Todd Millstein, and Sriram K Rajamani. Automatic
+     predicate abstraction of c programs. In Proceedings of the ACM SIGPLAN 2001 conference
+     on Programming language design and implementation, pages 203–213, 2001.
+
+ [3] Thomas Ball, Ella Bounimova, Byron Cook, Vladimir Levin, Jakob Lichtenberg, Con
+     McGarvey, Bohus Ondrusek, Sriram K Rajamani, and Abdullah Ustuner. Thorough static
+     analysis of device drivers. volume 40, pages 73–85. ACM New York, NY, USA, 2006.
+
+ [4] Armin Biere, Alessandro Cimatti, Edmund Clarke, and Yunshan Zhu. Symbolic model check-
+     ing without bdds. In International conference on tools and algorithms for the construction
+     and analysis of systems, pages 193–207. Springer, 1999.
+
+ [5] Cristian Cadar, Daniel Dunbar, and Dawson Engler. KLEE: Unassisted and automatic
+     generation of high-coverage tests for complex systems programs. In Proceedings of the
+     8th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’08),
+     pages 209–224, San Diego, CA, USA, December 2008. USENIX Association. URL https:
+     //www.usenix.org/legacy/event/osdi08/tech/full_papers/cadar/cadar.pdf.
+
+ [6] Dan Carpenter. Smatch: Pluggable static analysis for c. https://lwn.net/Articles/
+     691882/, 2016.
+
+ [7] Sagar Chaki, Edmund M Clarke, Alex Groce, Somesh Jha, and Helmut Veith. Modular
+     verification of software components in c. IEEE Transactions on Software Engineering, 30
+     (6):388–402, 2004.
+
+ [8] Edmund Clarke, Orna Grumberg, Somesh Jha, Yuan Lu, and Helmut Veith. Counterexample-
+     guided abstraction refinement. In International Conference on Computer Aided Verification,
+     pages 154–169. Springer, 2000.
+
+ [9] Edmund Clarke, Daniel Kroening, and Flavio Lerda. A tool for checking ansi-c programs.
+     In International Conference on Tools and Algorithms for the Construction and Analysis of
+     Systems, pages 168–176. Springer, 2004.
+
+[10] Pascal Cuoq, Florent Kirchner, Nikolai Kosmatov, Virgile Prevosto, Julien Signoles, and
+     Boris Yakobowski. Frama-c: a software analysis perspective. In Proceedings of the 10th
+     International Conference on Software Engineering and Formal Methods, SEFM’12, page
+     233–247, Berlin, Heidelberg, 2012. Springer-Verlag. ISBN 9783642338250. doi: 10.1007/
+     978-3-642-33826-7 16. URL https://doi.org/10.1007/978-3-642-33826-7_16.
+
+[11] Haoran Ding, Zhaoguo Wang, and Haibo Chen. Fm-agent: Scaling formal methods to large
+     systems via llm-based hoare-style reasoning. arXiv preprint arXiv:2604.11556, 2026.
+
+[12] Thomas A Henzinger, Ranjit Jhala, Rupak Majumdar, and Gregoire Sutre. Lazy abstrac-
+     tion. In Proceedings of the 29th ACM SIGPLAN-SIGACT symposium on Principles of
+     programming languages, pages 58–70, 2002.
+
+[13] Ruibang Liu, Minyu Chen, Ling-I Wu, Jingyu Ke, and Guoqiang Li. Enhancing automated
+     loop invariant generation for complex programs with large language models. Science of
+     Computer Programming, page 103387, 2025.
+
+[14] Luke Nelson, James Bornholt, Ronghui Gu, Andrew Baumann, Emina Torlak, and Xi Wang.
+     Scaling symbolic evaluation for automated verification of systems code with serval. In
+     Proceedings of the 27th ACM Symposium on Operating Systems Principles, SOSP ’19,
+     page 225–242, New York, NY, USA, 2019. Association for Computing Machinery. ISBN
+     9781450368735. doi: 10.1145/3341301.3359641. URL https://doi.org/10.1145/3341301.
+     3359641.
+
+                                              13
+[15] Alexa VanHattum, Daniel Schwartz-Narbonne, Nathan Chong, and Adrian Sampson. Veri-
+     fying dynamic trait objects in rust. In Proceedings of the 44th International Conference on
+     Software Engineering: Software Engineering in Practice, pages 321–330, 2022.
+
+[16] Cheng Wen, Jialun Cao, Jie Su, Zhiwu Xu, Shengchao Qin, Mengda He, Haokun Li, Shing-
+     Chi Cheung, and Cong Tian. Enchanting program specification synthesis by large language
+     models using static analysis and program verification. In International Conference on
+     Computer Aided Verification, pages 302–328. Springer, 2024.
+
+[17] Haoze Wu, Clark Barrett, and Nina Narodytska. Lemur: Integrating large language models
+     in automated program verification. In International Conference on Learning Representations,
+     volume 2024, pages 2968–2978, 2024.
+
+[18] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and
+     Yuan Cao. React: Synergizing reasoning and acting in language models. ICLR, 2023.
+
+
+
+Appendix
+A    VibeOS Case Studies
+
+We evaluate BMC-Agent on VibeOS [1], a bare-metal ARM64 hobby operating system of
+approximately 15,000 lines of C written with substantial LLM assistance. We chose VibeOS
+because it is representative of the LLM-generated systems code that motivates this work and it
+is publicly available and independently developed, ruling out circularity. To probe the agent’s
+behaviour on mature, heavily-fuzzed targets we additionally sweep selected functions from
+real-world OSS libraries (jq, OpenSSL, libcurl, libxml2, protobuf upb); these results appear in
+Section B.
+    We trace five confirmed bugs end-to-end through every pipeline phase. Each case study is
+drawn from a different VibeOS kernel module, exercises a different bug class, and highlights a
+distinct pipeline aspect:
+    • §A.1 (net get mac) — the simplest path: a missing-precondition fault found and confirmed
+      in a single CBMC pass.
+
+    • §A.2 (kapi file size) — postcondition-driven checking: an insufficient-validation bug
+      in the kernel API dispatcher, detected because the LLM spec makes the expected return
+      contract explicit.
+
+    • §A.3 (calloc) — CEGAR refinement and per-function flag selection: a CWE-190 integer
+      overflow in the kernel allocator, detectable either via CEGAR (spurious loop artifact
+      → refinement → real bug) or via Phase 1.5 flag selection (LLM autonomously enables
+     --unsigned-overflow-check for arithmetic on external sizes, finding the overflow directly
+      in one pass).
+
+    • §A.4 (stbtt buf get) — attacker-controlled input: an out-of-bounds buffer read in the
+      CFF font parser, triggerable by loading a crafted OpenType font file.
+
+    • §A.5 (vfs lookup) — multiple bugs, one function: two distinct vulnerabilities in the VFS
+      path resolver found by a single CBMC run, both reachable from any file-open syscall.
+
+Setup. CBMC 5.95.1, loop-unwinding bound k = 4, per-function timeout 120 s, LLM backbone
+claude-sonnet-4-6. Dynamic validation uses GCC 12.3 on an x86-64 Linux host running in
+verify-dir whole-codebase mode.
+
+                                              14
+Full-codebase results. Running BMC-Agent over all 37 kernel modules (675 functions anal-
+ysed) with all confirmation tiers and realism auditing enabled produced 34 confirmed realistic
+findings (out of 145 deduplicated counterexample reports); the realism audit additionally flagged
+85 reports as unrealistic (hardware stubs, uninitialized global state, or infeasible symbolic inputs)
+and 26 as uncertain, both of which we exclude from the headline count. Table 1 lists all 34
+findings, grouped by confidence tier: 16 in confirmed dynamic (a runtime fault reproduced by
+a GCC-compiled harness), 14 in confirmed system entry (counterexample reachable from a
+no-caller entry function), and 4 in confirmed bmc (formal model violation; reachability not yet
+traced to entry). The bugs span twelve kernel modules; the TTF font renderer (stb truetype)
+dominates with 16 of the 34 findings, all rooted in missing bounds validation on values derived
+from the font file itself, making them triggerable by loading a crafted font. The remaining 18
+bugs cluster in the public kernel API (kapi.c, 4), the HAL/platform layer (platform.c, 3),
+USB HID input (usb hid.c, 2), the FAT32 driver (fat32.c, 2), and seven single-bug modules
+covering memory allocation, VFS, ELF loading, IRQ handling, and input drivers.
+ Table 1: All 34 confirmed realistic findings from the vibeos full check10 run. Tier: D = confirmed dynamic,
+ S = confirmed system entry, B = confirmed bmc. Signal column reports the POSIX signal observed by the dynamic
+ harness (--- when no harness was executed).
+
+# Function                                    Module       T   Sig.    Root cause
+ 1 hal dma fb copy                            platform.c D SIGABRT Width × height overflow in unguarded DMA
+                                                                   copy
+ 2 kapi delete                                kapi.c     D SIGSEGV Null path pointer; no guard on public API
+ 3 kapi file size                             kapi.c     D SIGSEGV Null-check present but non-null invalid pointer
+                                                                   bypasses it
+ 4   kapi get datetime                        kapi.c     D SIGSEGV Null output buffer; no validation
+ 5   kapi rename                              kapi.c     D SIGSEGV Uninitialised VFS global state on rename
+ 6   keyboard irq handler                     keyboard.c D SIGSEGV Contract violation in IRQ handler
+ 7   mouse set pos                            mouse.c    D SIGABRT Signed integer overflow in x ⋅ 32768
+ 8   net get mac                              net.c      D SIGSEGV Null output MAC buffer
+ 9   hal usb get device info                  platform.c D SIGSEGV Null device-info buffer
+10   stbtt FreeShape                          ttf.c      D SIGSEGV Null vertices pointer in free
+11   stbtt GetBakedQuad                       ttf.c      D SIGSEGV Unbounded char index OOB on chardata
+12   stbtt GetFontVMetrics                    ttf.c      D SIGSEGV Crafted hhea offset → OOB read
+13   stbtt GetKerningTableLength              ttf.c      D SIGSEGV OOB on crafted kerning table
+14   stbtt GetPackedQuad                      ttf.c      D SIGSEGV Unchecked char index in pointer arithmetic
+15   ttUSHORT                                 ttf.c      D SIGSEGV OOB read in 16-bit byte-swap helper
+16   hal usb mouse poll                       usb hid.c  D SIGSEGV Null report pointer to memcpy
+17   read32                                   fat32.c      S    —      Integer overflow in 32-bit FAT read
+18   write32                                  fat32.c      S    —      Invalid directory-entry pointer in write
+19   malloc                                   memory.c     S    —      Integer overflow in size-class arithmetic
+20   hal get time us                          platform.c   S    —      Division by zero when cntfrq el0 = 0
+21   stbtt GetFontBoundingBox                 ttf.c        S    —      OOB read on info->data[info->head+42]
+22   stbtt GetNumberOfFonts internal          ttf.c        S    —      No bounds-check on font collection
+23   stbtt GetScaledFontVMetrics              ttf.c        S    —      NaN size triggers wrong scale path
+24   stbtt PackEnd                            ttf.c        S    —      Null spc; possible double-free
+25   stbtt ScaleForMappingEmToPixels          ttf.c        S    —      Crafted head-table offset → OOB
+26   stbtt ScaleForPixelHeight                ttf.c        S    —      Crafted hhea offset → OOB
+27   stbtt isfont                             ttf.c        S    —      Truncated/crafted font header OOB
+28   ttULONG                                  ttf.c        S    —      Invalid input in 32-bit byte-swap helper
+29   hal usb keyboard poll                    usb hid.c    S    —      Null report pointer to memcpy
+30   vfs read                                 vfs.c        S    —      Null buffer / invalid fd
+31 elf process relocations                    elf.c        B    —      Unbounded relocation-table loop on crafted
+                                                                       ELF
+32 wsod draw line                            irq.c         B    —      Underflow in fb width-40 → ∼ 232 loop
+33 stbtt CompareUTF8toUTF16 bigendian prefix ttf.c         B    —      Odd len2 → signed underflow → infinite loop
+34 stbtt setvertex                           ttf.c         B    —      Silent vertex-coordinate truncation overflow
+
+
+
+Manual validation on the target. As an additional sanity check, we manually replayed a
+small subset of the most reportable findings on the stock VibeOS/QEMU image. This step is
+separate from the automated tier assignment in Table 1: the dynamic tier still refers to the host
+GCC harness, while the target runs show how selected defects manifest in the bare-metal runtime.
+We also tried straightforward local fixes for these cases and checked whether the observed
+
+
+                                                      15
+behavior changed as expected. The replayed cases include hal dma fb copy, kapi file size,
+kapi rename, net get mac, read32, and vfs read. In the cases with observable target-level
+behavior, the trial fixes changed the result in the expected direction: overflowed DMA copies and
+NULL rename arguments were rejected, forged VFS handles no longer returned attacker-controlled
+file metadata or file contents, and the read32 byte-shift fix eliminated the corresponding UBSan
+warning. VibeOS also defines POSIX-style signal constants for libc compatibility, but the current
+signal() and raise() implementations are stubs; therefore the QEMU replay records target
+behavior rather than reinterpreting the host-harness signal labels.
+     The following five subsections trace one representative bug from each major pipeline path
+end-to-end; §A.6 surveys the rest of the 34 findings in less depth.
+
+A.1    Case Study 1 — net get mac: Missing Precondition
+Source. net get mac in kernel/net.c copies the host MAC address into a caller-supplied
+buffer:
+
+                         Listing 2: net get mac (kernel/net.c:97).
+1   void net_get_mac ( uint8_t * mac ) {
+2       memcpy ( mac , our_mac , 6) ;
+3   }
+
+    The function performs no validation of mac: it silently assumes the caller has allocated a
+six-byte buffer. This is a typical implicit API contract that is invisible to the C type system.
+
+Phase 1 — Specification generation. The spec agent reads the function body and its role
+as a public network API. It generates:
+
+    • Precondition: valid range(mac, 0, 6) — the output buffer must be a valid allocation of
+      at least six bytes.
+
+    • Postcondition: valid range(mac, 0, 6) && the six bytes at mac[0..5] contain the cur-
+      rent network interface MAC address.
+
+The precondition makes explicit an assumption the code leaves entirely implicit.
+
+Phase 2 — BMC. The harness generator produces a CBMC harness that initialises mac as a
+nondeterministic pointer and calls net get mac. The generated precondition is asserted before
+the call and the postcondition is asserted on return. CBMC immediately finds a counterexample:
+
+                                           mac = NULL
+
+The failing property is net get mac.precondition instance.3. The witness requires no loop,
+no arithmetic, and no callee reasoning — one symbolic step suffices to falsify the harness.
+
+Phase 3 Stage 1 — Feasibility check. The classifier asks whether the counterexample input
+is reachable in the real system. A call-site scan finds no callers of net get mac anywhere in
+the corpus; the function is a system-entry point. An LLM reasoning step confirms: no caller
+constrains mac to a non-null value, so any external consumer can supply NULL. Classification:
+is real bug = True, system entry reached = True.
+
+Phase 3 Stage 3 — Dynamic validation. The dynamic validator compiles a GCC har-
+ness that calls net get mac(NULL) and installs signal handlers for SIGSEGV/SIGABRT/SIGF-
+PE/SIGILL. Execution on the x86-64 host produces SIGSEGV: memcpy writes through a null
+pointer. The confidence tier is upgraded to confirmed dynamic.
+
+
+                                               16
+Phase 3 Stage 4 — Realism check. The realism agent reviews the full finding and rates it
+REALISTIC:
+      net get mac is a public API with no NULL guard. Any external consumer that passes an
+      uninitialised or error-path pointer triggers the fault immediately. No special conditions are
+      required to exploit this.
+
+Root cause and fix.        A one-line null guard resolves the issue:
+1   void net_get_mac ( uint8_t * mac ) {
+2       if (! mac ) return ;
+3       memcpy ( mac , our_mac , 6) ;
+4   }
+
+
+
+Summary. This case illustrates the simplest BMC-Agent pipeline path: spec generation
+exposes an implicit assumption; a single CBMC invocation finds the violation; LLM and dynamic
+confirmation require no refinement. The bug class — missing precondition in a public API — is
+routine but consequential: a kernel network driver silently crashes on a null pointer any consumer
+can supply.
+
+A.2    Case Study 2 — kapi file size: Insufficient Pointer Validation
+Source. kapi file size in kernel/kapi.c wraps the VFS layer for the kernel API table
+(kapi) that user applications call via function pointers:
+
+                        Listing 3: kapi file size (kernel/kapi.c:127).
+1   static int kapi_file_size ( void * node ) {
+2       if (! node ) return -1;
+3       vfs_node_t * n = ( vfs_node_t *) node ;
+4       return ( int )n - > size ;
+5   }
+
+    The function guards against a null node but then casts the opaque void* directly to
+vfs node t* without further validation. Any non-null but invalid pointer — dangling, freed,
+or an arbitrary integer cast to pointer type — passes the guard, and the subsequent read of
+n->size is undefined behaviour.
+
+Phase 1 — Specification generation.             The spec agent generates:
+
+    • Precondition: null(node) || (valid(node) && node points to a valid vfs node t with
+      an accessible size field).
+
+    • Postcondition: returns −1 when node is null, and otherwise returns ((vfs node t*)node)->size.
+
+The agent records a semantic tension between the two clauses: the precondition admits null
+or valid-pointer inputs, while the postcondition requires valid memory access for the non-null
+branch. This is exactly the gap the BMC backend will exploit to produce a counterexample.
+
+Phase 2 — BMC. The harness nondeterministically initialises node (admitting null or a
+symbolically allocated vfs node t), calls kapi file size, and asserts the postcondition. CBMC
+finds a counterexample violating main.assertion.2: the postcondition check for the non-null
+branch fails for a symbolically allocated node with an unconstrained size field. This witnesses
+that the function’s stated return contract cannot be guaranteed when the pointer originates from
+an untrusted caller.
+
+
+
+                                                   17
+Phase 3 Stage 1 — Feasibility check. kapi file size is registered as kapi.file size in
+the kernel API dispatch table; call-site analysis finds no callers in the corpus, confirming it is a
+system-entry point. The LLM classifier confirms: user applications invoke this via the kapi table
+with an opaque void* argument, and nothing prevents supplying a non-null, non-valid pointer.
+Classification: is real bug = True, system entry reached = True.
+
+Phase 3 Stage 3 — Dynamic validation. The dynamic validator compiles a GCC harness
+that supplies a non-null but unallocated pointer to kapi file size. The null guard passes, but
+n->size reads from an invalid address, producing SIGSEGV. Tier: confirmed dynamic.
+
+Phase 3 Stage 4 — Realism check.              The realism agent rates the finding REALISTIC:
+      The null check is present but does not protect against non-NULL invalid pointers. The function
+      is exposed as kapi.file size callable from user applications. The only defence is the null
+      check, which any non-null value bypasses trivially.
+
+Root cause and fix. A null check alone is insufficient for a pointer that originates from an
+untrusted caller. The correct fix depends on system design: either the API should accept a typed
+handle validated at creation time rather than a raw void*, or the VFS layer should validate the
+node pointer against a known-valid registry before dereferencing it.
+
+Summary. This case illustrates how LLM-generated postconditions surface semantic obligations
+that the type system cannot express. The null check makes the function appear safe to a code
+reviewer; the spec makes explicit that the null check is necessary but not sufficient, and CBMC
+confirms the violation.
+
+A.3    Case Study 3 — calloc: Integer Overflow
+Source.    calloc in kernel/memory.c is VibeOS’s own kernel memory allocator:
+
+                            Listing 4: calloc (kernel/memory.c:186).
+1   void * calloc ( size_t nmemb , size_t size ) {
+2       size_t total = nmemb * size ;         /* no overflow guard */
+3       void * ptr = malloc ( total ) ;
+4       if ( ptr != NULL ) {
+5            uint8_t * p = ( uint8_t *) ptr ;
+6            for ( size_t i = 0; i < total ; i ++) p [ i ] = 0;
+7       }
+8       return ptr ;
+9   }
+
+    Line 2 multiplies nmemb and size without any overflow guard. When the product exceeds
+SIZE MAX it wraps silently, causing malloc to receive a much smaller size than intended and
+returning a fatally undersized buffer. The standard portable guard is: if (nmemb != 0 && size
+> SIZE MAX / nmemb) return NULL;
+
+Phase 1 — Specification generation.              The spec agent generates:
+
+    • Precondition: requires nmemb * size ≤ SIZE MAX && (nmemb == 0 || size == 0 ||
+      nmemb * size ≥ nmemb).
+
+    • Postcondition: null(\result) || (valid range(\result, 0, nmemb * size) && all
+      bytes in \result[0..nmemb*size) are initialised to zero).
+
+The precondition explicitly captures the arithmetic safety invariant the code omits.
+
+
+                                                   18
+Phase 2, Round 1 — BMC finds a spurious counterexample. CBMC checks calloc
+against the generated spec. With total unconstrained, the zero-initialisation loop runs up to
+total iterations; at bound k = 4, CBMC fires the loop-unwinding assertion:
+
+                                Failing property: calloc.unwind.0
+
+This is a loop-bound artifact, not a postcondition violation or safety check: CBMC cannot explore
+beyond four loop iterations for an unconstrained loop count.
+
+Phase 3, Round 1 — SPURIOUS classification and spec refinement.                       The classifier
+analyses the counterexample trace and determines it is spurious:
+      Loop-bound artifact: calloc.unwind.0 fires at k = 4 for unconstrained total. This is not
+      reportable without a spec that constrains the loop-input range.
+
+Because the classifier produces a final precondition (a tighter constraint that excludes the
+loop-artifact inputs), the pipeline performs spec refinement:
+
+    1. A refined spec is constructed with the tightened precondition and replaces the original
+       in current specs.
+
+    2. The refined spec is persisted to the artifact store.
+
+    3. calloc is added to the self-recheck queue: the CEGAR re-verification queue for functions
+       whose precondition was tightened after a spurious counterexample.
+
+Without this step a tool that only filters (never refines) would either report the loop artifact as a
+false positive or drop it silently — and never discover the real bug hiding behind it.
+
+Phase 2, Round 2 — CEGAR re-verification reveals the real bug. BMC-Agent re-runs
+CBMC on calloc under the refined precondition. With the loop-artifact inputs excluded, CBMC
+freely explores the arithmetic path and finds a new counterexample:
+
+                nmemb = 9 223 372 036 854 775 808 (263 ),     size = 0,   total = 0
+
+The failing property is main.assertion.1: the postcondition valid range(\result, 0, nmemb
+* size) is violated because nmemb * size wraps to 0 while nmemb is 263 . The root cause — the
+absent overflow guard — also allows callers to supply large non-zero values (e.g., nmemb = 232 ,
+size = 232 ) that silently produce a zero-byte or undersized allocation.
+
+Phase 3, Round 2 — Feasibility check. calloc is VibeOS’s own kernel allocator with no
+callers in the corpus; it is a public system-entry point. The LLM confirms: no caller constrains
+nmemb or size, so any consumer — including user applications making allocation requests — can
+supply overflow-inducing values. Classification: is real bug = True, system entry reached =
+True.
+
+Phase 3 Stage 3 — Dynamic validation.             The dynamic validator compiles a GCC harness:
+1   void * p = calloc (9223372036854775808 UL , 0 UL ) ;
+2   /* assert : p == NULL or p is valid for nmemb * size bytes */
+
+Execution produces SIGABRT: the glibc heap corruption detector fires when malloc(0)
+returns a zero-byte allocation that the harness then attempts to use as a 263 -element array. Tier:
+confirmed dynamic.
+
+
+
+
+                                                 19
+Phase 3 Stage 4 — Realism check.              The realism agent rates the finding REALISTIC:
+      The missing overflow check is a well-known vulnerability pattern (CWE-190). A caller passing
+      nmemb = 232 , size = 232 on a 64-bit system receives a zero-byte or NULL allocation, leading
+      to a heap overflow on first write. This class of bug has caused real CVEs (e.g. CVE-2010-1628
+      and similar heap-overflow vulnerabilities arising from calloc size-computation wrapping).
+
+Independent cross-validation. At the time of this evaluation the VibeOS public issue tracker
+contained an independently filed report (issue #26) describing the same calloc integer-overflow
+vulnerability in memory.c. BMC-Agent discovered the bug automatically via formal verification
+without any knowledge of the issue; the independent human report provides external ground-truth
+confirmation that the finding is not a tool artefact.
+
+Phase 1.5 — Direct detection via per-function flag selection. The CEGAR path de-
+scribed above detects the overflow indirectly: the loop-artifact counterexample triggers refinement,
+which in turn exposes the arithmetic path. When Phase 1.5 flag selection is enabled, BMC-Agent
+can detect the same bug directly in a single BMC pass.
+    The flag-selection agent examines calloc’s body and reasons:
+     The function multiplies two external size parameters (nmemb × size) to compute an allocation
+     size passed to malloc, which can wrap around to a small value causing under-allocation. ⇒
+     --unsigned-overflow-check: true.
+
+With --unsigned-overflow-check enabled for calloc, CBMC adds an assertion before each un-
+signed multiplication. The very first BMC pass—before any CEGAR iteration—fires calloc.overflow.1
+with witness nmemb = 263 , size = 2, total = 2: the multiplication overflows and the caller
+receives a fatally undersized buffer. The call-chain validator then traces a second overflow
+(malloc.overflow.1) downstream: malloc’s ALIGN UP(size, 16) also overflows when the
+wrapped total value is near SIZE MAX.
+    The two detection paths are complementary. CEGAR handles the case where the overflow is
+masked by a loop artifact and the arithmetic check is not yet enabled; Phase 1.5 handles the
+case where a targeted check exposes the overflow directly. Both converge on the same CWE-190
+root cause.
+
+Root cause and fix.
+
+1   void * calloc ( size_t nmemb , size_t size ) {
+2       if ( nmemb != 0 && size > SIZE_MAX / nmemb ) return NULL ;
+3       size_t total = nmemb * size ;
+4       /* ... rest unchanged ... */
+5   }
+
+
+
+Summary. This case illustrates two complementary BMC-Agent mechanisms. First, the
+CEGAR refinement loop: the initial CBMC run finds a spurious loop-bound artifact; without
+refinement the pipeline either reports a false positive or misses the real bug entirely; spec
+refinement tightens the precondition, the CEGAR re-verification pass explores the arithmetic
+path, and the second run finds the genuine overflow. Second, Phase 1.5 flag selection: the LLM
+agent autonomously identifies calloc as requiring --unsigned-overflow-check (multiplication
+of two externally-supplied sizes) and enables it before the first BMC pass, allowing CBMC to
+detect the overflow directly in a single round. Both paths converge on the same CWE-190 root
+cause (absent nmemb * size overflow guard), and the finding is independently confirmed by a
+human-filed bug report (VibeOS issue #26).
+
+
+                                                   20
+A.4    Case Study 4 — stbtt buf get: Crafted-Font OOB Read
+Source. stbtt buf get in vendor/stb truetype.h reads n bytes from a stbtt buf by
+calling stbtt buf get8 in a loop. Each stbtt buf struct carries a data pointer, a cursor,
+and a size field. The bounds check in stbtt buf get8 is cursor < size:
+
+                          Listing 5: stbtt buf get8 (stb truetype.h).
+1   static stbtt_uint8 stbtt__buf_get8 ( stbtt__buf * b ) {
+2       if (b - > cursor >= b - > size ) return 0;
+3       return b - > data [b - > cursor ++];  /* OOB if size > real allocation */
+4   }
+
+     The size field is populated from values embedded in the CFF section of an OpenType font
+file. There is no check that size reflects the true allocation length of data.
+
+Phase 1 — Specification generation.            The spec agent inspects stbtt buf get and produces:
+    • Precondition: valid(b) && b->cursor + n ≤ b->size && valid range(b->data, 0, b->size)
+     — the buffer’s stated size must match the true allocation.
+
+    • Postcondition: the returned value equals the n-byte big-endian integer starting at b->data[b->cursor].
+The precondition explicitly requires b->size to be a sound upper bound on the backing allocation,
+an invariant the font parser never enforces.
+
+Phase 2 — BMC.           CBMC finds a counterexample violating the precondition:
+                      cursor = 8 388 607,       size = 1 073 741 824       (1 GiB)
+The check cursor < size passes, but no allocation of 1 GiB backs data. The subsequent
+b->data[cursor] access is a heap out-of-bounds read.
+
+Phase 3 Stage 1 — Feasibility check.             The call-graph scanner traces:
+
+           ttf get glyph → stbtt GetCodepointBitmap → stbtt GetGlyphShape
+           → stbtt GetGlyphShapeT2 → stbtt run charstring → stbtt buf get
+
+ttf get glyph (in kernel/ttf.c) is called on every character render. All font data comes from
+/fonts/Roboto/Roboto-Regular.ttf, loaded at boot. Classification: is real bug = True,
+system entry reached = True.
+
+Phase 3 Stage 3 — Dynamic validation. The dynamic validator compiles a GCC harness
+that constructs a stbtt buf with data = NULL, cursor = 8388607, size = 1073741824 and
+calls stbtt buf get. The harness produces SIGSEGV: the null data pointer dereference is
+the native equivalent of the OOB read. Tier: confirmed dynamic.
+
+Phase 3 Stage 4 — Realism check.              The realism agent rates the finding REALISTIC:
+      A crafted CFF font can set size to an arbitrarily large value while providing a much smaller
+      backing allocation. The bounds check cursor < size passes, but data[cursor] reads beyond
+      the real allocation. Since stb truetype is a font-file parser, external/untrusted input is the
+      normal operating context.
+
+Root cause and fix. The stbtt buf abstraction trusts the size field unconditionally. The
+fix requires stbtt cff index get and related index-construction sites to validate that the
+computed size does not exceed the outer buffer bounds before constructing a child buffer.
+
+                                                   21
+Summary. This case illustrates the attacker-controlled input path: a value read verbatim
+from an external file becomes the operand of a safety-critical bounds check. The LLM spec
+makes explicit that size must be sound; CBMC finds a witness immediately; dynamic validation
+confirms SIGSEGV.
+
+A.5     Case Study 5 — vfs lookup: Two Bugs, One Function
+Source. vfs lookup in kernel/vfs.c resolves a path string to a vfs node t. It normalises
+the input by splitting on / delimiters and rebuilding a canonical path:
+                   Listing 6: vfs lookup path normalisation (kernel/vfs.c).
+1    char normalized [ VFS_MAX_PATH ];      /* VFS_MAX_PATH = 256 */
+2    char * parts [32];                     /* fixed depth limit */
+3    int depth = 0;
+4
+5    char * rest = fullpath ;
+6    char * token ;
+7    if (* rest == ’/ ’) rest ++;
+8    while (( token = strtok_r ( rest , " / " , & rest ) ) != NULL ) {
+9        if ( strcmp ( token , " .. " ) == 0) { if ( depth > 0) depth - -; continue ; }
+10       parts [ depth ++] = token ;          /* no bounds check on depth */
+11   }
+12   for ( int i = 0; i < depth ; i ++) {
+13       strcat ( normalized , " / " ) ;
+14       strcat ( normalized , parts [ i ]) ;
+15   }
+
+     Two distinct vulnerabilities are present.
+
+Bug A — Stack buffer overflow via deep path. parts is declared with 32 entries. The
+loop body contains no check on depth before writing parts[depth++]. A path with 33 or more
+/-separated components (e.g., /a/b/c/. . . /gg) fits within the 256-byte VFS MAX PATH limit but
+overflows parts into adjacent stack memory, corrupting normalized, fullpath, or the return
+address.
+
+Bug B — strtok r misuse with non-ASCII input. The call pattern strtok r(rest,
+"/", &rest) reuses rest as both the input string and the save pointer on every iteration. The
+C standard requires the first argument to be NULL on calls after the first. Passing rest itself
+violates this contract. The counterexample exhibits path[0] = 0xAF (a non-ASCII byte): the
+tokeniser produces a token whose pointer does not point into fullpath, and the subsequent
+strcat(normalized, parts[i]) copies from an unexpected memory location.
+
+Phase 1 — Specification generation.              The spec agent generates:
+     • Precondition: null(path) || valid string(path).
+     • Postcondition: null(\result) || (valid(\result) && \result->type ∈ {VFS FILE,
+       VFS DIRECTORY}).
+Neither bug is ruled out by the precondition — a valid string can be 33 components deep, and
+strtok r misuse is an implementation defect, not a precondition violation. CBMC finds both
+through assertion checks generated for the callees strcat and strtok r.
+
+Phase 2 — BMC.         CBMC finds a counterexample violating vfs lookup.precondition instance.4:
+                       path[0] = 0xAF,     path[1] = 0,       cwd path = "/"
+The trace shows strtok r returning a token pointer that does not point into fullpath, after
+which strcat copies from unrelated stack memory.
+
+                                                   22
+Phase 3 Stage 1 — Feasibility check.               The call graph finds:
+                            kapi open → vfs open handle → vfs lookup
+kapi open is a system-entry point that accepts user-supplied path strings — a direct source of non-
+ASCII bytes or arbitrarily deep paths. Classification: is real bug = True, system entry reached
+= True.
+
+Phase 3 Stage 3 — Dynamic validation. The dynamic validator could not compile a
+standalone harness for vfs lookup because the function reads global state (cwd path, use fat32).
+The finding remains at the confirmed system entry tier.
+
+Phase 3 Stage 4 — Realism check.                The realism agent rates the finding REALISTIC:
+      Any application that calls kapi open with a non-ASCII filename or with a deeply nested path
+      (33+ components) triggers one of the two vulnerabilities. Both inputs are trivially constructible
+      from user space. No special privileges or race conditions are required.
+
+Root cause and fix. Bug A: add if (depth >= 32) break; (or better, make the limit
+configurable and return an error). Bug B: follow the standard strtok r contract — initialise a
+separate saveptr variable and pass NULL on subsequent calls.
+
+Summary. This case illustrates how a single CBMC run can surface multiple distinct vulner-
+abilities in one function. The stack overflow (Bug A) requires only a long path; the strtok r
+misuse (Bug B) requires a non-ASCII byte. Both are reachable from any process that opens a
+file, making them high-priority fixes.
+
+A.6    Additional Confirmed Findings
+The five case studies in §A.1–A.5 trace two findings from the run (net get mac and kapi file size)
+in full detail and three further bug patterns—CEGAR-refined allocator overflow, crafted-font
+out-of-bounds read, and a multi-bug VFS function—using representatives drawn from earlier
+pipeline configurations. All three patterns recur in the current run: the malloc overflow (Table 1
+#19) replays the allocator story; the sixteen stbtt * findings (#10–15, #21–28, #33–34) all
+involve crafted-font input; and vfs read (#30) instantiates the same family of system-entry
+stack-corruption seen in vfs lookup.
+    Below we sketch eleven additional confirmed findings spanning the remaining modules and tiers;
+full per-bug artefacts (spec, harness, counterexample, classification, dynamic verdict) are avail-
+able at https://github.com/agentic-prover/aprover/tree/main/findings/vibeos_full_
+check10.
+
+DMA — hal dma fb copy (confirmed dynamic, SIGABRT). A public DMA framebuffer-
+copy entry point takes (dst, src, width, height) with no validation of the size product.
+CBMC finds that width × height overflows when both are attacker-controlled (counterexample:
+width = 0x900000A0, height = 16, product wraps in 32-bit arithmetic), causing the subse-
+quent memcpy to silently corrupt unrelated memory. A GCC-compiled reproducer crashes with
+SIGABRT.
+
+HID input — mouse set pos (confirmed dynamic, SIGABRT). The kernel pointer-
+position update computes x ⋅ 32768 where x is a signed integer. CBMC’s --signed-overflow-check
+(enabled by the flag-selector for this function) finds the multiplication overflowing for any x > 65535.
+Although the symbolic counterexample uses an extreme fb width = UINT MAX, the overflow
+occurs in the multiplication before fb width is consumed, so the trigger condition is independent
+of the screen geometry.
+
+                                                     23
+Time — hal get time us (confirmed system entry). The microsecond-conversion HAL
+routine divides by cntfrq el0, the ARM generic-timer frequency register. On QEMU and some
+emulated hardware this register reads zero until set by firmware, triggering division by zero.
+CBMC finds the violation with no caller guard; reachable from boot.
+
+TTF — stbtt GetFontVMetrics (confirmed dynamic, SIGSEGV). The function reads
+vertical metrics at info->data + info->hhea + offset where info->hhea is the byte offset
+of the hhea table parsed out of the font file itself. CBMC finds an out-of-bounds dereference
+when hhea is set to a large value by a crafted font—an entire class of attacker-controlled-input
+faults that the upstream stb truetype library does not currently guard against.
+
+TTF — stbtt GetBakedQuad (confirmed dynamic, SIGSEGV). The character-quad
+lookup uses chardata[char index] with no upper bound on char index, which comes from
+caller-supplied character codes. For any glyph index outside the baked atlas range the resulting
+pointer addresses arbitrary memory, dereferenced as a struct. Confirmed SIGSEGV under the
+dynamic harness.
+
+USB HID — hal usb mouse poll (confirmed dynamic, SIGSEGV). The HAL polls the
+USB mouse and copies an HID report into a caller-supplied buffer via memcpy(report, ...)
+with no null guard on report. CBMC’s counterexample is immediate; the fault reproduces with
+SIGSEGV. As a public entry point, any driver invocation can trigger it.
+
+Memory — malloc (confirmed system entry). VibeOS ships its own kernel allocator.
+CBMC’s signed-overflow check finds that the size-class arithmetic inside malloc overflows for
+sufficiently large allocation requests, returning a chunk smaller than requested. This is the
+system-entry counterpart of the allocator-overflow family that Case Study 3 illustrates end-to-
+end.
+
+Font collection — stbtt GetNumberOfFonts internal (confirmed system entry). The
+collection-header parser dereferences the font buffer at offsets derived from the file with no
+length parameter and no upper bound, so a truncated or crafted font lets the dereference reach
+unmapped memory. No dynamic reproducer was built (reachable only by loading a crafted font
+through stbtt GetNumberOfFonts, a multi-step setup), but the static call chain to a system
+entry is confirmed.
+
+VFS — vfs read (confirmed system entry). The read syscall implementation does not
+validate fd or the user-supplied output buffer pointer before passing them down; CBMC finds a
+counterexample with fd = 0 and buf = NULL, reachable from kapi read. Although the symbolic
+counterexample uses extreme size/offset values, realistic exploitation needs only moderate
+values targeting an open file.
+
+ELF loader — elf process relocations (confirmed bmc). The relocation-processing
+loop iterates rela count times where rela count is read directly from the ELF section header.
+At the configured unwinding bound k = 4, CBMC reports an unwind-bound violation: a crafted
+ELF can declare an arbitrarily large relocation count, producing an effectively unbounded loop
+during kernel-module loading. Reachability to a system entry has not yet been traced, so the
+finding sits in confirmed bmc.
+
+
+
+
+                                              24
+WSOD renderer — wsod draw line (confirmed bmc). The white-screen-of-death debug
+renderer computes a loop bound of fb width - 40. Because fb width is an unsigned 32-bit integer,
+any fb width < 40 (which arises during early framebuffer initialisation) wraps to a near-232 loop
+count, hanging the kernel inside an IRQ handler.
+
+Font encoding — stbtt CompareUTF8toUTF16 bigendian prefix (confirmed bmc). The
+big-endian UTF-16 prefix comparator decrements len2 by 2 per iteration with no parity check.
+An odd attacker-controlled len2 causes the signed comparison len2 > 0 to wrap around and
+the loop to run forever—a denial-of-service vector reachable via the font name-table strings.
+
+B    Real-World OSS Evaluation
+
+To complement the VibeOS evaluation we sweep selected functions from mature, heavily-fuzzed
+open-source C libraries drawn from the OpenSSF Internet Bug Bounty corpus: jq 1.8.1, OpenSSL
+master, libcurl, libxml2 2.16.0, and protobuf upb. These targets probe two questions that VibeOS
+alone cannot: can the agent confirm real vulnerabilities in code that has already received extensive
+OSS-Fuzz coverage, and do its zero-finding sweeps constitute positive verification evidence on
+hardened parser surfaces.
+
+Setup. Same CBMC and LLM configuration as the VibeOS run, plus four real-world-OSS fea-
+tures: (a) --real-libc — the harness #includes the source .c file directly so CBMC’s frontend
+handles the glibc and project-internal type machinery, rather than the default Python-side cc -E
+expand-then-strip pipeline; (b) --strict-dsl — forces Phase 1 pre/post into single C boolean ex-
+pressions, preventing prose-mixed clauses from silently translating to inline comments and produc-
+ing vacuous verifications; (c) --enable-realism-check and --enable-dynamic-validation;
+(d) per-function --object-bits auto-scaling for state-heavy parser files. The feedback loop is
+enabled so witness-pattern false positives are absorbed into permanent remediations during the
+sweep itself.
+
+Confirmed real bugs. Across all sweeps BMC-Agent confirmed two real bugs, both in jq.
+Neither finding duplicates a published jq CVE or GHSA.
+
+Clean-verify sweeps as positive evidence. A complementary outcome of the OSS sweeps
+is the number of functions that completed the entry-spec, BMC, classification, and realism
+phases without surfacing any realistic finding. On heavily-defended parser code, these clean
+verifications are positive paper-track evidence: the agent’s spec is tight enough to drive CBMC
+to a decisive result, and the realism stage filters out the residual artifacts. Highlights:
+
+    • OpenSSL crypto/asn1/asn1 lib.c: 15 of 24 leaf functions verified clean, including
+      every wire-format DER decoder (asn1 get length, ASN1 get object, ASN1 object size,
+      ASN1 put *, asn1 check infinite end). The LONG MAX guard, sizeof(long) cap, and
+      INT MAX>>7L shift guards in OpenSSL’s DER decoders all hold up to unwind bound 10.
+      Zero real bugs — consistent with OpenSSL ASN.1 being a long-standing OSS-Fuzz target.
+
+    • libxml2 pattern.c: all 54 functions verified (XPath pattern compiler).
+
+    • libxml2 xpointer.c: 9 of 9 verified; the feedback loop auto-discovered the project
+      invariant xmlMalloc != NULL && xmlRealloc != NULL && xmlFree != NULL during the
+      sweep, converging the specs without manual intervention.
+
+    • libxml2 schematron.c: 37 of 37 verified, with five additional project invariants auto-
+      promoted by the feedback loop after ≥ 3 functions independently learned them.
+
+
+                                                25
+    • libxml2 encoding.c: 127 raw CBMC counterexamples reduced to zero confirmed bugs
+      after the full pipeline. Twenty-two functions reached the realism check (15 unrealistic, 6
+      uncertain, 1 realistic); the single realistic verdict was a model artifact correctly recovered
+      by the path-divergent-unwind detector (§3.5) — the cited property fires on a symbolic path
+      the exhibited witness does not traverse.
+
+    • curl lib/curlx/strparse.c: 8 of 20 leaf parsers verified clean (curlx str number,
+      curlx str hex, curlx str quotedword, etc.).
+
+    • protobuf upb wire reader: the pipeline runs end-to-end on the three leaf decoders; no
+      real bugs (consistent with upb’s OSS-Fuzz coverage).
+
+False-positive triage. A small candidate set of LLM-rated realistic findings did not survive
+manual post-triage. The most representative is a libxml2 xmlBufGrowInternal candidate: BMC-
+Agent’s dynamic harness crashed (ASan SIGSEGV at a pointer subtraction), but the triggering
+struct state (content=NULL, contentIO=non-NULL, alloc=IO) turned out to be unreachable
+through any in-tree caller or public API — every libxml2 site that nulls content also nulls
+contentIO, so the inconsistent state can only arise via direct struct mutation outside libxml2’s
+API contract. Each such class observed during the sweeps was absorbed into a permanent agent
+remediation via the feedback-loop: witness-pattern auto-rejection in the realism stage (library-init
+globals NULL, path-divergent unwind, tagged-union stub disconnect), full source-file context in
+the realism prompt, allocator-family stub return contracts, library-init function-pointer overrides,
+and selective inlining of small file-local pure callees in place of LLM-generated stubs.
+
+C    AI-Generated Rust: claudes-c-compiler
+
+To probe whether BMC-Agent generalises beyond C and to characterise the defect profile of
+LLM-generated code, we apply the agent to anthropics/claudes-c-compiler (CCC), a 50 000-
+line C compiler written entirely by Claude in Rust. CCC compiles real C sources, accepts and
+links ELF object files, and emits assembly for four targets (x86 64, i686, ARM, RISC-V). It is
+exactly the kind of production-shaped AI-generated codebase a verifier should be able to audit.
+
+Setup and pipeline extensions. The CCC sweep uses BMC-Agent’s Rust backend with Kani
+as the underlying BMC engine (in place of CBMC for C). Five capabilities new to this campaign
+are required for real-world Rust crates: (i) transitive callee closure during sibling-strip — without
+walking the call graph, mutually-recursive descent parsers (eval add → eval mul → eval unary)
+lose indirectly-reached helpers to E0425; (ii) empty-Vec fallback for non-Arbitrary slice elements
+— the LLM-generated harness path [T; N] = kani::any() fails when T is a user-defined enum
+(e.g. ExprToken with &’static str variants); the fallback materialises an empty Vec<T> so the
+function still gets a verdict; (iii) Phase 1 functional-correctness specs alongside the defensive
+panic-class specs, encoding what a correct implementation should compute, not merely the
+absence of panics; (iv) old(EXPR) pre-state snapshot substitution in the harness generator, lifting
+verification logic’s pre-state operator into explicit let pre N = (EXPR); bindings before the
+call so state-mutating functions can be specified; (v) three-way bug classification — real bug /
+latent / spurious — gated on threat model: under --threat-model security, a structural
+panic reachable through a pub fn is a real bug because attacker-controlled inputs cross the API
+boundary.
+
+Confirmed real bugs. BMC-Agent finds 25 real bugs in CCC under --threat-model
+security. The bug surface is concentrated in the boundary between externally-controlled bytes
+and CCC’s internal representation: ELF readers, ELF writers, the C preprocessor, DWARF
+unwind parsing.
+
+
+                                                 26
+   • src/backend/elf/io.rs: 11 bugs — slice OOB on data[offset+N] byte readers (read u16,
+     read u32, read u64, read i32, read i64), usize overflow in the if off + N <= buf.len()
+     bounds checks of byte writers (w16, w32, w64), and structural panics in the phdr writers
+     (wphdr, write phdr64, write bytes).
+
+   • src/frontend/preprocessor/utils.rs: 4 bugs — slice OOB and usize overflow in byte-
+     index helpers (bytes to str, skip literal bytes, copy literal bytes raw, copy litera
+     l bytes to string).
+
+   • src/backend/linker common/eh frame.rs: 4 bugs — duplicate-pattern LE byte read-
+     ers/writers (read u32 le, read i32 le, read u64 le, write i32 le). Reachable from
+     attacker-controlled .eh frame sections in input .o files.
+
+   • src/backend/linker common/write.rs: 3 bugs — u64 overflow in align up 64’s val +
+     align - 1; alloc::raw vec::capacity overflow in pad to’s Vec::resize(target, 0)
+     on extreme target; usize overflow in write elf64 phdr at’s offset arithmetic.
+
+   • src/common/encoding.rs: 1 bug — slice OOB on decode pua byte’s input[pos].
+
+   • src/ir/analysis.rs: 1 bug — the Cooper-Harvey-Kennedy LCA walker intersect walks
+     the dominator tree via finger1 = idom[finger1] but only guards idom[finger1] !=
+     usize::MAX for the entry values, not the iterates. A malformed IR with idom[n] ==
+     usize::MAX on a non-root node panics on the next step’s idom[usize::MAX].
+
+   • src/common/types.rs: 1 functional-correctness bug in align up — the function uses
+     checked add to prevent its own panic, but on overflow it silently returns offset un-
+     changed, which may not be aligned. The defensive spec misses this entirely (no panic);
+     Phase 1’s functional spec asserts result % align == 0 and Kani finds a CEx (e.g.
+     align up(usize::MAX, 8) returns usize::MAX, which %8 = 7 ≠ 0). This is the first
+     Phase 1 real find in the CCC sweep and the only bug in the 25 that the defensive workflow
+     would miss.
+
+Pattern across all 25. Every one of the 24 defensive findings sits on the public-API boundary:
+a pub fn helper(bytes: &[u8], offset: usize, ...) that indexes bytes[offset+N] or
+arithmetics on offset + N with no bounds or overflow guard. Every existing in-tree caller
+maintains the implicit bounds invariant through surrounding parser-loop or header-validation
+logic, so no current code path triggers a crash. The functions are nonetheless attacker-callable
+through the public API: a crafted .c source file drives the preprocessor helpers; a crafted .o
+object file drives the ELF and DWARF readers; the linker stage crashes instead of returning a
+clean error.
+    This is the canonical unenforced contract class. The precondition that would close each panic
+(offset + N ≤ data.len(), offset + align ≤ usize::MAX, etc.) is exactly the invariant
+every caller maintains independently. The match between BMC-Agent’s inferred safety condition
+and the caller-side invariants is independent validation that the spec is right rather than fabricated:
+random or wrong specs would not appear in caller code.
+
+Bounded functional equivalence. Beyond panic detection, Phase 1 functional specs let
+BMC-Agent establish positive correctness on several functions within the BMC unwind bound:
+
+   • linker common/hash.rs::gnu hash: verified equivalent to the fold expression name.iter().
+     fold(5381u32, |h, &b| h.wrapping mul(33)
+     .wrapping add(b as u32)) — the djb2-style ELF GNU hash — under arbitrary input
+     bytes up to the slice bound.
+
+
+
+                                                  27
+   • linker common/hash.rs::sysv hash: verified equivalent to the SysV ELF hash fold (shift,
+     add, mask, conditional XOR).
+
+   • linker common/write.rs::align up 64: under the inferred precondition (align a power
+     of two and val + align does not overflow), Phase 1’s postcondition (result ≥ val) &&
+     (result - val < align) && (result % align == 0) verifies cleanly.
+
+   • linker common/write.rs::write elf64 phdr, write elf64 shdr: verified to emit the
+     56-byte / 64-byte ELF64 program/section header byte layouts in little-endian.
+
+These are bounded functional-equivalence results rather than panic-freeness assertions, which is
+the verifier’s most powerful mode and the one a panic-only defensive workflow could not produce.
+
+Limits: spec fabrication on complex encodings. Phase 1 over-reports on functions where
+the LLM cannot reliably write a correct reference computation. On common/long double.rs
+(IEEE 80-bit / 128-bit floating-point emulation, 35 pub fns), the LLM-generated functional specs
+disagreed with the implementation’s byte-layout convention (e.g. x87 80-bit infinity in a 16-byte
+slot), producing four spec-encoding-mismatch false positives in the unfiltered run. Two filters
+make this manageable: (a) a spec-evaluation-overflow filter catches CEx where the spec arithmetic
+itself overflows on Kani’s extreme inputs (usize::MAX etc.), classifying those as spurious rather
+than real bug; (b) the LLM realism check (§3.5) reliably filters spec-encoding-mismatch false
+positives — all four long double candidates were verdicted unrealistic with high confidence
+when --enable-realism-check was active, reducing the post-filter count to zero on that file.
+Phase 1 thus needs to be paired with the realism check on domain-heavy functions; on pure
+arithmetic and algorithmic helpers the filter is rarely required.
+
+Latent classification under non-security threat models. Under --threat-model safety
+or functional, all 24 defensive CCC findings reclassify to latent: no current in-tree call site
+produces the trigger state, so they are hardening tasks rather than active crashes. The align up
+functional bug remains real bug under every threat model because its implementation violates
+its own implicit contract regardless of caller, not because of a public-API ingress.
+
+What this tells us about AI-generated Rust. Across 50 000 lines of LLM-generated Rust
+spanning a complete C compiler, the agent finds zero memory-safety bugs (Rust’s type system
+precludes that class) and zero observed logic bugs in the compiler proper (parser, semantic
+analysis, codegen, register allocation, IR passes all sweep clean within the agent’s reach). The
+25 bugs all fit one anti-pattern: the LLM consistently writes byte-helper functions on the public
+API without precondition checks, while writing the callers correctly to maintain the invariants
+those helpers depend on. The codebase works end-to-end on well-formed input; it fails on
+adversarial or crafted input passed to the same public API. This profile is distinct from typical
+human-written compiler defects (logic errors, miscompilations) and reflects the LLM’s tendency
+to encode contracts implicitly at call sites rather than enforce them at function boundaries.
+
+
+
+
+                                               28
+

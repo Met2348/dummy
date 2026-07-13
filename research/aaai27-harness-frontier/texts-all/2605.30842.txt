@@ -1,0 +1,986 @@
+                                               C O M EM: Context Management with A Decoupled Long-Context Model
+
+
+                                            Yuwei Zhang 1 Chengyu Dong 2 Shuowei Jin 2 Changlong Yu 2 Hejie Cui 2 Hongye Jin 2 Xinyang Zhang 2
+                                              Hamed Bonab 2 Colin Lockard 2 Jianshu Chen 2 Zhenyu Shi 2 Jingbo Shang 1 Xian Li 2 Bing Yin 2
+
+
+                                                                    Abstract                                        tackling complex, multi-step problems in domains such as
+                                               Context management enables agentic models to                         software engineering (Jimenez et al., 2024), scientific dis-
+                                               solve long-horizon tasks through iterative summa-                    covery (Lu et al., 2024), and open-ended exploration (He
+
+
+
+
+arXiv:2605.30842v1 [cs.LG] 29 May 2026
+                                               rization of previous interaction histories. How-                     et al., 2024; Team et al., 2025). Unlike standard question-
+                                               ever, this process typically incurs substantial de-                  answering tasks, the success on these applications depends
+                                               coding overhead for the extra summarization to-                      not only on the immediate instruction but on the agent’s
+                                               kens, which significantly affect the end-to-end                      ability to maintain a coherent understanding of its entire
+                                               response latency at deployment. In this paper, we                    interaction history. For instance, in repository-level code
+                                               introduce C O M EM, a novel framework that decou-                    generation, an agent must recall decisions made thousands
+                                               ples memory management from the primary agent                        of steps prior to generate valid subsequent actions. Conse-
+                                               workflow, enabling these processes to execute in                     quently, the ability to process and reason over extremely
+                                               parallel. We propose a k-step-off asynchronous                       long contexts has become a non-negotiable requirement for
+                                               pipeline that overlaps the memory model’s sum-                       high-performing agentic systems (Zhou et al., 2025; Wu
+                                               marization with the agent’s inference, effectively                   et al., 2025b; Lu et al., 2025; Sun et al., 2025; Yu et al.,
+                                               masking the latency of context processing. To en-                    2025).
+                                               sure robustness under this asynchronous setting,                     Despite the increasing attention to extend the effective con-
+                                               we introduce a reward-driven training strategy                       text window, there has been surprisingly little attention paid
+                                               that aligns the memory model to capture suffi-                       to the severe computational costs introduced by long-context
+                                               cient statistics for the agent’s decision-making.                    processing during agentic inference. While modern LLMs
+                                               Theoretical analysis confirms that C O M EM offers                   can natively accept context windows spanning millions of
+                                               a superior efficiency-effectiveness trade-off com-                   tokens, utilizing them during online agent deployment is of-
+                                               pared to coupled architectures. Our extensive ex-                    ten prohibitively expensive (Yuan et al., 2024). The primary
+                                               perimental results on SWE-Bench-Verified show                        challenge lies in the inference latency of the decoding stage.
+                                               that C O M EM provides 1.4x latency improvements                     As the interaction history grows, the KV cache footprint
+                                               upon vanilla long-context solutions while preserv-                   expands linearly, and the attention computation cost scales,
+                                               ing most of the performance. Furthermore, we                         saturating the High Bandwidth Memory (HBM) of modern
+                                               demonstrate that these latency gains scale favor-                    GPUs. Unlike the prefilling phase, which is compute-bound
+                                               ably with increased system throughput, offering                      and parallelizable, the auto-regressive decoding phase is
+                                               a modular path forward for the independent op-                       memory-bound, since fetching the entire KV cache for ev-
+                                               timization of agent reasoning and memory com-                        ery generated token results in high latency that degrades
+                                               pression.                                                            the user experience and limits the throughput of real-time
+                                                                                                                    systems (Tang et al., 2024).
+                                         1. Introduction                                                            To address these computational challenges, previous solu-
+                                                                                                                    tions have largely pursued two directions: context reduction
+                                         The capabilities of Large Language Model (LLM) agents                      and system-level optimization. Context reduction strategies
+                                         have expanded significantly, moving beyond simple con-                     attempt to limit the number of tokens the model must attend
+                                         versational assistants to autonomous systems capable of                    to. Sliding-window attention (Fu et al., 2025) restricts the
+                                           *
+                                             Equal contribution 1 Halıcıoğlu Data Science Institute, Univer-       agent to a fixed local context, inherently sacrificing the abil-
+                                         sity of California, San Diego 2 Amazon. Correspondence to: Yuwei           ity to recall distant dependencies, such as the initial user
+                                         Zhang <yuz163@ucsd.edu>.                                                   goal or a bug identified thousands of steps prior. Retrieval-
+                                                                                                                    Augmented Generation (RAG) (Wu et al., 2025a; Shi et al.,
+                                         Proceedings of the 43 rd International Conference on Machine               2026) alleviates this by fetching relevant snippets from the
+                                         Learning, Seoul, South Korea. PMLR 306, 2026. Copyright 2026
+                                         by the author(s).                                                          history. However, RAG relies heavily on semantic similarity,
+
+                                                                                                                1
+                            C O M EM : Context Management with A Decoupled Long-Context Model
+
+which often fails to capture the high-level state or procedural          • Extensive experiments on SWE-Bench-Verified
+trajectory of an agent, leading to fragmented reasoning.                   demonstrate that C O M EM significantly reduces
+                                                                           latency while maintaining competitive perfor-
+On the other hand, system-level optimizations aim to
+                                                                           mance      against  state-of-the-art long-context
+make processing the full context more efficient without
+                                                                           baselines.      Code is available at:    https:
+reducing the number of tokens. Modern inference en-
+                                                                           //github.com/horizon-llm/CoMem.git.
+gines like vLLM (Kwon et al., 2023) have revolution-
+ized memory management through PagedAttention, signifi-
+cantly reducing fragmentation. Similarly, Sparse Attention
+                                                                      2. Preliminaries
+mechanisms (Xiao et al., 2024) and KV Cache Quantiza-
+tion (Hooper et al., 2024) reduce the compute and memory              2.1. Standard Agent
+bandwidth requirements by sparsifying interactions or low-
+ering numerical precision. While these methods provide                Standard agent interaction is a Partially Observable Markov
+substantial throughput improvements, they do not solve the            Decision Process (POMDP), where each process starts from
+the redundancy of re-encoding or re-attending to a massive,           an initial observation o1 that usually contains a problem
+largely static interaction history for every single decoding          statement, and then a multi-turn interaction history of length
+step. As a result, even highly optimized engines eventually           T is generated as
+hit a latency wall as the interaction trace grows indefinitely.                       τ = (o1 , a1 , o2 , a2 , . . . , oT )
+To bridge this gap, we introduce C O M EM, a framework
+                                                                      where ai usually contains a reasoning block and a tool call,
+that decouples the distinct responsibilities of memory man-
+                                                                      and oi usually represents an observation returned from the
+agement and agentic reasoning. Unlike prior approaches
+                                                                      environment. The standard Large Language Model (LLM)
+that force a single large model to handle both history com-
+                                                                      agent takes the entire interaction history τ as input at each
+pression and policy generation, C O M EM offloads the heavy
+                                                                      step to infer the internal belief state of the environment,
+lifting of long-context processing to a dedicated, lightweight
+                                                                      and generates the next action ai . This results in a linearly
+summarization model. This architectural separation allows
+                                                                      scaling context length during the interaction that pressures
+us to propose a novel k-step-off asynchronous pipeline,
+                                                                      the model’s inference efficiency and performance.
+where the memory model continuously compresses history
+in the background, freeing the main agent to decode with a
+significantly reduced context window. To ensure this com-             2.2. LLM Inference
+pressed state effectively guides the agent, we introduce a            Modern LLMs usually employ a two-stage inference pro-
+reward-driven alignment strategy that trains the memory               cess: Prefill Stage and Decode Stage. The Prefill Stage
+model to capture the ”sufficient statistics” required for opti-       serves as the initial step where the key-value cache (KV
+mal decision-making. By shifting the computational burden             cache) for the prompt (also called prefix) sequences are built
+from the critical path of decoding to a parallelizable back-          for each KV head in the Transformer architecture1 . Given
+ground process, C O M EM achieves the best of both worlds:            hidden states X ∈ Rl×dmodel , each attention layer computes
+the global reasoning capability of long-context models and            Q = XWq ∈ Rl×hq ×dh , K = XWk ∈ Rl×hkv ×dh , and
+the low-latency inference of short-context systems.                   V = XWv ∈ Rl×hkv ×dh after reshaping, where hq is the
+Our contributions are summarized as follows:                          number of query heads, hkv is the number of KV heads,
+                                                                      and dh is the head dimension. After prefilling, all the key-
+   • We propose C O M EM, a framework that separates mem-             value pairs are preserved in the memory so that they can
+     ory management from reasoning, enabling the use of               be reused during the decoding of each token. This will
+     specialized, lightweight models for efficient history            result in two vectors Kcache = [K1 ; . . . ; Kl ] ∈ Rl×hkv ×dh
+     compression.                                                     and Vcache = [V1 ; . . . ; Vl ] ∈ Rl×hkv ×dh . The GPU High
+                                                                      Bandwidth Memory (HBM) typically needs to spare a sig-
+   • Asynchronous Inference: We design a k-step-off                   nificant amount of spaces to store these KV cache. For
+     pipeline that overlaps memory summarization with                 instance, for Qwen/Qwen3-32B in FP16 precision, it will
+     agent execution, masking the latency of context pro-             take up 16 GB to save a sequence of 64K tokens. In con-
+     cessing and reducing the decoding overhead by up to              trast, Qwen/Qwen3-4B requires roughly half of the space
+     1.4×.                                                            to save these amount of KV cache2 . The Prefill Stage is
+   • We introduce a novel training methodology that aligns            usually compute-bound, since it involves matrix-matrix mul-
+     the memory model using a functional equivalence re-                 1
+                                                                           Note that here we discriminate KV head from attention head
+     ward, ensuring the compressed summary recovers the               because of Grouped Query Attention (GQA)
+     full-context agent’s policy without expensive online                2
+                                                                           https://lmcache.ai/kv_cache_calculator.
+     interaction.                                                     html provides calculations for some other models
+
+                                                                  2
+                              C O M EM : Context Management with A Decoupled Long-Context Model
+
+        (a) Standard Agent Inference
+                                                                                   HBM Bandwidth
+                                                                                     Bottleneck
+                                                          Large Model
+             Full Trajectory                                                                                        Action
+                                                     Full history decoding à
+                                                      large KV cache reads
+
+        (b) CoMem (Ours)
+
+                                               Smaller Model
+            Full Trajectory                                                                        Lower KV
+                                              RL-trained memory                Compressed Text    cache traffic
+
+                                               k-step-off async                                                             Action
+             Recent Steps                                                        Large Model
+                                                                           Short context decoding à
+                                                                            reduced KV cache reads
+
+
+Figure 1. C O M EM framework: a decoupled agent framework that offloads long-context compression to an asynchronous, lightweight
+memory model, significantly reducing inference latency without compromising reasoning performance.
+
+tiplications that saturates the GPU’s arithmetic units. We             ent objective over a batch of groups is
+use Time to First Token (TTFT) to calculate the time spent                                "                                     #
+                                                                                                K
+from waiting the first token to emit to represent the prefilling                             1 X (k) X               (k)  (k) 
+latency.                                                                J(θ) = Ex, G(x)            Ã        log πθ at | st       ,
+                                                                                            K            t
+                                                                                                 k=1
+Once the prompt is processed, the model enters the De-
+code Stage. For each step t, the model processes the cur-              where the inner sum runs over all decision tokens in the
+                                                      (t)              trajectory. In practice, we use a PPO-style clipped surrogate
+rent prefix and concatenates a new KV pair: Kcache =                                                   (k)
+                                                                                                                      (k)
+                                                                                                                 πθ (at |st )
+                                                                                                                             (k)
+   (t−1)           (t)       (t−1)
+[Kcache ; K(t) ], Vcache = [Vcache ; V(t) ]. And at the same           to stabilize training. Let rt         =           (k) (k)   denote the
+                                                                                                                 πθold (at |st )
+time emits the output token. Different from Prefill Stage,             likelihood ratio; the GRPO loss is
+Decode Stage is memory-bound since at each decoding step,                                       "            
+the GPU spends more time waiting for the KV cache to ar-                                          1 X           (k)
+                                                                               LGRPO (θ) = −E             min rt Ã(k) ,
+rive from HBM. Consequently, the decoding speed is usually                                        K
+                                                                                                      k,t
+bottlenecked by the memory bandwidth. When the HBM                                                                      #                (1)
+is saturated, part of the KV cache will be either emitted or                                      (k)              (k)
+                                                                                            clip rt , 1 − ϵ, 1 + ϵ Ã
+offloaded to CPU (Jin et al., 2025). CPU offload is often a
+better strategy which results in linear prefilling costs com-                                                  
+                                                                                            + β E DKL πθ ∥ πref
+pared to the quadratic compute in long-context prefilling.
+Typically, we measure decoding efficiency through Time per             where ϵ controls the clipping range, β weights a KL penalty
+Output Token (TPOT), that tracks the average generation                to a reference policy πref , and the expectation is taken over
+speed per token, excluding the initial prefilling costs.               prompts, groups, and time steps.
+
+2.3. Group Relative Policy Optimization (GRPO)
+                                                                       3. Design of C O M EM
+In Group Relative Policy Optimization (GRPO) (Shao
+et al., 2024), for each prompt x, we sample a group of                 We design C O M EM to optimize the latency during high-
+K trajectories G(x) = {τ (1) , . . . , τ (K) } where each tra-         throughput agentic inference. By decoupling the long-
+jectory τ (k) is generated by the policy πθ and receives a             context processing from agentic process and then overlap-
+trajectory-level scalar return R(τ (k) ). GRPO constructs              ping them via k-step-off generation, our method effectively
+a relative advantage within each group by subtracting a                alleviates the memory-bound bottlenecks and improves the
+group-wise baseline from the individual return. Concretely,            end-to-end performance while keeping most of the accuracy.
+we define Ã(k) = R(τ (k) ) − b(G(x)) where b(G(x))                    In the following sections, we first analyze the decoding
+is a baseline that                                                     latency bottleneck in agentic inference and show that KV
+              1
+                PK depends (j)
+                                only on the group statistics:
+                                                                       cache loading dominates under high-throughput settings
+b(G(x)) = K        j=1 R(τ     ). The resulting policy gradi-
+                                                                       (§3.1). Next, we present the key insights of our proposed
+                                                                       framework C O M EM which includes a novel k-step-off in-
+                                                                       ference strategy (§3.2), and a new RL training pipeline that
+
+                                                                   3
+                                                     C O M EM : Context Management with A Decoupled Long-Context Model
+
+                 140         DeepSWE (batch=1)         Qwen3-4B (batch=1)                    ronment execution constitutes a negligible fraction. Second,
+                             DeepSWE (batch=16)        Qwen3-4B (batch=16)
+                 120         DeepSWE (batch=64)        Qwen3-4B (batch=64)                   the LLM execution time exhibits a non-monotonic trend,
+                                                                                             increasing progressively from the initial steps up to approx-
+                 100
+                                                                                             imately step 20, after which it begins to decrease toward
+
+Mean TPOT (ms)
+                  80                                                                         the final steps. We attribute this non-monotonic behavior to
+                  60                                                                         the evolving batch-size dynamics during inference. In the
+                                                                                             early stages, the large batch size renders the decoding pro-
+                  40
+                                                                                             cess memory-bound, leading to increased latency as context
+                  20                                                                         lengths grow. As the generation progresses and individual
+                   0                                                                         requests reach completion, the effective batch size dimin-
+                       211             212           213            214      215   216
+                                                  Context Length (tokens)                    ishes, thereby alleviating the memory bandwidth bottleneck
+                                                                                             and reducing per-step inference latency. To disentangle the
+Figure 2. TPOT for two models on various context lengths and
+batch sizes. DeepSWE is a dense model with 32B parameters.                                   effect of prompt length from that of batch-size variation, we
+                                                                                             further present the execution time per completion token as
+                                                                                             a function of prompt length in the right panel of Figure 3
+encourages the model to capture sufficient statistics (§3.4).                                (orange line). The results demonstrate that decoding la-
+Finally, we show the theoretical analysis on the determina-                                  tency per token increases monotonically with prompt length,
+tion of a proper summary length (§3.3).                                                      thereby corroborating the hypothesis that longer contexts
+                                                                                             incur proportionally greater decoding overhead.
+3.1. Analysis of Agent Inference
+In agentic inference, since at each step, only the current                                   3.2. C O M EM Framework
+observations are prefilled, the total time is typically domi-                                Through the preceding analysis, we demonstrate that in-
+nated by the decoding stage, which is often memory-bound                                     ference latency is primarily bottlenecked by the decoding
+because of the loading of KV cache. Thus, we study the                                       stage. While most agentic models are large reasoning mod-
+decoding speed in this section in both synthetic long-context                                els with substantial decoding overhead, there exist several
+and standard agent inference scenarios.                                                      lightweight long-context models capable of offloading the
+Long-context Scenario. Real-time agentic inference often                                     burden of long-context processing from the decoding phase.
+involves additional overheads from external processes such                                   In this section, we introduce C O M EM (Figure 1), that decou-
+as I/O, as well as varying batch sizes and token lengths                                     ples memory management from the main agent workflow
+during rollout. To isolate the relationship between context                                  by employing a dedicated smaller memory model that com-
+length and decoding time, we first conduct a profiling analy-                                presses prior interactions into a concise representation for
+sis on a synthetic long-context scenario in which inputs and                                 the agent. This design reduces latency and memory foot-
+outputs are random data with fixed lengths and a constant                                    print since fewer parameters are involved, while effectively
+batch size. As shown in Figure 2, when the batch size is                                     maintaining a long-context processing capability. Specifi-
+small (batch=1), TPOT does not scale significantly with                                      cally, (1) memory model (f ) is a native long-context model
+context length, because the time spent loading the KV cache                                  with a lightweight decoding mechanism (we choose a model
+is negligible compared with other overheads such as loading                                  with smaller parameter count) and is designed to capture
+model weights. For batch=16, at shorter contexts (< 213 ),                                   sufficient statistics from long-term history while (2) agent
+the KV cache remains small enough that GPU memory                                            model (π) is a more capable model (usually with larger pa-
+bandwidth is not saturated, and TPOT is still dominated by                                   rameter counts) that proposes policies based on the outputs
+fixed overheads. Beyond 213 tokens, however, the KV cache                                    from f and the short-term memory.
+becomes large enough that each additional token incurs a                                     Formally, the memory model f maps the long-term history
+linear increase in latency. For large batch sizes (batch=64),                                to a compressed state representation st :
+the GPU memory bandwidth is fully saturated even at short
+contexts, so TPOT scales linearly throughout.
+                                                                                                                   st = f (τ<t ; θf )                  (2)
+Agentic Scenario. To further investigate how context-
+length-induced slow-down manifests during agentic infer-
+ence, we measure the per-step execution time and its con-                                    where |θf | ≪ |θπ |, ensuring that the computational burden
+stituent components, averaged across multiple trajectories                                   of long-context encoding is handled by a smaller, more effi-
+generated on SWE-Bench-Verified. The results are pre-                                        cient model. Moreover, the constraint |st | < |τt | guarantees
+sented in the left panel of Figure 3. We make two key                                        that the input length for the agent is significantly reduced,
+observations. First, the total wall-clock time at each step is                               resulting in lower decoding latency compared to standard
+predominantly attributed to LLM execution, whereas envi-                                     full-context inference. Then the agent model proposes pol-
+
+                                                                                         4
+                                              C O M EM : Context Management with A Decoupled Long-Context Model
+
+                 200                                                                                        Total Time
+                                                                                   120                      LLM Execution Time                                       0.12
+                 175                                                                                        Environment Execution Time
+                 150                                                               100                      Summary Execution Time                                   0.10
+
+
+
+
+                                                                                                                                          Time per Token (seconds)
+                                                                                                                                                                                                       CoMem (LLM)
+                 125                                                                80
+
+Time (seconds)                                                    Time (seconds)
+                                                                                                                                                                                                       Full-Context Deepswe (LLM)
+                                                                                                                                                                     0.08                              CoMem (Summ)
+                 100                                                                60                                                                                                                 CoMem LLM (n)
+                                                                                                                                                                     0.06                              Full-Context Deepswe LLM (n)
+                  75                                                                                                                                                                                   CoMem Summ (n)
+                                                                                    40
+                  50                 Total Time                                                                                                                      0.04
+                  25                 LLM Execution Time                             20
+                                     Environment Execution Time                                                                                                      0.02
+                   0                                                                 0
+                       0     10     20         30           40                           0   10   20    30      40      50       60                                         0    5000   10000      15000     20000     25000      30000
+                                     Step                                                                Step                                                                           Prompt Token Length (binned)
+
+Figure 3. Profiling results for agentic inference scenario. Left is the execution time for Full-Context baseline. Middle is the execution time
+for C O M EM. Right is the time per completion token results.
+
+ icy based on the compressed summary.                                                                       Algorithm 1 k-step-off Pipeline
+                                                                                                            Require: Agent Model π, Memory Model f , Retain Turns k
+                                    at ∼ π(a|st , Ct ; θπ )                                       (3)        1: Initialize: s ← ∅, t ← 1, Pmem ← None
+                                                                                                             2: while not finished do
+                                                                                                             3: {Synchronization (every k steps)}
+ A naı̈ve implementation of the workflow described above                                                     4: if Pmem is complete then
+ introduces a sequential bottleneck, as the agent model must                                                 5:      s ← result(Pmem ); invalidate KV cache
+                                                                                                             6:      Pmem ← None
+ idle until the memory update concludes. Next, we intro-                                                     7: end if
+ duce a novel pipeline to remedy this extra overhead via                                                     8: {Agent Inference}
+ overlapping the generation of two models.                                                                   9: if KV cache valid then
+                                                                                                            10:      Prefill new tokens only: P π (ot ) {Cached}
+ k-step-off Pipeline To mitigate this sequential bottleneck,                                                11: else
+ we propose a novel k-step-off asynchronous pipeline (Algo-                                                 12:      Prefill full context: P π (s, τ[t−k+1:t] ) {Uncached}
+ rithm 1), illustrated in Figure 4. The core idea is to overlap                                             13: end if
+ memory compression with agent execution by allowing the                                                    14: Decode at ∼ π(a | s, τ[t−k+1:t] )
+                                                                                                            15: {Environment Execution}
+ memory model to lag k steps behind. The pipeline proceeds                                                  16: Execute at , observe ot+1
+ in cycles of k steps. At the beginning of each cycle, the                                                  17: τt+1 ← τt ∪ {at , ot+1 }
+ memory model is launched asynchronously to compress all                                                    18: {Launch Memory (async, every k steps)}
+ history up to the current step. While the memory model runs                                                19: if t mod k = 0 then
+ in the background, the agent continues to execute for the                                                  20:      Pmem ← async f (τ≤t )
+                                                                                                            21: end if
+ next k steps using the most recently available summary s                                                   22: t ← t + 1
+ concatenated with a buffer of raw recent interactions. Upon                                                23: end while
+ completion, the new summary becomes available at the start
+ of the next cycle, at which point the agent’s KV cache is
+ invalidated and a full uncached prefill is required. For the re-                                           3.3. Determination of Summary Length
+ maining k − 1 steps in the cycle, the agent reuses its cached
+                                                                                                            While C O M EM reduces memory overhead during the decod-
+ prefix and performs only incremental prefilling of new ob-
+                                                                                                            ing stage, the introduction of the summary representation s
+ servations which incurs negligible overhead compared to
+                                                                                                            requires an additional prefilling stage for the agent model
+ full-context inference. Formally, the policy generation at
+                                                                                                            before further decoding, as shown in Figure 4. To ensure a
+ step t is defined as:
+                                                                                                            net reduction in end-to-end latency, the decoding speedup
+                                                                                                            must sufficiently amortize the prefilling cost. We formalize
+                           at ∼ π(at | f (τ≤t−k ) , τt−k+1:t ; θπ )                               (4)       this trade-off below.
+                                       | {z } | {z }
+                                       Latent Summary Recent Buffer                                         Theoretical Analysis Let S denote the KV cache memory
+                                                                                                            size required per token (in GB), and let W represent the
+ This design ensures that while the heavy lifting of long-                                                  GPU’s HBM bandwidth (in GB/s). Assuming the decoding
+ context compression happens asynchronously, the agent                                                      process is memory-bound, the per-token latency reduction
+ always has access to the full context via both summary and                                                 achieved by C O M EM relative to the full-context baseline is:
+ the explicit short-term buffer. Larger k amortizes the un-
+ cached prefilling cost over more steps (as shown in Figure 4,                                                                                                                  (Lfull − Lsum ) · S
+                                                                                                                                      ∆tdecode =                                                                                      (5)
+ comparing 1-step-off with 2-step-off), at the expense of in-                                                                                                                           W
+ creased staleness in the summary. We will formalize the                                                    where Lfull and Lsum are the context lengths of the base-
+ latency–staleness trade-off in the next section.                                                           line and C O M EM, respectively. However, generating the
+
+                                                                                                        5
+                                C O M EM : Context Management with A Decoupled Long-Context Model
+
+                                                             Prefilling                           Decoding                        Uncached Prefilling
+
+                                           𝑡!                              𝑡"                          𝑡#                            𝑡$                           𝑡%
+                    Agent:
+     Full-context
+                                   𝑃! (𝑜" ) + 𝐷 ! (𝑎" )            𝑃! (𝑜$ ) + 𝐷 ! (𝑎$ )         𝑃! (𝑜% ) + 𝐷 ! (𝑎% )         𝑃! (𝑜& ) + 𝐷 ! (𝑎& )        𝑃! (𝑜' ) + 𝐷 ! (𝑎' )
+                                                                   𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + 𝑎"           𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + ⋯ + 𝑎$        𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + ⋯ + 𝑎%          𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + ⋯ + 𝑎&
+
+                                           𝑡!                              𝑡"                          𝑡#                            𝑡$                           𝑡%
+                     Agent:
+                                    𝑃! (𝑜" ) + 𝐷 ! (𝑎" )           𝑃! (𝑜$ ) + 𝐷 ! (𝑎$ )          𝑃! 𝑠$ + 𝑎$ + 𝑜%             𝑃! 𝑠% + 𝑎% + 𝑜&              𝑃! 𝑠& + 𝑎& + 𝑜'
+     1-step-off                                                    𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + 𝑎"                 +𝐷 ! (𝑎% )                  +𝐷 ! (𝑎& )                   +𝐷 ! (𝑎' )
+
+                  Memory:
+                                                                𝑃 # 𝑜" + 𝑎" + 𝑜$                   𝑃 # 𝑎$ + 𝑜%                 𝑃 # 𝑎% + 𝑜&                  𝑃 # 𝑎& + 𝑜'
+                                                                    +𝐷 # (𝑠$ )                       +𝐷 # (𝑠% )                  +𝐷 # (𝑠& )                   +𝐷 # (𝑠' )
+
+                                           𝑡!                              𝑡"                          𝑡#                            𝑡$                           𝑡%
+                     Agent:
+                                   𝑃! (𝑜" ) + 𝐷 ! (𝑎" )            𝑃! (𝑜$ ) + 𝐷 ! (𝑎$ )          𝑃! 𝑠$ + 𝑎$ + 𝑜%              𝑃! (𝑜& ) + 𝐷 ! (𝑎& )         𝑃! 𝑠& + 𝑎& + 𝑜'
+     2-step-off                                                    𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑜" + 𝑎"                 +𝐷 ! (𝑎% )         𝑝𝑟𝑒𝑓𝑖𝑥 = 𝑠$ + 𝑎$ + 𝑜% + 𝑎%             +𝐷 ! (𝑎' )
+
+                  Memory:
+                                                           𝑃 # (𝑜" + 𝑎" + 𝑜$ ) + 𝐷 # (𝑠$ )                             𝑃 # (𝑎$ + ⋯ + 𝑜& ) + 𝐷 # (𝑠& )
+
+Figure 4. Gantt chart illustrating the k-step-off pipeline. We denote P π (·) and Dπ (·) as the prefilling and decoding time of the agent
+model, and P f (·) and Df (·) for the memory model. Solid blue blocks denote cached prefilling (incremental), hatched blocks denote
+uncached prefilling (full context re-encoding after a summary update), and green blocks denote decoding. The “prefix” annotations
+indicate the cached KV prefix carried over from the previous step. When the prefix remains valid, only new tokens require prefilling. For
+1-step-off, every step after the first requires uncached prefilling due to the continuously updated summary. For 2-step-off, the uncached
+prefill occurs only once per cycle, with the intermediate step reusing the cached KV prefix.
+
+summary representation incurs a one-time prefilling latency.                                  a dedicated compression ratio. To bridge this gap, we intro-
+Assuming a prefilling throughput of P (tokens/s), a net                                       duce a training pipeline designed to align the summarization
+speedup requires that the cumulative decoding savings over                                    model’s output with what the agent requires for optimal
+Y generated tokens exceed the prefilling overhead:                                            decision-making. The key idea is to train the memory model
+                                                                                              to capture the sufficient statistics of the interaction history—
+                    (Lfull − Lsum ) · S    Lsum                                               the minimal representation from which the agent can re-
+              Y ·                        >                                        (6)
+                    |       W
+                            {z         }     P}
+                                           | {z                                               cover behavior equivalent to full-context inference (Sut-
+                    Per-token decoding saving       Prefill cost                              ton et al., 1998). Formally, a summary s = f (τ<t−k )
+                                                                                              is sufficient if the agent’s action conditioned on the sum-
+Rearranging yields an upper bound on the permissible com-                                     mary matches what it would produce given the full history:
+pression ratio:                                                                               π(· | s, Ct ) ≈ π(· | τ<t ), where Ct = τt−k:t−1 denotes the
+                   Lsum         1                                                             most recent k raw turns. Rather than optimizing for generic
+                          <                            (7)
+                    Lfull         W
+                            1 + Y ·S·P                                                        text quality, we directly optimize for this functional equiv-
+                                                                                              alence—whether the compressed memory induces correct
+Case Study. We instantiate this bound for Qwen3-32B                                           downstream behavior.
+served on a single A100-80GB GPU, with HBM bandwidth                                          Crucially, the agent model π remains frozen throughout
+W = 2 TB/s, prefilling throughput P = 3,000 tokens/s,                                         training. This decouples the optimization of the memory
+per-token KV size S = 2 × 10−4 GB, and average com-                                           model f from the agent’s reasoning policy, enabling an ef-
+pletion length Y = 1,000 tokens. Substituting these values                                    ficient offline regime that requires no online environment
+yields Lsum /Lfull < 0.23, which means for a prefix length                                    interactions. Concretely, we first generate reference trajec-
+of 32K tokens, we need to upperbound the summary length                                       tories using the standard full-context agent pipeline. For
+within 7.36K tokens. This is a compression ratio readily                                      each step t in a trajectory, we record the ground-truth ac-
+achievable through summarization.                                                             tion a∗t = π(· | τ<t ) produced by the full-context agent.
+                                                                                              We then fine-tune the memory model using GRPO (Eq. 1)
+3.4. Training                                                                                 with the following reward: given a candidate summary
+                                                                                              s = f (τ<t−k ), the frozen agent produces ât = π(· | s, Ct ),
+Empirical analysis suggests that the inherent summarization
+                                                                                              and we define
+capability of base models is often insufficient to compress
+the history for complex agentic interactions, especially with                                                               R(s) = sim(ât , a∗t )                              (8)
+
+                                                                                          6
+                           C O M EM : Context Management with A Decoupled Long-Context Model
+
+                         Table 1. Main results. For latency, we show the total inference time for 128 issues.
+
+                                                                               w/o CPU Offload             w/ CPU Offload
+             Agent             Memory        %Resolved    #Tool Calls
+                                                                          Latency (×128/s) Speedup   Latency (×128/s) Speedup
+                             Full-Context       40.4         34.39            9457.78         1×         6390.62        1×
+           DeepSWE
+                           Qwen3-4B (base)      29.9         24.74            4360.72        2.17×       3649.61      1.75×
+          (32B Dense)
+                           Qwen3-4B (SFT)       39.8         35.61            5232.64        1.81×       4168.85      1.53×
+                             GRPOAC             41.0         40.69            5622.33        1.68×       4400.89      1.45×
+                             Full-Context       57.2         36.68            6291.11         1×         5129.90        1×
+       Qwen3-Coder-Max      No Summary          46.6         25.20            3780.74        1.66×       3421.78      1.50×
+         (480B A35B)       Qwen3-4B (base)      42.2         39.40            3421.63        1.84×       3138.97      1.63×
+                           Qwen3-4B (SFT)       47.3         43.39            3819.70        1.65×       3337.58      1.54×
+                             GRPOAC             51.0         44.55            3917.68        1.61×       3594.51      1.43×
+                             Full-Context       69.0         55.11            6361.49         1×         5869.42        1×
+            GLM-4.7         No Summary          59.4         46.82            4216.83        1.51×       3842.17      1.53×
+           (355B 32B)      Qwen3-4B (base)      58.3         49.32            3928.44        1.62×       3526.91      1.66×
+                           Qwen3-4B (SFT)       61.3         52.74            4087.92        1.56×       3668.53      1.60×
+                             GRPOAC             62.7         51.21            3318.42        1.92×       2821.38      2.08×
+
+
+By maximizing this reward while enforcing a clipping on                  in Section 3.4. For DeepSWE and Qwen3-Coder-Max,
+the maximum response length, the memory model learns to                  we use k = 2, and for GLM-4.7 we use k = 4. For latency
+distill precisely the information the agent needs for decision-          comparison, we start two different vLLM engines for both
+making, discarding irrelevant details that would otherwise               agent model and memory model. We consistently choose
+consume context budget.                                                  vLLM version 0.14.0 with prefix caching and chunked
+                                                                         prefilling. We further compare latency under two scenarios:
+4. Experimental Results                                                  with or without CPU offloading, to demonstrate the capabil-
+                                                                         ity of C O M EM on wide deployment settings. For DeepSWE,
+4.1. Evaluation Dataset                                                  we run on A100 (80GB), and for the other two models, we
+                                                                         run on H200. Notice that in production, one memory model
+We evaluate C O M EM on SWE-Bench-Verified (Jimenez
+                                                                         server can be used for multiple agent models. See further
+et al., 2024), a human-validated subset of the original
+                                                                         discussions in Section 6. Detailed hyperparameters for both
+SWE-bench dataset designed to ensure reliable and repro-
+                                                                         training and evaluation are provided in Appendix H.
+ducible evaluation of autonomous software engineering
+agents. Specifically, following (Jain et al., 2025), we train
+                                                                         4.3. Main Results
+our memory model using R2E-Gym-Lite and then test on
+500 github issues on the SWE-Bench-Verified test set. We                 We evaluate C O M EM on SWE-bench Verified across three
+use the default scaffold provided by R2E-Gym and set maxi-               agent backbones: DeepSWE (32B), Qwen3-Coder-Max
+mum steps to 40 with an extended allowance to 100 steps to               (480B), and GLM-4.7 (355B). In terms of effectiveness,
+let the LLM submit the answer. Finally, we measure resolve               our framework consistently outperforms standard com-
+rate, number of tool calls and inference latency for each                pression baselines. Notably, on the DeepSWE backbone,
+batch of 128 issues.                                                     C O M EM (GRPO) achieves a 41.0% resolution rate, slightly
+                                                                         surpassing the full-context baseline (40.4%), suggesting
+4.2. Baselines and Implementations                                       that aligned summarization can effectively filter irrele-
+                                                                         vant noise for mid-sized models. For larger models like
+We choose Qwen3-4B as our smaller memory model be-
+                                                                         Qwen3-Coder-Max and GLM-4.7, our reward-driven
+cause of its scale and long-context capability. We always
+                                                                         training significantly recovers performance compared to
+use the maximum summary length of 2048 for consistency.
+                                                                         base and SFT variants, closing the gap with the full-context
+We pair the memory model with agent models with various
+                                                                         upper bound while restoring tool-use frequency. In terms of
+sizes and capabilities. Specifically, we choose DeepSWE,
+                                                                         efficiency, the decoupled architecture delivers robust infer-
+Qwen3-Coder-Max and GLM-4.7. We compare with
+                                                                         ence speedups ranging from 1.45× to 2.08× across different
+the following baselines: Full-Context is the standard agen-
+                                                                         hardware configurations. The gains are most pronounced
+tic inference scenario with long-context inference. No
+                                                                         on GLM-4.7 (up to 2.08×), confirming that C O M EM suc-
+Summary removes the summaries from the agent model
+                                                                         cessfully mitigates the decoding bottleneck without compro-
+prompt and leave the other components intact. Qwen3-4B
+                                                                         mising the agent’s ability to solve complex, long-horizon
+(base) uses off-the-shelf model as memory model. Finally,
+                                                                         tasks.
+GRPOAC is a model trained using our proposed framework
+
+
+                                                                     7
+                                             C O M EM : Context Management with A Decoupled Long-Context Model
+
+                                                                                Table 2. Per-step execution time comparison across concurrency
+                              CoMem                                             levels. Peak speedup denotes the maximum per-step speedup
+                10000         Full-context                                      observed over the trajectory. “Conc.” stands for concurrency.
+
+                 8000                                                            Conc. C O M EM (s) FC (s) Traj. Speedup Peak Speedup
+
+
+ Latency (ms)
+                                                                                 16         28.4        28.9     1.02×      1.14× (step 62)
+                 6000
+                                                                                 32         42.9        55.7     1.30×      2.03× (step 56)
+                                                                    2.52x        64         52.3        88.8     1.70×      4.95× (step 61)
+                 4000
+                                             2.08x
+                                                                                Table 3. KV cache utilization and prompt length comparison. FC
+                              1.05x
+                 2000 0.86x
+                                                                                prompt length is reported at the final step. “Conc.” stands for
+                                                                                concurrency.
+
+                    0                                                           Conc. C O M EM KV FC KV C O M EM Prompt FC Prompt
+                        32      64            128                    256
+                                               Batch Size
+                                                                                16        1–6%       up to 34%      4.8–6.7K         30.7K
+Figure 5. Latency and Speedup results for GLM-4.7 over various                  32       15–18%      up to 94%      4.8–6.7K         46.0K
+batch sizes. C O M EM’s speedup scales up with throughput.                      64       26–37%      up to 96%      4.8–6.7K         33.2K
+
+
+4.4. Scalable Speedup Gains with Increased Batch Size                           crossover point where C O M EM becomes faster than the
+                                                                                full-context baseline depends on the serving regime: un-
+We evaluate the inference latency of C O M EM against a
+                                                                                der concurrency 16, the two approaches are comparable as
+Full-context baseline across batch sizes ranging from 32 to
+                                                                                memory bandwidth is not yet saturated; under concurrency
+256. While the baseline performs competitively at the small-
+                                                                                32, C O M EM becomes consistently faster once the prompt
+est scale, it exhibits poor scaling as batch size increases,
+                                                                                exceeds ∼25K tokens (around step 34); under concurrency
+with latency rising from 1206.60 ms to 9684.24 ms. In
+                                                                                64, the crossover occurs at ∼12K tokens (around step 25),
+contrast, C O M EM demonstrates superior computational ef-
+                                                                                beyond which C O M EM’s advantage grows rapidly due to
+ficiency and linear scaling; it achieves a 2.08× speedup at a
+                                                                                compounding KV cache pressure.
+batch size of 128 and a 2.52× speedup at 256, effectively
+mitigating the memory-bandwidth bottlenecks typical of
+large-batch long-context processing.                                            4.6. Sensitivity to k
+                                                                                In the k-step-off pipeline, the update frequency k controls
+4.5. Crossover Analysis on Latency and Memory                                   the trade-off between summary staleness and prefilling over-
+                                                                                head: smaller k provides fresher summaries but requires
+To further provide practical intuition for when C O M EM
+                                                                                more frequent uncached prefills, while larger k amortizes
+becomes advantageous, we conduct a controlled latency and
+                                                                                this cost at the expense of increased lag. We ablate this hy-
+memory benchmark comparing C O M EM against the full-
+                                                                                perparameter under CPU offload with the GLM-4.7 agent
+context baseline across varying serving concurrency levels
+                                                                                backbone, reporting results in Table 4.
+(16, 32, and 64). The benchmark uses fixed 512 input tokens
+and 1024 output tokens over 64 steps, with GLM-4.7 as                           Performance is stable across k ∈ {2, 4, 8}, with k = 2
+the agent model and k = 3 for C O M EM.                                         slightly outperforming the default k = 4 in resolve rate.
+                                                                                The two extremes exhibit notably degraded behavior: k = 1
+Execution Time. Table 2 reports per-step LLM execu-
+                                                                                incurs excessive uncached prefilling overhead (as illustrated
+tion time averaged over the trajectory. C O M EM’s per-step
+                                                                                in Figure 4), while k = 16 saturates the memory of the agent
+latency remains nearly constant (∼28–52s depending on
+                                                                                server and introduces scheduling overhead. Importantly, all
+concurrency) because its prompt size is bounded at ∼5–7K
+                                                                                C O M EM variants with k ∈ {2, 4, 8} achieve approximately
+tokens through periodic summarization. In contrast, the full-
+                                                                                2× wall-clock speedup over the full-context baseline while
+context baseline’s prompt grows linearly with the number
+                                                                                retaining the majority of its resolve rate, confirming that
+of steps, and its latency degrades accordingly.
+                                                                                the method is not overly sensitive to this choice within a
+Memory Consumption. Table 3 reports KV cache uti-                               reasonable operating range.
+lization and prompt lengths. C O M EM’s GPU KV cache
+usage remains bounded, while the full-context baseline’s                        5. Related Works
+KV cache grows monotonically, reaching 96% at concur-
+rency 64. At high concurrency, KV cache saturation trig-                        Recent advancements in scaling large language models
+gers request preemption in the serving engine, causing the                      (LLMs) to long-horizon tasks have largely focused on over-
+non-linear latency explosion observed in Table 2. The                           coming fixed context window constraints through dynamic
+
+                                                                            8
+                            C O M EM : Context Management with A Decoupled Long-Context Model
+
+Table 4. Sensitivity to update frequency k on SWE-bench Verified       ∼47K tok/s, supporting ∼300 concurrent GLM-4.7 agent
+with GLM-4.7 (CPU offload enabled).
+                                                                       instances on a single server. This ratio scales gracefully
+                                                                       with model size: an 8B model sustains ∼40K tok/s (∼255
+    Frequency k       %Resolved Latency (s) Speedup
+                                                                       agents), and even a 32B model achieves ∼15K tok/s (∼95
+    Full-Context         69.0         5869.4       1.00×               agents). In all cases, the memory model’s serving cost is
+    k = 16               60.2         3576.8       1.64×               amortized across all agent instances sharing it, rendering
+    k=8                  62.4         2836.0       2.07×               C O M EM’s additional architectural complexity negligible at
+    k = 4 (default)      62.7         2821.4       2.08×               deployment scale.
+    k=2                  64.2         2841.4       2.07×               Relationship with Sparse Attention. A prominent line
+    k=1                  57.2         3843.5       1.53×               of research for efficient long-context processing involves
+                                                                       sparse attention mechanisms (Child et al., 2019; Belt-
+context management and memory optimization. One pri-                   agy et al., 2020; Zaheer et al., 2020), which mitigate
+mary approach involves context compression and summa-                  the quadratic computational complexity of standard self-
+rization, where methods like ReSum (Wu et al., 2025b),                 attention by limiting token interactions to predefined pat-
+ACON (Kang et al., 2025), and SUPO (Lu et al., 2025)                   terns or dynamic selections. More recent approaches, such
+employ reinforcement learning to condense interaction his-             as H2 O (Zhang et al., 2023) and StreamingLLM (Xiao et al.,
+tories into dense reasoning states, effectively discarding             2023), further optimize inference by identifying “heavy
+redundant information while retaining critical evidence. A             hitter” tokens or utilizing attention sinks to prune the KV
+parallel paradigm explores context folding and Markovian               cache significantly. We emphasize that C O M EM is orthogo-
+state reconstruction, illustrated by AgentFold (Ye et al.,             nal and complementary to these architectural optimizations.
+2025), Context-Folding (Sun et al., 2025), and The Marko-              Sparse attention techniques operate at the intra-model level,
+vian Thinker (Aghajohari et al., 2026). These frameworks               optimizing how a single model attends to its context. In con-
+restructure linear history into branching or collapsible sub-          trast, C O M EM operates at the system level by decoupling the
+trajectories, enforcing Markovian properties to decouple               context management process entirely. Consequently, these
+reasoning depth from input length. Finally, approaches such            approaches can be combined synergistically; for instance,
+as Mem-α (Wang et al., 2025), MEM1 (Zhou et al., 2025),                the underlying Memory Model in C O M EM could employ
+and DeepMiner (Tang et al., 2025) transition from passive              sparse attention or KV cache eviction policies to process
+context maintenance to active memory construction, training            raw interaction histories with even greater efficiency, while
+agents via RL to proactively update, retrieve, and synergize           the Agent Model continues to benefit from the high-level,
+external memory stores with reasoning processes, thereby               compressed state representations provided by our frame-
+enabling sustained performance over indefinite horizons                work.
+without linear computational scaling.
+                                                                       7. Conclusion
+6. Discussion                                                          We proposed C O M EM, a framework that decouples memory
+Practical Deployment and Model Synergy. For real-world                 management from agentic reasoning by offloading long-
+applications, C O M EM enables a flexible and modular de-              context compression to a dedicated lightweight model via a
+ployment strategy. We envision the memory model op-                    novel k-step-off asynchronous pipeline. Our reward-driven
+erating as a distinct high-throughput service, capable of              alignment training, which optimizes for functional equiva-
+handling context compression for multiple concurrent agent             lence rather than surface-level similarity, enables the mem-
+processes. This shared service architecture leverages the              ory model to capture sufficient statistics for the agent’s
+inherent efficiency of smaller models to offload context               decision-making without any online environment interac-
+management, allowing for independent scaling of memory                 tion. Extensive experiments on SWE-bench Verified across
+and reasoning components without necessitating specialized             three agent backbones (DeepSWE-32B, Qwen3-Coder-Max,
+heterogeneous hardware.                                                GLM-4.7) demonstrate that C O M EM achieves up to 2.08×
+                                                                       end-to-end speedup under standard serving and up to 4.95×
+To quantify this, we conduct an empirical cost analysis of             peak per-step speedup at high concurrency, while retain-
+the memory model server. From trajectory data, the mem-                ing competitive resolve rates with the full-context baseline.
+ory model consumes ∼28K input tokens and ∼1K output                    Furthermore, we show that the framework scales gracefully
+tokens per compression call, with a mean step time of ∼40s,            in deployment: a single 4B memory model can serve ap-
+yielding a required throughput of approximately 156 tok/s              proximately 300 concurrent agent instances, rendering the
+per agent instance. Benchmarking the memory server under               additional architectural complexity negligible at scale.
+varying concurrency (1 to 128 concurrent requests), we ob-
+serve that a 4B memory model achieves peak throughput of
+
+                                                                   9
+                           C O M EM : Context Management with A Decoupled Long-Context Model
+
+Acknowledgements                                                       Fu, Z., Song, W., Wang, Y., Wu, X., Zheng, Y., Zhang, Y.,
+                                                                         Xu, D., Wei, X., Xu, T., and Zhao, X. Sliding window at-
+Our work is sponsored in part by NSF CAREER Award                        tention training for efficient large language models, 2025.
+2239440, NSF Proto-OKN Award 2333790, Sponsored Re-                      URL https://arxiv.org/abs/2502.18845.
+search Projects from companies like Cisco and eBay, as
+well as generous gifts from Google, Adobe, and Teradata.               He, H., Yao, W., Ma, K., Yu, W., Dai, Y., Zhang, H., Lan,
+Any opinions, findings, and conclusions or recommenda-                   Z., and Yu, D. WebVoyager: Building an end-to-end web
+tions expressed herein are those of the authors and should               agent with large multimodal models. In Ku, L.-W., Mar-
+not be interpreted as necessarily representing the views, ei-            tins, A., and Srikumar, V. (eds.), Proceedings of the 62nd
+ther expressed or implied, of the U.S. Government. The                  Annual Meeting of the Association for Computational
+U.S. Government is authorized to reproduce and distribute                Linguistics (Volume 1: Long Papers), pp. 6864–6890,
+reprints for government purposes not withstanding any copy-              Bangkok, Thailand, August 2024. Association for Com-
+right annotation hereon.                                                 putational Linguistics. doi: 10.18653/v1/2024.acl-long.
+                                                                         371. URL https://aclanthology.org/2024.
+Impact Statement                                                         acl-long.371/.
+
+This work primarily advances the efficiency and scalability            Hooper, C., Kim, S., Mohammadzadeh, H., Mahoney,
+of Long-Horizon Agentic Systems. By decoupling memory                    M. W., Shao, Y. S., Keutzer, K., and Gholami, A.
+management from reasoning, C O M EM significantly reduces                Kvquant: Towards 10 million context length llm inference
+the computational resources and energy required to deploy               with kv cache quantization. In Globerson, A., Mackey, L.,
+capable autonomous agents. This efficiency contributes to                Belgrave, D., Fan, A., Paquet, U., Tomczak, J., and Zhang,
+the goal of ”Green AI” by lowering the carbon footprint                  C. (eds.), Advances in Neural Information Processing Sys-
+associated with the inference of massive Large Language                  tems, volume 37, pp. 1270–1303. Curran Associates, Inc.,
+Models, particularly in memory-bound regimes.                            2024. doi: 10.52202/079017-0040.
+
+Furthermore, by alleviating the latency bottleneck, this               Jain, N., Singh, J., Shetty, M., Zhang, T., Zheng, L., Sen, K.,
+framework lowers the barrier to entry for deploying sophis-               and Stoica, I. R2e-gym: Procedural environment genera-
+ticated agents in real-time and interactive applications, de-             tion and hybrid verifiers for scaling open-weights SWE
+mocratizing access to long-context capabilities on resource-              agents. In Second Conference on Language Modeling,
+constrained hardware. However, we acknowledge that in-                    2025. URL https://openreview.net/forum?
+creasing the efficiency of autonomous agents also lowers                  id=7evvwwdo3z.
+the cost of potential malicious use, such as automated cyber-          Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press,
+attacks or large-scale social engineering. As the marginal               O., and Narasimhan, K. R. SWE-bench: Can language
+cost of agent deployment decreases, the importance of ro-                models resolve real-world github issues? In The Twelfth
+bust safety alignment and defensive guardrails becomes                   International Conference on Learning Representations,
+increasingly critical. We hope our work encourages fur-                  2024. URL https://openreview.net/forum?
+ther research into efficient architectures that prioritize both          id=VTF8yNQM66.
+performance and safety.
+                                                                       Jin, S., Liu, X., Zhang, Q., and Mao, Z. Compute or load kv
+References                                                                cache? why not both? Proceedings of Machine Learning
+                                                                          Research, 267:28031–28043, 2025. ISSN 2640-3498.
+Aghajohari, M., Chitsaz, K., Kazemnejad, A., Chandar, S.,                 Publisher Copyright: © 2025, ML Research Press. All
+  Sordoni, A., Courville, A., and Reddy, S. The markovian                 rights reserved.; 42nd International Conference on Ma-
+  thinker: Architecture-agnostic linear scaling of reasoning.             chine Learning, ICML 2025 ; Conference date: 13-07-
+  In The Fourteenth International Conference on Learning                  2025 Through 19-07-2025.
+ Representations, 2026. URL https://openreview.
+  net/forum?id=3As6AQ9ELI.                                             Kang, M., Chen, W.-N., Han, D., Inan, H. A., Wutschitz, L.,
+                                                                         Chen, Y., Sim, R., and Rajmohan, S. Acon: Optimizing
+                                                                         context compression for long-horizon llm agents. arXiv
+Beltagy, I., Peters, M. E., and Cohan, A.        Long-
+                                                                         preprint arXiv:2510.00615, 2025.
+  former: The long-document transformer. arXiv preprint
+  arXiv:2004.05150, 2020.                                              Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu,
+                                                                        C. H., Gonzalez, J., Zhang, H., and Stoica, I. Effi-
+Child, R., Gray, S., Radford, A., and Sutskever, I. Gen-                cient memory management for large language model
+  erating long sequences with sparse transformers. arXiv                serving with pagedattention. In Proceedings of the
+  preprint arXiv:1904.10509, 2019.                                      29th Symposium on Operating Systems Principles, SOSP
+
+                                                                  10
+                           C O M EM : Context Management with A Decoupled Long-Context Model
+
+  ’23, pp. 611–626, New York, NY, USA, 2023. Associa-                  Wang, Y., Takanobu, R., Liang, Z., Mao, Y., Hu, Y.,
+  tion for Computing Machinery. ISBN 9798400702297.                     McAuley, J., and Wu, X. Mem-{\alpha}: Learning
+  doi: 10.1145/3600006.3613165. URL https://doi.                        memory construction via reinforcement learning. arXiv
+  org/10.1145/3600006.3613165.                                          preprint arXiv:2509.25911, 2025.
+
+Langley, P. Crafting papers on machine learning. In Langley,           Wei, J., Sun, Z., Papay, S., McKinney, S., Han, J., Fulford,
+  P. (ed.), Proceedings of the 17th International Conference            I., Chung, H. W., Passos, A. T., Fedus, W., and Glaese,
+  on Machine Learning (ICML 2000), pp. 1207–1216, Stan-                 A. Browsecomp: A simple yet challenging benchmark
+  ford, CA, 2000. Morgan Kaufmann.                                      for browsing agents. arXiv preprint arXiv:2504.12516,
+                                                                        2025.
+Lu, C., Lu, C., Lange, R. T., Foerster, J., Clune, J., and
+  Ha, D. The ai scientist: Towards fully automated                     Wu, D., Wang, H., Yu, W., Zhang, Y., Chang, K.-W., and
+  open-ended scientific discovery, 2024. URL https:                     Yu, D. Longmemeval: Benchmarking chat assistants
+  //arxiv.org/abs/2408.06292.                                           on long-term interactive memory. In The Thirteenth
+                                                                        International Conference on Learning Representations,
+Lu, M., Sun, W., Du, W., Ling, Z., Yao, X., Liu, K.,                    2025a. URL https://openreview.net/forum?
+  and Chen, J. Scaling llm multi-turn rl with end-to-                   id=pZiyCaVuti.
+  end summarization-based context management. arXiv
+  preprint arXiv:2510.06727, 2025.                                     Wu, X., Li, K., Zhao, Y., Zhang, L., Ou, L., Yin, H., Zhang,
+                                                                        Z., Yu, X., Zhang, D., Jiang, Y., et al. Resum: Unlocking
+Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Bi, X.,                  long-horizon search intelligence via context summariza-
+  Zhang, H., Zhang, M., Li, Y. K., Wu, Y., and Guo,                     tion. arXiv preprint arXiv:2509.13313, 2025b.
+  D. Deepseekmath: Pushing the limits of mathemat-
+  ical reasoning in open language models, 2024. URL                    Xiao, G., Tian, Y., Chen, B., Han, S., and Lewis, M. Ef-
+  https://arxiv.org/abs/2402.03300.                                      ficient streaming language models with attention sinks.
+                                                                         arXiv preprint arXiv:2309.17453, 2023.
+Shi, Y., Chen, Y., Wang, S., Li, S., Cai, H., Gu, Q., Wang, X.,
+                                                                       Xiao, G., Tian, Y., Chen, B., Han, S., and Lewis, M. Effi-
+  and Zhang, A. Look back to reason forward: Revisitable
+                                                                         cient streaming language models with attention sinks.
+  memory for long-context llm agents, 2026. URL https:
+                                                                         In Kim, B., Yue, Y., Chaudhuri, S., Fragkiadaki, K.,
+  //arxiv.org/abs/2509.23040.
+                                                                         Khan, M., and Sun, Y. (eds.), International Conference
+Sun, W., Lu, M., Ling, Z., Liu, K., Yao, X., Yang, Y., and               on Learning Representations, volume 2024, pp. 21875–
+  Chen, J. Scaling long-horizon llm agent via context-                   21895, 2024.
+  folding. arXiv preprint arXiv:2510.11967, 2025.                      Ye, R., Zhang, Z., Li, K., Yin, H., Tao, Z., Zhao, Y., Su, L.,
+Sutton, R. S., Barto, A. G., et al. Reinforcement learning:              Zhang, L., Qiao, Z., Wang, X., et al. Agentfold: Long-
+  An introduction, volume 1. MIT press Cambridge, 1998.                  horizon web agents with proactive context management.
+                                                                         arXiv preprint arXiv:2510.24699, 2025.
+Tang, J., Zhao, Y., Zhu, K., Xiao, G., Kasikci, B., and Han, S.
+                                                                       Yu, H., Chen, T., Feng, J., Chen, J., Dai, W., Yu, Q., Zhang,
+  QUEST: Query-aware sparsity for efficient long-context
+                                                                         Y.-Q., Ma, W.-Y., Liu, J., Wang, M., et al. Memagent: Re-
+  LLM inference. In Salakhutdinov, R., Kolter, Z., Heller,
+                                                                         shaping long-context llm with multi-conv rl-based mem-
+  K., Weller, A., Oliver, N., Scarlett, J., and Berkenkamp, F.
+                                                                         ory agent. arXiv preprint arXiv:2507.02259, 2025.
+  (eds.), Proceedings of the 41st International Conference
+  on Machine Learning, volume 235 of Proceedings of Ma-                Yuan, Z., Shang, Y., Zhou, Y., Dong, Z., Zhou, Z., Xue, C.,
+  chine Learning Research, pp. 47901–47911. PMLR, 21–                    Wu, B., Li, Z., Gu, Q., Lee, Y. J., et al. Llm inference
+  27 Jul 2024. URL https://proceedings.mlr.                              unveiled: Survey and roofline model insights. arXiv
+  press/v235/tang24l.html.                                               preprint arXiv:2402.16363, 2024.
+Tang, Q., Xiang, H., Yu, L., Yu, B., Lu, Y., Han, X., Sun,             Zaheer, M., Guruganesh, G., Dubey, K. A., Ainslie, J., Al-
+  L., Zhang, W., Wang, P., Liu, S., et al. Beyond turn                   berti, C., Ontanon, S., Pham, P., Ravula, A., Wang, Q.,
+  limits: Training deep search agents with dynamic context               Yang, L., et al. Big bird: Transformers for longer se-
+  window. arXiv preprint arXiv:2510.08276, 2025.                         quences. Advances in neural information processing
+                                                                         systems, 33:17283–17297, 2020.
+Team, T. D., Li, B., Zhang, B., Zhang, D., Huang, F., Li, G.,
+  Chen, G., Yin, H., Wu, J., Zhou, J., et al. Tongyi deepre-           Zhang, Z., Sheng, Y., Zhou, T., Chen, T., Zheng, L., Cai,
+  search technical report. arXiv preprint arXiv:2510.24701,              R., Song, Z., Tian, Y., Ré, C., Barrett, C., et al. H2o:
+  2025.                                                                  Heavy-hitter oracle for efficient generative inference of
+
+                                                                  11
+                         C O M EM : Context Management with A Decoupled Long-Context Model
+
+  large language models. Advances in Neural Information
+  Processing Systems, 36:34661–34710, 2023.
+Zhou, Z., Qu, A., Wu, Z., Kim, S., Prakash, A., Rus, D.,
+  Zhao, J., Low, B. K. H., and Liang, P. P. Mem1: Learning
+  to synergize memory and reasoning for efficient long-
+  horizon agents. arXiv preprint arXiv:2506.15841, 2025.
+
+
+
+
+                                                             12
+                           C O M EM : Context Management with A Decoupled Long-Context Model
+
+A. Prompt for Agent Model
+Consider the following github issue:
+<github_issue>
+{problem_statement}
+</github_issue>
+
+Can you help me implement the necessary changes to the
+repository to fix the <github_issue>? Please refer to the
+summary and recent messages for context, which contains our
+previous conversations and what you have done so far.
+
+Here are the summary of our previous conversations:
+<summary>
+{summary}
+</summary>
+Here are the most recent messages exchanged that are not
+included in the summary:
+<recent_messages>
+{recent_messages}
+</recent_messages>
+
+B. Prompt for Memory Model
+You are a helpful assistant that summarizes conversations
+for another model to use. You need to make sure that the
+summary captures all important details from the conversation
+so that the other model can understand the context just like
+reading the full conversation.
+
+### Conversation:
+{conversation}
+
+Please provide a detailed summary of the above conversation.
+Make sure to include all necessary details for the other
+model to understand the context, especially entities, actions
+taken, and outcomes. But NEVER include any suggestions or
+recommendations for future actions|only summarize what has
+already occurred.
+
+C. Additional Baseline Comparison
+Our internal baselines are designed to strictly isolate the core contributions of C O M EM: the Full-Context baseline establishes
+the performance ceiling without compression, the No Summary variant ablates the memory model entirely, and the Off-
+the-Shelf (base) variant evaluates generic summarization without task-specific training. Together, these systematically
+demonstrate that memory should be decoupled from the agent and trained for downstream decision-making.
+To provide an external point of comparison, we additionally evaluate against MemAgent (Yu et al., 2025), a general-purpose
+long-context compression model that is well suited as a drop-in replacement for our memory component. We integrate the
+official BytedTsinghua-SIA/RL-MemoryAgent-7B checkpoint, keeping all other experimental settings (including
+the asynchronous k-step-off pipeline) identical. We evaluate using both the GLM-4.7 and Qwen3-Coder-Max agent
+backbones. Results are reported in Table 5.
+As shown in Table 5, C O M EM consistently outperforms MemAgent across both agent backbones in terms of task effectiveness
+and inference efficiency. On GLM-4.7, C O M EM achieves a 7.9% higher resolve rate while also being faster (2.08× vs.
+
+
+                                                              13
+                           C O M EM : Context Management with A Decoupled Long-Context Model
+
+Table 5. Comparison with MemAgent on SWE-bench Verified. All methods use the same asynchronous pipeline and agent backbone.
+Latency is reported as total inference time for 128 issues (with CPU offload).
+
+                    Agent Backbone           Memory Method          %Resolved      Latency (s)    Speedup
+
+                                             Full-Context              69.0         5869.42        1.00×
+                    GLM-4.7                  MemAgent (7B)             54.8         3253.83        1.80×
+                                             C O M EM (GRPO)           62.7         2821.38        2.08×
+
+                                             Full-Context              57.2         5129.90        1.00×
+                    Qwen3-Coder-Max          MemAgent (7B)             43.2         3672.48        1.40×
+                                             C O M EM (GRPO)           51.0         3594.51        1.43×
+
+
+
+1.80× speedup). On Qwen3-Coder-Max, C O M EM improves the resolve rate by 7.8% with comparable latency. These
+results confirm that training the memory model with an action-consistency objective tailored to the downstream agent yields
+superior compression compared to a general-purpose memory model trained without such alignment.
+
+D. Generalization to Other Long-Horizon Agent Settings
+To evaluate the generalizability of C O M EM beyond software engineering tasks, we conduct additional experiments on
+BrowseComp-EN (Wei et al., 2025), a challenging deep research benchmark that requires multi-step information retrieval
+over the open web.
+The agent operates with three available actions: google search, scrape, and submit answer. Each task permits
+a soft maximum of 30 steps and a hard maximum of 50 steps. We use GLM-4.7 as the agent LLM with a 128K
+context window (longer than the SWE setting) and GPT-4.1 as the answer judge. For the C O M EM variant, we fine-tune
+Qwen3-4B-Instruct-2507 using the same training pipeline described in §3.4, with k = 1 at test time. Results are
+reported in Table 6.
+
+                           Table 6. Results on BrowseComp-EN with GLM-4.7 as the agent backbone.
+
+                                             Method                Accuracy (%)
+
+                                             Full-Context               28.1
+                                             C O M EM (k = 1)           32.0
+
+
+C O M EM improves accuracy by 3.9% over the full-context baseline, demonstrating that the compressed memory not only
+reduces context length but can actively improve task performance. We hypothesize that deep research tasks involve large
+volumes of scraped web content that dilute the agent’s attention; a structured summary filters this noise and facilitates more
+focused decision-making. This result suggests that C O M EM generalizes effectively to long-horizon agent settings beyond
+code generation.
+
+E. Preservation of Procedural Dependencies in Summaries
+A natural concern with compression-based memory is whether long-range procedural dependencies are preserved across
+many interaction steps. To investigate this, we examine C O M EM summaries from Qwen3-Coder-Max trajectories with
+k = 2. We observe that the trained memory model learns to discard recoverable noise (e.g., raw file contents, full stack
+traces) while retaining the procedural details critical for downstream decision-making.
+Case 1:       django-17084.           During steps 12–18, the agent discovers that the Window class has
+contains over clause=True but that this attribute is not checked in get aggregation(). Over 56 sub-
+sequent turns of exploration and failed attempts, this diagnostic detail could easily be lost. However, at step 74, the C O M EM
+summary still retains this exact finding, enabling the agent to produce the correct code fix without re-deriving the root cause.
+
+                                                              14
+                          C O M EM : Context Management with A Decoupled Long-Context Model
+
+Case 2: matplotlib-24026. At steps 27 and 32, the agent identifies the relevant logic in to rgba() and notes a missing
+import statement. Over 43 subsequent turns involving unrelated exploration, both the algorithmic detail and the missing
+import are preserved in the summary at step 75, allowing the agent to resolve the bug in a single action.
+These examples illustrate that the action-consistency reward (§3.4) incentivizes the memory model to retain precisely those
+details that are causally relevant to future actions, even when they occur many dozens of steps in the past.
+
+F. Scheduling Overhead Analysis
+A potential concern with the asynchronous k-step-off pipeline is whether scheduling and queuing delays in the memory
+server introduce additional latency visible to the agent. We analyze this from two perspectives.
+Per-step Overhead in Real Trajectories. From production trajectory data, memory summarization time remains stable at
+3.0–4.2s per call throughout the trajectory, with zero effective overhead to the agent since summarization completes well
+within the k-step window during which the agent proceeds independently.
+Queuing Delay under Load. To further isolate queuing from compute, we benchmark the memory server at varying
+concurrency levels using the real workload profile (28K input, 1K output tokens). At concurrency 1, time-to-first-token
+(TTFT) reflects pure compute; the increase at higher concurrency isolates queuing delay. Results are reported in Table 7.
+
+Table 7. Memory server performance under varying concurrency. Est. Queue Time is computed as the TTFT increase relative to
+concurrency 1.
+
+                                Conc. Med. TTFT Queue Time            TPOT     Throughput
+
+                                1         4,666 ms        0 ms        2.9 ms    3,828 tok/s
+                                8         5,678 ms      1,012 ms      5.3 ms   20,845 tok/s
+                                32        8,828 ms      4,162 ms     14.4 ms 38,946 tok/s
+                                128      23,810 ms     19,143 ms     48.5 ms 46,766 tok/s
+
+
+Although concurrency 128 introduces ∼19s of queuing delay, this remains entirely invisible to the agent due to the
+asynchronous pipeline design: the agent never blocks on memory completion, and the summary is consumed only at the start
+of the next k-step cycle. This confirms that C O M EM’s scheduling overhead is effectively zero from the agent’s perspective,
+even under heavy memory server load.
+
+G. Robustness to Scaffold Changes
+A practical deployment concern is whether the memory model is brittle to changes in the agent’s tool interfaces and prompt
+templates. To evaluate this, we conduct a cross-scaffold transfer experiment: we take a memory model trained entirely with
+the R2E-Gym scaffold and GLM-4.7 as the agent, and evaluate it using the OpenHands scaffold, which differs substantially
+in tool definitions, output formats, and prompt structure. Despite these differences, the transferred memory model achieves
+62.4% resolve rate compared to 62.7% with the original scaffold. This minimal degradation (−0.3%) suggests that the
+memory model learns to extract and compress task-relevant information in a manner that is largely invariant to the specific
+tool interfaces and prompt templates used during inference.
+
+H. Hyperparameters
+Training. We train the memory model (Qwen3-4B) using GRPO with the following hyperparameters. We use a learning
+rate of 1 × 10−6 with a cosine schedule and a warmup ratio of 0.05. The training batch size is 128 prompts with a group
+size of 16 rollouts per prompt. The clipping parameter is ϵ = 0.2 and the KL penalty coefficient is β = 0.01. We train for
+3 epochs on trajectories collected from R2E-Gym-Lite using the full-context agent pipeline. The maximum input length
+for the memory model is 32,768 tokens, and the maximum summary output length is capped at 2,048 tokens. For the
+action-consistency reward, we use cosine similarity between the agent’s action given the summary and the ground-truth
+full-context action. The SFT warmup stage uses the same learning rate and trains for 1 epoch before GRPO fine-tuning.
+
+                                                             15
+                          C O M EM : Context Management with A Decoupled Long-Context Model
+
+Evaluation. We evaluate on SWE-Bench-Verified using 500 GitHub issues from the test set, processed in batches of 128
+issues for latency measurement. The maximum number of agent steps is set to 40, with an extended allowance of up to
+100 steps to permit submission. We use the R2E-Gym scaffold with default tool definitions. For the k-step-off pipeline,
+we set k = 2 for DeepSWE and Qwen3-Coder-Max, and k = 4 for GLM-4.7. The maximum summary length is 2,048
+tokens for all configurations. For inference serving, we use vLLM version 0.14.0 with prefix caching and chunked
+prefilling enabled. DeepSWE is served on A100 (80GB) GPUs, and Qwen3-Coder-Max and GLM-4.7 are served on
+H200 GPUs. The agent model’s generation temperature is set to 0.6 with top-p sampling at 0.95. The memory model uses
+greedy decoding (temperature 0) for deterministic summaries.
+
+I. Cross-Backbone Transferability
+We further investigate whether a trained memory model specializes to the particular agent backbone used during training. To
+test this, we take a memory model trained with Qwen3-Coder-Max as the agent backbone and evaluate it directly with
+GLM-4.7 without any retraining. The transferred configuration achieves 61.9% resolve rate, compared to 62.7% for the
+dedicated training with GLM-4.7. The modest gap (−0.8%) indicates that the memory model acquires a general-purpose
+compression strategy that transfers across agent architectures, while dedicated per-backbone training can further elevate
+performance.
+
+
+
+
+                                                            16
+

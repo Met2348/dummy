@@ -1,0 +1,1162 @@
+                                                            CoHyDE: Iterative Co-Training of LLM Rewriter &
+                                                                   Dense Encoder for Tool Retrieval
+
+                                                         Vaishali Senthil*          Ashutosh Hathidara*           Sebastian Schreiber
+                                                                                          SAP Labs
+                                                               {vaishali.senthil, ashutosh.hathidara, sebastian.schreiber}@sap.com
+
+
+
+
+                                                                     Abstract                     every tool’s documentation into its context window,
+                                                                                                  and the quality of an agent’s actions is bounded
+                                             Tool retrieval over large API catalogs is a core
+
+
+
+
+arXiv:2605.29271v1 [cs.AI] 28 May 2026
+                                                                                                  above by an upstream tool retrieval step that selects
+                                             bottleneck for LLM agents: user queries arrive
+                                             in colloquial, often underspecified language,        a small candidate set per user query.
+                                             while the catalog uses technical API vocabu-            The dominant retrieval recipe embeds queries
+                                             lary that no fixed encoder can bridge on its own.    and tools into a shared vector space and returns
+                                             The two dominant training approaches, con-           the top-k most similar tools by nearest-neighbor
+                                             trastive encoder fine-tuning and HyDE-style          lookup. Two largely disjoint research directions
+                                             query expansion with a frozen LLM, address           have grown around this recipe. Direction 1: query
+                                             this problem from opposite ends and fail in
+                                                                                                  expansion with a frozen LLM. HyDE-style meth-
+                                             complementary directions: the fine-tuned en-
+                                             coder excels when the query’s surface form al-
+                                                                                                  ods (Gao et al., 2023; Wang et al., 2023) prompt a
+                                             ready matches the catalog but collapses when it      frozen LLM to generate a hypothetical document
+                                             does not, while zero-shot HyDE is more ro-           for the query and search a frozen encoder against
+                                             bust to underspecified queries yet generates         its embedding. Direction 2: encoder fine-tuning
+                                             catalog-unaware hypothetical descriptions that       with no query rewriting. Dense-retrieval methods
+                                             degrade retrieval when queries are well-formed.      fine-tune the encoder on (query, tool) pairs with
+                                             We introduce CoHyDE, an iterative procedure          contrastive losses (Karpukhin et al., 2020; Xiao
+                                             that trains the dense encoder and the LLM
+                                                                                                  et al., 2024).
+                                             rewriter as a single co-evolving system: the
+                                             encoder is retrained with InfoNCE on catalog-           Both directions have a complementary failure
+                                             style hypothetical descriptions produced by the      mode. A trained dense encoder is, in essence, a
+                                             rewriter, and the rewriter is preference-aligned     similarity function shaped by the (anchor, positive)
+                                             via DPO against the encoder’s retrieval scores,      pairs it sees during training. When the query is
+                                             with both sides warm-started on the tool cat-        in-distribution (i.e., sharing lexical surface with
+                                             alog before the loop begins. On a ∼10k tool          the catalog), the contrastive signal is sufficient;
+                                             subset of the ToolBench catalog (Qin et al.,
+                                                                                                  when surface form drifts, the encoder has no world-
+                                             2024), three rounds of CoHyDE improve over
+                                             the strongest single-component baseline by
+                                                                                                  knowledge or reasoning machinery to bridge the
+                                             +2.5 pp NDCG@5 on standard queries and               gap and falls back on residual lexical cues (Thakur
+                                             +6.3 pp on held-out vague queries, with gains        et al., 2021; Chen et al., 2022). Query-expansion
+                                             as large as +8 pp on the hardest vague tier.         approaches fail symmetrically: the LLM brings the
+                                             Ablations confirm that co-training is the key        reasoning needed to handle vague queries (Wei
+                                             ingredient: using either component in isolation      et al., 2022), but its generated output does not
+                                             fails to match CoHyDE on both well-formed            match the catalog’s vocabulary, so on well-formed
+                                             and vague queries, with losses of up to -8 pp
+                                                                                                  queries, it hurts more than it helps (Lei et al., 2024).
+                                             on vague queries.
+                                                                                                  This raises a natural question: can the two training
+                                         1    Introduction                                        modes be combined into a single procedure that is
+                                                                                                  stronger than either component alone?
+                                         Modern language model agents act in the world               We introduce CoHyDE, an iterative co-training
+                                         by calling external tools drawn from catalogs that       procedure that treats the dense encoder and the
+                                         increasingly number in the tens of thousands (Qin        LLM rewriter as a single co-evolving system. In
+                                         et al., 2024; Patil et al., 2024). No agent can fit      each round, the LLM generates catalog-style hy-
+                                             * Equal contribution.                                pothetical descriptions for each query; the encoder
+is then retrained via contrastive learning on these       (Ma et al., 2023), RaFe (Mao et al., 2024), and
+descriptions, and the LLM is preference-aligned           LeReT (Hsu et al., 2025) use RL or DPO with a
+via DPO using the encoder’s own retrieval scores          frozen retriever; a complementary thread (Nogueira
+as reward signal. This alternating update cycle is re-    et al., 2019; Dai et al., 2023; Bonifacio et al.,
+peated for multiple iterations, with each component       2022; Wang et al., 2022) trains the retriever on
+progressively adapting to the other.                      LLM-generated synthetic queries with the gener-
+   We apply CoHyDE on a ∼10k-tool subset of the           ator frozen. All these methods freeze at least one
+ToolBench catalog (Qin et al., 2024). After three         component, whereas CoHyDE co-trains both.
+rounds of co-training, CoHyDE improves over the
+strongest single-component baseline by +2.5 pp            Dense retriever robustness and joint retriever-
+NDCG@5 on standard queries and +6.3 pp on held-           generator training. Dense retrievers are brittle
+out vague queries, with gains as large as +8 pp on        off-distribution (Thakur et al., 2021; Sciavolino
+the hardest vague tier.                                   et al., 2021; Chen et al., 2022; Yu et al., 2022);
+   To summarize our contributions: (i) We intro-          domain-adaptation via synthetic queries (Wang
+duce CoHyDE, an iterative co-training procedure           et al., 2022; Dai et al., 2023; Meng et al., 2024;
+that jointly optimizes a dense encoder and an LLM         Lin et al., 2023) runs the generation loop once with
+rewriter for tool retrieval. (ii) We empirically char-    a frozen generator. Joint retriever–generator frame-
+acterize the complementary failure modes of en-           works like RAG (Lewis et al., 2020), Atlas (Izacard
+coder fine-tuning and zero-shot HyDE, motivating          et al., 2023), REPLUG (Shi et al., 2024), RA-DIT
+the need to train both components jointly.                (Lin et al., 2024), Self-RAG (Asai et al., 2024) train
+                                                          the generator to produce better final answers, not
+2   Related Work                                          better retrieval inputs. Prior work has therefore
+                                                          never co-trained a generator whose output is the
+Tool retrieval. Dense tool-retrieval methods fine-        retrieval input with the encoder that consumes it,
+tune an encoder on (query, tool) pairs with con-          the precise gap CoHyDE fills.
+trastive supervision (Qin et al., 2024; Anantha et al.,
+2023; Qu et al., 2024; Shi et al., 2025); a paral-        3     Methodology
+lel line treats retrieval as a frozen black-box via
+LLM-based expansion or generative indexing (Patil         3.1    Problem Formulation
+et al., 2024; Chen et al., 2024; Lumer et al., 2025;
+                                                          Let T = {t1 , . . . , tN } denote a tool catalog of
+Wang et al., 2025). The closest prior work is Shao
+                                                          size N , where each tool t ∈ T carries a structured
+et al. (2023), which iteratively rewrites user in-
+                                                          record (api name & description as well as tool title
+structions and retrains the encoder on (rewritten-
+                                                          & description). We write ϕ : T → Σ∗ for a fixed
+instruction, tool) pairs. CoHyDE differs: the
+                                                          rendering function that serialises a tool into a single
+rewriter is preference-aligned via DPO against the
+                                                          text string. Given a query q ∈ Σ∗ and a budget k ∈
+encoder it feeds, rewrites target catalog-description
+                                                          N, the tool-retrieval problem is to return a ranked
+style rather than query style, and the encoder re-
+                                                          set T̂k (q) ⊆ T with |T̂k (q)| = k that maximally
+train uses no real (query, tool) pairs. A concurrent
+                                                          overlaps the gold tool set Tq∗ ⊆ T .
+line of work (Anonymous, 2026) audits parametric
+                                                             We restrict attention to single-vector dense en-
+tool retrieval, where tools are embedded as virtual
+                                                          coder retrieval, the dominant architecture in tool
+tokens in an LLM’s vocabulary (Wang et al., 2025);
+                                                          retrieval (Qin et al., 2024; Anantha et al., 2023;
+this paradigm is orthogonal to CoHyDE, which
+                                                          Qu et al., 2024; Shi et al., 2025). A parameterised
+improves dense encoder retrieval.
+                                                          encoder fθ : Σ∗ → Rd maps any text into a d-
+Query expansion and trained rewriters. HyDE               dimensional unit-norm vector and retrieval is per-
+(Gao et al., 2023) searches a frozen index against        formed by approximate nearest-neighbour search
+a hypothetical document embedding; Query2doc              (Johnson et al., 2021),
+(Wang et al., 2023) concatenates the pseudo-                                                         
+document to the original query. CSQE (Lei et al.,                T̂k (q; θ) = topkt∈T fθ (q), fθ ϕ(t)        (1)
+2024) patches corpus-misalignment of LLM expan-
+sions at test time by injecting retrieved sentences;      We additionally consider a rewriter-augmented
+we address the same misalignment at training time.        variant in which a generator gψ : Σ∗ → Σ∗ pro-
+Trained query rewriters like Rewrite-Retrieve-Read        duces a hypothetical tool description d˜ = gψ (q)
+           Data prep                         Parallel warmup (S1)                                                                                                  Output
+
+         Tool catalog
+      10K tools, 5 renderings                                                         Iterative loop (rounds r = 1 … R)
+                                            S1a — Encoder warmup
+                                               InfoNCE on (query, tool)
+       Training queries                                 → θ₁
+      104K (query, tool) pairs                                                                                               S3ᵣ — Encoder retrain
+                                                                                                                                                               Encoder θᵣ₊₁
+                                                                                                                              InfoNCE on (g_ψᵣ(q), ϕ(t))
+                                                                                                                                                            BGE-large, desc-aligned
+      Vague-query split                                                                                                         no real queries → θᵣ₊₁
+        Eval only, held out
+                                                                                        S2 — Bootstrap data
+                                                                                         ψᵣ generates (desc, tool)
+                                                                                                 pairs ᵈ
+
+
+                                           S1b — Rewriter warmup
+                                            5-format tool SFT (Qwen3-4B)                                                   S4ᵣ — DPO rewriter update
+                                                        → ψ₁                                                                 Sample 4 candidates (T=0.7)       Rewriter ψᵣ₊₁
+                                                                                                                             Score by NDCG@5 under θᵣ₊₁     Qwen3-4B, DPO-aligned
+                                                                                                                               DPO (best, worst) → ψᵣ₊₁
+
+
+
+
+   Encoder stages                Rewriter stages               Data / neutral steps
+
+
+
+
+Figure 1: Overview of CoHyDE: a dense encoder and an LLM rewriter are co-trained in an alternating loop, with
+each component iteratively adapted to the other.
+
+
+that is encoded in place of the query:                                                                               so each tool is seen under all five surface forms
+     g                                                                                                             over an epoch. This format mixture encourages
+  T̂k ψ (q; θ) = topkt∈T fθ gψ (q) , fθ ϕ(t) .                                                                       the encoder to learn representations invariant to
+                                               (2)                                                                   catalog-side surface variation, including the longer
+The goal of CoHyDE is to find parameters (θ , ψ ∗ )
+                                            ∗
+                                                                                                                     multi-sentence ϕ5 that most closely matches the
+such that the two components reinforce each other,                                                                   rewriter’s output style. At inference, the catalog is
+which we achieve through an alternating sequence                                                                     indexed under ϕ5 .
+of encoder and rewriter updates described in §3.5.
+                                                                                                                     Vague-query split. We adopt the vague-query
+3.2       Data                                                                                                       evaluation protocol of Chen et al. (2026) to probe
+Tool catalog. The ToolBench API pool (Qin                                                                            robustness under query-side distribution shift. Each
+et al., 2024) contains |Tfull | = 46,980 tools, par-                                                                 q ∈ Qeval is paraphrased to replace surface tokens
+titioned into three evaluation tiers: single-domain                                                                  with conversational alternatives, while preserving
+(G1), cross-domain same-category (G2), and cross-                                                                    the original gold tool set. We follow the protocol
+domain different-category (G3), with 1,092 official                                                                  of Chen et al. (2026) exactly, substituting claude-
+evaluation queries (593 / 399 / 100 over G1/G2/G3).                                                                  4.5-opus for the GPT-4o paraphraser used in the
+We work with a stratified subset T of N = 10,000                                                                     original work. Qvague does not enter any training
+tools sized for training tractability: the subset re-                                                                procedure; two-pass validation (LLM self-check
+tains every tool referenced by the gold sets of the                                                                  on every paraphrase plus an author spot-check on
+evaluation queries, and stratified-samples the re-                                                                   50 samples) is described in Appendix A.
+maining slots to preserve the per-tier proportions
+of Tfull .                                                                                                           3.3    Encoder
+                                                                                                                     fθ is initialised from BGE-large-en-v1.5 (Xiao
+Training set. The training set Dtrain =                                                                              et al., 2024) (≈335M parameters, d =
+{(qi , Tq∗i )}M
+              i=1 consists of M = 104,224 (query,                                                                    1024). Given x ∈ Σ∗ we define fθ (x) =
+gold-tool-set) pairs (44,873 / 35,402 / 23,949 over                                                                  hθCLS (x)/∥hθCLS (x)∥2 , and the same encoder is ap-
+G1/G2/G3); most queries have multiple gold tools                                                                     plied to queries, tool renderings, and rewriter out-
+(|Tq∗ | > 1 for 93–99% of q). For contrastive train-                                                                 puts (a symmetric bi-encoder). Training minimises
+ing, we flatten these to individual (query, tool) pairs                                                              the symmetric InfoNCE loss (van den Oord et al.,
+Dq = {(q, ϕ(t)) : (q, Tq∗ ) ∈ Dtrain , t ∈ Tq∗ }.                                                                    2019) with temperature τ = 0.05 and in-batch
+Tool rendering. We represent each tool under                                                                         negatives; full loss expression and optimisation
+a family of five rendering conventions Φ =                                                                           hyperparameters are in Appendix F.
+{ϕ1 , . . . , ϕ5 } spanning its natural information axes:                                                               We define two contrastive training datasets, dif-
+ϕ1 (title only), ϕ2 (+API name), ϕ3 (+tool descrip-                                                                  fering only in what serves as the anchor: Dq pairs
+                                                                                                                                                               (ψ)
+tion), ϕ4 (title, API name, API description), and                                                                    user queries with tool renderings, while Dd pairs
+ϕ5 (full record). At training time, ϕ ∼ Unif(Φ)                                                                      rewriter-generated hypothetical descriptions gψ (q)
+is sampled independently per (query, tool) pair,                                                                     with tool renderings. In both cases the tool side is
+rendered under a rendering ϕ sampled uniformly            Algorithm 1 CoHyDE: Iterative Co-Training
+from Φ.                                                   Require: Pretrained encoder θ0 , base rewriter ψ0 ,
+                                                              training pairs Dtrain , prompt ρHyDE , rendering
+3.4   Rewriter
+                                                              family Φ, rounds R
+gψ is Qwen3.5-4B (Yang et al., 2025), an                  Ensure: Co-trained encoder θR+1 and rewriter
+instruction-tuned decoder-only transformer. We                ψR+1
+define a prompt operator ρHyDE that wraps a                1: [S1a] Encoder warmup: train θ0 with InfoNCE
+query with an instruction to enumerate the full               on {(q, ϕ5 (t))} from Dtrain to obtain θ1
+tool description of tool capable of fulfilling the         2: [S1b] Rewriter warmup: fine-tune ψ0 on cata-
+query’s intent, in catalog-style description for-             log tools under Φ to obtain ψ1
+mat (Appendix C). A deterministic cleaning op-             3: [S2] Bootstrap:          generate Dd 1
+                                                                                                    (ψ )
+                                                                                                            =
+erator clean(·) strips reasoning-trace blocks and             {(gψ1 (ρHyDE (q)), ϕ(t))} for (q, t) ∈ Dtrain
+conversational preambles before encoding (Ap-              4: for r = 1, . . . , R do
+pendix B). At inference, the rewriter produces             5:     [S3r ] Encoder retrain: train θr with In-
+d˜ = clean(gψ (ρHyDE (q))) and retrieval proceeds                            (ψ )
+                                                              foNCE on Dd r to obtain θr+1
+against d˜ alone, replacing the original query en-         6:     [S4r ] Rewriter alignment:
+tirely.                                                    7:        Sample N descriptions {d˜(j) } ∼
+3.5   CoHyDE: Iterative Co-training                           gψr (ρHyDE (q)) for each q ∈ Dtrain
+                                                           8:        Score each d˜(j) by NDCG@5 under
+We index encoder and rewriter checkpoints by
+                                                              θr+1
+training stage: θi , ψi are the parameters after
+                                                           9:        Form preference pair:           d˜+
+                                                                                                       q    =
+stage i. θ0 denotes BGE-large-en-v1.5 pretrained                                        ˜(j)  ˜−
+                                                              arg maxj NDCG@5(d ), dq = arg minj
+weights; ψ0 denotes the opensource instruction-
+                                                          10:        ψr+1 ← arg minψ LDPO (ψ; ψr )
+tuned Qwen3.5-4B. The pipeline has two parallel                        (ψ     )
+warmup steps (S1a & S1b) followed by a boot-              11:        Dd r+1 = {(gψr+1 (ρHyDE (q)), ϕ(t))}
+strap data-generation step (S2) and an alternating        12: end for
+training loop (S3, S4) that may be unrolled for any       13: return (θR+1 , ψR+1 )
+number of rounds R ≥ 1. Figure 1 and Algorithm 1
+summarise the procedure.
+                                                          S2: Bootstrap data generation. Using ψ1 and
+S1a: Encoder warmup. The encoder is trained               the prompt ρHyDE , we generate the first round of
+with InfoNCE on (query, tool) pairs from Dtrain :         (description, tool) training data:
+                                                
+ θ1 = arg min E(q,t)∼Dtrain LNCE θ; (q, ϕ5 (t))             (ψ )   
+             θ                                            Dd 1 = (gψ1 (ρHyDE (q)), ϕ(t)) : (q, t) ∈ Dtrain
+                                                   (3)                                                    (5)
+This is the standard contrastive tool-retrieval recipe    with ϕ ∼ Unif(Φ). The 5-format-trained rewriter
+(Qin et al., 2024; Anantha et al., 2023; Shi et al.,      produces catalog-style tool descriptions, used as
+2025), and is observed to be the strongest encoder-       the contrastive anchors for the next encoder train-
+only baseline (Table 1). We initialise the loop from      ing.
+θ1 rather than pretrained BGE so the encoder has
+a contrastive head start before description-only re-      S3r : Encoder retraining. For each round r =
+                                                                                                           (ψ )
+training begins.                                          1, . . . , R, the encoder is trained further on Dd r ,
+                                                          continuing from θr :
+S1b: Rewriter warmup. The rewriter is fine-
+tuned on the catalog itself, with each tool t shown       θr+1 = arg min E LNCE θ; (gψr (ρHyDE (q)), ϕ(t))
+                                                                                                          
+under all five renderings ϕ1 , . . . , ϕ5 from the for-                 θ
+                                                                                                            (6)
+mat family Φ (defined in §3.2):
+                                                          No real (q, t) pair participates in this stage; the
+                      XX
+                                                          encoder is trained only on (gψr (q), ϕ(t)) pairs.
+                                                
+     ψ1 = arg min −               log pψ ϕi (t)     (4)
+                  ψ
+                       t∈T ϕi ∈Φ
+                                                          S4r : DPO alignment of the rewriter. For each
+This teaches the rewriter the catalog’s vocabulary,       q ∈ Dtrain , sample N candidate descriptions
+naming conventions, and the multiple surface forms        {d˜(j) } ∼ gψr (ρHyDE (q)) at and score them by
+a tool can take.                                          NDCG@5 under the just-trained encoder θr+1 .
+Form a preference pair (d˜+   ˜−
+                          q , dq ) from the argmax        BGE encoder with the same vanilla Qwen3.5-4B
+and argmin of those scores, and minimise the stan-        generator, but differ in generation strategy: query
+dard DPO objective (Rafailov et al., 2023):               expansion paraphrases the user query (anchor stays
+                                                          on the query side), while HyDE generates a hy-
+                                        pψ (d˜+
+                                              q |ρ(q))    pothetical catalog-style tool description (anchor
+    LDPO (ψ; ψr ) = −Eq log σ β log                       moves to the document side). BGE (trained S1a)
+                                       pψr (d+˜q |ρ(q))
+                                              !           is the BGE encoder fine-tuned on (query, tool)
+                             pψ (d˜−
+                                   q |ρ(q))               pairs at the S1a warmup step described in §3.5.
+                     − β log                       (7)
+                             pψ (d˜−
+                                 r  q |ρ(q))              HyDE (vanilla LLM + trained BGE S1a) pairs
+                                                          the trained encoder with HyDE generation with-
+ψr+1 = arg minψ LDPO (ψ; ψr ) is then used to             out any rewriter training, testing whether the two
+             (ψ   )                                       components can be composed after independent op-
+regenerate Dd r+1 for the next round. The encoder
+of round r supervises the rewriter update, and the        timisation. All baselines use the ϕ5 catalog index
+rewriter of round r + 1 produces the data for the         for a fair comparison; all LLM-based baselines use
+next encoder update, both sides evolve along a            Qwen3.5-4B (Yang et al., 2025) as the generator.
+coupled trajectory.
+                                                          CoHyDE inference. At test time, the trained
+Iteration. The loop {S3r , S4r } may be unrolled          rewriter produces a hypothetical tool description
+for any number of rounds R.                               d˜ = clean(gψ (ρHyDE (q))) via greedy decoding
+                                                          (temperature=0, 150-token budget). The trained
+3.6    Evaluation Protocol                                encoder takes d˜ as its query and retrieves the top-k
+We report hit@k, recall@k, and NDCG@k for                 tools by nearest-neighbour lookup against the cata-
+k ∈ {1, 5, 10, 20}, averaged over each query              log indexed under ϕ5 . Full training hyperparame-
+split Q ∈ {Qeval , Qvague } and stratified by tier        ters and infrastructure details are in Appendix E.
+(G1/G2/G3). Catalog embeddings {fθ (ϕ5 (t))}t∈T
+                                                          Metrics. NDCG@5 is the primary metric; Re-
+are precomputed once per encoder θ under ϕ5 and
+                                                          call@5 is reported as a secondary check that gains
+reused across query splits; rewriter outputs are re-
+                                                          reflect more correct tools being retrieved and not
+generated end-to-end for every reported configura-
+                                                          merely reranking an already-correct candidate set.
+tion. Metric definitions appear in Appendix I; the
+                                                          Both metrics are reported on Qeval and Qvague ,
+full k-sweep results in Appendix J.
+                                                          stratified by tier (G1 / G2 / G3), giving six (metric
+4     Experiments & Results                               × split × tier) cells per configuration.
+
+4.1    Experimental Setup                                 4.2   CoHyDE Comparison with Baselines
+Benchmark and evaluation splits. All experi-              Table 1 compares CoHyDE against seven reference
+ments use the ToolBench-derived catalog and query         points; reading the rows top to bottom traces the
+splits described in §3.2: a 10,000-tool subset T          logical sequence that motivates the co-training de-
+with 1,092 evaluation queries stratified across three     sign.
+tiers (G1/G2/G3). Each query is evaluated on both
+                                                          Encoder-only fine-tuning is brittle on vague
+the standard split Qeval — the original ToolBench
+                                                          queries. The InfoNCE-trained encoder (BGE
+queries — and the vague split Qvague , which con-
+                                                          S1a) dominates every standard evaluation split by
+tains intent-preserving paraphrases that replace sur-
+                                                          a wide margin, lifting G1 NDCG@5 from 56.5 to
+face tokens with conversational alternatives (both
+                                                          84.2 over vanilla BGE. On vague paraphrases of
+splits share the same gold tool sets).
+                                                          the same queries, however, it collapses: G1 vague
+Baselines. We compare against seven reference             falls −39.5pp from its own performance on stan-
+points spanning the space of design choices. BM25         dard counterpart, and G3 vague reaches 14.9% —
+over the ϕ5 -indexed catalog serves as a sparse lex-      barely above the vanilla baseline. The strong com-
+ical floor, requiring no training or LLM. BGE             mercial encoder (text-embedding-3-large) follows
+(vanilla) and text-embedding-3-large are frozen           the same pattern at a lower absolute level: competi-
+dense encoders that embed raw queries directly.           tive on standard, but no more robust on vague. The
+Query expansion (LLM + BGE) and HyDE                      encoder has learned a similarity function calibrated
+(vanilla LLM + BGE) both pair the same vanilla            to the surface vocabulary of well-formed queries;
+                                                               Standard                                                  Vague
+                                                  G1                 G2                 G3                 G1                 G2                 G3
+    Method                                 N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5
+    BM25                                   49.0        52.7   31.0        31.7   17.3        17.5   17.8        19.6   10.3        11.6    3.4        3.0
+    BGE (vanilla)                          56.5        62.4   31.9        33.2   18.5        20.7   33.2        37.3   15.8        16.7    8.3        12.9
+    text-embedding-3-large                 61.6        66.4   36.3        36.4   26.7        29.2   34.8        40.5   18.1        19.8   19.8        19.8
+    Query expansion† (LLM + BGE)           51.4        56.7   27.0        30.0   29.2        30.9   32.6        38.2   11.3        12.5    6.2        10.9
+    HyDE (vanilla LLM & BGE)               58.2        63.8   34.9        37.7   35.1        36.4   37.4        43.4   17.7        19.9   17.4        21.1
+    BGE (trained S1a)                      84.2        89.7   71.7        76.3   57.1        56.8   44.7        49.8   30.7        33.6   14.9        18.7
+    HyDE (vanilla LLM + trained BGE S1a)   73.4        79.5   59.5        62.2   46.2        47.6   41.2        47.4   29.3        31.8   17.6        17.9
+    CoHyDE (r = 3)                         86.8        91.0   73.6        78.0   60.1        60.4   49.4        55.2   38.7        41.5   21.1        26.2
+†
+ Vanilla LLM paraphrases the user query into a retrieval-friendly form (query-side expansion); the rewritten query is encoded
+by vanilla BGE.
+
+Table 1: NDCG@5 (N@5) and Recall@5 (R@5) in % on standard and vague query splits, stratified by tier. Bold =
+best per column.
+
+
+any deviation from that vocabulary exposes its brit-                       neighbour search. This is the direct motivation for
+tleness.                                                                   co-training: the encoder and rewriter cannot be
+                                                                           composed after independent training. Instead, they
+Description generation bridges vocabulary gaps;                            should evolve their representation spaces together.
+query rewriting does not. Table 1 includes both
+a query expansion baseline and a HyDE baseline,                            CoHyDE resolves all three failure modes simul-
+both using the same vanilla BGE encoder and the                            taneously. CoHyDE at r=3 improves over the
+same vanilla Qwen3.5-4B generator. On standard                             strongest single-component baseline (BGE S1a)
+queries the two are comparable; the decisive dif-                          on every split. Standard-query gains are mod-
+ference is on vague cross-domain queries. Query                            est (average +2.5pp), reflecting that co-training
+rewriting, which keeps the inference-time anchor                           preserves the encoder’s standard-query precision
+on the query side of the embedding space, reaches                          rather than trading it away. Vague-query gains
+G3 vague NDCG@5 of only 6.2%—below the                                     are substantially larger (average +6.3pp), closing
+vanilla BGE baseline of 8.3%. HyDE, which gen-                             the lexical brittleness that neither the trained en-
+erates hypothetical catalog-style tool descriptions                        coder nor baseline HyDE could resolve on its own.
+and moves the anchor to the document side, reaches                         Crucially, the co-trained encoder also closes the
+17.4% on the same split, a +11.2pp gap. The pat-                           representation-mismatch gap: trained exclusively
+tern is consistent across all tiers: HyDE outper-                          on DPO-generated hypothetical descriptions with
+forms query rewriting on every vague cell, often by                        zero raw queries in its training data, it reaches
+double-digit margins. This establishes the gener-                          G1 standard NDCG@5 of 86.8%, matching and
+ative direction that CoHyDE adopts: producing a                            slightly exceeding the BGE encoder trained on raw
+hypothetical tool description rather than reformu-                         queries. The jointly-trained space has been shaped
+lating the query.                                                          so that raw query vectors at inference land in the
+                                                                           same neighbourhood as their corresponding cata-
+Combining HyDE with a query-trained encoder                                log descriptions, without ever having seen those
+makes things worse. A natural next step is to                              queries during training.
+combine the gains of encoder fine-tuning with
+HyDE generation. Table 1 shows that this naive                             4.3    Ablations
+combination backfires: “HyDE (vanilla LLM +                                We isolate four design choices in CoHyDE: (i)
+trained BGE S1a)” drops −10.8pp on G1 stan-                                the rewriter warmup stage S1b, which pre-trains
+dard NDCG@5 relative to the trained encoder used                           the LLM on catalog surface forms before the co-
+alone (73.4 vs 84.2), and trails on every other split                      training loop begins; (ii) the joint encoder update,
+as well. The trained encoder’s similarity function                         asking whether the gains require a co-trained en-
+was calibrated on raw user queries as anchors; at in-                      coder or can be obtained by pairing the trained
+ference it receives hypothetical catalog descriptions                      rewriter with a vanilla encoder; (iii) the symmet-
+whose embedding distribution is shifted away from                          ric question for the encoder side, asking whether
+that calibration manifold, distorting the nearest-                         the co-trained encoder retains its advantage when
+                                                                                       Standard                                                  Vague
+                                                                          G1                 G2                 G3                 G1                 G2                 G3
+   Variant                                                     N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5 N@5 R@5
+   CoHyDE (full)                                                   86.8        91.0   73.6        78.0   60.1        60.4   49.4        55.2   38.7        41.5   21.1        26.2
+   CoHyDE (w/o S1b rewriter warmup)                                81.3        87.0   71.5        75.6   50.5        53.8   47.0        54.1   35.2        36.9   19.6        21.8
+   CoHyDE (trained LLM + vanilla encoder)                          63.2        68.7   38.1        40.3   36.2        37.0   40.1        45.2   17.6        19.4   12.9        15.3
+   CoHyDE (vanilla LLM + trained encoder)                          86.3        79.5   75.6        62.2   53.7        47.6   44.1        47.4   32.8        31.8   15.8        17.9
+
+         Table 2: Ablation study. Each row removes or replaces one component of CoHyDE. Bold = best per column.
+
+
+                    Standard                                       Vague
+         90
+                                                                                                  dation in Table 2. NDCG@5 collapses on stan-
+         80                                                                                       dard splits by 23.6pp, 35.5pp, and 23.9pp on G1,
+         70
+                                                                                                  G2, and G3 respectively; vague splits decline by 9–
+NDCG@5
+         60
+         50                                                                                       21pp. The vanilla encoder was trained on raw user
+         40
+         30                                                                                       queries, so its representation space is calibrated to
+         20
+         10
+                                                                                                  natural-language vectors rather than to the catalog-
+              S1   R1           R2        R3        S1        R1            R2        R3
+                        Round                                       Round                         style hypothetical descriptions the DPO-aligned
+                                          Tier
+                                     G1        G2        G3                                       rewriter generates. Feeding it rewriter outputs at
+                                                                                                  inference therefore distorts, rather than improves,
+Figure 2: Per-round NDCG@5 trajectory on standard                                                 the similarity search. This result confirms that
+(left) and vague (right) query splits, stratified by tier.                                        the rewriter’s gains are not a free add-on to any
+Both splits improve monotonically from S1 through R3.                                             encoder: they require an encoder whose repre-
+                                                                                                  sentation space has been co-shaped to match the
+paired with a vanilla (untrained) rewriter; and (iv)                                              rewriter’s output distribution.
+the number of co-training rounds r, which mea-
+sures convergence behaviour and whether addi-
+tional rounds continue to improve retrieval quality.                                              The encoder is load-bearing for standard
+   Table 2 reports results for each ablated variant                                               queries; the rewriter differentiates vague ones.
+across all six evaluation splits.                                                                 The symmetric ablation, co-trained encoder with
+                                                                                                  a vanilla rewriter, reveals the complementary side.
+Rewriter warmup is critical for cross-domain                                                      On easy standard queries, the co-trained encoder
+retrieval. Removing the rewriter warmup drops                                                     is nearly self-sufficient: G1 standard NDCG@5
+standard G3 NDCG@5 by 9.6pp (60.1 → 50.5)                                                         falls by only 0.5pp (86.3 vs 86.8), and G2 standard
+and R@5 by 6.6pp, while standard G1 and G2 fall                                                   actually edges out the full model by 2.0pp (75.6 vs
+by only 5.5pp and 2.1pp respectively. Vague-query                                                 73.6). The co-trained encoder has absorbed enough
+degradation is consistently smaller (≤ 3.5pp across                                               of the catalog distribution that zero-shot HyDE
+all tiers). The gradient of the drop, steepest on stan-                                           queries land acceptably close in its embedding
+dard G3 and shallowest on vague splits, reflects                                                  space without a fine-tuned rewriter. The gap opens
+what the warmup actually provides: the rewriter                                                   on harder settings: NDCG@5 on standard G3 falls
+learns the catalog’s vocabulary and surface forms                                                 by 6.4pp (60.1 → 53.7) and on vague splits by
+before the co-training loop begins. On near-domain                                                5.3–5.9pp uniformly across all tiers. These are
+standard G1 queries, the encoder can partially                                                    precisely the conditions where the rewriter’s DPO
+compensate for a cold rewriter; on cross-domain                                                   alignment matters—bridging a large lexical gap on
+standard G3 tools, whose descriptions share few                                                   cross-domain tools, or reasoning past underspecifi-
+surface tokens with user queries, a warmup-free                                                   cation on vague queries.
+rewriter fails to generate catalog-aligned descrip-
+tions from the outset and the encoder’s nearest-                                                      Together, ablations (ii) and (iii) confirm the
+neighbour search degrades from round one.                                                          asymmetry established in §4.2: the encoder car-
+                                                                                                   ries precision on near-vocabulary standard queries;
+The trained rewriter requires a jointly-trained                                                    the rewriter provides robustness on hard and vague
+encoder. Pairing the co-trained rewriter with a                                                    ones; co-training is what enables both gains simul-
+vanilla BGE encoder produces the largest degra-                                                    taneously.
+                                                  Xu et al. (2024) (re-impl.)   et al., 2024) is a stronger standard-query competi-
+         80                                       RaFe
+                                                  CoHyDE (R=3)                  tor than Shao et al. (2023), closing much of the gap,
+         60
+NDCG@5
+                                                                                but still trails CoHyDE by 6.9pp on G1, 6.4pp on
+         40                                                                     G2, and 6.4pp on G3. The vague splits separate the
+         20                                                                     methods more sharply. Shao et al. (2023) holds up
+          0                                                                     on G1 and G2 vague (within ≤ 2.1pp of CoHyDE),
+               G1 std   G2 std   G3 std   G1 vague G2 vague G3 vague
+                                  Dataset Split                                 but falls behind on G3. RaFe (Mao et al., 2024)
+                                                                                degrades most severely on G3 vague, dropping to
+Figure 3: NDCG@5 comparison with the two closest                                13.6 NDCG@5 against CoHyDE’s 21.1 — a 7.5pp
+prior methods across all six evaluation splits. Error bars
+                                                                                gap on the hardest cross-domain vague split, com-
+show 95% confidence intervals.
+                                                                                pared to RaFe’s 6.4pp deficit on the corresponding
+                                                                                standard split. Confidence intervals for all reported
+Co-training performance evolution across                                        differences follow the paired-bootstrap protocol
+rounds. Figure 2 traces NDCG@5 at each stage                                    (Appendix K); re-implementation details for Shao
+for all six evaluation splits. Performance is mono-                             et al. (2023) are in Appendix M.
+tonically non-decreasing from S1 through R3 on                                     The pattern is consistent with the failure-mode
+five of six splits; the single exception is standard                            framing of §4.2: an encoder trained on raw queries
+G2, which retreats by a marginal 0.6pp between                                  with a frozen rewriter (i.e. Shao et al. (2023)) and
+R2 and R3. Gains from R1 to R2 are consistently                                 a rewriter trained against an external reranker with
+larger than those from R2 to R3 across all tiers and                            a frozen encoder (i.e. Mao et al. (2024)) both fail
+both evaluation split types, indicating the coupled                             to bridge the lexical gap that vague cross-domain
+encoder–rewriter system approaches convergence                                  queries expose. CoHyDE’s joint co-training, where
+within three rounds. The diminishing updates and                                the encoder’s retrieval metric directly supervises
+the single non-monotonic cell motivate our choice                               the rewriter and the rewriter’s outputs shape the
+to report R3 as the final CoHyDE configuration.                                 encoder’s representation space, sustains the advan-
+                                                                                tage across both query distributions.
+4.4           Comparison with Closest Prior Methods
+CoHyDE is most directly related to two lines of                                 5   Conclusion
+work that also use iterative feedback to improve
+tool or document retrieval. Shao et al. (2023) pro-                             Contrastive encoder fine-tuning and HyDE-style
+pose an iterative loop in which the LLM’s down-                                 description generation fail in complementary direc-
+stream tool-usage success is fed back to retrain                                tions, and their naive composition makes things
+the retriever; the retriever evolves across rounds                              worse because their representation spaces have
+but the query representation at inference is the raw                            been calibrated to different input distributions. We
+user query and no rewriter component is trained.                                introduce CoHyDE, an iterative co-training loop
+RaFe (Mao et al., 2024) trains a query rewriter with                            that resolves this by evolving the encoder and
+RL feedback from an external reranker in a general                              rewriter together: the encoder’s NDCG@5 scores
+RAG setting; critically, the rewriter paraphrases                               supervise the rewriter via DPO, and the rewriter’s
+the user query into a more retrieval-friendly form                              catalog-aligned outputs become the encoder’s train-
+— it does not generate catalog-style hypothetical                               ing anchors each round. Three rounds improve
+descriptions — so the inference-time anchor re-                                 over the strongest single-component baseline on
+mains on the query side of the embedding space,                                 every evaluation cell, with average gains of +2.5pp
+and the encoder remains frozen throughout. Both                                 NDCG@5 on standard queries and +6.3pp on
+methods train only one side of the retrieval pipeline                           vague ones. The asymmetric improvement is the
+and use a signal external to the encoder-rewriter                               direct consequence of the mechanism: the jointly-
+pair rather than closing the loop directly through                              trained encoder learns a space where raw query
+the retrieval objective.                                                        vectors land near their corresponding catalog de-
+   Figure 3 reports NDCG@5 for all three meth-                                  scriptions at inference — without ever seeing those
+ods across standard and vague splits. On standard                               queries during training — suggesting that for re-
+queries CoHyDE leads on all three tiers by a wide                               trieval over idiosyncratic catalogs with underspec-
+margin over Shao et al. (2023): +17.3pp on G1,                                  ified queries, the encoder and rewriter are better
++18.5pp on G2, and +14.3pp on G3. RaFe (Mao                                     treated as a single co-evolving system.
+Limitations                                                     ing vague instructions with retriever preferences via
+                                                                bridge model. Preprint, arXiv:2604.07816.
+All reported numbers are from a single training
+seed; the bootstrap confidence intervals in Ap-               Xilun Chen, Kushal Lakhotia, Barlas Oguz, Anchit
+                                                                Gupta, Patrick Lewis, Stan Peshterliev, Yashar
+pendix P characterise evaluation-set variance but               Mehdad, Sonal Gupta, and Wen-tau Yih. 2022.
+not training-side variance, and multi-seed retrains             Salient phrase aware dense retrieval: Can a dense
+were not run due to the per-round compute cost                  retriever imitate a sparse one? In Findings of the
+of each co-training loop (Appendix N). Experi-                  Association for Computational Linguistics: EMNLP
+                                                                2022, pages 250–262, Abu Dhabi, United Arab Emi-
+ments are conducted on a 10K-tool English subset                rates. Association for Computational Linguistics.
+of ToolBench, which is skewed toward consumer-
+facing RapidAPI REST endpoints; it remains to be              Yanfei Chen, Jinsung Yoon, Devendra Singh Sachan,
+                                                                Qingze Wang, Vincent Cohen-Addad, Mohammad-
+seen whether the co-training gains transfer to en-
+                                                                hossein Bateni, Chen-Yu Lee, and Tomas Pfister.
+terprise catalogs, non-English queries, or function-            2024. Re-invoke: Tool invocation rewriting for zero-
+call schemas that lack free-text descriptions. The              shot tool retrieval. In Findings of the Association
+vague-query split Qvague is generated and validated             for Computational Linguistics: EMNLP 2024, pages
+by the LLMs used throughout the pipeline; though                4705–4726, Miami, Florida, USA. Association for
+                                                                Computational Linguistics.
+spot-checked by a human on 50 paraphrases (Ap-
+pendix A), systematic biases shared between the               Zhuyun Dai, Vincent Y Zhao, Ji Ma, Yi Luan, Jianmo
+generator and judge may go undetected. Finally, we              Ni, Jing Lu, Anton Bakalov, Kelvin Guu, Keith Hall,
+                                                                and Ming-Wei Chang. 2023. Promptagator: Few-
+benchmark against single-vector dense retrievers                shot dense retrieval from 8 examples. In The Eleventh
+and BM25 but not against cross-encoder rerankers                International Conference on Learning Representa-
+or sparse–dense hybrids; a comparison with such                 tions.
+methods would require matched latency or FLOPs
+                                                              Luyu Gao, Xueguang Ma, Jimmy Lin, and Jamie Callan.
+budgets, which we leave to future work.                         2023. Precise zero-shot dense retrieval without rel-
+                                                                evance labels. In Proceedings of the 61st Annual
+Ethical Considerations                                          Meeting of the Association for Computational Lin-
+                                                                guistics (Volume 1: Long Papers), pages 1762–1777,
+We conducted experiments within the provisions                  Toronto, Canada. Association for Computational Lin-
+of the ACL Ethics Policy and relevant research-                 guistics.
+integrity guidelines. There are, to the best of our
+                                                              Sheryl Hsu, Omar Khattab, Chelsea Finn, and Archit
+knowledge, no remaining ethical risks that have not             Sharma. 2025. Grounding by trying: LLMs with re-
+been addressed.                                                 inforcement learning-enhanced retrieval. In The Thir-
+                                                                teenth International Conference on Learning Repre-
+                                                                sentations.
+References                                                    Gautier Izacard, Patrick Lewis, Maria Lomeli, Lucas
+Raviteja Anantha, Bortik Bandyopadhyay, Anirudh                 Hosseini, Fabio Petroni, Timo Schick, Jane Dwivedi-
+  Kashi, Sayantan Mahinder, Andrew W Hill, and                  Yu, Armand Joulin, Sebastian Riedel, and Edouard
+  Srinivas Chappidi. 2023.        Protip: Progres-              Grave. 2023. Atlas: few-shot learning with retrieval
+  sive tool retrieval improves planning. Preprint,              augmented language models. J. Mach. Learn. Res.,
+  arXiv:2312.10332.                                             24(1).
+
+Anonymous. 2026. ToolSense: A diagnostic framework            Jeff Johnson, Matthijs Douze, and Herve Jegou. 2021.
+  for auditing parametric tool knowledge in LLMs. Un-             Billion-Scale Similarity Search with GPUs . IEEE
+  der review.                                                    Transactions on Big Data, 7(03):535–547.
+
+Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, and           Vladimir Karpukhin, Barlas Oguz, Sewon Min, Patrick
+  Hannaneh Hajishirzi. 2024. Self-RAG: Learning to              Lewis, Ledell Wu, Sergey Edunov, Danqi Chen, and
+  retrieve, generate, and critique through self-reflection.     Wen-tau Yih. 2020. Dense passage retrieval for open-
+  In The Twelfth International Conference on Learning           domain question answering. In Proceedings of the
+  Representations.                                              2020 Conference on Empirical Methods in Natural
+                                                                Language Processing (EMNLP), pages 6769–6781,
+Luiz Bonifacio, Hugo Abonizio, Marzieh Fadaee, and              Online. Association for Computational Linguistics.
+  Rodrigo Nogueira. 2022. Inpars: Data augmentation
+  for information retrieval using large language models.      Yibin Lei, Yu Cao, Tianyi Zhou, Tao Shen, and An-
+  Preprint, arXiv:2202.05144.                                   drew Yates. 2024. Corpus-steered query expansion
+                                                                with large language models. In Proceedings of the
+Kunfeng Chen, Luyao Zhuang, Fei Liao, Juhua Liu, Jian           18th Conference of the European Chapter of the As-
+  Wang, and Bo Du. 2026. Tool retrieval bridge: Align-          sociation for Computational Linguistics (Volume 2:
+  Short Papers), pages 393–401, St. Julian’s, Malta.       Yujia Qin, Shihao Liang, Yining Ye, Kunlun Zhu, Lan
+  Association for Computational Linguistics.                 Yan, Yaxi Lu, Yankai Lin, Xin Cong, Xiangru Tang,
+                                                             Bill Qian, Sihan Zhao, Lauren Hong, Runchu Tian,
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio         Ruobing Xie, Jie Zhou, Mark Gerstein, dahai li,
+  Petroni, Vladimir Karpukhin, Naman Goyal, Hein-            Zhiyuan Liu, and Maosong Sun. 2024. ToolLLM:
+  rich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-           Facilitating large language models to master 16000+
+  täschel, Sebastian Riedel, and Douwe Kiela. 2020.          real-world APIs. In The Twelfth International Con-
+  Retrieval-augmented generation for knowledge-              ference on Learning Representations.
+  intensive nlp tasks. In Proceedings of the 34th Inter-
+  national Conference on Neural Information Process-       Changle Qu, Sunhao Dai, Xiaochi Wei, Hengyi Cai,
+  ing Systems, NIPS ’20, Red Hook, NY, USA. Curran           Shuaiqiang Wang, Dawei Yin, Jun Xu, and Ji-Rong
+  Associates Inc.                                            Wen. 2024. Towards completeness-oriented tool re-
+                                                             trieval for large language models. In Proceedings of
+Sheng-Chieh Lin, Akari Asai, Minghan Li, Barlas Oguz,
+                                                             the 33rd ACM International Conference on Informa-
+  Jimmy Lin, Yashar Mehdad, Wen-tau Yih, and Xilun
+                                                             tion and Knowledge Management, CIKM ’24, page
+  Chen. 2023. How to train your dragon: Diverse aug-
+                                                             1930–1940, New York, NY, USA. Association for
+  mentation towards generalizable dense retrieval. In
+                                                             Computing Machinery.
+  Findings of the Association for Computational Lin-
+  guistics: EMNLP 2023, pages 6385–6400, Singapore.        Rafael Rafailov, Archit Sharma, Eric Mitchell, Christo-
+  Association for Computational Linguistics.                 pher D Manning, Stefano Ermon, and Chelsea Finn.
+Xi Victoria Lin, Xilun Chen, Mingda Chen, Weijia             2023. Direct preference optimization: Your language
+  Shi, Maria Lomeli, Richard James, Pedro Rodriguez,         model is secretly a reward model. In Thirty-seventh
+  Jacob Kahn, Gergely Szilvasy, Mike Lewis, Luke             Conference on Neural Information Processing Sys-
+  Zettlemoyer, and Wen tau Yih. 2024. RA-DIT:                tems.
+  Retrieval-augmented dual instruction tuning. In The
+  Twelfth International Conference on Learning Repre-      Christopher Sciavolino, Zexuan Zhong, Jinhyuk Lee,
+  sentations.                                                and Danqi Chen. 2021. Simple entity-centric ques-
+                                                             tions challenge dense retrievers. In Proceedings of
+Elias Lumer, Vamse Subbiah, James Burke, Pradeep             the 2021 Conference on Empirical Methods in Natu-
+   Basavaraju, and Austin Huber. 2025. Toolshed:             ral Language Processing, pages 6138–6148, Online
+   Scale tool-equipped agents with advanced rag-tool         and Punta Cana, Dominican Republic. Association
+   fusion and tool knowledge bases. In Proceedings           for Computational Linguistics.
+   of the 17th International Conference on Agents and
+  Artificial Intelligence - Volume 3: ICAART, pages        Zhihong Shao, Yeyun Gong, Yelong Shen, Minlie
+  1180–1191. INSTICC, SciTePress.                            Huang, Nan Duan, and Weizhu Chen. 2023. En-
+                                                             hancing retrieval-augmented large language models
+Xinbei Ma, Yeyun Gong, Pengcheng He, Hai Zhao,               with iterative retrieval-generation synergy. In Find-
+  and Nan Duan. 2023. Query rewriting in retrieval-          ings of the Association for Computational Linguis-
+  augmented large language models. In Proceedings of         tics: EMNLP 2023, pages 9248–9274, Singapore.
+  the 2023 Conference on Empirical Methods in Natu-          Association for Computational Linguistics.
+  ral Language Processing, pages 5303–5315, Singa-
+  pore. Association for Computational Linguistics.         Weijia Shi, Sewon Min, Michihiro Yasunaga, Min-
+                                                            joon Seo, Richard James, Mike Lewis, Luke Zettle-
+Shengyu Mao, Yong Jiang, Boli Chen, Xiao Li, Peng           moyer, and Wen-tau Yih. 2024. REPLUG: Retrieval-
+  Wang, Xinyu Wang, Pengjun Xie, Fei Huang, Hua-            augmented black-box language models. In Proceed-
+  jun Chen, and Ningyu Zhang. 2024. RaFe: Ranking           ings of the 2024 Conference of the North American
+  feedback improves query rewriting for RAG. In Find-       Chapter of the Association for Computational Lin-
+  ings of the Association for Computational Linguistics:    guistics: Human Language Technologies (Volume
+  EMNLP 2024, pages 884–901, Miami, Florida, USA.           1: Long Papers), pages 8371–8384, Mexico City,
+  Association for Computational Linguistics.                Mexico. Association for Computational Linguistics.
+Rui Meng, Ye Liu, Semih Yavuz, Divyansh Agarwal,
+                                                           Zhengliang Shi, Yuhan Wang, Lingyong Yan, Pengjie
+  Lifu Tu, Ning Yu, Jianguo Zhang, Meghana Bhat,
+                                                             Ren, Shuaiqiang Wang, Dawei Yin, and Zhaochun
+  and Yingbo Zhou. 2024. Augtriever: Unsupervised
+                                                             Ren. 2025. Retrieval models aren’t tool-savvy:
+  dense retrieval and domain adaptation by scalable
+                                                             Benchmarking tool retrieval for large language mod-
+  data augmentation. Preprint, arXiv:2212.08841.
+                                                             els. In Findings of the Association for Computational
+Rodrigo Nogueira, Wei Yang, Jimmy Lin, and                   Linguistics: ACL 2025, pages 24497–24524, Vienna,
+  Kyunghyun Cho. 2019. Document expansion by                 Austria. Association for Computational Linguistics.
+  query prediction. Preprint, arXiv:1904.08375.
+                                                           Nandan Thakur, Nils Reimers, Andreas Rücklé, Ab-
+Shishir G Patil, Tianjun Zhang, Xin Wang, and Joseph E.      hishek Srivastava, and Iryna Gurevych. 2021. BEIR:
+  Gonzalez. 2024. Gorilla: Large language model con-         A heterogeneous benchmark for zero-shot evaluation
+  nected with massive APIs. In The Thirty-eighth An-         of information retrieval models. In Thirty-fifth Con-
+  nual Conference on Neural Information Processing           ference on Neural Information Processing Systems
+  Systems.                                                   Datasets and Benchmarks Track (Round 2).
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. 2019.        constructed to probe robustness under query-side
+  Representation learning with contrastive predictive         distribution shift while preserving the gold tool set.
+  coding. Preprint, arXiv:1807.03748.
+                                                              Construction follows the protocol of Chen et al.
+Kexin Wang, Nandan Thakur, Nils Reimers, and Iryna            (2026) verbatim, with claude-4.5-opus substituted
+  Gurevych. 2022. GPL: Generative pseudo labeling             for their GPT-4o paraphraser.
+  for unsupervised domain adaptation of dense retrieval.
+  In Proceedings of the 2022 Conference of the North          Two-pass validation.        The split is validated in
+  American Chapter of the Association for Computa-            two passes.
+  tional Linguistics: Human Language Technologies,
+  pages 2345–2360, Seattle, United States. Association            1. LLM self-check. Every paraphrase in Qvague
+  for Computational Linguistics.
+                                                                     is re-presented to claude-4.5-opus in a sepa-
+Liang Wang, Nan Yang, and Furu Wei. 2023.                            rate session, together with the original query
+  Query2doc: Query expansion with large language                     and the gold tool set, and scored on the three
+  models. In The 2023 Conference on Empirical Meth-
+                                                                     binary criteria of Chen et al. (2026) — (i) in-
+  ods in Natural Language Processing.
+                                                                     tent preservation, (ii) absence of leaked tool
+Renxi Wang, Xudong Han, Lei Ji, Shu Wang, Timothy                    names / API verbs / domain keywords, (iii)
+  Baldwin, and Haonan Li. 2025. Toolgen: Unified                     plausibility as an end-user utterance. An ex-
+  tool retrieval and calling via generation. In The Thir-
+  teenth International Conference on Learning Repre-                 ample is retained only if all three criteria are
+  sentations.                                                        satisfied. Substituting claude-4.5-opus for the
+                                                                     GPT-4o validator used by Chen et al. (2026)
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+   Bosma, Brian Ichter, Fei Xia, Ed H. Chi, Quoc V. Le,
+                                                                     is the only deviation from their protocol.
+   and Denny Zhou. 2022. Chain-of-thought prompt-
+   ing elicits reasoning in large language models. In             2. Human spot-check. 50 paraphrases were
+   Proceedings of the 36th International Conference on               sampled uniformly at random from the LLM-
+   Neural Information Processing Systems, NIPS ’22,                  validated split and re-verified by human
+   Red Hook, NY, USA. Curran Associates Inc.                         against the same three criteria. All 50 passed
+Shitao Xiao, Zheng Liu, Peitian Zhang, Niklas Muen-                  all three criteria, giving a 6% rule-of-three
+  nighoff, Defu Lian, and Jian-Yun Nie. 2024. C-pack:                upper bound on the true failure rate at 95%
+  Packed resources for general chinese embeddings. In                confidence. The annotator was not blinded
+  Proceedings of the 47th International ACM SIGIR                    to the paraphraser identity; this is a trans-
+  Conference on Research and Development in Infor-
+  mation Retrieval, SIGIR ’24, page 641–649, New                     parency disclosure rather than a methodolog-
+  York, NY, USA. Association for Computing Machin-                   ical strength. The annotator was not com-
+  ery.                                                               pensated separately, apart from their regular
+An Yang, Anfeng Li, Baosong Yang, Beichen Zhang,                     wages during the research; no external anno-
+  Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao,                        tators were used.
+  Chengen Huang, Chenxu Lv, Chujie Zheng, Day-
+  iheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao                Ethics review. The annotation involves no hu-
+  Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41              man subjects beyond the human conducting the
+  others. 2025. Qwen3 technical report. Preprint,             spot-check and qualifies as exempt from formal
+  arXiv:2505.09388.
+                                                              ethics-board review under the relevant institutional
+Yue Yu, Chenyan Xiong, Si Sun, Chao Zhang, and                guidelines. No consent procedure was required
+  Arnold Overwijk. 2022. COCO-DR: Combating the               because the annotator is the data producer.
+  distribution shift in zero-shot dense retrieval with con-
+  trastive and distributionally robust learning. In Pro-      Annotator demographics. The annotator is a
+  ceedings of the 2022 Conference on Empirical Meth-          full-time employee of the authoring organization
+  ods in Natural Language Processing, pages 1462–
+  1479, Abu Dhabi, United Arab Emirates. Association          and resides in the USA.
+  for Computational Linguistics.
+                                                              B     Cleaning Operator
+Appendix
+                                                              The deterministic cleaning operator clean(·) ap-
+A    Vague-Query Construction and                             plied to every rewriter output before encoding
+     Validation                                               strips:
+
+The vague-query split Qvague is a held-out para-                  1. Reasoning-trace blocks         delimited    by
+phrase of the official 1,092-query evaluation set,                   <think>...</think>.
+    2. Unclosed reasoning traces (a leading <think>           E     Per-Stage Hyperparameter Summary
+       with no terminator), in which case the entire
+       output is rejected and replaced with the origi-        Table 3 consolidates every training and inference
+       nal query.                                             stage in the main pipeline with its load-bearing hy-
+                                                              perparameters. Full per-stage detail (objective, opti-
+    3. Conversational    preambles     match-                 miser, schedules, ablation context) is in Appendix F
+       ing   ^(Sure|Okay|Of      course|Here                  (encoder; S1a, S3r ) and Appendix G (rewriter; S1b,
+       is|Here’s)[^.]*\.\s+.                                  S2, S4r ). The optional HyDE-style SFT bridging
+                                                              stage — which is not part of the main pipeline —
+    4. Trailing whitespace and repeated blank lines.
+                                                              is documented separately in Appendix H. Software
+The operator is implemented as a sequence of                  versions for every stage are in Appendix O.
+regular-expression substitutions and is applied iden-
+tically at SFT-target construction, DPO-candidate             F     Encoder Training Hyperparameters
+scoring, and inference time.
+                                                              The encoder is trained at two distinct points in
+C     HyDE-Style Rewriter Prompt                              the pipeline: once at S1a (warmup on real query–
+                                                              tool pairs) and once per round at S3r (retrain on
+The HyDE-style prompt ρHyDE is used at the op-                rewriter-generated descriptions). Both stages use
+tional SFT stage (when included; see Appendix H),             the same InfoNCE objective; they differ only in the
+                    (ψ )
+at S2 (generating Dd r ), at S4 (sampling DPO can-            anchor source and in whether they continue from
+didates), and at every inference-time HyDE evalua-            the previous checkpoint or restart from θ0 .
+tion reported in §4.
+                                                              InfoNCE loss. Let B = {(ai , pi )}B    i=1 be a mini-
+System message:                                               batch of (anchor, positive) pairs, and write Sijθ =
+      You are an expert at understanding API tool             ⟨fθ (ai ), fθ (pj )⟩/τ . The symmetric InfoNCE loss
+      pipelines. When given a user query, you de-
+      scribe the sequence of API calls needed to fulfill      (van den Oord et al., 2019) is
+      it. Each description should focus on what the tool
+      does, what inputs it takes, and what data it returns.                           B
+                                                                                        "
+      Write each tool’s description as a single concise                            1 X            exp Siiθ
+                                                                  LNCE (θ; B) = −         log PB
+      technical sentence.                                                         2B                          θ
+                                                                                     i=1         j=1 exp Sij
+User message:
+                                                                                                           #
+                                                                                              exp Siiθ
+       User query: {query}                                                          + log PB                 , (8)
+                                                                                                       θ
+                                                                                             j=1 exp Sji
+       Think about the full pipeline of API
+       calls needed to answer the query.
+       Describe each API tool in the pipeline in              with temperature τ = 0.05. Negatives are in-batch
+       order, explaining what data it provides                (no hard-negative mining).
+       and how it feeds into the next step. Be
+       concise and technical.                                 S1a: Encoder warmup. Anchors are real
+                                                              queries q, positives are ϕ5 (t) for the gold tool. Ini-
+D     Query-Rewriting Prompt
+                                                              tialised from BGE-large-en-v1.5. AdamW with
+The query-rewriting prompt ρrewrite is used only in           learning rate ηθ = 2 × 10−5 , weight decay 10−2 ,
+the prompt-style ablation reported in Appendix L;             cosine schedule with 5% warmup, batch size
+it is not used anywhere for CoHyDE.                           B = 256, max sequence length 256 tokens, 5
+                                                              epochs over the 104,224 (G1+G2+G3) training
+System message:
+                                                              pairs of Dtrain . Validation NDCG@5 (mean over
+      You are a query enhancement expert. Given a user
+      query and the relevant API tools, rewrite the query
+                                                              G1/G2/G3 dev splits) is computed every 200 steps
+      to be more specific and detailed. Include relevant      and the checkpoint maximising it is retained — this
+      tool names, API capabilities, and technical terms       is step 3600 in our run. All training is on a single
+      that would help a retrieval system find the right
+      tools. Keep it as a natural user request, but a more    H200 GPU with native bf16 mixed precision; no
+      specific version of what the user is asking for.        gradient accumulation. CLS-token pooling, L2 -
+                                                              normalised before scoring. No dropout beyond
+User message:
+                                                              BGE’s defaults.
+       Original query: {query}
+       Relevant tools: {tool_names}                           S3r : Per-round encoder retrain. Anchors are
+       Rewritten query:                                       the rewriter outputs d˜ = gψr (ρHyDE (q)) from the
+    Stage                Objective                 Init from           LR / β   Effective BS   Length / steps                    Adapter
+
+    S1a (encoder)        InfoNCE, τ =0.05          BGE-large-en-v1.5   2×10−5   256            seq 256, 5 ep                     full FT
+    S1b (rewriter)       5-format SFT (NLL)        Qwen3.5-4B          2×10−5   64             seq 1024, 8 ep                    LoRA r=16 + new tok embeds
+    S2 (gen)             greedy decode, T =0       ψ1                  —        1              150-tok budget                    —
+    S3r (encoder)        InfoNCE, τ =0.05          θr                  2×10−5   256            seq 256, 5 ep                     full FT
+    S4r (cand. sample)   nucleus, T =0.7, p=0.95   ψr                  —        N =4/query     300-tok budget                    —
+    S4r (DPO)            sigmoid DPO, β=0.1        ψr (ref)            5×10−6   8              prompt 1024 / comp 300, 1 epoch   LoRA r ′ =64
+    Inference            greedy decode, T =0       ψR                  —        1              150-tok budget                    —
+
+
+Table 3: Per-stage hyperparameters for the main pipeline. “LR” is the optimiser learning rate (AdamW, weight
+decay 10−2 , bf16 throughout); for S4 “β” is the DPO regularisation coefficient. “Effective BS” is per-device batch
+size × gradient accumulation. All training runs on a single H200 GPU; full per-stage detail in Appendices F, G.
+
+                                          (ψ )
+regenerated bootstrap set Dd r ; positives are ϕ(t)                             the G1/G2/G3 retrieval dev splits is computed every
+for ϕ ∼ Unif(Φ). The encoder is initialised from                                100 steps and the best checkpoint is retained.
+θr (i.e. continued from the previous round’s check-
+point, not from θ0 ). All other hyperparameters —                               S2: Bootstrap description generation. Using
+optimiser, learning rate 2 × 10−5 , weight decay,                               ψ1 (the S1b checkpoint), we generate the first
+                                                                                                                             (ψ )
+cosine schedule with 5% warmup, batch size 256,                                 round of (description, tool) training data Dd 1 over
+max sequence length 256, bf16, validation cadence,                              all queries q ∈ Dtrain . Sampling is greedy (T = 0,
+single-GPU — are identical to S1a. The retrain                                  top-p = 1, top-k = 1, no repetition penalty) with
+                                           (ψ )
+runs for the same 5-epoch budget over Dd r , with                               a 150-token completion budget, served via vLLM.
+the best validation-NDCG@5 checkpoint retained                                  We use a single completion per query. Outputs pass
+(around step 3400–4000 across rounds). No real                                  through clean(·) (Appendix B) before being used
+(q, t) pair is used at S3r ; the encoder is trained                             as encoder anchors. The same generation protocol
+purely on (rewritten-description, tool) pairs and                               is re-run at the start of every subsequent round r to
+                                                                                            (ψ )
+tested on real queries at inference time. An ab-                                produce Dd r from the current rewriter ψr .
+lation that mixes real q-anchored and ˜  d-anchored
+                                                                                S4r : DPO candidate sampling. For each query
+pairs in the same retrain is reported in Appendix L
+                                                                                q ∈ Dtrain we sample N = 4 candidate de-
+(combined-pair encoder retrain).
+                                                                                scriptions from ψr at temperature T = 0.7, top-
+                                                                                p = 0.95, top-k = 50, with a 300-token com-
+G     Rewriter Training and Inference
+                                                                                pletion budget, served via vLLM. Each candidate
+      Hyperparameters
+                                                                                d˜(j) is encoded by the freshly-retrained encoder
+The rewriter is trained at S4r (DPO alignment, run                              θr+1 (from S3r ); candidates are scored by their
+once per round), and is sampled from at S2 (boot-                               NDCG@5 against the gold tool set Tq∗ under θr+1 .
+strap data generation), at S4r (DPO candidate sam-                              The chosen / rejected pair (d˜+   ˜−
+                                                                                                              q , dq ) is the (argmax,
+pling), and at inference time. Each of these uses                               argmin) of the four scores. Queries whose four
+different decoding settings, listed below.                                      candidates yield identical NDCG@5 are dropped
+                                                                                from the DPO set.
+S1b: 5-format tool-rendering SFT. The rewriter
+ψ0 = Qwen3.5-4B is fine-tuned on the catalog T                                  S4r : DPO training. We use TRL’s DPOTrainer
+rendered under all five formats ϕ1 , . . . , ϕ5 (defined                        with the sigmoid loss formulation (Rafailov et al.,
+in §3.2). Each tool is presented as a next-token                                2023):
+prediction target under each of the five rendering                                                                               
+conventions, sampled with equal weight per mini-                                LDPO (ψ; ψr ) = − log σ β ∆ψ (d˜+ , q)−∆ψ (d˜− , q) ,
+batch. LoRA with rank r = 16, αLoRA = 32,
+dropout 0.05, applied to attention q, k, v, o projec-                                                                    ˜
+                                                                                                                      p (d|ρ          (q))
+                                                                                         ˜ q) = log ψ HyDE
+                                                                                with ∆ψ (d,                     and β = 0.1.
+tions. AdamW with learning rate ηψS1b = 2 × 10−5 ,                                                    ˜
+                                                                                                   p (d|ρ  (q))        ψr        HyDE
+linear schedule with 3% warmup, per-device batch                                LoRA with rank r′ = 64, αLoRA = 128, dropout
+size 2, gradient accumulation 32 (effective batch                               0.05, applied to attention q, k, v, o projections only;
+size 64), max sequence length 1024, 8 epochs                                    embeddings and the language-model head are not
+over the mixture (≈50K examples per epoch), bf16                                tuned at S4 (the new tool tokens are already learned
+mixed precision, gradient checkpointing on (non-                                at S1b and held fixed thereafter). AdamW with
+reentrant), single H200 GPU. Validation hit@5 on                                learning rate ηψS4 = 5 × 10−6 , cosine schedule with
+3% warmup, per-device batch size 2, gradient ac-       this style gap.
+cumulation 4 (effective batch size 8), max prompt         Once we adopted the 5-format encoder warmup
+length 1024 tokens, max completion length 300          (S1) and the 5-format rewriter warmup S1b (Ap-
+tokens, 1 epoch over the DPO pair set (≈4,371          pendix G), the picture changed. By training the
+optimiser steps), bf16 mixed precision, gradient       encoder under ϕ ∼ Unif(Φ) — with ϕ5 in par-
+checkpointing on, single H200 GPU. The reference       ticular being the long, multi-sentence rendering
+policy ψr is the previous round’s rewriter; at r = 1   closest in length and style to the rewriter’s output
+this is ψ1 from S1b. The trained adapter is merged     — the encoder learns a representation that is ap-
+back into the base weights at the end of the round     proximately invariant across the style gap this SFT
+before ψr+1 is used at S2 of round r + 1.              pass was originally designed to close, and S1b then
+Inference-time decoding. At evaluation time the        teaches the rewriter the catalog vocabulary directly.
+rewriter is sampled greedily (T = 0) with a 150-       In this configuration, S2 can be initialised from ψ1
+token completion budget, single completion per         (the S1b checkpoint) without an intervening HyDE-
+query, served via vLLM. The deterministic clean-       style SFT pass, and the iterative loop proceeds as
+ing operator clean(·) (Appendix B) is applied be-      in Algorithm 1.
+fore the description is passed to the encoder. The
+same decoding protocol is used for both standard       Pipeline with optional SFT. When included, the
+and vague evaluation passes.                           optional SFT pass produces an alternative ψ1 as fol-
+                                                       lows. Sampling descriptions from ψ0 under ρHyDE
+Reference policy and adapter merging. At each          for queries in Dtrain and applying clean(·) with a
+round r, the DPO reference ψr is loaded from the                       ˜ > 30 characters) yields a cleaned
+                                                       length filter (|d|
+merged checkpoint of round r−1 (or from ψ1 at          set SSFT of ≈2,754 pairs. We then run a short
+r = 1). After DPO training, the LoRA adapter           LoRA SFT pass — explicitly not trained to conver-
+is merged into the base weights to produce ψr+1 ,      gence:
+which serves both as the next round’s S2 generator
+and as the next round’s DPO reference.                   (opt)
+                                                                               X
+                                                                                          log pψ d˜ ρHyDE (q) .
+                                                                                                             
+                                                       ψ1        = arg min −
+                                                                       ψ
+Implementation. PyTorch with HuggingFace                                       ˜
+                                                                            (q,d)∈S SFT
+Transformers; encoder training uses an in-house                                                              (9)
+                                                                                              (opt)
+InfoNCE script; rewriter SFT and DPO use               The iterative loop then runs from ψ1           instead of
+TRL’s SFTTrainer and DPOTrainer with PEFT              ψ1 from S1b.
+for LoRA adapters. vLLM serves the rewriter at
+S2, S4 candidate sampling, and inference. Exact        Hyperparameters. LoRA with rank r = 16,
+software versions are listed in Appendix O.            αLoRA = 32, dropout 0.05, applied to all attention
+                                                       projection matrices (q, k, v, o); embeddings and
+H    Optional SFT Stage (HyDE-Style
+                                                       the language-model head are not tuned. AdamW
+     Bridging)                                         with ηψ = 2 × 10−4 , linear schedule with 20-step
+This appendix describes an optional HyDE-style         warmup, effective batch size 32 (per-device 4 ×
+SFT pass that we ran in early experiments but do       gradient accumulation 8), max sequence length
+not use in the main pipeline reported in §4. It is     512, 100 optimisation steps total (≈3,200 exam-
+a separate stage from the 5-format tool-rendering      ples seen, less than 2 epochs over SSFT ). bf16
+SFT (S1b) used in the CoHyDE pipeline.                 mixed precision, single H200 GPU, gradient check-
+   In early experiments we inserted a brief LoRA-      pointing on. Longer schedules (1,000 / 5,000 steps)
+SFT pass between S1 and S20 to align the rewriter’s    degraded downstream DPO performance by reduc-
+output style with the catalog rendering. The motiva-   ing the diversity of candidates available to the S4
+tion was that the base Qwen3.5-4B rewriter under       sampler; this ablation is reported in Appendix L.
+ρHyDE produced free-form text whose length and
+style differed visibly from the 5-format catalog       Ablation. §4 reports retrieval numbers for the
+rendering — in particular, outputs were often sub-     main pipeline (without the optional SFT pass, i.e.
+stantially longer than any single ϕi . A short SFT     S2 initialised from S1b). The variant with the op-
+pass on cleaned descriptions taught ψ the catalog-     tional SFT pass is reported in Appendix L and does
+style output vocabulary and stop tokens, narrowing     not improve over the main pipeline.
+                      Standard               Vague            {yq }q∈Q(G) be the per-query NDCG@5 scores un-
+     Metric      G1      G2 G3        G1      G2 G3           der the two systems being compared (e.g. Round
+     hit@1       83.1   75.2   69.0   44.7   39.4   18.0      3 and Xu re-implementation), each system hav-
+     hit@5       95.8   90.7   92.0   66.1   65.2   58.0      ing produced its own ranking for the same set of
+     hit@10      97.3   92.0   96.0   75.7   73.9   74.0
+     hit@20      98.0   93.0   98.0   82.1   80.0   86.0      queries from the same evaluation run. We resam-
+                                                              ple query indices with replacement, B = 10,000
+     recall@1    40.4   32.9   25.2   21.8   16.9 6.8
+     recall@5    91.0   78.0   60.4   55.2   41.5 26.2        times, with a fixed random seed. For each re-
+     recall@10   95.2   86.6   75.4   67.2   54.3 42.2        sample b, we compute x̄(b) = meanq∈Sb xq and
+     recall@20   96.7   89.6   90.5   76.1   65.0 57.8        ȳ (b) = meanq∈Sb yq , and the paired difference
+     NDCG@1      83.1   75.2   69.0   44.7   39.4   18.0      δ (b) = x̄(b) − ȳ (b) . The 95% CI of the differ-
+     NDCG@5      86.8   73.6   60.1   49.4   38.7   21.1      ence is the (2.5%, 97.5%) percentile interval of
+     NDCG@10     87.8   78.3   66.8   54.4   44.0   28.0
+     NDCG@20     88.3   78.4   72.4   57.2   47.5   33.6      {δ (b) }B
+                                                                      b=1 ; we report this as [lo, hi]. The same
+                                                              protocol with a single-system x-only resample
+Table 4: Full k-sweep for the round-3 co-trained sys-         yields the per-method CI half-widths quoted in Ap-
+tem. NDCG@1 = hit@1 by construction. Recall@1 is              pendix P (±2pp / ±3pp / ±5−6pp on G1/G2/G3,
+capped at 1/|Tq∗ | for multi-tool queries.                    dominated by tier size |Q(G) |).
+
+                                                              L   Design-Choice Ablations: Details
+I   Evaluation Metrics
+                                                              This appendix gives the per-variant numbers and
+For a query q with gold tool set Tq∗ and retrieved
+                                                              discussion behind the summary in §4.3. None of
+ranking T̂k (q) = (t̂1 , . . . , t̂k ):                       these variants are part of the main pipeline.
+        hit@k(q) = ⊮ T̂k (q) ∩ Tq∗ ̸= ∅ ,
+                                      
+                                                       (10)   Single-format encoder training (ϕ ≡ ϕi for
+                   |T̂k (q) ∩ Tq∗ |                           a fixed i). Training under any single rendering
+     recall@k(q) =                  ,                  (11)   matched the 5-format encoder on its matched eval-
+                         |Tq∗ |
+                                                              uation rendering but underperformed on the others.
+                          ⊮[t̂j ∈Tq∗ ]
+                           Pk
+                    j=1 log2 (j+1)                            Training under ϕ5 alone — the rendering closest
+    NDCG@k(q) = Pmin(k,|T ∗ |)            .            (12)   in length to the rewriter’s output — still produced
+                         q          1
+                 j=1           log2 (j+1)                     an encoder less robust to rewriter outputs of vary-
+                                                              ing length than the 5-format encoder. We interpret
+Each metric is averaged over queries in the relevant
+                                                              this as evidence that the format mixture is doing
+tier. Definitions match the standard ir_measures
+                                                              more than augmenting on the longest format: by
+implementations.
+                                                              forcing the encoder to assign similar embeddings
+                                                              to the same tool across five different surface forms,
+J    Round-3 k-Sweep
+                                                              it learns a length- and style-invariant representation
+Table 4 reports hit@k, recall@k, and NDCG@k                   that the description-only S2 retrains can then build
+for the converged round-3 co-trained system at                on.
+k ∈ {1, 5, 10, 20}, on both standard and vague
+query splits, stratified by tier. Numbers are sourced         Combined-pair encoder retrain. Replacing the
+from the same evaluation run that supplies the                description-only S3r objective with the mixed
+                                                                       (ψr );α=0.5
+round-3 NDCG@5. NDCG@1 equals hit@1 by                        batch Dq+d           produced no improvement over
+construction. Recall@1 is reported in full but, as            description-only and slightly degraded vague-query
+noted in §3.6, is bounded above by 1/|Tq∗ | and is            performance. The mechanism we attribute this to
+therefore lower than the other metrics for every              is that mixing q-anchored pairs back into S3 par-
+multi-tool query.                                             tially pulls the encoder toward the on-distribution
+                                                              q-anchored fixed point established at S1 — the very
+K     Bootstrap CI Protocol                                   fixed point whose vague-query failure we are trying
+                                                              to escape. The description-only objective is, in this
+The paired-bootstrap 95% confidence intervals re-             view, doing distribution shift on purpose.
+ported in §4 and Appendix P are computed as
+follows. For each tier G ∈ {G1 , G2 , G3 } and                Query-rewrite prompt ρrewrite . Substituting the
+split ∈ {standard, vague}, let {xq }q∈Q(G) and                catalog-style ρHyDE with the user-style ρrewrite at
+any stage of the loop (sampling SFT targets, gener-      Iteration schedule. T = 3 refinement rounds
+ating S3r pairs, or sampling DPO candidates) lost        (matching the paper’s reported best). Within each
+on every standard metric, with the largest gap on        round, the LLM sees the current top-K retrieved
+cross-domain G3. The prompt is given the relevant        tools with K = 10 and runs the three-stage Com-
+tool names as in-context anchors, so the compari-        prehension / Assessment / Refinement prompts; the
+son is not a strawman: with that anchoring, ρrewrite     refined instruction (or N/A early-stop) becomes the
+produces specific, plausible user queries — they         next round’s retrieval input. Final ranking is the
+simply do not match the style of the contrastive         last round’s. Top-50 are saved for evaluation at
+pair the encoder sees during S3 retraining.              k ∈ {1, 5, 10, 20}.
+
+Longer SFT schedules. Extending the optional             Three-stage prompts. The paper does not pro-
+SFT pass (Appendix H) from 100 steps to 1,000 /          vide verbatim text. Our reimplementation uses
+5,000 steps closed the SFT train loss but produced       prompts that match the three-stage description in
+lower-diversity candidates at S4 and a smaller DPO       their §3:
+margin, ultimately reducing the closed-loop gain.
+The DPO update relies on temperature-0.7 sam-                • P_Comprehension (system + user): sum-
+pling spreading mass across distinguishable candi-             marise user goals and the functionalities of
+dates; over-fitted rewriters concentrate that mass             the top-K retrieved tools, one short sentence
+and degrade the preference signal.                             per goal and per tool.
+
+HyDE-concat. Concatenating q with d˜ before en-              • P_Assessment (system + user): given the
+coding, in the spirit of Query2doc (Wang et al.,               comprehension and the retrieved set, decide
+2023), helped slightly on G1 standard but hurt                 which goals are SOLVED vs UNSOLVED
+vague queries — where the original q’s lexical sur-            and whether the ranking matches importance;
+face is precisely the surface we are trying to escape.         output Solved: and Unsolved: sections.
+
+M    Xu et al. 2024 Re-implementation                        • P_Refinement (system + user): given the
+                                                               assessment, output either N/A (if all goals
+This appendix documents the hyperparameters and                solved and ranking matches) or a refined one-
+prompts used for the head-to-head against Shao                 paragraph instruction enriched with the miss-
+et al. (2023) reported in §4.4.                                ing intent.
+Encoder. Shao et al. (2023)’s pipeline trains the        This should be read as a faithful reimplementation
+encoder once contrastively and never updates it          of the pipeline structure rather than an exact repro-
+again at inference time. We instantiate this once-       duction of Xu’s prompts.
+trained encoder with our S1a InfoNCE checkpoint
+(BGE-large-en-v1.5 fine-tuned with InfoNCE on            Caveat. Beyond the prompt approximation, our
+real (q, ϕ5 (t)) pairs; full hyperparameters in Ap-      reimplementation differs from the original paper
+pendix F). This is a strictly stronger starting point    in two respects: (i) a stronger encoder (S1a In-
+than the Sentence-BERT base used in the original         foNCE BGE-large vs Sentence-BERT base), and
+paper, and is therefore a charitable substitution:       (ii) a different LLM (Qwen3.5-4B vs GPT-3.5).
+any gap our co-training closes against this baseline     Both substitutions advantage Xu’s method on this
+cannot be attributed to a weaker re-implemented          benchmark, making the head-to-head charitable to
+encoder.                                                 it.
+
+LLM refiner. Qwen3.5-4B served via vLLM,                 N    Compute Budget and Infrastructure
+identical model and serving setup as the main pa-
+per’s rewriter (we deliberately use the same LLM as      Hardware. All experiments were run on a single
+our rewriter to remove model-capacity confounds;         node with 8 H200 GPUs. The encoder training,
+Shao et al. (2023) use GPT-3.5). Greedy decoding         rewriter SFT, rewriter DPO, and HyDE inference
+(T = 0, top-p = 1, top-k = 1), max 400 generated         passes each fit on a single GPU; multi-GPU par-
+tokens per stage. The same temperature is used at        allelism was used only opportunistically and not
+all three prompted stages within a round.                required for any reported result.
+Per-stage wall-clock cost (approximate, single         a separate, finite-sample uncertainty estimate, we
+H200).                                                 computed paired-bootstrap 95% CIs (B=10,000)
+                                                       of NDCG@5 over the 593 / 399 / 100 queries in
+    • S1a (encoder InfoNCE warmup, 5 epochs,           G1/G2/G3 (protocol in Appendix K). The half-
+      batch 256): ∼3 hours.                            width of these CIs — which captures sampling
+    • S1b (rewriter 5-format tool-memorisation         uncertainty over the eval set, not training-seed vari-
+      SFT, ≈50K examples): ∼2 hours.                   ance — is approximately ±2pp on G1 cells, ±3pp
+                                                       on G2 cells, and ±5–6pp on G3 cells (the small-
+    • Per-round S2 (description regeneration over      est tier). Cell-level differences should accordingly
+      Dtrain at T = 0, 150-token budget, via           be read against the bootstrap CI of the difference
+      vLLM): ∼2 hours.                                 rather than a flat noise band: round-3 vs. S1 differ-
+                                                       ences on standard tiers are well outside this band
+    • Per-round S3 encoder retrain: ∼1.5 hours.        on G1/G2 and at the edge on G3; vague-tier differ-
+    • Per-round S4 DPO data generation (N = 4          ences are well outside on G2 but smaller than the
+      candidates per query at T = 0.7, scored by       bootstrap CI on G1 and G3. Multi-seed retrains,
+      the current encoder): ∼6 hours.                  which would also bound training-side variance, are
+                                                       an open item.
+    • Per-round S4 DPO training (≈4,371 steps,
+      LoRA r = 64): ∼4 hours.                          Q     Ethics, Risks, and Artifacts
+                                                       Q.1    Upstream Artifacts and Licenses
+    • Per-configuration vague-split evaluation
+      (HyDE generation over 1,092 queries via          This work builds on the following publicly avail-
+      vLLM): ∼2.5 hours per pass.                      able artifacts, used in a manner consistent with
+                                                       their stated intended use (research benchmarks and
+Total budget. Three rounds of co-training plus         research-grade pretrained models).
+all baselines, ablations, and rejected design-choice
+variants (Appendix L) totalled approximately 400–          • ToolBench (Qin et al., 2024): source of
+500 GPU-hours on H200-class hardware. Repro-                 the underlying API pool and the official
+ducing only the main result (S1a + S1b + three               G1/G2/G3 evaluation queries. Released
+rounds + a single end-to-end vague evaluation)               under Apache 2.0. https://github.com/
+would take roughly 50 GPU-hours.                             OpenBMB/ToolBench.
+
+O    Software Versions                                     • ToolGen (Wang et al., 2025): source of the
+                                                             46,980-tool catalog from which we derive the
+Encoder training uses an in-house InfoNCE script             10K subset T , and the source of the (query,
+built on PyTorch 2.4 and HuggingFace Transform-              gold-tool-set) training pairs Dtrain . Released
+ers 4.46. Rewriter SFT and DPO use TRL 0.11                  under Apache 2.0. https://github.com/
+(SFTTrainer, DPOTrainer) with PEFT 0.13 for                  Reason-Wang/ToolGen.
+LoRA adapters. Rewriter inference uses vLLM 0.6.
+Mixed-precision training uses native PyTorch bf16.         • BGE-large-en-v1.5 (Xiao et al., 2024):
+Evaluation uses our own retrieval scoring code;              encoder initialisation θ0 . Released un-
+metric definitions match the standard ir_measures            der MIT. https://huggingface.co/BAAI/
+implementations and are given in closed form in              bge-large-en-v1.5.
+Appendix I.                                                • Qwen3.5-4B (Yang et al., 2025): rewriter
+P    Single-Seed Caveat                                      initialisation ψ0 . Released under Apache 2.0.
+                                                             https://huggingface.co/Qwen/Qwen3.
+All reported numbers are from a single training              5-4B.
+seed. We did not run multi-seed variance estimates
+due to the per-round compute cost (§N); the per-       Q.2    Data Coverage and Privacy
+round trajectory in §4.3 serves as a partial proxy     Language       and     domain. The       Tool-
+for stability, in that the system’s behaviour across   Bench/ToolGen catalog is entirely English-
+rounds is smooth on tier-averaged metrics and only     language and is sourced from RapidAPI’s public
+mildly non-monotonic at the per-cell level. As         catalog, skewed toward consumer-facing REST
+APIs (weather, sports, lifestyle, finance, entertain-   Q.4   AI Assistant Use
+ment). No non-English text appears in queries,          For prototyping the codebase and experimentation,
+tool descriptions, or rewriter outputs.                 as well as for writing and editing of this manuscript,
+                                                        Claude Code with the Opus-4.5 model was used;
+Personally identifying information. Tool
+                                                        all technical content, experimental design, claims,
+records contain API metadata (titles, endpoints, pa-
+                                                        and figures are the authors’ own.
+rameter schemas, free-text descriptions written by
+API publishers). They do not contain end-user PII.
+We did not run a dedicated PII scan on the catalog
+because the source records are already public API
+documentation; however, the manual review of
+100 vague-paraphrase outputs in Appendix A did
+not surface any inadvertent generation of personal
+information.
+
+Offensive content. The catalog includes some
+adult-content-tagged APIs (a small minority, con-
+sistent with RapidAPI’s public listings). We did not
+filter these out, on the grounds that doing so would
+change the benchmark composition and make our
+numbers incomparable with prior work on the same
+catalog. No offensive content appears in any re-
+ported example or figure.
+
+Split sizes. As reported in §3: catalog |T | =
+10,000; training set |Dtrain | = 104,224 (G1:
+44,873; G2: 35,402; G3: 23,949); evaluation
+queries 593 / 399 / 100 over G1/G2/G3 (1,092 to-
+tal), with vague paraphrases of the same evaluation
+queries forming Qvague of equal size.
+
+Q.3   Risks
+Tool retrieval is a component of larger tool-using
+agent systems; improvements in retrieval can am-
+plify both desirable and undesirable downstream
+agent behaviour, depending on the tools in the cat-
+alog and the agent’s policy over them. Our experi-
+ments are run on the ToolBench-derived ToolGen
+catalog, which inherits whatever selection biases
+that catalog has — consumer-facing REST APIs
+over enterprise or safety-critical tools, English-
+language descriptions, no audit of the underlying
+APIs’ content. A rewriter aligned to a specific
+encoder is, in effect, a steering vector over that
+encoder’s retrieval distribution; the same mecha-
+nism that closes catalog-misalignment gaps could
+in principle be used to bias retrieval toward a cho-
+sen subset of tools, and any practitioner reusing
+this method should be aware that the rewriter’s be-
+haviour is encoder-specific. We see no near-term
+dual-use concern beyond what already applies to
+any open dense retriever or instruction-tuned LLM.
+

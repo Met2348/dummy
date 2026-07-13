@@ -1,0 +1,461 @@
+                                               Context-as-AI-Service: Surfacing Cross-File Dependency Chains
+                                                       for LLM-Generated Developer Documentation
+
+                                                   Ameya Gawde, Vyzantinos Repantis, Harshvardhan Singh, Lucy Moys
+                                                                         Meta Platforms, Inc.
+                                                   {ameyagawde, vrepantis, harshvardhan, ljm}@meta.com
+
+
+
+                                                              Abstract                          internal codebase that serves as the source of truth
+                                            LLM agents increasingly write and maintain          for system behavior. LLMs are increasingly used
+                                            developer documentation, but usefulness and         to automate documentation tasks, including gener-
+
+
+
+
+arXiv:2606.04397v3 [cs.SE] 9 Jun 2026
+                                            accuracy often rely on dependency chains that       ating doc comments, writing tutorials, and main-
+                                            are not obvious to follow. Even with more           taining reference pages (Chen et al., 2021; Ni-
+                                            files in context, the agent must still decide       jkamp et al., 2023). LLM-based coding agents can
+                                            which cross-file dependencies to trace. We          read source files, understand API signatures, and
+                                            present Context-as-AI-Service (CAIS), a re-         produce fluent prose at scale.
+                                            trieval layer that LLM agents query to find ev-
+                                                                                                   Documentation claims often depend on behav-
+                                            idence across the codebase as they review or
+                                            generate documentation. CAIS indexes source         ior distributed across files: a method delegating to
+                                            code, API references, and upstream documen-         an internal scheduler, an equality check depending
+                                            tation, then enables agents to query the index      on a separate backing object, a tutorial step relying
+                                            through tool calls that combine keyword and         on framework lifecycle rules, or a component as-
+                                            semantic search. We evaluate CAIS in two            suming another already exists. Even when many
+                                            case studies using Claude Sonnet 4.6 on a pro-      files are available to an agent, the relevant chain
+                                            duction SDK: improving API reference com-
+                                                                                                may not be obvious. The generated documenta-
+                                            ments in a core source file and validating an
+                                            LLM-generated tutorial. In both studies, the        tion can be locally plausible, yet globally wrong.
+                                            baseline already had ordinary repository tools         Many practical LLM workflows give agents or-
+                                            such as file reads, keyword search, and sym-        dinary repository tools such as file reads, key-
+                                            bol navigation. CAIS adds a retrieval layer on      word search, and nearby-file inspection. This
+                                            top, so the comparison isolates added retrieval     helps when the relevant evidence is local or lex-
+                                            rather than basic repository access. In the API-    ically obvious, but it is less reliable when a docu-
+                                            reference review, the CAIS-augmented agent          mentation claim requires following a non-obvious
+                                            produced the same 5 missing-documentation
+                                                                                                dependency chain: from an API comment to a
+                                            fixes as the baseline and surfaced 4 findings
+                                            the baseline missed: 2 cross-file factual er-       registry component, from a method name to a
+                                            rors and 2 underspecified API comments. In          state-management layer, from a tutorial exam-
+                                            the tutorial validation, it surfaced 1 executable   ple to a utility constructor, or from an interac-
+                                            bug, 1 API-usage improvement, and 2 miss-           tion component to framework-level component-
+                                            ing prerequisites that the baseline pipeline did    creation logic. In these cases, the challenge is
+                                            not catch. These findings required tracing          not merely having enough tokens. The agent must
+                                            non-obvious dependency chains across util-
+                                                                                                identify which symbols, examples, tests, or frame-
+                                            ity files, framework internals, usage examples,
+                                            tests, and component-creation logic. Over five      work rules are worth chasing.
+                                            runs per condition, adding CAIS reduced wall-          Consider a disposal method documented as re-
+                                            clock time by 22% to 34% across the two tasks       moving an object and freeing its resources. From
+                                            and lowered input-token usage.                      the declaring file, this looks plausible. But the im-
+                                                                                                plementation hands the actual removal to a sep-
+                                        1   Introduction
+                                                                                                arate state-management layer, where cleanup is
+                                        Developer documentation is easy to generate but         deferred until the next processing cycle. The
+                                        hard to keep correct. API references become stale       documentation can, therefore, mislead developers
+                                        as code evolves, tutorials accumulate subtle mis-       about cleanup and synchronization. The defect
+                                        takes, and documentation can drift away from the        surfaces only after tracing the dependency from
+the local API to the layer that defines what removal
+really does.
+   We call this the cross-file documentation
+problem: documentation can look correct in its
+own file while depending on symbols, implemen-
+tations, examples, tests, or framework rules else-
+where in the codebase. These errors survive be-
+cause confirming a claim requires finding the spe-
+cific files it depends on, and the agent rarely knows   Figure 1: CAIS system architecture. The LLM agent
+in advance which files those are.                       queries a retrieval service during its documentation
+   To address this problem, we introduce Context-       workflow and receives evidence from across the code-
+as-AI-Service (CAIS), a composable retrieval            base for documentation review.
+layer for LLM documentation workflows. CAIS
+does not replace the agent’s decision about which
+                                                        that are fluent and locally plausible, but contra-
+files to inspect. It gives the agent a scoped way
+                                                        dicted or incomplete once their codebase depen-
+to retrieve evidence from the codebase before de-
+                                                        dencies are traced.
+ciding which dependency chains to follow. Dur-
+ing documentation generation or review, the agent       Code Documentation Generation. Automated
+queries CAIS – a pre-indexed corpus of source           documentation generation has progressed from
+code, API references, tests, examples, and up-          template and heuristic systems (Sridhara et al.,
+stream documentation, and receives structured re-       2010; McBurney and McMillan, 2014) to neural
+sults that point to relevant codebase evidence. The     and LLM-based approaches (Hu et al., 2018; Ah-
+goal is to make non-obvious dependency chains           mad et al., 2020; Khan and Uddin, 2022; Geng
+easier to surface without replacing the agent’s file    et al., 2024). Much of this work focuses on gen-
+inspection or reasoning steps.                          erating useful or fluent summaries. We focus in-
+   This paper makes three contributions:                stead on validation: whether documentation that
+                                                        reads correctly in one file holds up once the rele-
+    1. We describe a retrieval architecture suitable    vant cross-file evidence is checked.
+       for documentation workflows, callable by an
+       agent as a tool, that combines keyword and       LLM Agents for Software Engineering. LLM-
+       dense search over code, examples, tests, API     based software engineering agents can navigate
+       references, and upstream documentation.          repositories, execute commands, and complete
+                                                        multi-step tasks (Yang et al., 2024; Jimenez et al.,
+    2. We present two case studies on a production      2024). They typically choose files through repos-
+       SDK in which this architecture surfaced re-      itory tools such as file reads, keyword search, and
+       view findings that baseline workflows with       symbol navigation. This works when the relevant
+       ordinary repository tools missed.                evidence is obvious from names, imports, or local
+                                                        call sites, but is less reliable when the dependency
+    3. We characterize the cross-file documentation     chain is semantic or indirect. CAIS complements
+       problem and provide an evidence trail show-      this agent-driven model with a reusable retrieval
+       ing which dependency chain each retained         layer for surfacing candidate cross-file evidence.
+       finding required.
+                                                        3     System Architecture
+2     Related Work
+                                                        CAIS is organized as a four-stage pipeline: inges-
+Retrieval-Augmented Generation. Retrieval-              tion, storage, retrieval, and review. Figure 1 illus-
+augmented generation (RAG) grounds LLM out-             trates the architecture.
+puts in retrieved documents, reducing reliance on
+parametric memory (Lewis et al., 2020). Prior           3.1    Source Ingestion
+work has applied retrieval to code tasks such as        The ingestion layer collects three source types:
+code generation and summarization (Parvez et al.,
+2021; Zhang et al., 2023). CAIS applies retrieval           • Source code: SDK implementation files,
+to a different documentation failure mode: claims             public APIs, internal utilities, and tests.
+   • API references: Structured documentation
+     extracted from code comments and published
+     API reference pages.
+
+   • Upstream documentation: Third-party plat-
+     form or engine documentation relevant to the
+     target SDK.
+
+   A configurable fetcher normalizes each source
+into a document record tagged with source type,       Figure 2: Case-study design. The baseline agent per-
+                                                      forms the documentation task with ordinary repository
+file path, and last-modified timestamp. This
+                                                      tools such as file reads, keyword search, and symbol
+lets one retrieval interface serve code, reference    navigation. The CAIS condition uses the same agent
+prose, examples, tests, and upstream documenta-       and tools, with retrieval from CAIS added over the in-
+tion while preserving enough metadata for fresh-      dexed SDK corpus. We compare the outputs for extra
+ness checks and re-indexing. The mixed cor-           findings backed by cross-file evidence.
+pus matters because evidence chains often cross
+source types, such as from an API comment to im-
+                                                          cycle..."}, ...]
+plementation code, from implementation code to
+tests, or from tutorial prose to external framework      CAIS is agent-agnostic: any LLM agent able to
+documentation. The corpus itself is configurable,     call tools can query it. In our workflows, agents
+so an operator chooses what to index for a given      issued partial or behavior-based queries (describ-
+project.                                              ing what the code should do, not just its name),
+                                                      retrieved ranked snippets from CAIS, then opened
+3.2   Storage and Indexing                            the underlying files when a finding needed broader
+Ingested documents are stored in raw and enriched     context. Retrieval guided the agent’s exploration.
+forms. The raw form preserves original format-        It did not replace reading files, and it did not force
+ting for inspection, while the enriched form is to-   the agent to follow a fixed list of queries.
+kenized, indexed with BM25, and embedded with
+                                                      3.4    Review Layer
+DRAMA (Ma et al., 2025). Because the storage
+layer supports enumeration and bulk retrieval, the    CAIS retrieval results can be used directly by
+corpus can be re-indexed as the codebase evolves.     the agent or passed through a lightweight review
+   CAIS makes project information searchable          prompt that labels documentation claims as con-
+along both lexical and semantic dimensions, so        sistent, contradicted, or incomplete. Retrieved
+agents can query for behavior, symbols, examples,     snippets are treated as candidate evidence, not
+temporal dependencies, or failure modes that may      ground truth. In our case studies, a finding was
+not be obvious from the immediate file.               retained only when the evidence supported a con-
+                                                      crete correction to the documentation or tutorial.
+3.3   Retrieval Interface
+The retrieval component exposes a tool-callable       4     Case-Study Protocol
+query interface for LLM agents. BM25 handles          We evaluate CAIS in a retrospective study of two
+exact lexical matches such as method names and        documentation workflows on a production SDK of
+enum values, while dense retrieval handles seman-     roughly 200 source files across core, toolkit, and
+tically related descriptions, examples, and behav-    feature packages. Because the SDK and detailed
+ioral explanations. At query time, CAIS com-          logs are proprietary, we do not try to measure how
+bines BM25 and DRAMA results using recipro-           accurate documentation is across repositories in
+cal rank fusion (Cormack et al., 2009), then re-      general. Instead, we ask whether codebase re-
+turns ranked snippets with document identifiers       trieval exposed concrete documentation problems
+and source metadata.                                  that the recorded baseline workflows missed.
+Agent -> CAIS: query(                                    Both studies use the design in Figure 2:
+  "deferred removal semantics",
+  corpus="codebase", top_k=5)                             • Baseline: an LLM coding agent performs the
+CAIS -> Agent: [{doc_id: "...",
+  score: 0.94, snippet: "object will                        task using its standard repository tools over
+  be removed in the next processing                         the working codebase, including file reads,
+      keyword search, and symbol navigation, but         istry component and a query layer showed that the
+      without CAIS.                                      argument is actually an attribute identifier. Sec-
+                                                         ond, the documentation for a disposal method im-
+    • +CAIS: the same agent, prompts, and repos-         plied immediate removal, whereas CAIS retrieved
+      itory tools, with CAIS retrieval as an extra       state-management-layer documentation showing
+      tool-callable layer over the indexed corpus.       that removal is deferred to the next processing
+   The comparison is between using ordinary              cycle. Third, the documentation for an equal-
+repository tools alone and using those same tools        ity method defined equality by object ID alone,
+together with a retrieval layer that helps find cross-   but CAIS retrieved implementation and test evi-
+file evidence. The question is whether CAIS ex-          dence showing that a separate backing object also
+posed non-obvious cross-file dependency chains           matters. Fourth, the documentation for an own-
+that the baseline workflow did not follow.               ership method largely restated the method name.
+   We retained a CAIS finding only when three            CAIS retrieved evidence from a filter implemen-
+conditions held: (1) the baseline workflow left a        tation describing what ownership actually means
+meaningful gap – it missed relations that matter         across multiple clients, the detail needed for a use-
+for correctness or comprehension; (2) the CAIS           ful comment.
+run drew on context beyond what an LLM would             Finding. CAIS surfaced non-local evidence
+normally see while working on the immediate              needed to evaluate existing comments. The base-
+task; and (3) the finding would concretely affect        line corrected missing comments visible in the file,
+how an LLM understands the API, whether the tu-          but missed comments whose correctness depended
+torial actually runs, or which implementation steps      on registry behavior, state-management semantics,
+are needed. Retained findings were manually in-          tests, or ownership-filter logic elsewhere in the
+spected before inclusion in the evidence trail. This     repository.
+protocol supports a qualitative, evidence-centered
+case study rather than a controlled benchmark.           5.2   Case Study 2: Tutorial Generation and
+Section 6.2 lists each finding, its supporting evi-            Validation
+dence type, and its developer impact.                    Task. A multi-stage LLM pipeline generated a
+5     Case Studies                                       step-by-step tutorial for an SDK interaction fea-
+                                                         ture. The pipeline researched source code and
+5.1    Case Study 1: API Reference                       samples, drafted the tutorial, reviewed the result,
+       Improvement                                       validated technical claims against source, and per-
+Task. We gave an LLM coding agent a core                 formed a quality critique.
+SDK source file of roughly 900 lines, containing a
+                                                         Baseline. Without CAIS, the pipeline produced
+central domain abstraction, and asked it to review
+                                                         a tutorial covering interaction-subsystem depen-
+and improve the documentation comments on pub-
+                                                         dencies, creation of an interactive object, the fea-
+lic members.
+                                                         ture’s input events, and advanced interaction cus-
+Baseline. Without CAIS, the agent loaded the             tomization. Its validator confirmed 17 API claims,
+source file and its immediate dependencies, iden-        including enum values, method signatures, com-
+tified 5 undocumented public methods, and wrote          ponent fields, and lifecycle behavior. The tutorial
+clean, consistent comments for them. It did not          passed all five stages and was marked complete.
+flag any existing comment as wrong.
+                                                         With CAIS. CAIS-augmented post-generation
+With CAIS. With CAIS access, the agent pro-              review surfaced four additional findings. The
+duced the same missing-documentation fixes and           agent queried CAIS to decide which examples,
+surfaced four additional findings: two cross-file        framework rules, utility APIs, and component-
+factual errors and two incomplete or underspeci-         creation behavior to inspect more closely. One
+fied API comments.                                       finding was an executable bug: the tutorial used an
+   First, the documentation for a lookup method          incorrect resource URI scheme for loading exter-
+referenced a method name renamed in an earlier           nal resources. CAIS retrieved canonical examples
+API revision and called the argument a type identi-      showing that the scheme prefix already resolves
+fier. The evidence that CAIS retrieved from a reg-       to the resource root, so the tutorial path would
+double-nest the directory. Because the URI looked       Finding category                         Base +CAIS
+syntactically valid, the pipeline’s validator (base-    Missing public-member docs                5       5
+line) did not flag it. Another finding was an API-      Cross-file factual errors                 0       2
+                                                        Incomplete/underspecified API comments    0       2
+idiom improvement: the tutorial used a verbose          Executable tutorial bug                   0       1
+scaling constructor even though a shorter equiv-        API-idiom improvement                     0       1
+alent was available in a utility module outside the     Critical omitted prerequisites            0       2
+component’s primary definition.                         Total retained findings                   5      13
+   The remaining two findings were critical omis-
+                                                        Table 1: Findings retained from the two case studies.
+sions. First, the tutorial demonstrated two lifecy-
+                                                        CAIS surfaced 8 additional findings not detected in the
+cle callbacks without specifying the required base      baseline workflows.
+class, leaving developers without enough informa-
+tion to compile the example. CAIS found this re-
+quirement in framework documentation. Second,           6.2   Evidence Trail
+the tutorial created an interactive object from mesh    Table 2 provides a compact audit trail for the 8 ad-
+geometry, but the interaction subsystem auto-           ditional CAIS findings. The table is intentionally
+generates the needed collision-support component        phrased in terms of evidence type rather than inter-
+only for primitive shapes. Direct contact interac-      nal file names, preserving anonymity while show-
+tion could, therefore, fail silently while pointer-     ing why each finding required repository-scoped
+based interaction worked, a dependency the base-        retrieval.
+line’s file-by-file validation did not connect to the
+tutorial scenario.                                      6.3   Dependency-Chain Taxonomy
+                                                        The case studies suggest a taxonomy by the scope
+Finding. The baseline validation checked many
+                                                        of dependency chain needed to validate a docu-
+local API claims correctly, but the retained CAIS
+                                                        mentation claim:
+findings depended on evidence elsewhere: con-
+ventions in example code, a constructor in a util-        1. Single-file: missing documentation, style is-
+ity file, a framework inheritance rule, and a multi-         sues, or comments the same file contradicts.
+hop component-creation dependency. The failure
+mode was not a lack of validation, but validation         2. Cross-file: stale references, wrong seman-
+that did not follow the dependency chains needed             tics, missing prerequisites, and implicit de-
+to tell whether the tutorial would actually work.            pendencies that need evidence from other
+                                                             files.
+6     Results and Discussion
+                                                          3. Cross-system: mismatches with upstream
+6.1    Summary of Findings                                   platform behavior or version-specific exter-
+                                                             nal documentation.
+Table 1 summarizes the retained findings across
+both case studies. We separate findings that affect     CAIS can retrieve evidence for all three categories,
+correctness from those that improve documenta-          but its added value concentrates in cross-file is-
+tion quality or use a cleaner API idiom, rather than    sues, where the evidence is often not lexically
+treating every additional finding as the same kind      adjacent to the claim, and in cross-system issues
+of error.                                               when upstream documentation is in the indexed
+   The baseline findings were missing information       corpus. Single-file issues are already handled well
+available in the local source file. The 8 additional    by ordinary LLM workflows, so retrieval adds lit-
+CAIS findings required evidence from registry           tle there.
+behavior, scheduling semantics, tests, ownership
+logic, examples, utility APIs, base-class require-      6.4   Efficiency
+ments, and component-creation behavior. Because         To measure efficiency, we ran each condition five
+the baseline already had file reads, lexical search,    times: the agent with its native repository tools,
+and symbol navigation, the difference comes from        and the same agent with CAIS added. We report
+surfacing semantic, cross-file evidence rather than     mean and standard deviation in Tables 3 and 4.
+from basic repository access.                           The CAIS condition used fewer input tokens and
+    ID       Finding                           Supporting evidence                             Why baseline missed it                  Impact
+    F1       Stale method name and wrong       Registry and query-layer usage showed the ar-   Local declaration made the comment      Wrong API under-
+             parameter meaning in a lookup     gument is an attribute identifier, not a type   look plausible                          standing
+             method                            identifier
+    F2       Disposal method described as      State-management layer documented de-           Method name suggested immediate         Cleanup semantics
+             immediate removal                 ferred removal in the next processing cycle     cleanup
+    F3       Equality method described as      Implementation and tests showed equality        ID-only description looked locally      Multi-client correct-
+             ID-only equality                  also depends on a separate backing object       plausible                               ness
+    F4       Ownership method restated the     Ownership-filter logic described client-        Comment was vague rather than con-      Useful API reference
+             method name                       ownership semantics                             tradicted
+    F5       Incorrect resource URI scheme     Canonical examples showed the scheme pre-       URI looked syntactically valid          Tutorial code will
+             in tutorial                       fix already resolves to the resource root                                               fail
+    F6       Verbose scaling constructor       Utility module provided a shorter equivalent    Constructor lived outside the primary   More idiomatic code
+                                                                                               component definition
+    F7       Missing required base class for   Framework documentation specified the class     Callback names validated, but inheri-   Example may not
+             lifecycle callbacks               developers must extend                          tance requirement was omitted           compile
+    F8       Mesh-based object lacked re-      Component-creation logic auto-generates         File-by-file validation missed the      Direct contact may
+             quired collision support          support for primitive shapes but not mesh       component dependency                    fail silently
+                                               geometry
+
+
+Table 2: Evidence trail for the 8 additional CAIS findings. Each finding required evidence outside the immediate
+source file or tutorial validation context.
+
+
+         Metric                       Baseline           +CAIS                    pend on non-obvious dependency chains that are
+         Wall-clock time (min)        4.1 ± 0.7         3.2 ± 0.4                 easy not to trace. CAIS did not merely help gener-
+         Input tokens (K)            17.4 ± 1.8        14.6 ± 1.3                 ate more text. It exposed contradictions and miss-
+         Output tokens (K)            3.8 ± 0.6         5.1 ± 0.5
+         LLM calls                    2.4 ± 0.5        17.6 ± 0.5
+                                                                                  ing prerequisites whose supporting evidence lived
+         Prompt cache hit             84 ± 3%           91 ± 2%                   in utility files, examples, tests, framework docu-
+         Query latency                    —            1.6 ± 0.3 s                mentation, and component-creation logic outside
+         CAIS queries                     —            15.0 ± 0.0
+                                                                                  the immediate task context.
+Table 3: Efficiency for Case Study 1, averaged over five                             While our evidence comes from two workflows
+runs per condition (µ ± σ). CAIS reduced wall-clock                               in one SDK, the observed findings share a com-
+time by 22% and used fewer input tokens.                                          mon structure: the documentation claim was plau-
+                                                                                  sible from the local context, but wrong or incom-
+     Metric                           Baseline            +CAIS                   plete once connected to evidence elsewhere in the
+     Wall-clock time (min)           17.2 ± 2.1         11.4 ± 1.3                codebase. This makes retrieval across the code-
+     Input tokens (K)                112.3 ± 8.6        76.8 ± 6.2                base a practical complement to LLM documen-
+     Output tokens (K)                 9.8 ± 1.4        10.4 ± 1.2
+     LLM calls                        17.4 ± 1.9        30.2 ± 2.4                tation workflows: retrieval can help agents dis-
+     Prompt cache hit                  71 ± 4%           84 ± 3%                  cover which cross-file evidence is relevant before
+     Query latency                         —            1.7 ± 0.3 s               the documentation is trusted.
+     CAIS queries                          —            13.4 ± 1.1
+                                                                                     Several directions remain open. Symbol-level
+Table 4: Efficiency for Case Study 2, averaged over five                          indexing could reduce wasted context-window
+runs per condition (µ ± σ). CAIS reduced wall-clock                               budget by retrieving specific classes, methods,
+time by 34% and used fewer input tokens.                                          or tests rather than file-level snippets. Diff-
+                                                                                  level provenance could help agents reason about
+                                                                                  when documentation and implementation last
+finished faster on both tasks, because retrieval re-
+                                                                                  changed. Future work should also compare
+turned compact, pre-ranked snippets for the agent
+                                                                                  retrieval-augmented review against large-context
+to inspect. LLM calls went up because the agent
+                                                                                  prompting strategies that explicitly instruct agents
+issued retrieval queries as tool calls. These were
+                                                                                  to trace dependencies. More broadly, a service
+queries the agent chose as it went, not a fixed
+                                                                                  like CAIS could serve as a general-purpose con-
+script.
+                                                                                  text layer for code review, bug detection, and other
+7    Conclusion and Future Work                                                   agent-driven software engineering tasks.
+
+These case studies suggest that cross-file docu-                                  Limitations
+mentation inconsistency is a practical failure mode
+for LLM-assisted documentation workflows. The                                     This work is a case study, not a broad benchmark.
+problem is not only that agents lack enough con-                                  We evaluate two documentation workflows on one
+text; it is that documentation correctness can de-                                production SDK, and the findings may not gener-
+alize to other languages, repositories, documenta-        Proceedings of the 58th Annual Meeting of the Asso-
+tion genres, or agent designs. The SDK and full           ciation for Computational Linguistics, pages 4998–
+                                                          5007, Online. Association for Computational Lin-
+logs are proprietary, so we anonymize identifiers
+                                                          guistics.
+and cannot release the underlying corpus. The ev-
+idence trail is therefore self-contained at the level   Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan,
+of finding type and retrieved evidence, but not in-      Henrique Ponde de Oliveira Pinto, Jared Kaplan,
+                                                         Harri Edwards, Yuri Burda, Nicholas Joseph, Greg
+dependently reproducible from public data.               Brockman, Alex Ray, Raul Puri, Gretchen Krueger,
+   Our baseline was a single coding agent (Claude        Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela
+Code v2.1.154 and model Sonnet 4.6) with its na-         Mishkin, Brooke Chan, Scott Gray, and 39 others.
+tive repository tools on one SDK, not an exhaus-         2021. Evaluating large language models trained on
+                                                         code. arXiv preprint arXiv:2107.03374.
+tive set of baselines. A stronger future evalua-
+tion would broaden beyond this to alternative re-       Gordon V. Cormack, Charles L. A. Clarke, and Stefan
+trieval models, different exploration budgets, and        Büttcher. 2009. Reciprocal rank fusion outperforms
+                                                          condorcet and individual rank learning methods. In
+large-context models explicitly prompted to trace         Proceedings of the 32nd International ACM SIGIR
+cross-file dependencies. We also evaluate doc-            Conference on Research and Development in Infor-
+umentation quality through retained review find-          mation Retrieval, pages 758–759. ACM.
+ings rather than a controlled human-subject study
+                                                        Mingyang Geng, Shangwen Wang, Dezun Dong, Hao-
+of developer impact. Finally, the current retrieval       tian Wang, Ge Li, Zhi Jin, Xiaoguang Mao, and Xi-
+layer operates mostly at document or file granular-       angke Liao. 2024. Large language models are few-
+ity; symbol-level retrieval improves precision and        shot summarizers: Multi-intent comment generation
+reduces the number of queries needed to reach ac-         via in-context learning. In Proceedings of the 46th
+                                                          International Conference on Software Engineering,
+tionable evidence.                                        pages 39:1–39:13, Lisbon, Portugal. ACM.
+Ethics Statement                                        Xing Hu, Ge Li, Xin Xia, David Lo, and Zhi Jin. 2018.
+                                                          Deep code comment generation. In Proceedings of
+Our work focuses on improving the accuracy of             the 26th International Conference on Program Com-
+developer-facing documentation through retrieval-         prehension, pages 200–210. ACM.
+augmented LLM workflows. The case studies               Carlos E. Jimenez, John Yang, Alexander Wettig,
+used internal, non-public SDK source code with            Shunyu Yao, Kexin Pei, Ofir Press, and Karthik
+authorization from the codebase owners. No                Narasimhan. 2024. SWE-bench: Can language
+human participants were recruited, no crowd-              models resolve real-world GitHub issues? In Pro-
+                                                          ceedings of the Twelfth International Conference on
+sourced annotations were collected, and no per-           Learning Representations.
+sonally identifiable information was accessed or
+generated as part of the study.                         Junaed Younus Khan and Gias Uddin. 2022. Auto-
+                                                          matic code documentation generation using GPT-
+   The LLM agent used in the case studies was ac-         3. In Proceedings of the 37th IEEE/ACM Interna-
+cessed through a licensed API under the provider’s        tional Conference on Automated Software Engineer-
+standard terms of service. We anonymize internal          ing, Rochester, MI, USA. ACM.
+system names, file paths, and identifiable product
+                                                        Patrick Lewis, Ethan Perez, Aleksandra Piktus,
+details, and we present CAIS as a review aid rather       Fabio Petroni, Vladimir Karpukhin, Naman Goyal,
+than a replacement for human approval.                    Heinrich Küttler, Mike Lewis, Wen-tau Yih,
+   Automated documentation tools can affect tech-         Tim Rocktäschel, Sebastian Riedel, and Douwe
+nical writing and developer education workflows.          Kiela. 2020. Retrieval-augmented generation for
+                                                          knowledge-intensive NLP tasks.      In Advances
+In the deployment context studied here, the bot-          in Neural Information Processing Systems 33
+tleneck was documentation freshness and correct-          (NeurIPS 2020), volume 33, pages 9459–9474. Cur-
+ness rather than writing capacity; CAIS was used          ran Associates, Inc.
+to surface evidence for review, not to remove hu-       Xueguang Ma, Xi Victoria Lin, Barlas Oguz, Jimmy
+man oversight.                                            Lin, Wen-tau Yih, and Xilun Chen. 2025. DRAMA:
+                                                          Diverse augmentation from large language mod-
+                                                          els to smaller dense retrievers. arXiv preprint
+References                                                arXiv:2502.18460.
+Wasi Uddin Ahmad, Saikat Chakraborty, Baishakhi         Paul W. McBurney and Collin McMillan. 2014. Au-
+  Ray, and Kai-Wei Chang. 2020. A transformer-            tomatic documentation generation via source code
+  based approach for source code summarization. In        summarization of method context. In Proceedings
+  of the 22nd International Conference on Program
+  Comprehension, pages 279–290, Hyderabad, India.
+  ACM.
+Erik Nijkamp, Bo Pang, Hiroaki Hayashi, Lifu Tu,
+   Huan Wang, Yingbo Zhou, Silvio Savarese, and
+   Caiming Xiong. 2023. CodeGen: An open large lan-
+   guage model for code with multi-turn program syn-
+   thesis. In Proceedings of the Eleventh International
+   Conference on Learning Representations.
+Md Rizwan Parvez, Wasi Ahmad, Saikat Chakraborty,
+ Baishakhi Ray, and Kai-Wei Chang. 2021. Retrieval
+ augmented code generation and summarization. In
+ Findings of the Association for Computational Lin-
+ guistics: EMNLP 2021, pages 2719–2734, Punta
+ Cana, Dominican Republic. Association for Compu-
+ tational Linguistics.
+Giriprasad Sridhara, Emily Hill, Divya Muppaneni,
+  Lori Pollock, and K. Vijay-Shanker. 2010. To-
+  wards automatically generating summary comments
+  for Java methods. In Proceedings of the 25th
+  IEEE/ACM International Conference on Automated
+  Software Engineering, pages 43–52. ACM.
+
+John Yang, Carlos E. Jimenez, Alexander Wettig, Kil-
+  ian Lieret, Shunyu Yao, Karthik Narasimhan, and
+  Ofir Press. 2024. SWE-agent: Agent-computer in-
+  terfaces enable automated software engineering. In
+  Advances in Neural Information Processing Systems
+  37 (NeurIPS 2024), volume 37, pages 50528–50543.
+  Curran Associates, Inc.
+Xiangyu Zhang, Yu Zhou, Guang Yang, and Taolue
+  Chen. 2023. Syntax-aware retrieval augmented code
+  generation. In Findings of the Association for Com-
+  putational Linguistics: EMNLP 2023, pages 1291–
+  1302. Association for Computational Linguistics.
+

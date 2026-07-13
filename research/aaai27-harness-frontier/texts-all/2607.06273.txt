@@ -1,0 +1,820 @@
+                                        AgentTether: Graph-Guided Diagnosis and Runtime
+                                         Intervention for Reliable LLM Agent Operations
+                                                                      Chenyu Zhao1 , Shenglin Zhang1,* , Wenwei Gu1 , Yongqian Sun1
+                                                                     Dan Pei2 , Chetan Bansal3 , Saravan Rajmohan3 , and Minghua Ma3
+                                                                                            1
+                                                                                            Nankai University, Tianjin, China
+                                                                                        2
+                                                                                          Tsinghua University, Beijing, China
+                                                                                                     3
+                                                                                                       Microsoft
+                                                                                       *
+                                                                                         Corresponding author: Shenglin Zhang.
+
+
+                                           Abstract—Large language model (LLM) agents are increas-             actions [17], [18]. Improving reliability therefore demands
+                                        ingly used for multi-step, stateful tool-use tasks, yet production     moving beyond final-outcome measurement and blind retry,
+                                        reliability remains limited. Unlike static software repair, agent      toward actively recovering the runs that go wrong.
+                                        repair must recover dynamic trajectories whose early decisions
+                                        can propagate into later errors and external state changes.               We refer to this corrective process as agent repair: diag-
+                                        Existing automatic remedies address only part of this problem:         nosing and correcting defective agent runs after failure or
+                                        blind retry adds no diagnosis, outcome feedback says whether a         during execution, without modifying the underlying model or
+                                        run failed but not where or why, and self-reflection often lacks       environment. Unlike automated program repair or LLM-based
+                                        grounded evidence to prevent the same failure from recurring. We
+
+
+
+
+arXiv:2607.06273v1 [cs.SE] 7 Jul 2026
+                                                                                                               self-debugging, which operate on fixed code artifacts and
+                                        present AgentTether, a run-time repair framework that automates
+                                        post-run diagnosis and guided recovery without modifying the           test oracles [19]–[21], agent repair targets dynamic, stateful,
+                                        underlying agent or environment. AgentTether abstracts each            and non-deterministic trajectories whose failures may lack an
+                                        run into Transition Units, links them through a dependency-            oracle, originate far upstream, and change external state in
+                                        aware Critical Transition Graph, and localizes failure-critical        ways that are hard to undo. These differences make agent
+                                        subtrajectories by combining an offline normal-behavior model          repair more than patch generation and motivate the expert
+                                        with a run-local graph detector. It then converts the localized
+                                        cause into behavior-scoped guidance backed by cross-iteration          human operator’s repair loop as a reference.
+                                        Repair Memory, and can optionally apply guarded run-time                  Figure 1 illustrates the repair gap on a Banking task that
+                                        intervention to keep the correction active during re-execution.        requires posting a $25 check before closing the customer’s
+                                        The same design can be deployed as an offline diagnostic-and-          Green account. deposit_check fails because the agent
+                                        guidance tool or as an online repair layer.                            omits check_amount, so the deposit is never posted and
+                                           We evaluate AgentTether on 261 τ -bench tasks across three
+                                        domains with Qwen3.7-max, and test cross-model transfer on             close_account remains infeasible. The original run loops
+                                        Banking with GPT-5.4. On the hardest Banking domain, Agent-            on the malformed call and self-repair misdiagnoses it as an
+                                        Tether repairs 59.04% (49/83) of initially failed Qwen3.7-max          account-information problem (columns a–b), while a human
+                                        tasks and 65.12% (56/86) of initially failed GPT-5.4 tasks. Overall,   operator recalls the prior loop, injects the missing argument,
+                                        AgentTether improves repair effectiveness while reducing agent         and supervises closure only after the deposit posts (column c).
+                                        turns and end-to-end approach tokens, suggesting a practical
+                                        reliability layer that can wrap existing agent deployments, reduce     Together, diagnosis, behavioral control, and stateful reasoning
+                                        wasted re-execution, and improve recovery without retraining the       form an integrated repair loop that current agent self-repair
+                                        agent.                                                                 methods often lack.
+                                           Index Terms—LLM agents, agent repair, root cause analysis,             Existing methods reproduce only part of this loop. Blind
+                                        graph-guided diagnosis, runtime intervention                           retry adds no diagnosis; outcome feedback reports whether a
+                                                                                                               run failed, not where or why [22]; self-reflection is frequently
+                                                               I. I NTRODUCTION                                vague or self-confirming without external evidence [23], [24];
+                                           Large language model (LLM) agents now execute multi-step            and process-level analyses typically stop at detection rather
+                                        tasks that require planning, tool use, state updates, and iterative    than closing the loop from diagnosis to run-time repair [15],
+                                        interaction with external environments [1]–[7]. As they move           [25]. Consequently, the same failures recur at run-time, where
+                                        from demonstrations to production, reliability becomes the             agents repeat a mistake, fix one issue while regressing on
+                                        central barrier: single-run success rates remain limited in            another, drift mid-execution, or over-correct after the prob-
+                                        realistic domains [3], [8]–[14], and even seemingly successful         lem has already been resolved. This shortfall is fundamental
+                                        runs may harbor process-level risks such as missing steps,             rather than incidental. Even when a failure is localized with
+                                        incorrect ordering, tool-protocol violations, unauthorized state       reasonable accuracy, only a small fraction of runs are actually
+                                        changes, or unnecessary actions [15], [16]. Such defects may           repaired [26], because diagnosis alone does not drive a repair.
+                                        be missed by coarse outcome-based evaluation yet impose real              A diagnosis drives a repair only when it pinpoints the
+                                        operational and compliance costs, as illustrated by deployed           specific decision that went wrong rather than merely the kind
+                                        chatbots that misstated refund rules or advised legally invalid        of failure, and only when it stays in force as the agent
+                                                Task: deposit a $25 check into the customer's Green account, then close the account.
+               (a) Original agent run - Fails                   (b) Agent self-repair - Fails                              (c) Human repair - Succeeds
+              Missing arg, repeated call loop                      Wrong self-diagnosis                        Stateful reasoning → diagnosis → behavioral control
+             A1   deposit_check (Green)              A1    deposit_check (Green)                           Recall: prior run looped; deposit never posted
+                                                                                                           Diagnose: cause = missing `check_amount` + wrong order
+                                                                                         Reflect 1:        Advise: add `check_amount`; close only after posted
+             O1 error, deposit not posted            O1 error, deposit not posted
+                                                                                     wrong account id?
+                                                                                                                deposit_check (Green,
+             A2   deposit_check (Green)              A2     get_account (Green)                           A1
+                                                                                                                               check_amount=$25)
+                                            loop:
+                                            same                                          Reflect 2:                                                     Supervise:
+             O2 same error, no progress              O2     balance $0, no clue                                                                         verify posted
+                                            error                                      rephrase & retry   O1        deposit posted, balance $25
+                                                                                                                                                          → close
+             A3   close_account (Green)              A3    deposit_check (Green)                          A2       close_account (account=Green)
+
+                   deposit not posted;
+             O3                                      O3         same error                                O2              account closed
+                      cannot close
+
+
+Fig. 1: Agent self-repair versus human repair on a Banking task. (a) Missing check_amount prevents the deposit, causing
+close_account to fail. (b) Self-repair misdiagnoses the failure and repeats the malformed call. (c) Human repair recalls
+the prior loop, diagnoses the missing argument, injects corrected guidance, and supervises closure after the deposit is posted.
+
+
+re-executes rather than being consulted once and forgotten.                                     CTG, an offline HGT detector and a real-time detector localize
+Meeting these two requirements automatically raises three                                       anomalous structures. An analyst LLM then states the root
+challenges.                                                                                     cause, turning point, and recovery hints, requiring no labeled
+                                                                                                failures. (ii) To address C2, AgentTether produces stateful
+  • C1: Causal localization from correlated traces. A
+                                                                                                repair guidance, pairing behavioral control with stateful rea-
+    trajectory exposes behavioral correlations rather than the
+                                                                                                soning. A feedback builder converts the analyst’s diagnosis and
+    root-cause step itself. An early wrong argument or missed
+                                                                                                outcome-failure evidence into scoped guidance, including cor-
+    signal can propagate through many later steps, with
+                                                                                                rection directives and an injection plan. Cross-iteration Repair
+    long-range and many-to-many dependencies. Therefore,
+                                                                                                Memory records what was fixed and what remains unresolved,
+    root-cause analysis is a temporal–structural attribution
+                                                                                                so later iterations preserve useful fixes while preventing re-
+    problem rather than a flat reading of the traces.
+                                                                                                gressions. (iii) To address C3, AgentTether applies guarded
+  • C2: Stateful, behavior-scoped guidance. There is a gap
+                                                                                                run-time intervention, the online side of behavioral control.
+    between knowing why a run failed and making the next
+                                                                                                A harness checks behavior at tool-return and text-response
+    run behave correctly. A diagnosis can be too broad to act
+                                                                                                boundaries, detecting loop repetition, expectation deviation,
+    on, too specific to generalize, or forgotten once the agent
+                                                                                                intent drift, and structural checks. It then injects corrections
+    enters a long tool-use trajectory. Moreover, one retry
+                                                                                                by appending to a tool result or inserting a synthetic user
+    may fix the original error while regressing on another
+                                                                                                message, while evidence grounding, cooldowns, and minimal-
+    constraint, so repair requires remembering what has been
+                                                                                                intervention guards avoid over-control.
+    fixed and what remains unresolved across iterations.
+  • C3: Intervening without over-control. Even good guid-                                          We evaluate AgentTether on τ -bench [3], a widely used
+    ance can decay during re-execution as the agent drifts, re-                                 benchmark for realistic, policy-governed tool-agent-user in-
+    peats old actions, or takes premature state-changing steps.                                 teraction. Unlike outcome-only benchmarks, τ -bench checks
+    However, intervening too often can itself derail the task,                                  process-level correctness in long, stateful tool-use runs, mak-
+    block legitimate exploration, or cause the agent to over-                                   ing it suitable for end-to-end repair evaluation beyond final-
+    correct after the original issue is already resolved. The                                   response plausibility. To cover variation in service workflows
+    challenge is therefore deciding when and how strongly                                       and agent backbones, we run all three domains, Retail, Airline,
+    to intervene, and when to stop.                                                             and Banking, covering 261 tasks with Qwen3.7-max [27],
+                                                                                                and cross-validate Banking with GPT-5.4 [28]. AgentTether
+   We propose AgentTether, a run-time repair framework that                                     repairs a substantial fraction of initially failed tasks, with the
+automates the human repair loop through three coordinated                                       largest gain on the most constrained Banking domain. Lay-
+components. (i) To address C1, AgentTether performs graph-                                      ered ablations show that graph-guided post-run guidance and
+guided RCA for diagnosis. We use a graph representation                                         guarded intervention provide complementary improvements
+to preserve both temporal order and non-local dependencies                                      while reducing agent turns and end-to-end method tokens.
+among decisions, tool calls, and environment feedback. Agent-
+                                                                                                   This paper makes the following contributions:
+Tether forms a Critical Transition Graph (CTG), where each
+Transition Unit, a decision–execution–feedback cycle, is a                                        •   A unified agent repair framework. We present Agent-
+node and information-flow dependencies between units are                                              Tether, a run-time repair framework that combines di-
+edges. This lets attribution operate at the level of behavioral                                       agnosis, behavioral control, and stateful reasoning in a
+decisions and trace a failure backward along dependency paths                                         single automated pipeline, usable either as a post-run
+rather than stopping at temporally adjacent steps. Over the                                           diagnostic-and-guidance tool or with online intervention.
+  • Graph-guided diagnosis. We design a graph-guided                                                                       (a) Where the failure is rooted
+    RCA method built on the Critical Transition Graph                     Wrong argument /                                                                        54 (65%)
+    (CTG), which localizes failure-critical subtrajectories by                   procedure
+    fusing an offline normal-behavior model with a real-                   Missing required                                          24 (29%)
+                                                                                     action
+    time graph detector, attributes failures along dependency
+    paths rather than linear adjacency, and requires no labeled                  Output /                           5 (6%)
+                                                                            communication                                                     Write     Read       Comm.
+    failures.
+                                                                                                                0     10        20      30        40         50     60
+  • Stateful and guarded run-time intervention. We de-
+                                                                                                                             Number of the 83 failed runs
+    sign a repair mechanism that turns diagnosis into con-
+                                                                                                            (b) The root cause sits upstream (median 4, max 26)
+    cise, behavior-scoped guidance, carries cross-iteration                                                                   upstream of the symptom: 62 of 78 (79%)
+                                                                                                                                                                  29
+
+
+
+
+                                                                                   Number of runs (n=78)
+    Repair Memory to prevent regressions, and supervises                                                   30
+    re-execution through a guarded run-time intervention
+                                                                                                           20        16
+    harness that injects corrections while suppressing unnec-                                                                                13        12
+    essary or risky ones.                                                                                  10                   8
+  • Evaluation across domains and models. Against Blind
+    retry, Outcome feedback [21], and Reflexion [23], Agent-                                                0
+                                                                                                                     0          1         2-3          4-5        >=6
+    Tether repairs 69.11% of initially failed Qwen3.7-max                                                       Distance from earliest violated action to final failure
+    tasks, improving over blind retry by 26.02 pp overall and
+    32.53 pp on Banking. A GPT-5.4 Banking study shows             Fig. 2: Failure analysis of the 83 initially-failed Banking runs
+    the same trend, and guarded run-time intervention adds         (Qwen3.7-max), from τ -bench’s gold action checks. (a) Root-
+    +12.05 pp on Qwen3.7-max Banking where compliance              cause taxonomy by violated action type. (b) Causal distance
+    decay is severe. We release AgentTether as an installable      between the earliest violated gold action and the final failure,
+    package with our experimental setup.1                          over the 78 runs with a violated required step.
+
+                          II. M OTIVATION
+   To understand why diagnosing a failed run is not enough         the failure; the true cause is too far upstream to be picked out
+to repair it, we analyze the initially-failed runs on τ -bench.    by position alone. (ii) Effects are many-to-many, so frequency
+This analysis surfaces two problems, each motivating one core      fails. A single wrong decision propagates. One root error is
+component of AgentTether: the diagnosis must pinpoint where        followed by 3.2 further violated checks on average, and 76%
+the run went wrong, and it must stay in force as the rerun         of the 78 failures violate more than one check. A heuristic that
+unfolds. We quantify the contribution of each mechanism in         flags the most error-dense region therefore cannot separate
+Sections IV-B and IV-D.                                            the originating step from the many downstream steps that
+   Q1: Can the root cause be localized from a flat trace,          merely inherit its effect. Localizing the cause requires more
+or does it require dependency structure? We classify all           than reading or counting the trace. It requires knowing which
+83 initially-failed Banking runs under Qwen3.7-max by root         earlier step’s output each later decision consumed, namely
+cause using τ -bench’s gold action checks, locating for each       the information-flow and dependency edges of the execution.
+run the earliest required step the agent violated. Failures        Modeling these as a graph lets attribution follow causal paths
+are overwhelmingly behavioral: 78 of 83 (94%) stem from            to the originating step, rather than the linear adjacency a flat
+a wrong or missing tool action (65% a wrong argument or            trace exposes.
+procedure, 29% a missing required action), and only 6% are
+pure communication errors.                                          Finding 1 (Challenge 1). Localize root causes over a tra-
+   A natural baseline is to hand the entire trace to an LLM and     jectory graph that models information-flow dependencies,
+ask it to name the root cause. This is unreliable for two struc-    rather than over the final outcome or a flat trace handed to
+tural reasons, neither of which a simple positional or frequency    an LLM.
+heuristic can fix. (i) The cause is far upstream of the symptom,
+so recency fails. The failure signal (reward=0) surfaces only         Q2: Does a correct diagnosis stay in force as the
+at the end, yet the responsible step lies well before it. For      rerun unfolds? A precise diagnosis is delivered as a one-
+each of the 78 behavioral failures (the 5 communication-only       shot message injected at the start of the rerun, where it
+failures violate no required step), we measure the distance        must survive an execution that often runs for more than 20
+from the earliest violated gold action to the final failure. The   tool-call steps, alongside task instructions, tool outputs, and
+root cause precedes the symptom by a median of 4 required          domain policy. To test whether it does, we measure feedback
+steps (up to 26) and is strictly upstream in 62 of 78 runs (79%;   adherence over the 173 post-feedback reruns of a diagnosis-
+Figure 2b). A flat reading, like a recency heuristic, anchors on   only setting (AgentTether (post-run only)) approach, detailed
+the last or most salient error, which is merely correlated with    in Section IV; iterations ≥1, all three domains). From each
+                                                                   injected report we parse the concrete directives it imposes,
+  1 https://anonymous.4open.science/r/AgentTether-9416/            namely the tools or actions it forbids (“do not call X” and
+                                1.0
+                                                                                                                    (CTG), uses the offline HGT detector and real-time detector
+                                                                                                                    to localize anomalous substructures, and asks an analyst LLM
+
+
+
+      Feedback adherence rate
+                                0.8                                                                                 to turn them into a diagnosis and repair guidance. This
+                                                                                                                    guidance is injected at the start of the next run. Optionally,
+                                0.6
+                                                                                                                    the Run-time (Supervise & Intervene) track supervises that
+                                0.4   Banking                                                                       re-execution at tool-return and text-response hooks, following
+                                      Retail                                                        50% adherence
+                                      Airline                                                       at step 13      a Check–Decide–Inject pipeline to apply guarded corrections
+                                      All domains
+                                0.2                                                                                 when the agent drifts. The completed run then becomes the
+                                       2            4        6           8         10          12    14        16
+                                                        Tool-call step (after feedback injection)                   next trace for post-run diagnosis, closing the loop. The cycle
+                                                                                                                    stops once a run resolves the task or a fixed budget of Γ
+Fig. 3: Feedback adherence by tool-call step after feedback                                                         repair iterations is exhausted. Cross-iteration Repair Memory
+injection (n=173 post-feedback reruns, across all three do-                                                         carries fixed/unresolved state across attempts, so guidance
+mains). Adherence decays sharply, with Banking the first                                                            accumulates rather than resets.
+domain to fall below 50%.
+
+                                                                                                                    B. Agent Execution and Transition Units
+the report’s boundary constraints), the required actions it flags
+                                                                                                                       1) Trace acquisition: Diagnosis requires the complete be-
+as missing, and the prohibited behaviors such as shell-based
+                                                                                                                    havioral trace of a run, collected without modifying the agent.
+policy lookups. Walking the rerun’s tool calls in order, a run
+                                                                                                                    Inspired by distributed tracing [29], AgentTether acquires the
+is adherent at step k if it has not yet violated any of these
+                                                                                                                    trace by monkey-patching known LLM-SDK entry points (e.g.,
+directives; once it violates one, it is counted as fallen for all
+                                                                                                                    chat.completions.create, messages.create) with transparent be-
+later steps, yielding a first-violation survival curve.
+                                                                                                                    fore/after hooks. Each intercepted event (an LLM inference,
+   Figure 3 plots the fraction of reruns still adherent at each
+                                                                                                                    a tool invocation, or an environment response) is recorded
+step. Adherence starts at 99% immediately after injection but,
+                                                                                                                    with its full request/response payload and session context,
+outside the short Retail tasks that need few tool calls, erodes
+                                                                                                                    and appended in execution order to the run’s trace. Patches
+as runs progressively break the feedback. It falls to 71% by
+                                                                                                                    are removed at session end, leaving the agent’s source and
+step 5 and crosses 50% at step 13 overall, as early as step 8
+                                                                                                                    behavior unchanged.
+on Banking, the longest and most constraint-heavy domain. In
+other words, the agent honors a correct diagnosis at first, then                                                       2) Transition Units: AgentTether abstracts this trace into
+drifts back toward its prior behavior, repeats unproductive tool                                                    Transition Units (TUs), reasoning at the granularity of deci-
+calls, or over-executes after the fix is already in place. Because                                                  sions rather than raw events, and models a run as an ordered
+such deviations surface only after the feedback has scrolled out                                                    sequence T = ⟨TU1 , . . . , TUn ⟩. Each TUk = (ok , bk , ak , fk )
+of the agent’s effective attention window, no improvement to                                                        bundles one decision–execution–feedback cycle: an observa-
+the post-hoc report alone can prevent them.                                                                         tion ok (the context the agent conditions on), a belief bk
+                                                                                                                    (its natural-language reasoning), an action ak (a tool call
+ Finding 2 (Challenges 2–3). A one-shot diagnosis is not                                                            ⟨name, args⟩ or an LLM response), and feedback fk (the
+ enough; the guidance should be carried across the rerun                                                            execution result and environment output). Each TU also
+ and applied as it unfolds, catching deviations as they occur                                                       carries derived attributes that summarize its own outcome
+ and stopping once the repair is complete.                                                                          and role, including an execution status and error signature,
+                                                                                                                    the acting tool and its inferred intent, and the artifacts it
+   These two problems, the lack of dependency-aware localiza-                                                       produces (e.g., an identifier or a retrieved record). Beyond
+tion and the run-time decay of an otherwise-correct diagnosis,                                                      these scalar attributes, each TU links to the surrounding run-
+motivate the two core mechanisms of AgentTether, namely                                                             time telemetry (spans, metrics, logs, and verification records),
+graph-based diagnosis and guarded mid-execution interven-                                                           which the offline detector later represents as typed context
+tion.                                                                                                               nodes, grounding diagnosis in signals beyond the agent’s own
+                                                                                                                    messages. Working at TU granularity compresses the raw
+                                      III. T HE AgentTether A PPROACH
+                                                                                                                    event stream into O(n) behavioral steps and gives every step a
+A. Overview                                                                                                         stable identity to which evidence (in diagnosis) and corrections
+   As shown in Fig. 4, AgentTether wraps a single unmodified                                                        (at run-time) attach.
+Agent Run with two repair tracks that interact with the agent
+only through its completed trace and subsequent execution.                                                          C. Post-run: Observe and Diagnose
+Each run is represented as an ordered sequence of Transition
+Units (TUs), each capturing one Observation–Belief–Action–                                                             Given the completed TU sequence of a failed run, the post-
+Feedback cycle. The initial run is only observed; AgentTether                                                       run track pinpoints which decision caused the failure, and
+enters the repair cycle only if that run fails.                                                                     why, a temporal–structural attribution problem. It proceeds in
+   Between iterations, the Post-run (Observe & Diagnose)                                                            three stages: it builds the trajectory graph, localizes anomalous
+track lifts the completed trace into a Critical Transition Graph                                                    substructures over it, and analyzes them into repair guidance.
+                                                                                                agent continues
+                              on tool return /
+                              text response      Run-time: Supervise & Intervene
+                                                                     ② Check                                        ③ Decide                                        ④ Inject             TU�
+           ① Agent Run                            Loop Detection  Expectation Deviation                   Cooldown                                       Append to tool result
+                                                                                                                              Minimal
+                        ...
+
+  TUk
+                                                  Intent Drift           Structural Check                     Evidence Grounded                        Synthetic user message         TUl
+
+                Observation
+
+                                                 Post-run: Observe & Diagnose
+                    Belief                                                                                                                                               ⑧ Diagnosis
+                                                  ⑤ Critical transition                   ⑥ Detectors                              ⑦ Anomalous                               & Guidance
+                   Action
+                                                               graph                     Offline HGT: enrich                  root    Structures          failure
+                                                                                                                             cause                                                  Root Cause
+                                                                                       each TU with telemetry
+                                                                                                                                                                                    Turning Point
+   LLM Response 표                                                                                                            TU1     TU2     TU3          TUn
+                                                                                              span         metric
+                                                                                                                                                    ...
+                                                 TU1     TU2      TU3            TUn                 TU�
+                                Tool Call                                 ...                                                                                       Diagnosis Recovery Hints
+    (a textual reply)          <name, args>
+
+                                                                                              log          verify
+                                                                                                                    ⊕union      backward attribution along
+                                                       Temporal transition                                                         dependency edges
+                                                                                                                                                                                     Correction
+                 Feedback
+                                                       Dependency edge                   Real-time detector                          Backtracking attribution                        directives
+                                                       (shared artifact / signature)
+                                                                                         (25 local features)                         Anomalous TU
+                                                                                                                                                                                 Injection plan
+                        ...                                                                                                                                         Guidance
+                               completed                                                                                             Write: fixed / unresolved
+                                 trace                                          Repair Memory
+                                                                                                                                                          Read: prior info
+                                                                                       guidance into next iteration
+
+
+Fig. 4: Overview of AgentTether. Two repair tracks wrap a single Agent Run and interact only through it. Post-run (Observe
+& Diagnose): the completed trace is lifted into a Critical Transition Graph (CTG), where two complementary detectors isolate
+anomalous substructures that an LLM analyst turns into a diagnosis and repair guidance; a cross-iteration Repair Memory
+carries fixed/unresolved state across iterations. Run-time (Supervise & Intervene): a Check → Decide → Inject harness
+supervises the next iteration under over-correction guards.
+
+
+   1) Trajectory graph: To model causal relationships within                                          temporal/dependency edges, while normalizing framework-
+a run, we construct a Critical Transition Graph (CTG), de-                                            specific logs and payload layouts. Thus AgentTether learns
+noted as G = (V, E), where nodes V = {TU1 , . . . , TUn }                                             a normal-execution prior over telemetry structure rather than
+correspond to transition units in the execution trace. Temporal                                       specific tool policies. On this corpus, we train a heterogeneous
+edges TUk → TUk+1 connect consecutive units and encode                                                graph transformer [32] backbone H as a normal-execution
+execution order. Dependency edges {TUk , TUl } link units                                             model, self-supervised and without any failure or benchmark
+that share underlying state (e.g., the same artifact or error                                         labels. It learns normal TU context in two ways: it reconstructs
+signature), enabling non-local attribution beyond temporal                                            telemetry edges and recovers masked categorical fields (tool,
+adjacency. Following these edges lets graph-guided RCA trace                                          status, role, phase, outcome) from the surrounding graph.
+a failure backward along dependency paths rather than relying                                            At inference, for each TUk , the average of its
+only on temporal adjacency.                                                                           edge-reconstruction and masked-attribute surprises forms a
+   2) Dual anomaly detection: To localize the failure-critical                                        subgraph-surprise score sH (TUk ), capturing how poorly the
+region on the CTG without any failure labels, two comple-                                             local context around TUk conforms to the normal model.
+mentary detectors score the trajectory T , combining a learned                                        AgentTether ranks TUs by sH , cuts the anomaly frontier at
+prior of normal behavior with a training-free local detector.                                         the largest score drop in the run’s own distribution, and
+   The offline detector supplies a learned prior over normal                                          groups frontier TUs contiguous in execution order into frontier
+TU behavior. It operates on a telemetry-enriched view of the                                          groups. These groups project back onto the CTG as compact,
+CTG, where each TU is augmented with its surrounding typed                                            TU-aligned anomalous subtrajectories.
+context nodes, reasoning over these TU-centered neighbor-                                                The real-time detector complements the offline HGT de-
+hoods to emit a score for each TU. We train this view on                                              tector with run-local evidence. We instantiate this lightweight
+an external success-only corpus of 21,143 resolved trajecto-                                          run-local detector with Isolation Forest [33] because it re-
+ries, dominated by TerminalBench [30] (11,079) and SWE-                                               quires no pre-training, works directly on fixed-dimensional TU
+smith [31] (10,010), plus a small number of operational-agent                                         features extracted from a single CTG, and returns a ranked
+traces. These sources provide tool-rich, multi-step telemetry                                         anomaly score rather than a binary decision. Given the CTG,
+and exclude τ -bench domains and historical runs. Because                                             the detector maps each TU to a fixed 25-dimensional graph-
+these sources differ from τ -bench in task semantics, we map                                          contextual feature vector ϕ(TUk ) and obtains a run-local
+them into a behavior-oriented telemetry schema that preserves                                         anomaly score sO (TUk ). The features cover three families:
+transferable execution structure, including TU order, tool-                                           structural (e.g., in/out degree), attribute-level (e.g., status–
+call/return roles, status/outcome evidence, artifact links, and                                       feedback inconsistency), and macro-level, where a macro is a
+contiguous block of TUs that share a sub-goal or tool family           the agent’s behavior and intervenes only when the current
+(e.g., per-macro error ratio). High-scoring TUs are expanded           trajectory begins to drift. As shown in Fig. 4, the harness
+along CTG connectivity into localized frontiers.                       follows a Check → Decide → Inject pipeline at two hooks:
+   AgentTether keeps the offline and real-time outputs as              on tool return, after a tool executes but before its result is
+separate evidence planes: the offline HGT detector captures            passed back to the agent, and on text response, after the agent
+deviations from successful telemetry structure, while the real-        generates text but before the response is accepted. The first
+time detector captures outliers within the current CTG. Their          hook steers the next decision after observing a tool outcome,
+union forms the anomalous substructures S.                             while the second intercepts premature or misaligned textual
+   3) Analysis and repair guidance: The anomalous substruc-            continuations.
+tures S localize suspicious regions, but they may still contain           1) Check: At each trigger point, the harness evaluates the
+redundant detector evidence and routine steps adjacent to              current action against the active intent and recent execution
+those regions. AgentTether therefore prunes S into a compact           history through four complementary signals. Together, they
+evidence packet before passing it to the analyst LLM. For              cover the run-time drifts highlighted in Fig. 4: loop repetition,
+each suspicious region, the packet keeps the peak-scoring              intent drift, expectation deviation, and delayed response to
+TU as a candidate turning point, i.e., the transition where            unresolved guidance.
+the run first leaves a recoverable path even if the failure               Loop detection catches unproductive repetition by flagging
+surfaces later. It also retains the detector signals supporting this   repeated calls to the same tool with identical arguments.
+candidate and the minimal local CTG context, including ad-             Intent drift embeds the active intent and current action, scores
+jacent or dependency-linked TUs, while dropping low-scoring            their semantic dissimilarity, and applies risk-tiered thresholds:
+connectors and routine actions. Given this packet and the run’s        destructive actions are treated most sensitively, information-
+outcome-failure evidence, the analyst reasons backward along           gathering actions least sensitively, and high-risk drift can-
+dependency edges and returns a diagnosis with three fields: the        didates are confirmed by an LLM verifier. At tool-return
+root cause, the confirmed turning point TUt⋆ , and recovery            checkpoints, an exponential moving average over recent scores
+hints for returning the next run to a correct path.                    prevents a single exploratory step from triggering intervention.
+   The diagnosis explains why the previous run failed, but it is       Expectation deviation checks whether expected corrective ac-
+retrospective and does not specify how to steer the next run.          tions from the guidance or Repair Memory have been satisfied,
+A feedback builder converts it into guidance: short natural-           using observed tool names and selected arguments. If the agent
+language instructions inserted into the agent’s context. The           attempts an unexpected destructive operation, the harness
+guidance pairs correction directives, which describe how the           raises a warning that names the violated action family or
+behavior around TUt⋆ should change, with an injection plan,            constraint without exposing exact expected parameter values.
+which specifies where the guidance enters the next iteration.          Structural checks handle delayed or forgotten guidance. After
+Three design choices shape the guidance. First, disclosure             sufficient progress, or before a submission-like operation, the
+control keeps directives general rather than instance-specific.        harness checks whether expected corrective actions remain
+A directive names the failing action family and constraint             unsatisfied; if so, it extracts the most relevant correction
+class, such as “use the savings-eligible source account”, but          hint from the active guidance and emits a sparse checkpoint
+avoids hard-coding exact parameter values, so the next run             reminder.
+follows the failure pattern rather than a fixed answer. Second,           2) Decide: Rather than acting on every candidate deviation
+prominence places guidance at the start of the next run’s              from Check, the Decide step applies three guards before
+context so the correction is seen early. Third, concision merges       intervening. First, to act only on well-supported problems,
+overlapping recovery hints and keeps the directives most tied          Evidence-grounded requires each intervention to be backed
+to TUt⋆ .                                                              by an explicit Check signal and by active guidance or Repair
+   Beyond a single iteration, guidance is stateful through Re-         Memory, prioritizing direct evidence such as loops, unexpected
+pair Memory M . Before producing new guidance, AgentTether             destructive actions, or LLM-verified intent drift. Second, to
+reads M to recover which directives were fixed and which               avoid over-correction, Cooldown prevents repeated firings.
+remain unresolved; after the next run, it writes the updated           It enforces spacing between interventions, caps reroutes on
+state back. This turns post-run feedback from independent              text responses, and deduplicates structural reminders to avoid
+one-shot messages into a repair trajectory that reinforces per-        reissuing the same correction. Third, to disturb the agent
+sistent issues while avoiding regressions on fixes that already        as little as possible, the Minimal guard chooses the least
+succeeded.                                                             disruptive response. Once all expected corrective actions are
+                                                                       complete, AgentTether stops intervening; after an expected
+D. Run-time: Supervise and Intervene                                   state-changing action, it suppresses all non-loop interventions
+   AgentTether implements the run-time track as a lightweight          and only intervenes to break repeated calls.
+intervention harness around the agent execution, without mod-             3) Inject: For candidates that pass the Decide guards, the
+ifying the agent’s internal policy. To keep the re-execution           Inject step delivers a correction through one of two channels.
+aligned with the active intent, formed by the original task            The correction is generated from the active guidance and
+goal and the post-run repair guidance, the harness monitors            the verifier’s explanation. For on tool return triggers, the
+harness appends the correction to the tool result before it is            failed run, following the self-debugging pattern of using
+passed back, keeping the intervention in-band with the next               external feedback for repair.
+decision. For on text response triggers, it injects a synthetic        • Reflexion [23]: replaces AgentTether’s external diagnosis
+user message and reroutes control to the agent, a stronger                with the agent’s own self-reflection, generating verbal
+channel reserved for text that would otherwise drift or end the           feedback from its failed trajectory.
+run prematurely. The injected text clarifies the repair direction      • AgentTether (post-run only): AgentTether’s post-run track
+rather than providing a complete solution. After injection, the           alone, injecting graph-guided diagnosis and repair guid-
+agent continues execution and produces subsequent TUs.                    ance (backed by Repair Memory) at each retry, with run-
+                                                                          time intervention disabled.
+                       IV. E VALUATION                              AgentTether adds the guarded run-time intervention on top
+  Our evaluation addresses three research questions:                of AgentTether (post-run only). Unless otherwise noted, all
+  • RQ1: What is the end-to-end repair effectiveness of             hyperparameters in AgentTether are fixed across domains and
+    AgentTether, and what does each component contribute?           models and are not tuned per benchmark. For the offline detec-
+  • RQ2: Does AgentTether transfer across agent model               tor, the HGT normal-execution model uses hidden dimension
+    families, and how does repair progress across iterations?       52 and is trained for 20 epochs with batch size 128; for the
+  • RQ3: What is the effect of guarded run-time interven-           real-time detector, Isolation Forest uses 100 trees, maximum
+    tion?                                                           subsample size 256, one-hop graph-context features, and seed
+                                                                    42. For auxiliary LLM calls, we use low-variance decoding
+A. Experimental Setup                                               settings where supported, and keep all model parameters fixed
+                                                                    across approaches, domains, and agent backbones. For Intent
+   Benchmark. We evaluate on τ -bench [3], a benchmark
+                                                                    drift, thresholds are 0.35 for destructive actions, 0.50 by
+for tool-agent-user interaction featuring realistic multi-step
+                                                                    default, and 0.55 for information-gathering operations, with
+tasks with verifiable database state changes, communication
+                                                                    five-step exponential moving average smoothing (α=0.3). For
+requirements, and natural language assertions. We use three
+                                                                    Structural checks, checkpoint reminders require at least five
+domains of increasing complexity: Retail for e-commerce
+                                                                    prior steps and five tool calls, allow one repeated reminder,
+order management (114 tasks), Airline for flight booking
+                                                                    and are capped at three fires per run.
+operations (50 tasks), and Banking for financial transactions
+                                                                       Metrics and statistics. Our primary metric is task-level
+with strict compliance requirements (97 tasks), totaling 261
+                                                                    binary success rate. We also report action-level correction
+tasks.
+                                                                    rate, which measures whether required tool actions and ar-
+   Models. The primary agent under repair uses Qwen3.7-             guments that were wrong in the initial run are corrected
+max [27] via Alibaba Cloud Model Studio/DashScope, chosen           or regress across repair iterations. To assess efficiency, we
+as a strong contemporary Qwen tool-use model with feasible          report average interaction steps, wall-clock time, and end-to-
+cost for full-domain evaluation. We additionally evaluate GPT-      end method tokens per task. The token count includes input
+5.4 [28] via the OpenAI API on Banking to test cross-               and output for each agent generation and adds AgentTether’s
+model transfer. To avoid same-model self-judging, all non-          analyst/verifier calls when used. We exclude benchmark user-
+agent auxiliary roles, including the τ -bench user simulator/e-     simulator/evaluator calls, which are fixed across compared
+valuator and AgentTether’s analyst/verifier, use DeepSeek-V4-       approaches and are not part of the repair method. Since each
+Pro [34], a separate model family with long-context and             task is evaluated under every approach, we use McNemar’s
+tool-calling support. These auxiliary roles are fixed across        exact test on paired binary outcomes. This test compares how
+approaches, so each ablation is compared under the same             many tasks are resolved by one approach but not by the other.
+simulator, evaluator, analyst, and verifier. For retrieval em-
+beddings, we follow the τ -bench AllTools setting and use           B. RQ1: End-to-End Repair Effectiveness
+text-embedding-3-large.                                                1) Overall repair effectiveness: Table I reports end-to-
+   Repair protocol and approaches. All approaches share the         end repair results for Qwen3.7-max on all initially failed
+same initial execution. The experiments operate solely on tasks     tasks. Across the three domains, AgentTether repairs 85 of
+that initially failed, with a maximum of Γ=3 repair iterations      123 failed runs, corresponding to a 69.11% repair rate. This
+after the initial run, ensuring that the evaluation focuses on      improves over Blind retry by 26.02 percentage points and
+tasks that genuinely require repair. Each approach includes         over AgentTether (post-run only) by 8.94 points. The result
+or removes a specific AgentTether component to isolate its          indicates that both stages of AgentTether contribute: graph-
+contribution:                                                       guided post-run diagnosis raises the overall repair rate from
+   • Blind retry: a blind-retry baseline with none of Agent-        43.09% to 60.16%, and guarded run-time intervention further
+      Tether’s components; the agent reruns for up to three         raises it to 69.11%.
+      repair iterations with no feedback between iterations.           The largest domain-level gain appears on Banking, where
+   • Outcome feedback [21]: removes AgentTether’s graph-            AgentTether repairs 49 of 83 failed runs and improves over
+      guided diagnosis and gives the next repair iteration only     blind retry by 32.53 points. Banking contains long-horizon
+      the evaluator’s outcome-level assessment of the previous      constraints, compliance checks, and state-changing operations,
+TABLE I: End-to-end performance on initially-failed tasks with Qwen3.7-max. Resolved: tasks repaired / total. ∆Retry: lift
+over Blind retry. Avg Steps: mean agent LLM turns per task, summed over repair iterations. Avg Dur.: mean simulation wall-
+clock time in minutes. E2E Tokens: average end-to-end method tokens (K) per task, including AgentTether’s analyst/verifier
+calls and excluding benchmark user-simulator/evaluator calls. Overall averages are weighted by initially-failed tasks per domain.
+    Domain            Approach                      Resolved   Rate (%)     ∆Retry (pp)   Avg Steps   Avg Dur. (min)   E2E Tokens (K)
+                      Blind retry                    23/26      88.46           0.00        31.50          5.55             102
+                      Outcome feedback [21]          22/26      84.62          −3.85        25.92          4.75              83
+    Retail (n=26)     Reflexion [23]                 23/26      88.46          +0.00        24.50          4.60              79
+                      AgentTether (post-run only)    24/26      92.31          +3.85        20.50          4.18              68
+                      AgentTether                    25/26      96.15          +7.69        18.08          4.09              59
+                      Blind retry                     8/14      57.14           0.00        32.93          6.39             114
+                      Outcome feedback [21]           9/14      64.29          +7.14        28.86          5.60             101
+    Airline (n=14)    Reflexion [23]                 10/14      71.43          +14.29       28.64          6.17             100
+                      AgentTether (post-run only)    11/14      78.57          +21.43       25.21          4.64              94
+                      AgentTether                    11/14      78.57          +21.43       27.07          5.55             102
+                      Blind retry                    22/83      26.51           0.00        83.16         21.38            1,988
+                      Outcome feedback [21]          17/83      20.48          −6.02        84.86         17.19            2,013
+    Banking (n=83)    Reflexion [23]                 22/83      26.51          +0.00        81.52         19.36            1,967
+                      AgentTether (post-run only)    39/83      46.99          +20.48       77.17         17.88            1,671
+                      AgentTether                    49/83      59.04          +32.53       73.29         20.88            1,738
+                      Blind retry                    53/123     43.09           0.00        66.52         16.32            1,376
+                      Outcome feedback [21]          48/123     39.02          −4.07        66.02         13.24            1,387
+    Overall (n=123)   Reflexion [23]                 55/123     44.72          +1.63        63.45         14.74            1,356
+                      AgentTether (post-run only)    74/123     60.16          +17.07       59.28         13.47            1,153
+                      AgentTether                    85/123     69.11          +26.02       56.36         15.59            1,197
+
+
+
+making failures difficult to recover through repeated execution           the graph evidence packet usually contains the failure-critical
+alone. The improvement in this domain indicates that Agent-               area. p̂ is also closer to g than position- or density-based
+Tether addresses cases in which repair requires identifying an            shortcuts: median error is 5.5 TUs for AgentTether, compared
+upstream decision and preserving the correction during re-                with 6.0 for Recency and 10.0 for Frequency. These results
+execution.                                                                indicate that graph attribution is more robust than reading the
+   2) Comparison with simpler repair signals: The baseline                trace backward from the final symptom or choosing the densest
+approaches separate AgentTether from retrying or adding                   error region.
+generic feedback. Blind retry repairs 43.09% overall, showing                4) Component ablation: Table II isolates the contribution
+that some failures can be recovered through stochastic re-                of two internal components of AgentTether. To test whether
+execution, but only 26.51% on Banking. Reflexion repairs                  the learned normal-behavior prior adds value beyond run-
+44.72% overall, only 1.63 points above blind retry, and does              local anomaly scoring, we remove the offline HGT detector
+not improve Banking at all. This suggests that the agent’s own            and leave localization to the real-time detector alone. To test
+self-critique often fails to identify the upstream decision that          whether cross-iteration state is needed, we remove Repair
+caused the failure. Outcome feedback performs worse than                  Memory, preventing the system from recording which correc-
+blind retry overall (39.02%), indicating that final evaluator             tions have already been fixed and which remain unresolved.
+feedback alone does not provide enough information to guide                  Removing either component reduces repair effectiveness.
+the next iteration and may direct the agent toward surface                Without the offline HGT detector, overall repair falls from
+symptoms rather than the failure-inducing transition. By con-             69.11% to 46.34%, with the largest drop on Banking (59.04%
+trast, AgentTether (post-run only) repairs 60.16%, showing the            to 27.71%). Without Repair Memory, overall repair falls to
+value of graph-guided post-run guidance before adding run-                52.03%, with Banking dropping to 34.94%. These results
+time intervention.                                                        indicate that the learned normal-execution prior helps identify
+   3) Localization of graph-guided RCA: We directly test                  the right failure region, while Repair Memory helps preserve
+whether graph-guided RCA localizes the upstream failure                   the correction across multi-iteration repairs.
+region from Fig. 2. Over the 78 behavioral Banking failures                  5) Interaction budget and latency: Compared with Blind
+under Qwen3.7-max, excluding the 5 communication-only                     retry, AgentTether (post-run only) reduces average agent turns
+runs, let g be the TU position of the earliest violated τ -               from 66.52 to 59.28 and estimated end-to-end method tokens
+bench gold action and p̂ the peak-scoring TU retained from                from 1,376K to 1,153K, while increasing the repair rate from
+the anomalous substructures S before analyst confirmation.                43.09% to 60.16%. AgentTether uses 56.36 turns and 1,197K
+This proxy is conservative: g marks the first externally visible          end-to-end method tokens per task on average, about 13%
+violation, while graph-guided RCA may select the earlier drift            fewer tokens than blind retry, while achieving the highest
+that caused it. Even under this strict proxy, the anomalous               repair rate. This pattern indicates that trajectory-localized
+substructures S cover g in 56/78 runs (71.8%), showing that               guidance and run-time checkpoints reduce unproductive re-
+TABLE II: Component ablation of AgentTether on initially-                                                                    TABLE III: Intervention effect by domain: AgentTether vs.
+failed tasks (Qwen3.7-max). Values are repair rate (%); per-                                                                 AgentTether (post-run only) on paired initially-failed tasks
+domain denominators match Table I (n=26/14/83). Overall                                                                      with Qwen3.7-max. Helped: resolved only by AgentTether.
+is weighted by initially-failed tasks per domain.                                                                            Hurt: resolved only by AgentTether (post-run only) .
+   Approach                                                      Retail       Airline           Banking           Overall           Domain            Helped   Hurt   Net    Sig.
+   AgentTether (full)                                            96.15           78.57            59.04              69.11          Retail (n=26)        1      0     +1     p=1.00
+     w/o offline HGT                                             92.31           71.43            27.71              46.34          Airline (n=14)       2      2     +0     p=1.00
+     w/o Repair Memory                                           92.31           78.57            34.94              52.03          Banking (n=83)      13      3     +10    p=0.021∗
+
+
+                                                       (a) Cross-model transfer on Banking
+                                                   Qwen3.7-max                   60.47               59.04
+                                                                                                             65.12           adding 12.05 points over AgentTether (post-run only) , and
+
+
+      Repair rate (%)
+                                    60             GPT-5.4               46.99                                               65.12% (56/86) on GPT-5.4, adding 4.65 points. The smaller
+                                    40                                                                                       intervention gain on GPT-5.4 reflects fewer residual drift
+                                               26.51
+                                    20                 17.44
+                                                                                                                             cases after graph-guided feedback alone, whereas Qwen3.7-
+                                     0                                                                                       max benefits more from run-time checks because it more often
+                                                   Retry         AgentTether (post-run only)         AgentTether
+                                                                                                                             drifts from the injected repair guidance during re-execution.
+                                                       (b) Repair progress across iterations
+                                                                                                                                2) Repair dynamics: Fig. 5(b) plots cumulative repair rate
+                                                       Retry     AgentTether (post-run only)       AgentTether
+
+
+
+
+       Cumulative repair rate (%)
+                                             Qwen3.7-max                              GPT-5.4
+                                                                                                                             on Banking across repair iterations. Repair is concentrated
+                                    60                                                                                       at iteration 1, the first retry after guidance is introduced.
+                                    40                                                                                       With AgentTether, 43.37% of initially failed Qwen3.7-max
+                                    20                                                                                       Banking tasks are repaired at iteration 1, accounting for 73.5%
+                                     0                                                                                       of all eventual repairs. For GPT-5.4, 54.65% are repaired at
+                                         Initial     1         2         3        Initial        1         2          3
+                                                   Repair iteration                            Repair iteration              iteration 1, accounting for 83.9% of eventual repairs. Later
+                                                                                                                             iterations provide substantially smaller marginal gains. This
+Fig. 5: Banking transfer and repair dynamics. (a) Cross-model                                                                pattern supports the bounded repair protocol used by Agent-
+repair rate on initially failed tasks. (b) Cumulative repair rate                                                            Tether, where a small number of repair iterations captures most
+across iterations, where Initial denotes the shared failed run                                                               recoverable cases.
+and iterations 1–3 are guided retries. Repair is front-loaded at
+the first guided iteration for both agents.                                                                                  D. RQ3: Effect of Guarded Run-Time Intervention
+                                                                                                                                To isolate guarded run-time intervention, we compare
+                                                                                                                             AgentTether with AgentTether (post-run only) on the same
+execution instead of simply extending the interaction. Wall-                                                                 initially failed tasks. Table III reports paired helped and hurt
+clock time follows a different pattern because it includes                                                                   counts, where a task is helped if only AgentTether repairs it and
+auxiliary verification and intervention latency. Overall, Agent-                                                             hurt if only AgentTether (post-run only) repairs it. Intervention
+Tether is faster than blind retry (15.59 vs. 16.32 minutes)                                                                  yields a significant net gain on Banking (+10, p=0.021), is
+but slower than AgentTether (post-run only) (15.59 vs. 13.47                                                                 positive but not significant on Retail (+1, p=1.00), and is
+minutes). This reflects a trade-off in which guarded run-time                                                                neutral on Airline. This suggests that run-time intervention
+intervention improves repair rate and reduces agent-side turns,                                                              is most useful when repair requires preserving a specific
+while introducing additional wall-clock overhead outside the                                                                 correction plan through long, state-changing workflows.
+agent’s ordinary tool-call sequence.                                                                                            To further explain the result, we inspect the run-time in-
+                                                                                                                             tervention logs for the helped and hurt cases in the Banking
+C. RQ2: Cross-Model Transfer and Repair Dynamics                                                                             domain. The helped tasks receive sparse interventions: across
+   1) Cross-model transfer: Fig. 5(a) compares Qwen3.7-max                                                                   the 13 helped Banking tasks, AgentTether triggers 11.3 in-
+with GPT-5.4 on Banking. We use Banking because it leaves                                                                    terventions per task on average. All recorded interventions
+enough initially failed tasks for both agents (83 for Qwen3.7-                                                               use the lighter on tool return channel, reflecting that Banking
+max and 86 for GPT-5.4), treating these as model-specific                                                                    deviations usually surface after tool execution as missing
+repair sets rather than a base-model ranking. The results                                                                    evidence, unmet preconditions, or premature state-changing
+indicate that graph-guided diagnosis transfers across model                                                                  actions. Most correspond to Structural Check, with fewer
+families. For Qwen3.7-max, AgentTether (post-run only) re-                                                                   Expectation Deviation warnings. This indicates that interven-
+pairs 46.99% of initially failed tasks, improving over blind                                                                 tions in repaired cases usually act as lightweight checkpoints,
+retry by 20.48 percentage points; for GPT-5.4, it repairs                                                                    keeping the agent aligned with the repair guidance while
+60.47%, improving over blind retry by 43.03 points. The larger                                                               allowing it to continue the task. The hurt cases show a different
+lift on GPT-5.4, mirroring the gain on Qwen3.7-max, shows                                                                    pattern. Across the 3 Banking hurt cases, AgentTether triggers
+that graph-guided post-run guidance is not tied to a single                                                                  29.3 interventions per task on average, with a larger share of
+model family. Adding run-time intervention improves both                                                                     Expectation Deviation warnings on state-changing calls. These
+agents: AgentTether reaches 59.04% (49/83) on Qwen3.7-max,                                                                   cases demonstrate that when the same guard repeatedly fires
+TABLE IV: Positioning of AgentTether relative to prior ap-                                     VI. R ELATED W ORK
+proaches. Diagnostic: locates where/why a run failed from
+                                                                             Table IV compares prior work along the capabilities needed
+execution evidence; Reasoning: operates at the step level;
+                                                                          for agent repair: diagnosis, behavioral control, and stateful
+Online: intervenes during execution; Stateful: carries repair
+                                                                          reasoning. Existing methods cover parts of this loop, but none
+state across iterations; Oracle-free: needs no ground-truth
+                                                                          combine trace-grounded diagnosis, process-level reasoning,
+answers or tests.
+                                                                          online intervention, cross-iteration repair state, and oracle-free
+System                 Diagnostic Reasoning Online Stateful Oracle-Free   operation.
+Reflexion [23]            ✗          ✗         ✗      ✓          ✓           Feedback-based agent repair. Feedback-based methods
+Self-Refine [24]          ✗          ✗         ✗      ✗          ✓        reuse failed-run signals across attempts. Reflexion [23] learns
+SelfDebug [21]            ✗          ✓         ✗      ✗          ✗        from verbal feedback, Self-Refine [24] runs generate-then-
+Failure Attrib. [25]      ✓          ✓         ✗      ✗          ✗
+PROBE [26]                ✓          ✓         ✗      ✗          ✓        critique loops, and SelfDebug [21] re-executes against test
+AgentTether               ✓          ✓         ✓      ✓          ✓        results; tool-interactive critiquing [35], iterative computer-
+                                                                          control agents [36], and studies of self-correction and inner-
+                                                                          monologue planning [37]–[39] explore related feedback chan-
+                                                                          nels. Offline optimizers such as DSPy [40] and ProTeGi [41]
+around a required action, the agent may re-plan instead of
+                                                                          instead search prompt templates before execution. These
+committing to the correct operation. Thus, while cooldowns
+                                                                          methods support retry- or prompt-level adaptation, but their
+and caps limit over-intervention, balancing timely correction
+                                                                          feedback is not tied to a specific behavioral transition and
+against excessive control remains an open policy-design issue.
+                                                                          does not keep a correction active during re-execution.
+                                                                             Process-level analysis and run-time monitoring. A sec-
+                              V. D ISCUSSION                              ond line localizes or checks behavior at the step level but
+                                                                          stops short of closing the repair loop. Automated failure
+                                                                          attribution [25] localizes the agent and step responsible for a
+   Intervention is useful but not free. AgentTether separates
+                                                                          task failure from execution logs. Classic software-engineering
+post-run diagnosis from run-time intervention because iden-
+                                                                          fault localization [42], [43] and dependency-graph root cause
+tifying the failed decision and keeping the correction active
+                                                                          analysis in distributed systems [44] inspire our graph-based
+during re-execution are different problems. This distinction
+                                                                          attribution, though they require substantial adaptation to the
+explains our results: intervention helps most on Banking,
+                                                                          semantic, non-deterministic nature of LLM traces. Run-time
+where long trajectories and state-changing operations make
+                                                                          monitoring methods, including specification-based monitor-
+one-shot guidance decay quickly, but is neutral on Airline,
+                                                                          ing [45], process mining [46], and LM-emulated sandbox-
+where legitimate exploration can resemble drift. The hurt cases
+                                                                          ing [16], watch executions as they unfold, but mainly enforce
+show the main risk: repeated guards around a required action
+                                                                          safety or specification constraints rather than closing the loop
+may cause the agent to re-plan instead of committing. Future
+                                                                          from diagnosis to repair.
+systems should therefore adapt intervention strength to domain
+                                                                             Failure-anchored recovery. PROBE [26] grounds post-
+risk, task phase, and model capability.
+                                                                          failure recovery in run telemetry, organizing failed-run evi-
+   Repair quality depends on auxiliary judgments. Agent-                  dence into a structured diagnosis of the failure category and
+Tether uses an analyst for diagnosis and a verifier for interven-         bounded recovery guidance. It has high accuracy in fault
+tion, so it does not eliminate dependence on LLM judgments.               category identification but low repair rates, indicating that
+Three properties bound this dependence: diagnosis is grounded             naming fault types is necessary but far from sufficient. Agent-
+in CTG-localized telemetry with a graph-algorithmic fallback;             Tether instead performs graph-guided RCA over the Critical
+the verifier only gates intervention, not task outcome, and over-         Transition Graph (CTG), turns the analyst LLM’s diagnosis
+correction guards limit a wrong call’s disruption; and auxiliary          into behavior-scoped guidance, carries fixed/unresolved state
+roles stay separate from the repaired agent to reduce self-               through Repair Memory, and applies guarded run-time inter-
+evaluation leakage. Reducing this reliance via stronger label-            vention when the agent drifts during repair.
+free diagnosis or lighter verifiers is a promising direction.
+   Scope and deployment. AgentTether is not simply a more                                       VII. C ONCLUSION
+expensive retry: it reduces agent turns and end-to-end approach              We presented AgentTether, a runtime repair framework that
+tokens while improving repair, and it also recovers failures in           bridges the gap between diagnosing failed LLM-agent trajecto-
+the separate GPT-5.4 Banking study. The main added cost is                ries and recovering them in subsequent execution. AgentTether
+auxiliary latency, making deployment a choice between offline             abstracts runs into Transition Units, localizes failure-critical
+post-run repair and full run-time intervention. Our evaluation            subtrajectories over a Critical Transition Graph, and converts
+on τ -bench covers process-level failures in long, stateful               the diagnosis into stateful guidance and guarded run-time
+tool-use tasks, but production systems may have different                 intervention, all without modifying the underlying agent or en-
+failure distributions, tool ecosystems, and evaluator reliability.        vironment. Across 261 τ -bench tasks and two model families,
+Extending AgentTether to code generation, multi-agent coor-               AgentTether improves repair over blind retry while reducing
+dination, and production observability remains future work.               unproductive agent-side execution. On Banking, it repairs
+59.04% of initially failed Qwen3.7-max tasks and 65.12% of                       [16] Y. Ruan, H. Dong, A. Wang, S. Pitis, Y. Zhou, J. Ba, Y. Dubois,
+initially failed GPT-5.4 tasks. The results show that effective                       C. Maddison, and T. Hashimoto, “Identifying the risks of lm agents
+                                                                                      with an lm-emulated sandbox,” in International Conference on Learning
+agent repair requires more than identifying a failure: diagnosis                      Representations, vol. 2024, 2024, pp. 27 031–27 098.
+must be carried across iterations and enforced only when                         [17] J. L. Brand, “Air canada’s chatbot illustrates persistent agency and
+execution drifts. Future work includes adaptive intervention                          responsibility gap problems for ai,” AI & SOCIETY, vol. 40, no. 5,
+                                                                                      pp. 3361–3363, 2025.
+policies, multi-agent repair, and integration with production                    [18] C.      Lecher,      “NYC’s       AI      chatbot       tells     businesses
+observability platforms.                                                              to      break     the       law,”   The       Markup,         2024.    [On-
+                                                                                      line]. Available: https://themarkup.org/artificial-intelligence/2024/03/29/
+                                                                                      nycs-ai-chatbot-tells-businesses-to-break-the-law
+                         DATA AVAILABILITY                                       [19] C. Le Goues, M. Pradel, and A. Roychoudhury, “Automated program
+                                                                                      repair,” Communications of the ACM, vol. 62, no. 12, pp. 56–65, 2019.
+  We have made our source code and datasets publicly avail-                      [20] C. S. Xia, Y. Wei, and L. Zhang, “Automated program repair in the
+able through an anonymous repository at https://anonymous.                            era of large pre-trained language models,” in 2023 IEEE/ACM 45th
+4open.science/r/AgentTether-9416/.                                                    International Conference on Software Engineering (ICSE). IEEE, 2023,
+                                                                                      pp. 1482–1494.
+                                                                                 [21] X. Chen, M. Lin, N. Schärli, and D. Zhou, “Teaching large language
+                              R EFERENCES                                             models to self-debug,” in International Conference on Learning Repre-
+                                                                                      sentations, vol. 2024, 2024, pp. 8746–8825.
+ [1] Z. Xi, W. Chen, X. Guo, W. He, Y. Ding, B. Hong, M. Zhang, J. Wang,         [22] H. Lightman, V. Kosaraju, Y. Burda, H. Edwards, B. Baker, T. Lee,
+     S. Jin, E. Zhou et al., “The rise and potential of large language model          J. Leike, J. Schulman, I. Sutskever, and K. Cobbe, “Let’s verify step
+     based agents: A survey,” Science China Information Sciences, vol. 68,            by step,” in International Conference on Learning Representations, vol.
+     no. 2, p. 121101, 2025.                                                          2024, 2024, pp. 39 578–39 601.
+ [2] L. Wang, C. Ma, X. Feng, Z. Zhang, H. Yang, J. Zhang, Z. Chen,              [23] N. Shinn, F. Cassano, A. Gopinath, K. Narasimhan, and S. Yao, “Re-
+     J. Tang, X. Chen, Y. Lin et al., “A survey on large language model based         flexion: Language agents with verbal reinforcement learning,” Advances
+     autonomous agents,” Frontiers of Computer Science, vol. 18, no. 6, p.            in neural information processing systems, vol. 36, pp. 8634–8652, 2023.
+     186345, 2024.                                                               [24] A. Madaan, N. Tandon, P. Gupta, S. Hallinan, L. Gao, S. Wiegreffe,
+ [3] S. Yao, N. Shinn, P. Razavi, and K. Narasimhan, “τ -bench: A                     U. Alon, N. Dziri, S. Prabhumoye, Y. Yang et al., “Self-refine: Iter-
+     benchmark for tool-agent-user interaction in real-world domains,” 2024.          ative refinement with self-feedback,” Advances in neural information
+     [Online]. Available: https://arxiv.org/abs/2406.12045                            processing systems, vol. 36, pp. 46 534–46 594, 2023.
+ [4] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao,       [25] S. Zhang, M. Yin, J. Zhang, J. Liu, Z. Han, J. Zhang, B. Li, C. Wang,
+     “React: Synergizing reasoning and acting in language models,” arXiv              H. Wang, Y. Chen et al., “Which agent causes task failures and when? on
+     preprint arXiv:2210.03629, 2022.                                                 automated failure attribution of llm multi-agent systems,” arXiv preprint
+ [5] T. Schick, J. Dwivedi-Yu, R. Dessı̀, R. Raileanu, M. Lomeli, E. Hambro,          arXiv:2505.00212, 2025.
+     L. Zettlemoyer, N. Cancedda, and T. Scialom, “Toolformer: Language          [26] C. Zhao, S. Zhang, Y. Lin, W. Gu, Z. Chen, Y. Sun, D. Pei, C. Bansal,
+     models can teach themselves to use tools,” Advances in neural informa-           S. Rajmohan, and M. Ma, “Debugging the debuggers: Failure-anchored
+     tion processing systems, vol. 36, pp. 68 539–68 551, 2023.                       structured recovery for software engineering agents,” arXiv preprint
+ [6] S. Yao, D. Yu, J. Zhao, I. Shafran, T. Griffiths, Y. Cao, and                    arXiv:2605.08717, 2026.
+     K. Narasimhan, “Tree of thoughts: Deliberate problem solving with large     [27] Qwen Team, “Qwen3.7: The agent frontier,” May 2026, aPI model
+     language models,” Advances in neural information processing systems,             identifier: qwen3.7-max. [Online]. Available: https://qwen.ai/blog?
+     vol. 36, pp. 11 809–11 822, 2023.                                                id=qwen3.7
+ [7] G. Wang, Y. Xie, Y. Jiang, A. Mandlekar, C. Xiao, Y. Zhu, L. Fan, and       [28] OpenAI, “Introducing GPT-5.4,” Mar. 2026, aPI model
+     A. Anandkumar, “Voyager: An open-ended embodied agent with large                 identifier: gpt-5.4. [Online]. Available: https://openai.com/index/
+     language models,” arXiv preprint arXiv:2305.16291, 2023.                         introducing-gpt-5-4/
+ [8] S. Zhou, F. F. Xu, H. Zhu, X. Zhou, R. Lo, A. Sridhar, X. Cheng, T. Ou,     [29] B. H. Sigelman, L. A. Barroso, M. Burrows, P. Stephenson, M. Plakal,
+     Y. Bisk, D. Fried et al., “Webarena: A realistic web environment for             D. Beaver, S. Jaspan, and C. Shanbhag, “Dapper, a large-scale distributed
+     building autonomous agents,” in International Conference on Learning             systems tracing infrastructure,” Google, Tech. Rep., 2010.
+     Representations, vol. 2024, 2024, pp. 15 585–15 606.                        [30] M. A. Merrill, A. G. Shaw, N. Carlini, B. Li, H. Raj, I. Bercovich,
+ [9] X. Liu, H. Yu, H. Zhang, Y. Xu, X. Lei, H. Lai, Y. Gu, H. Ding, K. Men,          L. Shi, J. Y. Shin, T. Walshe, E. K. Buchanan et al., “Terminal-
+     K. Yang et al., “Agentbench: Evaluating llms as agents,” in International        bench: Benchmarking agents on hard, realistic tasks in command line
+     Conference on Learning Representations, vol. 2024, 2024, pp. 52 989–             interfaces,” arXiv preprint arXiv:2601.11868, 2026.
+     53 046.                                                                     [31] J. Yang, K. Lieret, C. Jimenez, A. Wettig, K. Khandpur, Y. Zhang,
+[10] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and                 B. Hui, O. Press, L. Schmidt, and D. Yang, “Swe-smith: Scaling
+     K. Narasimhan, “Swe-bench: Can language models resolve real-world                data for software engineering agents,” Advances in Neural Information
+     github issues?” in International Conference on Learning Representa-              Processing Systems, vol. 38, 2026.
+     tions, vol. 2024, 2024, pp. 54 107–54 157.                                  [32] Z. Hu, Y. Dong, K. Wang, and Y. Sun, “Heterogeneous graph trans-
+[11] Y. Qin, S. Liang, Y. Ye, K. Zhu, L. Yan, Y. Lu, Y. Lin, X. Cong,                 former,” in Proceedings of the web conference 2020, 2020, pp. 2704–
+     X. Tang, B. Qian et al., “Toolllm: Facilitating large language models            2710.
+     to master 16000+ real-world apis,” in International Conference on           [33] F. T. Liu, K. M. Ting, and Z.-H. Zhou, “Isolation-based anomaly
+     Learning Representations, vol. 2024, 2024, pp. 9695–9717.                        detection,” ACM Transactions on Knowledge Discovery from Data
+[12] S. G. Patil, T. Zhang, X. Wang, and J. E. Gonzalez, “Gorilla: Large              (TKDD), vol. 6, no. 1, pp. 1–39, 2012.
+     language model connected with massive apis,” Advances in Neural             [34] A. Xu, B. Lin, B. Xue, B. Wang, B. Xu, B. Wu, B. Zhang, C. Lin,
+     Information Processing Systems, vol. 37, pp. 126 544–126 565, 2024.              C. Dong, C. Ling et al., “Deepseek-v4: Towards highly efficient million-
+[13] J. Yang, C. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan, and            token context intelligence,” arXiv preprint arXiv:2606.19348, 2026.
+     O. Press, “Swe-agent: Agent-computer interfaces enable automated soft-      [35] Z. Gou, Z. Shao, Y. Gong, Y. Shen, Y. Yang, N. Duan, and W. Chen,
+     ware engineering,” Advances in Neural Information Processing Systems,            “CRITIC: Large language models can self-correct with tool-interactive
+     vol. 37, pp. 50 528–50 652, 2024.                                                critiquing,” in International Conference on Learning Representations,
+[14] S. Kapoor, B. Stroebl, Z. S. Siegel, N. Nadgir, and A. Narayanan, “Ai            2024.
+     agents that matter,” arXiv preprint arXiv:2407.01502, 2024.                 [36] G. Kim, P. Baldi, and S. McAleer, “Language models can solve computer
+[15] M. Cemri, M. Z. Pan, S. Yang, L. A. Agrawal, B. Chopra, R. Tiwari,               tasks,” Advances in Neural Information Processing Systems, vol. 36, pp.
+     K. Keutzer, A. Parameswaran, D. Klein, K. Ramchandran et al., “Why               39 648–39 677, 2023.
+     do multi-agent llm systems fail?” Advances in Neural Information            [37] R. Kamoi, Y. Zhang, N. Zhang, J. Han, and R. Zhang, “When can llms
+     Processing Systems, vol. 38, 2026.                                               actually correct their own mistakes? a critical survey of self-correction
+     of llms,” Transactions of the Association for Computational Linguistics,
+     vol. 12, pp. 1417–1440, 2024.
+[38] W. Huang, F. Xia, T. Xiao, H. Chan, J. Liang, P. Florence, A. Zeng,
+     J. Tompson, I. Mordatch, Y. Chebotar et al., “Inner monologue: Embod-
+     ied reasoning through planning with language models,” arXiv preprint
+     arXiv:2207.05608, 2022.
+[39] J. Huang, X. Chen, S. Mishra, H. S. Zheng, A. Yu, X. Song, and
+     D. Zhou, “Large language models cannot self-correct reasoning yet,” in
+     International conference on learning representations, vol. 2024, 2024,
+     pp. 32 808–32 824.
+[40] O. Khattab, A. Singhvi, P. Maheshwari, Z. Zhang, K. Santhanam,
+     S. Vardhamanan, S. Haq, A. Sharma, T. T. Joshi, H. Moazam et al.,
+     “DSPy: Compiling declarative language model calls into self-improving
+     pipelines,” arXiv preprint arXiv:2310.03714, 2023.
+[41] R. Pryzant, D. Iter, J. Li, Y. Lee, C. Zhu, and M. Zeng, “Automatic
+     prompt optimization with “gradient descent” and beam search,” in
+     Proceedings of the 2023 conference on empirical methods in natural
+     language processing, 2023, pp. 7957–7968.
+[42] W. E. Wong, R. Gao, Y. Li, R. Abreu, and F. Wotawa, “A survey on
+     software fault localization,” IEEE Transactions on Software Engineering,
+     vol. 42, no. 8, pp. 707–740, 2016.
+[43] J. A. Jones and M. J. Harrold, “Empirical evaluation of the tarantula
+     automatic fault-localization technique,” in Proceedings of the 20th
+     IEEE/ACM international Conference on Automated software engineer-
+     ing, 2005, pp. 273–282.
+[44] M. Solé, V. Muntés-Mulero, A. I. Rana, and G. Estrada, “Survey
+     on models and techniques for root-cause analysis,” arXiv preprint
+     arXiv:1701.08546, 2017.
+[45] E. Bartocci, J. Deshmukh, A. Donzé, G. Fainekos, O. Maler,
+     D. Ničković, and S. Sankaranarayanan, “Specification-based monitoring
+     of cyber-physical systems: a survey on theory, tools and applications,”
+     in Lectures on Runtime Verification: Introductory and Advanced Topics.
+     Springer, 2018, pp. 135–175.
+[46] W. Van Der Aalst, “Process mining: Overview and opportunities,” ACM
+     Transactions on Management Information Systems (TMIS), vol. 3, no. 2,
+     pp. 1–17, 2012.
+

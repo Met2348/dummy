@@ -1,0 +1,1296 @@
+                                         Bridging Local Observation and Global Simulation in
+                                                    Closed-Loop Traffic Modeling
+
+
+                                                           Ziyan Wang1,2∗    Tan Xiang2∗     Peng Chen2     Xintao Yan1†
+                                                                1                              2
+                                                                  The University of Hong Kong    Beihang University
+
+
+
+
+arXiv:2606.31844v1 [cs.RO] 30 Jun 2026
+                                                                                           Abstract
+                                                     A local-to-global context mismatch arises when autoregressive traffic simulators
+                                                     trained on ego-centric driving logs are deployed in globally observable closed-loop
+                                                     environments. In such logs, the ego vehicle has rich local observations, while sur-
+                                                     rounding agents are only partially observed due to perception limits and occlusions.
+                                                     As a result, simulators may learn incomplete context–action mappings that remain
+                                                     hidden in log-based training but emerge during closed-loop rollouts, leading to
+                                                     unrealistic behaviors such as abnormal stops, unsafe interactions, and rule viola-
+                                                     tions. We propose CRAFT, a Contextual pReference Alignment Framework for
+                                                     Traffic Simulation, to mitigate this mismatch via self-supervised failure discovery
+                                                     and preference-guided test-time alignment. CRAFT treats the base simulator as
+                                                     a globally observable sandbox, generating diverse what-if rollouts from logged
+                                                     initial states to expose context-induced failures. These failures are grounded with
+                                                     human-aligned driving priors and converted into preference supervision for training
+                                                     a Contextual Preference Evaluator (CPE). At inference time, CPE acts as a plug-in
+                                                     alignment module that scores candidate actions under complete scene context and
+                                                     reweights autoregressive decoding toward globally coherent behaviors. CRAFT
+                                                     mitigates this local-to-global contextual bias, reducing collisions by 31.2% and
+                                                     traffic violations by 33.2% without retraining the base simulator. The official im-
+                                                     plementation is available at https://ashorizon.github.io/CRAFT-site/.
+
+
+                                         1     Introduction
+                                         Realistic traffic simulation is a critical generative data engine for autonomous driving, enabling scal-
+                                         able training and evaluation in complex multi-agent environments [10, 34]. Recent advances in gener-
+                                         ative modeling have led to the widespread adoption of autoregressive architectures [24, 22], which for-
+                                         mulate traffic simulation as sequential trajectory generation. Most existing approaches [27, 34, 36, 33]
+                                         train simulators on large-scale ego-centric driving logs under an imitation learning paradigm, learning
+                                         context–trajectory mappings by maximizing the likelihood of logged behaviors. This paradigm has
+                                         substantially advanced the realism and fidelity of microscopic traffic simulation, enabling realistic
+                                         multi-agent interactions and achieving strong performance on widely used benchmarks [19].
+                                         Despite these advances, a fundamental question remains largely unexplored: can policies learned from
+                                         locally observed driving logs remain behaviorally rational when executed in globally contextualized
+                                         closed-loop simulation? Figure 1 illustrates why this assumption may fail. In real-world data
+                                         collection, a leading vehicle may brake in response to a downstream obstacle. However, if the
+                                         obstacle lies outside the perception range of the logging vehicle or is occluded by other agents, the
+                                         recorded log captures the braking behavior while omitting the context that justifies it. From the
+                                         perspective of the observed data, this valid maneuver appears as an unexplained stop. When such
+                                         partial observations are treated as complete supervision, the learned model may associate braking
+                                             * Equal contribution.
+                                             † Corresponding author. (Email: xintaoy@hku.hk)
+
+
+
+
+                                         Preprint.
+Figure 1: Motivation of CRAFT. Incomplete ego-centric logs can induce flawed context–action
+mappings, leading to abnormal behaviors in global autoregressive rollouts. CRAFT mitigates this
+mismatch by learning complete-context preferences and guiding simulation toward rational behaviors.
+
+with incomplete context, reproducing the action even when the true cause is absent [12]. This leads
+to ambiguous context–action mappings and unrealistic behaviors during closed-loop rollout [26, 7].
+This phenomenon reflects a broader local-to-global mismatch in traffic simulation [18]. Most existing
+simulators are trained on large-scale driving logs collected from ego-centric vehicle platforms, such
+as Waymo [8], nuPlan [3], and Argoverse [32], where perception boundaries, occlusions, and sensor
+viewpoints are inherent. As a result, these logs provide rich local driving priors but limited evidence
+about how a model should behave under full scene context during long-horizon rollouts. The key
+challenge is therefore how to mitigate abnormal behaviors induced by incomplete context-action
+learning, especially when these behaviors are not directly observed in the original logs but emerge
+during closed-loop generation [4].
+To address this challenge, we propose to shift from passive imitation to active alignment. Instead of
+viewing simulation solely from the perspective of the biased autoregressive generator, we introduce
+a complementary Contextual Preference Evaluator (CPE) that assesses the rationality of generated
+behaviors under complete scene context. We use the base simulator itself as a globally observable
+sandbox: starting from logged initial states, it generates multiple what-if rollouts that reveal how
+biases learned from incomplete observations manifest as closed-loop failures. We further ground
+these self-exposed failures with human-aligned driving priors and transform them into preference
+supervision. The CPE is then trained with contrastive preference learning to distinguish globally
+coherent behaviors from locally plausible but contextually inconsistent ones. During inference,
+CPE acts as a plug-in test-time alignment module that reweights candidate actions from the frozen
+simulator, guiding autoregressive decoding toward behaviors that are more consistent with the full
+traffic scene. This converts traffic simulation from passive next-token sampling into preference-guided
+decision making, improving closed-loop behavioral rationality.
+
+Contributions. (1) We identify a fundamental mismatch between local observations and global
+simulation requirements, showing that imitation learning on ego-centric logs leads to incomplete
+context–action associations that degrade closed-loop behavior. (2) We propose a decoupled Contextual
+Preference Evaluator (CPE) that learns complete-context behavioral preferences from simulator-
+induced failures grounded by human-aligned driving priors. (3) We deploy CPE as a plug-in test-time
+guidance module for autoregressive decoding, improving behavioral rationality across simulators
+while preserving competitive realism. Extensive experiments demonstrate that our approach bridges
+local-to-global mismatch, achieving superior performance in closed-loop traffic modeling.
+
+2   Related Work
+Generative Traffic Models from Driving Logs. Modeling multi-agent traffic behavior is central
+to autonomous driving simulation. Early predictive models, such as QCNet [41] and Multiverse
+Transformer [30], regress future trajectories from historical states, but often struggle to capture joint
+dependencies required for closed-loop interaction. Recent generative models learn richer behavior
+distributions: diffusion-based methods, including VBD [15], CTG [38], and NEXUS [39], generate
+
+
+                                                   2
+diverse futures through iterative denoising, while autoregressive models such as Trajeglish [22],
+BehaviorGPT [40], and SMART [33] discretize driving states into motion tokens for next-token
+prediction. Benchmarks such as WOSAC [19] further promote closed-loop evaluation. However, most
+simulators are still trained from ego-centric logs, whose partial observations may induce spurious
+context-action associations and poor closed-loop generalization [7, 4, 28, 20].
+
+Closed-Loop Refinement of Traffic Simulators. Recent work refines pretrained driving models
+after imitation learning to reduce closed-loop errors. Supervised fine-tuning methods, such as
+UniMM [16] and CAT-K [35], generate rollouts, select high-quality trajectories, and continue training
+on the selected samples. Reinforcement learning fine-tuning methods, including SMART-R1 [21],
+R1Sim [31], and LLM2AD [29], optimize policies with rewards that encourage expert-like behavior
+or penalize violations. These methods show the importance of adapting simulators to their own
+rollout distributions, but they still rely on training-time optimization of high-dimensional generators,
+often with carefully designed reward shaping or simulation pipelines. Such optimization can suffer
+from sparse or delayed feedback, credit-assignment difficulty, and stability issues [11]. We instead
+study a complementary test-time correction strategy without updating the base simulator.
+
+Preference Evaluation and Test-Time Guidance. Evaluation-guided generation has been widely
+used to improve driving reliability [37]. Rule-based evaluator provide interpretable criteria for
+collisions, offroad behaviors, traffic-rule violations, and unfeasible motions, and are commonly
+used to filter, rank, or evaluate generated trajectories [6]. Beyond handcrafted criteria, learned and
+generation-time evaluators have also been explored. Gen-Drive [14] trains a scene evaluator for
+reward modeling and policy refinement, while SaFeR [5] performs feasibility-constrained token
+resampling to generate safety-critical but plausible scenarios. Unlike methods that use evaluation
+mainly for post-hoc ranking, reward modeling, or safety-critical generation, our work incorporates
+preference evaluation directly into test-time decoding for closed-loop traffic simulation, guiding
+generated behaviors toward greater realism and rationality.
+
+3      Problem Formulation
+Autoregressive traffic simulation. We consider closed-loop traffic simulation initialized from a
+logged driving scene state. Let Ct denote the dynamic scene state at time t, which includes all agent
+states and traffic signal states that evolve over time. Let XM denote the static map context of the
+environment, including road geometry and lane topology. Given an initial state C0 and map XM ,
+a pretrained autoregressive simulator πθ (with parameters θ) models the evolution of the scene by
+sequentially generating joint actions for all agents. At each step t, the simulator outputs a distribution
+Pθ over joint action tokens, from which a joint action at+1 is sampled:
+
+
+    Pθ (· | Ct , XM ) = πθ (Ct , XM ),           at+1 ∼ Pθ (· | Ct , XM ),     Ct+1 = Step(Ct , at+1 ), (1)
+where Step(·) is the deterministic simulator transition function. The resulting autoregressive rollout
+over a horizon Tf is given by
+                                         Tf −1
+                                         Y
+             Pθ (a1:Tf
+                         | C0 , XM ) =           πθ (at+1 | Ct , XM ),   Ct+1 = Step(Ct , at+1 ).       (2)
+                                         t=0
+
+
+Preference-guided alignment objective. We keep the base simulator πθ fixed and modifies only
+its test-time decoding distribution by introducing an evaluator πϕ to assess the scenes induced by
+candidate actions before execution. Given a candidate action at+1 sampled from the base distribution
+Pθ , a one-step lookahead scene is first constructed and preference score is estimated by the evaluator:
+
+          at+1 ∼ Pθ (· | Ct , XM ),         C̃t+1 = Step(Ct , at+1 ),        Rt = πϕ (C̃t+1 , XM ).     (3)
+Here Rt measures whether the candidate action leads to a new scene under the current context. The
+policy updates the original decoding distribution using these scene-level preference scores:
+                  Pθ,ϕ (at+1 | Ct , XM ) = Calibrate Pθ (at+1 | Ct , XM ); Rt .
+                                                                                
+                                                                                               (4)
+
+
+                                                          3
+Figure 2: The training pipeline of CRAFT. Starting from logged initial scenes, a frozen autore-
+gressive simulator generates complete-context what-if rollouts, which are annotated by rule-based
+evaluators and organized into grouped preference datasets. The CPE is trained on grouped rollouts to
+predict dense preference scores with token-level, intra-trajectory, and inter-rollout supervision.
+
+
+4     Method
+4.1   Grouped complete-context what-if simulation
+                                                                                M
+As shown in Fig.2, given an original logged dataset Dlog = {(Cm             m
+                                                                    0 , XM )}m=1 , we employ the
+pretrained autoregressive simulator πθ as a what-if simulation generator. For each initial scene
+(Cm     m
+   0 , XM ), the base simulator performs N stochastic rollouts with diverse random seeds followed
+by equation 2:
+                          (m,j)
+                        Ĉ1:Tf = Rollout (Cm    m
+                                           0 , XM ; ϵj ) ,    j = 1, . . . , N,                (5)
+where ϵj denotes the random sampling seed. Through multimodal sampling and autoregressive scene
+updates, these rollouts evolve into diverse what-if simulations where all represented agents interact
+under the same map context.
+For each rollout, we derive agent-time preference supervision from human-aligned driving priors,
+including safety, rule compliance, and kinematic feasibility. Each token is assigned a binary label
+yi,t ∈ {0, 1} from the auto-labeling evaluation, where positive labels indicate reasonable behaviors
+and negative labels indicate abnormal behaviors:
+                                               
+                       (m,j)         (m,j)               (m,j)
+                     Y1:Tf = A Ĉ1:Tf , Xm    M ,       Y1:Tf ∈ {0, 1}Na ×Tf .                   (6)
+
+The resulting preference dataset is organized as grouped alternative futures:
+                                                     n                  oN
+                                                          (m,j)    (m,j)
+                     Dpref = {Gm }M m=1 ,     Gm =      Ĉ1:Tf , Y1:Tf        .                    (7)
+                                                                            j=1
+
+This grouped construction provides comparable rollouts from the same logged scene, supporting
+both token-level supervision and inter-rollout preference learning. More details on the auto-labeling
+criteria and the construction of the grouped preference dataset are provided in the Appendix C.
+
+4.2   Complete-Context Preference Learning
+
+Leveraging Dpref , we train a Contextual Preference Evaluator (CPE) to estimate the behavioral
+rationality of motion tokens in Fig. 2. Given a grouped what-if rollout Ĉm,j                   m
+                                                                          0:Tf and map context XM ,
+CPE estimates a dense agent-time preference matrix:
+                                                
+                       Rm,j = πϕ Ĉm,j         m
+                                       0:Tf , XM ,     Rm,j ∈ [0, 1]Na ×(Tf ) ,                 (8)
+         m,j
+where Ri,t   estimates whether agent i’s behavior at step t is reasonable under the complete simulated
+scene. CPE uses the frozen scene encoder of the base simulator and a temporal convolutional
+preference decoder, which processes each agent’s temporal context and estimates the score matrix in
+a single parallelized forward pass.
+
+
+                                                  4
+Figure 3: The inference pipeline of CRAFT. During inference, CPE evaluates behaviors via a
+lookahead search algorithm, computing the posterior probabilities before sampling.
+
+
+CPE is trained with absolute token-level supervision and relative preference constraints. We formulate
+the weighted Binary Cross Entropy loss [25] as
+                                 N a TX
+                                      +Tf
+                           1     X
+               Lbce = −                   [yi,t log(Ri,t ) + (1 − yi,t ) log(1 − Ri,t )] ,              (9)
+                        Na (Tf ) i=1 t=1
+
+Beyond token-level labels, contrastive preference learning provides relative supervision that encour-
+ages CPE to distinguish subtle differences in behavioral quality. We introduce two complementary
+preference losses: an intra-trajectory loss that exploits temporal transitions from normal behavior
+to failure within a rollout, and an inter-rollout loss that leverages the grouped structure of Dpref to
+compare alternative futures generated from the same initial scene.
+For intra-trajectory alignment, Pintra contains agents that encounter a failure event within a single
+rollout. For each i ∈ Pintra , a normal segment T + is preferred over a subsequent failure segment
+T − . We apply a margin ranking loss [1]:
+                                   1      X                                   
+                     Lintra =                   max 0, R̄i,T − − R̄i,T + + m .                   (10)
+                                |Pintra |
+                                          i∈Pintra
+
+
+For inter-rollout alignment, Pinter contains token-level pairs (i, t, j + , j − ) from different rollouts in
+the same group. Here, j + and j − denote preferred and less preferred futures for the same agent and
+time step. We optimize the Bradley–Terry objective [2]:
+                                                                         + 
+                                                                             (j )
+                              1           X                       exp     Ri,t
+               Linter = −                           log       +                   − .              (11)
+                          |Pinter |    + −              exp R
+                                                                 (j )
+                                                                          + exp R
+                                                                                      (j )
+                                     (i,t,j ,j )∈Pinter             i,t              i,t
+
+
+The overall training objective is
+                               LCP E = λ1 Lbce + λ2 Lintra + λ3 Linter ,                               (12)
+where λ1 , λ2 , and λ3 balance absolute token-level supervision and relative preference constraints.
+
+4.3   Test-Time Preference Alignment
+
+After training, CPE is used to guide autoregressive sampling by evaluating the next-step candidates
+proposed as shown in Fig.3. At step t, each agent receives K candidate action tokens from the
+original decoding distribution. Each candidate joint action is first applied to the current scene to
+construct a one-step lookahead scene, whose behavioral rationality is scored by CPE. This design
+aims to calibrate the simulator’s next-token distribution before action execution. Ideally, evaluating
+every possible multi-agent action combination would provide the preference score for the full joint
+action space. However, for Na agents with K candidates each, exhaustive evaluation requires K Na .
+CPE forward passes at each step, incurring high computational cost in dense traffic scenes.
+
+
+                                                     5
+     Instead of exhaustively evaluating the intractable K Na , joint action space, we adopt an Independent
+     Marginal Approximation strategy. By drawing K parallel joint action samples from the base simula-
+     tor’s prior, we effectively construct K independent Monte Carlo rollout scenes. For any individual
+     agent, the actions of all other agents in the k-th scene act as a highly probable stochastic background.
+     This transforms the exponential joint evaluation into a linear O(K) marginal evaluation, estimating
+     the expected contextual preference score of an action under plausible background traffic. This decou-
+     pled evaluation is empirically sound due to the kinematic inertia within a single autoregressive step
+     (e.g., 0.1s-0.5s). In such a short lookahead horizon, severe anomalies are primarily determined by
+     the agent’s own marginal action rather than the exact micro-interactions of distant agents. Therefore,
+     evaluating actions against a sampled plausible background provides sufficient localized evidence to
+     reject explicitly irrational choices. Algorithm 1 summarizes the procedure.
+
+  Algorithm 1: Inference Sampling Guidance
+  Input :Initial scene context C0 ; Base simulator πθ ; Contextual Preference Evaluator πϕ ;
+          Scenario horizon Tf ; Candidates K; Guidance scale β.
+1 for t = 1, . . . , Tf do
+2     Extract Top-K candidate action pool At ∈ RNa ×K and priors Pprior   t from πθ (·|Ct−1 );
+3     for candidate index k = 1, . . . , K do
+                                                (k)                   (k)
+4         Generate the lookahead scenario: C̃t ← Step(Ct−1 , ãt ). ;
+                                          (k)          (k)          (k)
+5         Evaluate alignment scores: Rt ← πϕ (C̃t ), where Rt ∈ RNa . ;
+                                                               (k)
+6         Update probabilities: Punnorm
+                                  :,t,k   ← Pprior
+                                              :,t,k · exp(β · Rt ). ;
+                                                                     P unnorm
+ 7         Normalize probabilities across candidates: Ppost
+                                                       i,t,k ←
+                                                               PK i,t,kunnorm . ;
+                                                                    Pj=1   i,t,j
+
+ 8     Sample ai,t ∼ Categorical(Ppost i,t,: ) for all agents i;
+ 9     Execute the actual step update: Ct ← Step(Ct−1 , {ai,t }N i=1 ). ;
+                                                                   a
+
+
+10 return C1:Tf .
+
+
+
+
+     5     Experiment
+     5.1    Experimental Setups
+
+     Datasets and base simulator. We employ the Waymo Open Motion Dataset (WOMD) [8] as
+     the training and validation dataset for the experiments. The WOMD comprises more than 480k
+     multi-agent interactive scenarios, each with a duration of 9 seconds and sampled at 10 Hz, which is
+     suitable for the training and validation of traffic simulation models. For the base autoregressive traffic
+     simulator, we utilize the CAT-K model[35] pre-trained on the WOMD.
+     Metrics. We evaluate traffic simulation under two complementary protocols. First, we report the
+     official WOSAC metrics [19] to ensure comparability with the standard benchmark. This protocol
+     mainly measures log-similarity and realism on benchmark-defined scored agents, and also provides
+     safety-related rates such as collision, offroad, and traffic-light violations. Second, we report all-agent
+     behavioral metrics following prior simulation studies [17, 23]. This protocol evaluates all moving
+     agents in the generated scene, focusing on distributional realism and behavioral rationality, including
+     collision, offroad, and traffic-rule violation rates at both agent and scene levels. The two protocols
+     are complementary: WOSAC emphasizes standard realism comparison, while the all-agent protocol
+     better reflects whether a closed-loop simulator produces safe and compliant behaviors for the entire
+     traffic scene. More details are provided in the Appendix B.
+     Baselines. To comprehensively evaluate our framework, we compare it with representative baselines
+     from two categories. (1) Pretrained imitation learning models: GUMP [13] is a generative motion
+     model for multi-task motion generation, and SMART [33] is an autoregressive multi-agent simulator
+     trained via next-token behavior cloning. (2) Post-training refinement models: CAT-K [35] refines
+     tokenized traffic models through closed-loop supervised fine-tuning, while R1Sim [31] applies
+     reinforcement learning fine-tuning with handcrafted rewards to optimize generated trajectories. (3)
+     Auto-labeler: We additionally compare with a direct rule-based guidance baseline, where the same
+     human-aligned criteria used for auto-labeling, are applied online to score candidate actions.
+
+
+                                                          6
+Table 1: Simulation performance comparison under WOSAC metrics. Col., Off., and Tra. denote
+collision rate, offroad rate, and traffic violation rate, respectively.
+                                               WOSAC Metrics ↑                        Trajectory Error ↓   Col.    Off.    Tra.
+ Base Model   Strategy
+                              Realism       Kinematic     Map-based     Interactive   ADE       minADE     (%) ↓   (%) ↓   (%) ↓
+ SMART        Top-K           0.7630         0.4595        0.8949         0.7948      3.9990    1.9630     5.50    12.50   3.90
+ CAT-K        Top-K           0.7647         0.4588        0.8950         0.7993      3.8810    1.9850     4.70    12.50   3.50
+ CAT-K        Auto-labeler    0.7611         0.4508        0.8919         0.7963      3.8850    2.3730     4.20    12.60   3.50
+ CAT-K        CRAFT           0.7189         0.3420        0.8437         0.7583      3.5490    3.3430     3.90    11.58   2.30
+ SMART        CRAFT           0.7190         0.3493        0.8579         0.7630      3.4400    3.1430     4.00    11.88   2.10
+
+
+Table 2: Simulation performance comparison under behavioral rationality metrics. Spd., Ang., and
+Dist. denote speed, angular speed, and nearest-agent distance; P-Ag. and P-Sc. denote per-agent and
+per-scene rates, respectively.
+                                                        JSD (×10−2 ) ↓        Collision (%) ↓     Offroad (%) ↓    Traffic (%) ↓
+ Base Model    Strategy          Reference
+                                                   Spd.     Ang.      Dist.   P-Ag.     P-Sc.    P-Ag.     P-Sc.      P-Sc.
+ Log           Log replay               –          0.00     0.00      0.00     0.56     5.20      1.59     14.40      20.70
+ GUMP          Top-K            ECCV2024           4.78     5.41      11.36    4.06     36.30     3.80     26.90      32.70
+ SMART         Top-K           NeurIPS2024         1.07     3.23      0.56     3.13     15.10     2.52     19.10      38.80
+ CAT-K         Top-K            CVPR2025           1.02     2.96       0.53    3.41     15.70     2.54     19.50      36.50
+ R1Sim         Top-K           IEEE R-AL           1.05     3.16       0.56    3.36     15.50     2.23     16.30      36.60
+ CAT-K         Auto-labeler             -          1.19     3.02      0.67     3.21     15.50     2.57     20.30      36.70
+ CAT-K         CRAFT                    -          0.92     2.20      0.69     2.46     10.80     2.26     16.60      26.60
+ SMART         CRAFT                    -          0.91     2.20      0.72     2.60     11.90     2.06     17.10      25.90
+
+
+5.2    Main result
+
+WOSAC evaluation. Table 1 reports the results under the WOSAC [19] protocol. CRAFT achieves
+fewer failures (i.e., collision, offroad, and traffic violation rates) at the all-agent level, while showing
+a certain degradation in the realism meta metric. We argue that this decrease should be interpreted
+carefully. WOSAC realism mainly reflects one-to-one similarity between the logged trajectories and
+simulated trajectories of scored agents. However, as discussed in Sec. 1, locally observed logs may
+contain incomplete context-action associations due to perception boundaries and occlusions. As a
+result, this evaluation can favor behaviors that are close to the local log distribution, even when such
+behaviors may become abnormal under the complete simulated context. From this perspective, Top-K
+sampling [9] better preserves the base simulator’s original ability to match logged trajectory patterns,
+leading to higher realism scores. In contrast, CRAFT guides decoding away from actions that are
+highly likely under the base model but potentially abnormal in closed-loop simulation. Therefore,
+its lower realism score reflects a trade-off between log-trajectory matching and global behavioral
+rationality, rather than a simple degradation in simulation quality. Further discussion on the WOSAC
+evaluation protocol and its limitations is provided in the Appendix B.
+Behavioral rationality evaluation. Furthermore, we evaluate behavioral rationality over all moving
+agents, including abnormal events ignored by WOSAC but critical for realistic traffic simulation. As
+shown in Table 2, CRAFT outperforms pretrained imitation-learning simulators such as GUMP [13]
+and SMART [33], especially on collision and traffic-rule violation metrics. This indicates that pure
+log imitation captures local motion statistics but remains prone to abnormal behaviors. Post-training
+methods such as CAT-K [35] and R1Sim [31] alleviate distribution shift through additional rollout-
+or reward-based training, yet remain tied to logged demonstrations. Consequently, their reductions in
+abnormal behavior rates remain limited. In contrast, the consistent improvements on both CAT-K
+and SMART demonstrate that CPE functions as a plug-in alignment module for different simulators,
+substantially improving the behavioral rationality of generated traffic agents. Directly using the auto-
+labeler’s sparse rule-based outputs as online guidance provides limited candidate-level discrimination.
+In contrast, CPE amortizes these human-aligned criteria into dense contextual preference scores,
+enabling more stable probability calibration during decoding. CRAFT therefore improves closed-
+loop behavioral rationality while maintaining competitive distributional realism, with only a mild
+degradation in nearest-agent distance JSD, likely due to its preference for safer inter-agent spacing.
+Visualization. A visual comparison between the CRAFT and the baseline method is shown in Fig.4.
+When the baseline fails to select a reasonable traffic behavior, CRAFT can suppress abnormal actions
+to maintain normal driving behavior.
+
+
+                                                                7
+Figure 4: Qualitative Comparison between CAT-K and CRAFT. (a) CAT-K violates the traffic
+signal, while CRAFT reliably complies with the traffic rule. (b) CAT-K exhibits abnormal stopping
+and disrupts traffic flow, whereas CRAFT drives smoothly and maintains flow stability.
+
+
+
+
+Figure 5: Abnormal agent warning rate of Figure 6: Abnormal agent rate curves of CRAFT against
+CPE over different warning lead times.   baseline over rollouts.
+
+5.3   Analysis of Test-Time Alignment
+
+Proactive Risk Assessment. Fig. 5 analyzes CPE’s ability to anticipate abnormal behaviors. We
+define a warning as the first time step where the CPE score falls below 0.5, and compare it with the
+actual occurrence time of abnormal actions. CPE warns 48.7% of abnormal behaviors at least 1.0s in
+advance and 17.7% at least 2.0s in advance, showing its ability to identify risky action distributions
+before failures materialize. This proactive signal enables test-time correction before execution,
+whereas rule-based evaluators usually react only after explicit violations have occurred.
+Error Accumulation Mitigation. As shown in Figure 6, CAT-K suffers from evident error accumu-
+lation during closed-loop rollout, where abnormal behaviors become more frequent as autoregressive
+generation proceeds. After test-time calibration, CRAFT substantially reduces this risk, achieving
+a 23.79% lower abnormal behavior rate at 9s. This demonstrates that CPE-guided decoding can
+suppress risky candidates before execution and enhances the long-horizon behavioral rationality.
+Runtime Overhead Analysis. Table. 3 com-
+pares different test-time alignment strategies in Table 3: Runtime and behavioral performance of
+terms of behavioral performance and inference different test-time strategies.
+runtime. Top-K is computationally efficient but
+exhibits relatively high abnormal behavior rates. Strategy   Col. (%) ↓ Off. (%) ↓ Tra. (%) ↓ Time (ms) ↓
+The rule-based auto-labeler provides only lim- Top-K           15.67      19.50      36.46       2.15
+ited improvement while incurring a large run- Auto-labeler
+                                                   CRAFT
+                                                               15.50
+                                                               10.80
+                                                                          20.30
+                                                                          16.60
+                                                                                     36.70
+                                                                                     26.60
+                                                                                                491.77
+                                                                                                 76.75
+time overhead. In contrast, CRAFT achieves
+consistently lower collision, offroad, and traffic
+violation rates with moderate additional cost.
+
+5.4   Ablation study
+
+Table 4 analyzes the contribution of each component in CPE.
+
+
+                                                   8
+Table 4: Ablation study of Contextual Preference Evaluator. Seq., Tok., and Rep. denote sequence-
+level, token-level, and representation, respectively.
+            Components                    Cls. Metrics            Collision (%) ↓   Offroad (%) ↓   Traffic (%) ↓
+    Rep.   Data    Loss            Acc.   Rec.   Prec.       F1   P-Ag.    P-Sc.    P-Ag.   P-Sc.      P-Sc.
+    Seq.   Dlog    Lbce            0.65   0.75   0.49    0.59     4.36     20.50    3.10    25.80      42.30
+    Tok.   Dlog    Lbce            0.76   0.77   0.61    0.68     4.23     19.90    3.01    23.60      38.70
+    Tok.   Dpref   Lbce            0.75   0.84   0.59    0.69     3.10     15.00    2.37    17.30      36.10
+    Tok.   Dpref   Lbce + Lintra   0.78   0.85   0.65    0.74     3.08     14.40    2.31    16.90      32.80
+    Tok.   Dpref   Lbce + Linter   0.87   0.77   0.70    0.73     2.93     12.80    2.62    19.40      28.20
+    Tok.   Dpref   LCP E           0.85   0.83   0.73    0.78     2.46     10.80    2.26    16.60      26.60
+
+
+
+
+Figure 7: Results are reported as relative improvement over the CAT-K baseline under different
+preference training data sizes, guidance scales β, and candidate pool sizes K.
+
+
+Effect of Token-level Representation. Token-level representation is more suitable for CPE than
+sequence-level prediction. Since the base simulator performs autoregressive decoding over motion
+tokens, evaluating behaviors at the same granularity provides more direct supervision for test-time
+sampling. This leads to a stronger evaluator and more reliable closed-loop guidance.
+Effect of Complete-context What-if Data. Complete-context what-if rollouts are important for
+exposing simulator-induced failures. Logged data mainly provides static demonstrations, while many
+abnormal behaviors appear only after the simulator rolls out its own predictions. Training on what-if
+rollouts allows CPE to observe these failure modes under explicit scene context, improving its ability
+to guide the simulator away from unsafe or unreasonable actions.
+Effect of Preference Learning. The preference losses further improve CPE beyond BCE supervision.
+The intra-trajectory loss captures temporal degradation from normal behavior to failure, while
+the inter-rollout loss exploits alternative futures to learn relative behavioral preferences. Their
+combination provides complementary supervision and yields the most effective guidance, showing
+that CPE benefits from both absolute labels and group-level preference comparisons.
+Robustness to Training and Inference Configurations. Fig. 7 shows that CRAFT is robust to both
+training and inference configurations. Increasing the preference training data consistently improves
+all behavioral metrics, indicating that CPE benefits from broader coverage of simulator-induced
+failure modes. For test-time alignment, a moderate guidance scale achieves the best trade-off: a
+small β provides limited correction, while an overly large β over-calibrates the base distribution and
+degrades performance. A similar trend is observed for the candidate size, where increasing K from
+16 to 32 improves guidance quality, but a larger pool introduces noisier candidates and hurts stability.
+
+
+6     Conclusion
+
+In this paper, we present CRAFT, a test-time preference alignment framework centered on the
+Contextual Preference Evaluator (CPE). CRAFT learns rationality-aware preferences under complete
+scene context by using the frozen base simulator as a globally observable sandbox, where self-
+generated what-if rollouts expose failures induced by incomplete context learning. At inference
+time, CPE acts as a plug-in guidance module that recalibrates autoregressive decoding to suppress
+abnormal behaviors without retraining the simulator. Extensive experiments show that CRAFT
+improves closed-loop behavioral rationality while maintaining competitive simulation realism.
+
+
+                                                         9
+References
+
+ [1] A. Bordes, N. Usunier, A. Garcia-Duran, and et al. Translating embeddings for modeling multi-
+     relational data. In Proceedings of the Annual Conference on Neural Information Processing
+     Systems (NeurIPS), volume 26, 2013.
+ [2] R. A. Bradley and M. E. Terry. Rank analysis of incomplete block designs: I. the method of
+     paired comparisons. Biometrika, 39(3/4):324–345, 1952.
+ [3] H. Caesar, J. Kabzan, K. S. Tan, W. K. Fong, E. Wolff, A. Lang, L. Fletcher, O. Beijbom, and
+     S. Omari. nuplan: A closed-loop ml-based planning benchmark for autonomous vehicles. arXiv
+     preprint arXiv:2106.11810, 2021.
+ [4] F. Codevilla, E. Santana, A. M. López, and A. Gaidon. Exploring the limitations of behavior
+     cloning for autonomous driving. In Proceedings of the IEEE/CVF international conference on
+     computer vision (ICCV), pages 9329–9338, 2019.
+ [5] J. Cui, F. Liang, G. Yang, C. Tang, and J. Cui. Safer: Safety-critical scenario generation
+     for autonomous driving test via feasibility-constrained token resampling. arXiv preprint
+     arXiv:2603.04071, 2026.
+ [6] D. Dauner, M. Hallgarten, A. Geiger, and K. Chitta. Parting with misconceptions about learning-
+     based vehicle motion planning. In Conference on Robot Learning, pages 1268–1281. PMLR,
+     2023.
+ [7] P. De Haan, D. Jayaraman, and S. Levine. Causal confusion in imitation learning. In Proceedings
+     of the Annual Conference on Neural Information Processing Systems (NeurIPS), volume 32,
+     2019.
+ [8] S. Ettinger, S. Cheng, B. Caine, and et al. Large scale interactive motion forecasting for
+     autonomous driving: The waymo open motion dataset. In Proceedings of the IEEE/CVF
+     international conference on computer vision (CVPR), pages 9710–9719, 2021.
+ [9] A. Fan, M. Lewis, and Y. Dauphin. Hierarchical neural story generation. In Proceedings of
+     the 56th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long
+     Papers), pages 889–898, 2018.
+[10] S. Feng, H. Sun, X. Yan, and et al. Dense reinforcement learning for safety validation of
+     autonomous vehicles. Nature, 615(7953):620–627, 2023.
+[11] H. Gao, S. Chen, Y. Zhu, Y. Song, W. Liu, Q. Zhang, and X. Wang. Rad-2: Scaling reinforcement
+     learning in a generator-discriminator framework. arXiv preprint arXiv:2604.15308, 2026.
+[12] R. Geirhos, J.-H. Jacobsen, C. Michaelis, R. Zemel, W. Brendel, M. Bethge, and F. A. Wichmann.
+     Shortcut learning in deep neural networks. Nature Machine Intelligence, 2(11):665–673, 2020.
+[13] Y. Hu, S. Chai, Z. Yang, and et al. Solving motion planning tasks with a scalable generative
+     model. In Proceedings of the European Conference on Computer Vision (ECCV), pages 386–404,
+     2024.
+[14] Z. Huang, X. Weng, M. Igl, and et al. Gen-drive: Enhancing diffusion generative driving
+     policies with reward modeling and reinforcement learning fine-tuning. In Proceedings of 2025
+     IEEE International Conference on Robotics and Automation (ICRA), pages 3445–3451, 2025.
+[15] Z. Huang, Z. Zhang, A. Vaidya, and et al. Versatile behavior diffusion for generalized traffic
+     agent simulation. arXiv preprint arXiv:2404.02524, 2024.
+[16] L. Lin, X. Lin, K. Xu, et al. Revisit mixture models for multi-agent simulation: Experimental
+     study within a unified framework. arXiv preprint arXiv:2501.17015, 2025.
+[17] J. Lu, K. Wong, C. Zhang, and et al. Scenecontrol: Diffusion for controllable traffic scene
+     generation. In Proceedings of 2024 IEEE International Conference on Robotics and Automation
+     (ICRA), pages 16908–16914, 2024.
+[18] S. Meng and C. Ai. Infrastructure-centric world models: Bridging temporal depth and spatial
+     breadth for roadside perception. arXiv preprint arXiv:2604.17651, 2026.
+[19] N. Montali, J. Lambert, P. Mougin, and et al. The waymo open sim agents challenge. In
+     Proceedings of the Annual Conference on Neural Information Processing Systems (NeurIPS),
+     volume 36, pages 59151–59171, 2023.
+[20] L. Nguyen, M. Fauth, and B. a. a. Jaeger. Lead: Minimizing learner-expert asymmetry in
+     end-to-end driving. arXiv preprint arXiv:2512.20563, 2025.
+[21] M. Pei, S. Shi, and S. Shen. Advancing multi-agent traffic simulation via r1-style reinforcement
+     fine-tuning. arXiv preprint arXiv:2509.23993, 2025.
+[22] J. Philion, X. B. Peng, and S. Fidler. Trajeglish: Traffic modeling as next-token prediction.
+     arXiv preprint arXiv:2312.04535, 2023.
+[23] L. Rowe, R. Girgis, A. Gosselin, and et al. Ctrl-sim: Reactive and controllable driving agents
+     with offline reinforcement learning. In Proceedings of the Conference on Robot Learning
+     (CoRL), pages 3600–3621, 2025.
+
+
+                                                 10
+[24] A. Seff, B. Cera, D. Chen, and et al. Motionlm: Multi-agent motion forecasting as language
+     modeling. In Proceedings of the IEEE/CVF International Conference on Computer Vision
+     (ICCV), pages 8579–8590, 2023.
+[25] C. E. Shannon. A mathematical theory of communication. The Bell system technical journal,
+     27(3):379–423, 1948.
+[26] C. Si, D. Friedman, N. Joshi, S. Feng, D. Chen, and H. He. Measuring inductive biases of
+     in-context learning with underspecified demonstrations. In Proceedings of the 61st Annual
+     Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), pages
+     11289–11310, 2023.
+[27] S. Suo, S. Regalado, S. Casas, and R. Urtasun. Trafficsim: Learning to simulate realistic
+     multi-agent behaviors. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+     Pattern Recognition (CVPR), pages 10400–10409, 2021.
+[28] E. Vinitsky, N. Lichtlé, X. Yang, and et al. Nocturne: a scalable driving benchmark for bringing
+     multi-agent learning one step closer to the real world. In Proceedings of the Annual Conference
+     on Neural Information Processing Systems (NeurIPS), volume 35, pages 3962–3974, 2022.
+[29] M. Wang, J. Wang, T. Ye, and K. Yu. Do llm modules generalize? a study on motion generation
+     for autonomous driving. In Proceedings of the Conference on Robot Learning (CoRL), pages
+     4657–4683, 2025.
+[30] Y. Wang, T. Zhao, and F. Yi. Multiverse transformer: 1st place solution for waymo open sim
+     agents challenge 2023. arXiv preprint arXiv:2306.11868, 2023.
+[31] Z. Wang, P. Chen, D. Li, C. Li, Q. Zhang, Z. Xia, and G. Yu. Learning rollout from sampling: An
+     r1-style tokenized traffic simulation model. IEEE Robotics and Automation Letters, 11(5):6336–
+     6343, 2026.
+[32] B. Wilson, W. Qi, T. Agarwal, J. Lambert, J. Singh, S. Khandelwal, B. Pan, R. Kumar, A. Hart-
+     nett, J. K. Pontes, et al. Argoverse 2: Next generation datasets for self-driving perception and
+     forecasting. arXiv preprint arXiv:2301.00493, 2023.
+[33] W. Wu, X. Feng, Z. Gao, and Y. Kan. Smart: Scalable multi-agent real-time motion generation
+     via next-token prediction. In Proceedings of the Annual Conference on Neural Information
+     Processing Systems (NeurIPS), volume 37, pages 114048–114071, 2024.
+[34] X. Yan, Z. Zou, S. Feng, and et al. Learning naturalistic driving environment with statistical
+     realism. Nature communications, 14(1):2037, 2023.
+[35] Z. Zhang, P. Karkus, M. Igl, and et al. Closed-loop supervised fine-tuning of tokenized traffic
+     models. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+     (CVPR), pages 5422–5432, 2025.
+[36] Z. Zhang, A. Liniger, D. Dai, and et al. Trafficbots: Towards world models for autonomous
+     driving simulation and motion prediction. In Proceedings of the IEEE International Conference
+     on Robotics and Automation (ICRA), pages 1522–1529, 2023.
+[37] S. Z. Zhao, L. Wang, H. Ruan, Y. Bao, Y. Chen, Z. Leng, A. Ravichandran, H. He, Z. Zhou,
+     X. Han, et al. Bridgesim: Unveiling the ol-cl gap in end-to-end autonomous driving. arXiv
+     preprint arXiv:2604.10856, 2026.
+[38] Z. Zhong, D. Rempe, D. Xu, and et al. Guided conditional diffusion for controllable traffic
+     simulation. In Proceedings of 2023 IEEE International Conference on Robotics and Automation
+     (ICRA), pages 3560–3566. IEEE, 2023.
+[39] Y. Zhou, N. Ye, W. Ljungbergh, and et al. Decoupled diffusion sparks adaptive scene generation.
+     In Proceedings of the IEEE/CVF International Conference on Computer Vision (CVPR), pages
+     27760–27770, 2025.
+[40] Z. Zhou, H. Haibo, X. Chen, J. Wang, N. Guan, K. Wu, Y.-H. Li, Y.-K. Huang, and C. J. Xue.
+     Behaviorgpt: Smart agent simulation for autonomous driving with next-patch prediction. In
+     Proceedings of the Annual Conference on Neural Information Processing Systems (NeurIPS),
+     volume 37, pages 79597–79617, 2024.
+[41] Z. Zhou, J. Wang, Y.-H. Li, and Y.-K. Huang. Query-centric trajectory prediction. In Proceedings
+     of the IEEE/CVF conference on computer vision and pattern recognition (CVPR), pages 17863–
+     17873, 2023.
+
+
+
+
+                                                 11
+In this supplementary material, we provide additional details in a question-driven manner to support
+the methodology and experiments discussed in the main manuscript:
+
+       • How is the complete experimental pipeline implemented? Appendix A provides imple-
+         mentation details, including dataset configurations, trajectory discretization, model architec-
+         tures, training setups, and inference procedures.
+       • How do we validate behavioral alignment? Appendix B details the validation protocols,
+         annotation criteria, and evaluation settings used to assess whether generated behaviors are
+         aligned with human-aligned driving priors.
+       • What does the globally observable preference dataset contain, and what can we learn
+         from it? Appendix C presents the grouped preference dataset statistics, failure-type analysis,
+         and representative visual examples, showing how simulator-induced failures are transformed
+         into preference supervision.
+       • What further insights can be obtained from additional qualitative and quantitative re-
+         sults? Appendix D provides extended metric comparisons, alignment output visualizations,
+         qualitative case studies, and failure case analysis.
+       • What are the limitations and future directions? Appendix E discusses the limitations of
+         the current framework and outlines promising directions for future work.
+       • Supplementary videos. Appendix F describes the organization of the supplementary videos,
+         which visualize the behavior alignment process and closed-loop simulation performance.
+
+
+A     How is the complete experimental pipeline implemented?
+
+A.1   Dataset and Splits
+
+Our experiments are conducted on the Waymo Open Motion Dataset (WOMD) [8], a widely used
+benchmark for motion prediction and traffic simulation, which includes 486995 training scenarios,
+44097 validation scenarios and 44920 testing scenarios. Unlike simpler datasets that primarily focus
+on ego-vehicle routing, WOMD is uniquely characterized by its dense, highly interactive multi-agent
+environments. The dataset captures complex urban road topologies alongside dynamically interacting
+road users (e.g., vehicle, pedestrian, cyclist). This rich distribution of joint behaviors (e.g., yielding,
+overtaking, and collision avoidance) makes it suitable for training and evaluating multi-agent traffic
+simulation models. In this dataset, each scenario provides 1 second of historical observations and an
+8 seconds prediction horizon, recorded at a frequency of 10 Hz.
+
+A.2   Data preprocessing
+
+Following SMART [33] and CAT-K [35], we first construct discrete token vocabularies for both
+map elements and motion trajectories using k-disk clustering. Specifically, the map vocabulary
+contains 1,024 tokens, where each token represents a 5-meter polyline composed of 10 consecutive
+lane segments. The motion vocabulary contains 2,048 tokens, where each token corresponds to a
+0.5-second trajectory fragment.
+During data loading, we discretize the vectorized map elements in each scene into polylines of the
+same length and match them to the predefined map vocabulary according to the nearest-distance
+criterion. Motion trajectories are discretized in a similar manner by matching each trajectory fragment
+to its nearest motion token in the vocabulary. This tokenization procedure converts continuous map
+and motion information into discrete representations that can be directly used by the autoregressive
+simulator.
+To ensure data quality and maintain a reasonable distribution of agent behaviors, we use all agents
+present at the 1-second timestamp as valid scene agents. For each scene, we select up to 32 agents
+within a 100-meter radius around the ego vehicle as training agents. If fewer than 32 agents are
+available within this range, all valid agents are retained; otherwise, 32 agents are randomly sampled
+from the candidate set. This filtering strategy preserves the most relevant local interactions around
+the ego vehicle while keeping the input size manageable for training.
+
+
+                                                    12
+                      Figure 8: Contextual Preference Evaluator Architecture
+
+
+A.3   Model Architecture
+
+Our model consists of two main components: a scene encoder and a lightweight decoder. The scene
+encoder follows a SMART-like architecture based on Transformer encoder blocks, which encode
+the tokenized map elements, agent histories, and scene-level interaction context into contextualized
+feature representations. This design allows the model to capture multi-agent dependencies and
+map-aware spatial relationships under the complete scene context.
+On top of the encoded scene features, we employ a lightweight decoder implemented as a residual
+convolutional network. Specifically, the decoder is built from multiple temporal 1D convolutional
+layers with residual connections, enabling efficient modeling of local temporal patterns in candidate
+motion sequences. Compared with a heavy autoregressive Transformer decoder, this convolutional
+ResNet-style decoder provides a compact and efficient scoring module for contextual preference
+evaluation.
+
+
+A.4   Model Training
+
+CPE Training. The proposed method is implemented based on the open-source CAT-K codebase [35].
+We retain the architectural configuration and training settings defined in the original repository to
+ensure consistency with the baseline implementation. The Contextual Preference Evaluator is
+initialized with the pretrained CAT-K model, which serves as the scene encoder and provides stable
+and discriminative scene representations. During training, the parameters of the scene encoder are
+kept frozen, and only the decoder of the Contextual Preference Evaluator is optimized. This design
+improves computational efficiency while reducing the overall training cost.
+Baseline Training. We compare our method with several representative traffic simulation models,
+including SMART [33], GUMP [13], CAT-K [35] and R1Sim [31]. For these baselines, we use the
+official open-source implementations when available; otherwise, we implement the core algorithmic
+designs according to the original papers. To ensure a fair evaluation, all models are trained on the
+same training set.
+
+
+A.5   Hardware Setup
+
+To ensure a fair comparison, all methods are implemented and evaluated under the same experimental
+protocol. Both pretraining and fine-tuning are conducted on a cluster server with 4 NVIDIA RTX
+4090 GPUs. Closed-loop simulation and metric evaluation are performed on a separate workstation
+equipped with 1 NVIDIA RTX 4090 GPU, an Intel Core i9-14900K CPU, and 128 GB RAM.
+
+
+                                                 13
+                                  Table 5: Hyperparameter settings.
+
+                    Model Architecture                          Optimization and Loss
+        Component                           Value    Component                             Value
+        General Architecture                         Alignment Setting
+        Hidden dimension d                   128     Weight of posterior probability β      2.0
+        Number of attention heads              8     Top-k candidate size k                 32
+        Attention head dimension              16     Top-M selection size M                 64
+        Number of Fourier frequency bands     64     Temp t                                 1.0
+        Dropout rate                         0.1
+        Map Encoder                                  Training Setting
+        Map-map radius rpl2pl                10      Learning rate η                      1 × 10−5
+        Max. map-map neighbors               100     Batch size B                             8
+        Number of attention layers L          3      Number of epochs E                      32
+        Agent Encoder                                Loss Function
+        Number of historical steps           11      Ranking loss margin m                  0.5
+        Number of future steps               80      Weight of BCE loss λ1                  0.5
+        Number of attention layers L          6      Weight of intra-trajectory loss λ2     1.5
+        Temporal span                        30      Weight of inter-trajectory loss λ3     1.0
+        Temporal stride                       5
+        Map-agent radius rpl2a               30
+        Agent-agent radius ra2a              60
+        Max. map-agent neighbors             300
+        Max. agent-agent neighbors           300
+        Number of agent motion tokens       2048
+        Decoder Architecture
+        Dropout rate                         0.15
+        Number of temporal conv. layers        5
+        Temporal convolution kernel size       6
+        GroupNorm groups                      16
+        Number of MLP layers                   4
+        Output dimension                       1
+
+
+A.6   Hyperparameters
+
+Table 5 summarizes the hyperparameters used in our approach, including the training settings of the
+Contextual Preference Evaluator (e.g., learning rate, batch size and number of epochs), the weighting
+coefficients of the loss functions, and the hyperparameters associated with the alignment strategy.
+
+B     How do we validate behavioral alignment?
+B.1   Evaluation protocol
+
+For evaluation, all methods are tested under a unified experimental setting. Given an initial 1-second
+scene observation, each model autoregressively predicts the trajectories of all agents for the following
+8 seconds. The generated trajectories are then used to evaluate both the realism of the synthesized
+scenes and the behavioral rationality of the agents. During the framework validation stage, we
+randomly sample 2% of the validation split to perform evaluation. Empirical observations [23, 35]
+show that this reduced validation subset maintains a distribution consistent with that of the original
+training and validation data, allowing it to serve as a reliable proxy for performance assessment while
+reducing computational cost.
+
+B.2   Evaluation Metrics
+
+We adopt two complementary evaluation benchmarks to assess different aspects of closed-loop traffic
+simulation. The first follows the official WOSAC evaluator, which measures distributional realism
+
+
+                                                    14
+and safety-related event rates by comparing simulated rollouts with logged futures. The second
+focuses on behavioral rationality, evaluating whether generated agents exhibit realistic behavior
+distributions and avoid abnormal closed-loop events under our validation protocol.
+
+WOSAC evaluation metrics. The Waymo Open Sim Agents Challenge (WOSAC) evaluates
+whether a simulator can generate realistic multi-agent futures from logged initial conditions [19].
+For each scenario, the simulator generates 32 stochastic rollouts, and the official evaluator compares
+these simulated futures with the logged trajectories of selected valid agents. These evaluated agents
+are determined by the official validity masks, which favor objects with sufficiently long valid future
+states to ensure reliable metric computation.
+The core WOSAC realism metrics are likelihood-based. For each metric component, the evaluator
+constructs an empirical distribution from the 32 simulated rollouts and computes the approximate
+negative log-likelihood (NLL) of the logged future under this distribution:
+                                               |D|
+                                       1 X
+                              NLL = −         log psim (s≥1,i | s<1,i ),                              (13)
+                                      |D| i=1
+
+where D denotes the set of evaluated scenarios, s<1,i represents the initial observation of scenario i,
+and s≥1,i represents its logged future. Since the exact likelihood of high-dimensional multi-agent
+futures is intractable, WOSAC approximates psim by normalizing histograms constructed from the
+submitted simulation samples.
+The realism score is organized into three major groups. The kinematic likelihood includes linear
+speed, linear acceleration, angular speed, and angular acceleration. The map-based likelihood
+includes distance to road edge, offroad behavior, and traffic-light violation in the 2025 evaluator. The
+interactive likelihood includes distance to the nearest object, collision, and time-to-collision. Together,
+these components measure whether simulated rollouts match real-world driving distributions in terms
+of motion dynamics, map compliance, and agent-agent interaction.
+In addition to likelihood-based scores, the official evaluator also reports rate-based metrics for
+safety-critical events. In our experiments, we report collision rate, offroad rate, and traffic violation
+rate following the official evaluation outputs. These rates are computed over all valid agents in the
+simulated scenes. For traffic violations, we follow the 2025 WOSAC evaluator and count red-light
+violations, i.e., cases where a vehicle passes through an intersection under a red traffic signal. We
+also report trajectory errors, including ADE averaged over the 32 generated rollouts and minADE
+computed from the rollout closest to the logged future.
+
+Behavioral rationality metrics. Unlike WOSAC, which evaluates a selected subset of valid agents
+through the official challenge protocol, our behavioral rationality metrics assess behavior distributions
+and abnormal event rates over all moving agents in simulated scenes. We focus on moving agents
+rather than all existing agents because stationary vehicles may contain detection noise or pre-existing
+overlaps, which can introduce substantial noise into rate-based metrics. Thus, on top of the WOSAC
+validity filtering, we further exclude non-moving vehicles to obtain a cleaner evaluation of closed-loop
+behavioral rationality.
+Our evaluation consists of two parts: distribution-based metrics and rate-based metrics. For
+distribution-based metrics, we use the Jensen–Shannon Distance (JSD) to quantify the discrepancy
+between feature distributions extracted from real and simulated rollouts. Instead of focusing on
+one-to-one trajectory matching against logged futures, we aggregate behavioral features over the
+entire simulated scene and compare their overall distributions with those from real data. We compute
+JSD over three behavior-related features: speed, angular speed, and nearest-agent distance. Lower
+JSD indicates that the simulated rollouts better match the real-world behavior distribution.
+Jensen–Shannon Distance. For a given feature, let p and q denote the normalized histograms computed
+from real and simulated rollouts, respectively. The JSD is defined as:
+                                         r
+                                            DKL (p ∥ m) + DKL (q ∥ m)
+                           JSD(p, q) =                                   ,                     (14)
+                                                          2
+where m = 12 (p + q), and DKL denotes the Kullback–Leibler divergence. Based on this definition,
+Spd JSD measures the discrepancy between linear speed distributions, Ang JSD measures the
+
+
+                                                     15
+discrepancy between angular speed distributions, and Dist JSD measures the discrepancy between
+nearest-agent distance distributions.
+For rate-based metrics, we report both scene-level and agent-level ratios, denoted as P -Sc and
+P -Ag, respectively. P -Sc measures the percentage of scenes in which at least one abnormal event
+occurs, while P -Ag measures the percentage of moving agents involved in such events across all
+evaluated scenes. We compute these ratios for collision and offroad behaviors, and additionally
+report scene-level traffic violation rates. Together, these metrics provide a fine-grained assessment of
+behavioral rationality, complementing the likelihood-based realism evaluation of WOSAC.
+Collision, offroad, and traffic-rule violation rates. Let Nsc denote the total number of evaluated
+scenes, and let Nag denote the total number of evaluated moving agents. For a given event type, let
+  sc                                                                              ag
+Nevent  be the number of scenes in which the event occurs at least once, and let Nevent be the number
+of moving agents that experience the event at least once. We define the scene-level ratio P -Sc and
+the agent-level ratio P -Ag as:
+                                                   N sc
+                                            PSc = event ,
+                                                     Nsc
+                                                     ag                                           (15)
+                                                   Nevent
+                                           PAg =          .
+                                                    Nag
+
+While P -Sc provides a macroscopic view of scenario-level safety, P -Ag offers a finer-grained view
+by measuring how many moving agents are involved in abnormal events. Following these definitions,
+we report CollisionP -Sc and CollisionP -Ag , OffroadP -Sc and OffroadP -Ag , as well as TrafficP -Sc .
+For collision detection, each moving agent is represented as an oriented bounding box, and collisions
+are identified using the Separating Axis Theorem.
+For offroad detection, we examine the four corners of the vehicle bounding box and determine
+whether any corner crosses the drivable boundary based on its vector orientation with respect to
+nearby road-edge segments. This box-level evaluation is stricter than center-point checking and
+captures partial vehicle departures from the drivable area.
+For traffic violations, we build upon the official WOSAC evaluator and further refine the signal-
+compliance check by considering the permitted green-light direction. Specifically, a violation is
+counted not only when a vehicle runs a red light, but also when it remains stopped on an approach
+lane while the corresponding movement direction is given a green signal. This extension allows the
+metric to capture both unsafe red-light running and unreasonable green-light inaction, providing a
+more complete assessment of signal compliance in closed-loop simulation. In addition, We report
+traffic-rule violations only at the scene level. Unlike collision or offroad events, signal violations
+are localized to signalized intersections, and most agents in a scene are not subject to traffic-light
+constraints at a given time. Computing traffic violations at the agent level would therefore introduce
+a denominator bias and artificially dilute the metric. Moreover, traffic signals impose structural
+right-of-way constraints on the local traffic flow; a single red-light violation can invalidate the logical
+consistency of the intersection. Thus, scene-level traffic violation rate provides a more meaningful
+indicator of signal compliance.
+
+B.3   Additional Discussion on WOSAC Evaluation
+
+To further illustrate the discussion in the main paper, we present a representative case study comparing
+the driving log, CAT-K, and CRAFT under the WOSAC protocol. This example helps explain why
+WOSAC may favor behaviors that remain closer to the local logged trajectory distribution, even when
+those behaviors become abnormal under the complete simulated context.
+As shown in Fig. 9, the leading vehicle in the driving log first decelerates, likely because of a
+waiting vehicle or other downstream obstruction that is not fully visible in the recorded context.
+Moreover, this vehicle disappears from the log after approximately 4 seconds, so the logged trajectory
+only provides a partial observation of its original driving intent. CAT-K closely imitates this local
+behavior pattern and continues to decelerate in simulation. However, under the simulated scene, the
+corresponding vehicle no longer has a leading vehicle in front of it. As a result, CAT-K produces an
+unnatural behavior in which the vehicle gradually slows down and finally stops in the middle of the
+road.
+
+
+                                                   16
+Figure 9: Case study illustrating the limitation of WOSAC-style trajectory matching. In the
+driving log, the leading vehicle decelerates and disappears after approximately 4 seconds, leaving
+only a partial observation of its original intent. CAT-K closely imitates this pattern and eventually
+stops in the middle of the road, even though no leading vehicle exists in the simulated scene. In
+contrast, CRAFT uses the complete scene context to maintain forward motion, producing a more
+behaviorally rational rollout. Nevertheless, CAT-K receives a higher WOSAC realism score because
+it stays closer to the local logged trajectory pattern.
+
+
+In contrast, CRAFT takes the complete simulated scene into account during decoding. By recognizing
+that there is no vehicle ahead, CRAFT discourages the locally likely but globally inconsistent
+deceleration behavior and instead guides the vehicle to continue moving forward at a nearly constant
+speed. From the perspective of closed-loop behavioral rationality, this behavior is more consistent
+with common driving principles.
+However, when we examine the WOSAC scores of these two simulated trajectories, CAT-K achieves
+a higher realism score at 0.6120, while CRAFT receives a lower one at 0.5103. This result reflects
+the central tension discussed in our paper: WOSAC rewards one-to-one similarity between simulated
+and logged trajectories of the scored agents, whereas CRAFT explicitly corrects behaviors that
+may be statistically consistent with local logs but irrational under global simulation. In this case,
+CAT-K is rewarded for closely mimicking the partial logged behavior, while CRAFT is penalized
+for maintaining a more globally reasonable driving policy. This example therefore highlights the
+mismatch between local log matching and global closed-loop rationality, and further motivates the
+use of complementary behavioral rationality metrics and qualitative analysis.
+
+
+C     What does the globally observable preference dataset contain, and what
+      can we learn from it?
+
+C.1   Grouped What-if Scenario Construction
+
+As introduced in the main paper, human driving logs inherently suffer from a distributional coverage
+gap, primarily consisting of safe and compliant driving behaviors. To train the Contextual Preference
+Evaluator to recognize and penalize abnormal actions, we construct a large-scale what-if dataset,
+named CRAFT15K.
+To construct the what-if scenario, we adopt a generation-then-evaluation paradigm. Specifically, we
+randomly sample 15,000 initial 1-second historical scenes from the WOMD dataset. Utilizing the
+base simulator (i.e., the pretrained CAT-K model), we conduct autoregressive simulations for each
+sampled scene. Driven by the multimodal characteristics of the traffic simulator and the temporal
+cascading effect inherent in the autoregressive generation process, applying diverse random seeds
+naturally yields a wide spectrum of what-if traffic scenarios. This streamlined approach ensures that
+the generated “what-if” trajectories authentically reflect the native capacity and behavioral distribution
+of the base model. By executing 32 independent random rollouts per scene, we ultimately construct
+the CRAFT15K dataset, providing a massive, diverse, and natively aligned substrate for subsequent
+dense step-level behavior data.
+
+
+                                                   17
+Figure 10: Visualization of partial negative-sample scenarios in CRAFT15K. The scenes are
+generated by our grouped complete-context what-if simulation pipeline. Vehicles with anomalous
+behaviors are color-coded as green (collision), dark blue (offroad), purple (abnormal stopping), red
+(traffic violation), black (front–rear jitter), and yellow (wrong-way driving). Blue indicates normal
+vehicles. The bar on the right represents the labels of the circled vehicles, where the red portion
+denotes negative labels and the green portion denotes positive labels.
+
+
+C.2   Annotation Protocol
+
+We construct behavior annotations for supervised learning by assigning step-wise labels to the
+generated grouped scene segments. Utilizing an automated evaluation pipeline, we assess the
+behavioral validity of each agent at every time step. To systematically evaluate these behaviors, we
+categorize six specific criteria into three macro-dimensions: Safety, Compliance, and Kinematics.
+1) Safety
+
+       • Collision (Vcol ): We check whether an agent in the scene exhibits any explicit collision
+         or hazardous spatial conflict with other agents over the entire time horizon. A time step is
+         included in Vcol if no such violation is detected.
+
+2) Compliance
+
+       • Abnormal stopping (Vstop ): We check whether an agent undergoes substantial deceleration
+         and comes to an evident stop from a normal driving state when there is no leading blocking
+         vehicle, no red light, and no large-angle turning maneuver ahead. A time step is included in
+         Vstop if no such violation is detected.
+       • Traffic rule violation (Vtraffic ): We check whether an agent in a signal-controlled lane runs
+         a red light or remains stationary when the signal is green. A time step is included in Vtraffic
+         if no such violation is detected.
+       • Offroad driving (Voffroad ): We check whether an agent drives beyond the boundary of the
+         map. A time step is included in Voffroad if no such violation is detected.
+       • Wrong-way driving (Vwrong ): We check whether the direction of the lane traversed by an
+         agent shows a large angular deviation from the agent’s own heading direction. A time step
+         is included in Vwrong if no such violation is detected.
+
+3) Kinematics
+
+       • Trajectory jitter (Vjitter ): We check whether an agent exhibits abnormal back-and-forth
+         jittering in the lateral or longitudinal direction. A time step is included in Vjitter if no such
+         violation is detected.
+
+Consequently, the final valid set V is strictly defined as the intersection of all individual criterion sets:
+                       V = Vcol ∩ Vstop ∩ Vtraffic ∩ Voffroad ∩ Vwrong ∩ Vjitter .                      (16)
+
+A trajectory segment is deemed valid (assigned a positive label) if and only if it strictly adheres to a
+predefined set of criteria; otherwise, it is labeled as negative. Accordingly, the binary label for agent i
+
+
+                                                    18
+Figure 11: Distribution of behavioral anomalies in the CRAFT15K dataset. The chart visualizes
+the composition of anomalous tokens across a training set (17.1M tokens, 13.42% negative) and
+a testing set (1.1M tokens, 13.19% negative). The highly consistent distribution across both splits
+ensures reliable and unbiased evaluation for our predefined violation criteria.
+
+
+at time step t is formulated as:                
+                                                    1,    (i, t) ∈ V,
+                                       yi,t =                                                       (17)
+                                                    0,    (i, t) ∈
+                                                                 / V.
+
+C.3   Annotation Visualization
+
+To facilitate understanding of the label definitions, we provide examples for each abnormal behavior
+in Fig.10.
+
+C.4   Annotation Statistics
+
+In the CRAFT15K dataset, our automated evaluation pipeline identifies anomalous behaviors across
+a substantial training set (17.1 million tokens) and a test set (1.1 million tokens). As shown in Fig.11,
+the overall proportion of negative samples remains highly consistent between the training (13.42%)
+and testing (13.19%) splits. Categorizing these anomalies reveals a distinct hierarchy that aligns with
+our evaluation dimensions, showing minimal distributional shift between the splits:
+
+       • Safety: Explicit collisions dominate the negative samples, accounting for a substantial 38.2%
+         in the training set and 40.1% in the testing set.
+       • Compliance: Violations in this category constitute a major portion, led by abnormal stopping
+         (27.1% train / 25.3% test), followed by traffic rule violations (15.1% train / 13.9% test) and
+         offroad driving (12.1% train / 12.2% test). Wrong-way driving remains a rare edge case,
+         stable at 2.5% across both sets.
+       • Kinematics: Anomalies related to trajectory jitter account for the remaining 5.0% of the
+         training and 5.8% of the testing negative steps.
+
+Crucially, across the entire generated dataset, vehicles exhibiting at least one abnormal behavior
+consistently account for over 13% of the total simulated scenarios. This dense concentration of
+boundary cases quantitatively validates our grouped rollout strategy. It demonstrates that our approach
+
+
+                                                         19
+successfully bridges the distributional coverage gap inherent in driving logs, providing a sufficiently
+challenging, diverse, and high-quality substrate necessary for robust preference alignment.
+
+
+
+D     What further insights can be obtained from additional qualitative and
+      quantitative results?
+
+D.1   Open-Loop Evaluation: Alignment Output Visualization
+
+This section presents visualizations of the step-wise evaluation scores assigned to agent behaviors
+by the Contextual Preference Evaluator across diverse driving scenarios in Fig.12. These qualitative
+results explicitly demonstrate the model’s robust discriminative capacity in accurately identifying and
+penalizing anomalous or unsafe actions. Furthermore, they substantiate the underlying effectiveness
+of the proposed CRAFT evaluation method, proving its ability to provide reliable, interpretable
+assessments that correctly guide the agent decision process.
+
+
+
+
+Figure 12: Qualitative evaluation of CAT-K generated trajectories using CRAFT. (a) CRAFT
+accurately penalizes red-light infractions and unnatural lateral drifts. (b) The model consistently
+rewards stable car-following behaviors while assigning low scores to hazardous spatial conflicts.
+
+
+
+Scenario 1: Rule violation. This scenario highlights the model’s sensitivity to rule grounding. At
+T=5s, the orange agent commits a severe red-light infraction, resulting in a heavily penalized score
+from CRAFT. Conversely, the blue agent exhibits strict signal compliance by yielding at the stop line,
+thereby receiving a high rationality score. By T=8s, the orange agent exhibits an unnatural lateral
+drift during its turning maneuver; our model immediately captures this kinematic anomaly, causing
+its score to drop even further. Meanwhile, the blue agent eventually violates the red light, which is
+also instantly penalized by a corresponding score reduction.
+Scenario 2: Collision risk. This scenario highlights the model’s sensitivity to spatial safety. At
+both T=4s and T=7s, the blue agent maintains a safe and stable headway, consistently earning high
+evaluation scores for its logical car-following dynamics. In contrast, the orange agent experiences
+a hazardous spatial conflict with surrounding vehicles at T=4s, leading to a sharply reduced score
+due to the imminent collision risk. As the scene evolves to T=7s, the orange agent safely disengages
+from the dense interaction with the gray vehicle and transitions back into a stable car-following state,
+which is correctly reflected by a swift recovery in its behavioral score.
+
+
+                                                  20
+Figure 13: Additional qualitative comparisons between CRAFT and CAT-K. (a) Given an initial
+anomalous state, CRAFT gradually corrects the trajectory back to the lane center, whereas the baseline
+destabilizes into the oncoming lane. (b) CRAFT maintains strict lane adherence during a large-angle
+maneuver, successfully avoiding the offroad and wrong-way violations frequently triggered by the
+baseline’s token selection errors.
+
+
+D.2   Closed-Loop Evaluation: Additional Qualitative Examples
+
+This section presents two additional complex scenarios generated by the CRAFT framework, which
+demonstrates its robustness against covariate shift and challenging road topologies during closed-loop
+autoregressive simulation in Fig.13.
+Scenario 1: Self-recovery under Initial Perturbations. The first scenario evaluates the model’s
+recovery capability when initialized with anomalous kinematic states. Due to the compounding nature
+of autoregressive generation, the baseline CAT-K model fails to solve out-of-distribution state, leading
+to causing it to generate abnormal behavior that ultimately forces the vehicle to drift unstably into
+the oncoming lane. Conversely, our Contextual Preference Evaluator exhibits strong self-recovery
+capabilities; it actively regularizes the generated tokens, safely guiding the vehicle to the lane center.
+Scenario 2: Stability under Extreme Geometric Topologies. The second scenario highlights
+performance under strict spatial constraints, specifically during a large-angle turn. In the base
+simulator’s motion token vocabulary, high-curvature motion tokens are naturally sparse. When
+confronted with such edge cases, the unaligned baseline frequently makes catastrophic token selection
+errors, resulting in offroad deviations or wrong-way driving. By integrating preference alignment,
+CRAFT significantly enhances the stability of these sharp maneuvers, ensuring that the selected
+tokens keep the vehicle safely within its bounds.
+
+D.3   Offline CPE Ranking Analysis
+
+In addition to the online test-time guidance used in the main paper, we conduct an offline ranking
+analysis to better understand the roles of the base simulator and CPE. This experiment is not used
+as our main inference strategy; instead, it serves as a diagnostic study to examine whether the base
+simulator already contains potentially reasonable behaviors in its sampled trajectory set, and whether
+CPE can identify them under complete scene context.
+
+
+                                                   21
+Table 6: Simulation performance comparison under WOSAC metrics. Col., Off., and Tra. denote
+collision rate, offroad rate, and traffic violation rate, respectively.
+                                                   WOSAC Metrics ↑                           Trajectory Error ↓   Col.    Off.    Tra.
+ Base Model   Strategy
+                                  Realism       Kinematic        Map-based     Interactive   ADE       minADE     (%) ↓   (%) ↓   (%) ↓
+ SMART        Top-K               0.7630         0.4595           0.8949        0.7948       3.9990    1.9630     5.50    12.50   3.90
+ CAT-K        Top-K               0.7647         0.4588           0.8950        0.7993       3.8810    1.9850     4.70    12.50   3.50
+ CAT-K        Auto-labeler-rank   0.7663         0.4588           0.8960        0.8017       3.8760    1.9520     4.30    12.50   3.30
+ CAT-K        Auto-labeler        0.7611         0.4508           0.8919        0.7963       3.8850    2.3730     4.20    12.60   3.50
+ CAT-K        CPE-rank            0.7654         0.4615           0.8947        0.7997       4.0020    1.9790     4.80    12.40   3.80
+ CAT-K        CRAFT               0.7189         0.3420           0.8437        0.7583       3.5490    3.3430     3.90    11.58   2.30
+ SMART        CPE-rank            0.7643         0.4573           0.8949        0.7990       3.8830    1.9820     4.70    12.70   3.40
+ SMART        CRAFT               0.7190         0.3493           0.8579        0.7630       3.4400    3.1430     4.00    11.88   2.10
+
+
+Table 7: Simulation performance comparison under behavioral rationality metrics. Spd., Ang., and
+Dist. denote speed, angular speed, and nearest-agent distance; P-Ag. and P-Sc. denote per-agent and
+per-scene rates, respectively.
+                                                            JSD (×10−2 ) ↓           Collision (%) ↓     Offroad (%) ↓    Traffic (%) ↓
+ Base Model   Strategy               Reference
+                                                       Spd.        Ang.      Dist.   P-Ag.     P-Sc.    P-Ag.     P-Sc.      P-Sc.
+ Log          Log replay                    –             0.00     0.00      0.00     0.56      5.20     1.59     14.40      20.70
+ GUMP         Top-K                 ECCV2024              4.78     5.41      11.36    4.06     36.30     3.80     26.90      32.70
+ SMART        Top-K                NeurIPS2024            1.07     3.23      0.56     3.13     15.10     2.52     19.10      38.80
+ CAT-K        Top-K                 CVPR2025              1.02     2.96       0.53    3.41     15.70     2.54     19.50      36.50
+ R1Sim        Top-K                IEEE R-AL              1.05     3.16       0.56    3.36     15.50     2.23     16.30      36.60
+ CAT-K        Auto-labeler-rank             -             1.09     3.15      0.55     2.72     12.80     2.39     17.90      34.30
+ CAT-K        Auto-labeler                  -             1.19     3.02      0.67     3.21     15.50     2.57     20.30      36.70
+ CAT-K        CPE-rank                      -             1.09     3.18      0.55     3.12     13.90     2.45     17.90      34.00
+ CAT-K        CRAFT                         -             0.92     2.20      0.69     2.46     10.80     2.26     16.60      26.60
+ SMART        CPE-rank                      -             1.09     3.16      0.55     2.83     13.00     2.29     17.70      35.30
+ SMART        CRAFT                         -             0.91     2.20      0.72     2.60     11.90     2.06     17.10      25.90
+
+
+
+Specifically, for each scenario, we first let the base simulator generate 64 closed-loop rollout can-
+didates from the same logged initial state without applying CPE or auto-labeler guidance during
+decoding. After the rollouts are completed, CPE or auto-labeler evaluates each candidate trajectory
+under the full simulated scene context and assigns an overall preference score. We then select the top
+32 scoring rollout as the final output. This differs from our online CRAFT inference, where CPE
+is applied at each autoregressive decoding step to reweight candidate actions before the trajectory
+is fully generated. Therefore, offline ranking only selects among already generated futures, while
+online guidance actively changes the generation process.
+The offline ranking results provide two useful observations. First, CPE can consistently rank safer
+and more behaviorally rational rollouts higher, indicating that the learned preference scores capture
+meaningful global interaction quality rather than merely fitting the annotation labels. Second, the
+fact that offline ranking can already improve the results suggests that the base simulator has not
+fully exhausted its behavioral potential: reasonable futures may exist in its candidate set, but are not
+reliably selected by the original sampling strategy. This observation further motivates our test-time
+guidance design, which incorporates CPE earlier in the decoding process to steer the simulator toward
+such globally coherent behaviors before abnormal actions accumulate.
+
+D.4    Complete Sensitivity Experimental Results
+
+The main paper reports the overall comparison across different hyperparameter settings and baseline
+models. Here, we provide the complete numerical results in table.8 to facilitate a more detailed
+examination of these analyses.
+
+E      What are the limitations and future directions?
+
+E.1    Failure Case
+
+While our framework improves scenario realism in most cases, we present a failure case to transpar-
+ently discuss the limitations of our current sampling strategy. As illustrated in Fig. 14, when crossing
+
+
+                                                                    22
+   Table 8: Ablation studies on CPE training size, guidance strength β, and candidate set size K.
+            (a) Training size                                   (b) Guidance strength                                     (c) Candidate set size
+          Collision ↓        Offroad ↓      Traffic ↓           Collision ↓          Offroad ↓     Traffic ↓                     Collision ↓        Offroad ↓      Traffic ↓
+ Size                                                   β                                                      Strategy   K
+        P-Sc     P-Ag     P-Sc     P-Ag       P-Sc            P-Sc     P-Ag     P-Sc       P-Ag      P-Sc                      P-Sc     P-Ag     P-Sc     P-Ag       P-Sc
+                                                                                                               CAT-K      16   0.1390   0.0298   0.1810   0.0254   0.3610
+ 10%    0.1940   0.0410   0.1950   0.0252   0.4100      0.2   0.1530   0.0303   0.2020    0.0258   0.3530      CAT-K      32   0.1567   0.0341   0.1950   0.0254   0.3646
+ 30%    0.1700   0.0359   0.1810   0.0241   0.3820      2     0.1080   0.0246   0.1660    0.0226   0.2660      CAT-K      64   0.1940   0.0424   0.1910   0.0248   0.3680
+ 50%    0.1590   0.0287   0.1780   0.0239   0.3430      5     0.1430   0.0323   0.2150    0.0288   0.3210
+ 70%    0.1240   0.0253   0.1710   0.0231   0.3010                                                             CRAFT      16   0.1210   0.0267   0.1730   0.0238   0.3120
+                                                        10    0.1940   0.0439   0.2460    0.0332   0.3860      CRAFT      32   0.1080   0.0246   0.1660   0.0226   0.2660
+ 100%   0.1080   0.0246   0.1660   0.0226   0.2660      20    0.3110   0.0669   0.3140    0.0366   0.4240      CRAFT      64   0.1720   0.0378   0.2100   0.0273   0.3510
+
+
+
+
+a T-junction, the vehicle generated by the baseline CAT-K exhibits an unnatural stop. Our CRAFT
+model shows a similar behavior, characterized by an unexpected deceleration instead of keeping
+moving.
+Our analysis at step T=4s reveals that this failure stems from our reliance on the Top-k candidate
+set (k=32 in our implementation), which is adopted to maintain computational efficiency during
+the lookahead search. In this scene, the base simulator assigns disproportionately low probabilities
+to the optimal moving tokens, causing them to fall completely outside the Top-32 proposal pool.
+Consequently, the optimal actions are excluded from the alignment evaluation. The Contextual
+Preference Evaluator is forced to score and select from a set of suboptimal proposals, resulting in the
+safest available but unnatural deceleration. This case factually demonstrates that the performance of
+CRAFT is fundamentally bottlenecked by the quality of the provided candidate space.
+
+
+
+
+Figure 14: Failure case due to candidate set limitations. (Left) Qualitative visualization at a
+T-junction, where both CAT-K and CRAFT exhibit anomalous behaviors. (Right) The velocity-time
+profile of the red circle vehicle showing an unnatural deceleration. (Bottom) The token probability
+distribution from the base simulator at T=4s, indicating that the optimal turning tokens are absent
+from the Top-32 candidate pool.
+
+
+E.2     Limitations and Future Work
+
+Although CRAFT demonstrates the effectiveness of test-time behavioral alignment for closed-loop
+traffic simulation, we acknowledge that its current inference strategy still leaves substantial room
+for improvement. In this work, the search and reweighting procedure is designed as a simple and
+experimental realization of preference-guided decoding. While effective in reducing abnormal
+behaviors, it may still be constrained by the quality and diversity of the candidate actions proposed
+by the base simulator. If essential motion tokens are not included in the candidate set, CPE can only
+re-rank the available choices rather than recover the missing behaviors.
+
+
+                                                                                23
+Nevertheless, we believe this limitation also highlights an important direction for future traffic
+simulation research. Most existing methods focus on improving imitation learning or post-training
+the simulator, whereas our work suggests that correcting behavioral biases at test time can provide a
+lightweight and complementary path toward more reliable closed-loop simulation. This perspective
+is particularly relevant for practical simulators and world models, where retraining large generative
+models can be costly, unstable, or difficult to deploy.
+Future work may explore more advanced decoding and search strategies, such as dynamic expansion
+of the candidate set, adaptive guidance strength or hybrid methods that combine preference-guided de-
+coding with improvements to the base simulator’s prior distribution. In particular, directly improving
+the base simulator’s proposal distribution could help prevent essential tokens from being excluded be-
+fore CPE evaluation, enabling stronger alignment between local driving priors and globally coherent
+behaviors.
+
+F    Supplementary videos
+We provide a collection of supplementary videos to accompany this manuscript. These videos
+dynamically animate the static visualizations presented in both the main text and this appendix,
+offering additional qualitative evidence to substantiate the effectiveness of our proposed framework.
+The video files are organized into three distinct directories:
+
+       • video/dataset/: This folder contains animated visualizations of the annotated samples
+         from our CRAFT15K dataset. These videos explicitly highlight the various categories of
+         anomalous agent behaviors (e.g., collisions, abnormal stopping, offroad driving) captured
+         by our automated evaluation pipeline.
+       • video/Open_loop_evaluation/: This directory contains open-loop evaluation visualiza-
+         tions of our proposed CRAFT-r applied to the base simulator’s trajectories. These dynamic
+         demonstrations illustrate the Contextual Preference Evaluator’s step-wise scoring of agent
+         actions, clearly validating its precise discriminative capacity to accurately identify and
+         penalize anomalous behaviors.
+       • video/Closed_loop_evaluation/: This folder features closed-loop qualitative compar-
+         isons between our proposed CRAFT framework and the baseline models. Corresponding
+         to the static figures presented in the manuscript, these rollouts clearly demonstrate the
+         performance improvements achieved by our method in enhancing both behavioral rationality
+         and realism across diverse traffic situations.
+       • video/failure/: Here, we provide videos of our failure cases. These videos illustrate
+         the extreme boundary conditions and highly constrained scenarios that our current model
+         cannot yet perfectly resolve in Appendix E.
+
+
+
+
+                                                 24
+

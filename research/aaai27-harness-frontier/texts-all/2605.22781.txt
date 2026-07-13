@@ -1,0 +1,986 @@
+                                                 DeltaBox: Scaling Stateful AI Agents with
+                                              Millisecond-Level Sandbox Checkpoint/Rollback
+                                               Yunpeng Dong1 , Jingkai He1,2 , Shiqi Liu1 , Yuze Hou1 , Dong Du1,2 ✉, Zhonghu Xu3 , Si Yu3 ,
+                                                                    Baochuan Yang3 , Yubin Xia1,2 , Haibo Chen1,2
+                                                                   1 Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University
+                                                     2 Engineering Research Center for Domain-specific Operating Systems, Ministry of Education, China
+                                                                                              3 Huawei Technologies Co., Ltd.
+
+
+                                        Abstract                                                                   In early text-based tasks (e.g., HotPotQA), backtracking
+                                        Emerging LLM-powered AI agent workloads, such as test-                  cost almost nothing: the agent simply truncated its prompt
+
+
+
+
+arXiv:2605.22781v2 [cs.OS] 8 Jun 2026
+                                        time tree search and reinforcement learning, require high-              history. A coding agent, by contrast, acts on real OS state [8,
+                                        frequency state exploration, relying on rapid checkpoint                9] through commands like rm, pip install, and sed. These
+                                        and rollback (C/R) of the complete sandbox state, including             side effects persist on disk and cannot be undone by editing
+                                        files and process state. Existing mechanisms duplicate the              history; reverting them requires checkpointing and restor-
+                                        entire state, causing hundreds of milliseconds to seconds of            ing1 the complete sandbox state. Because tree search back-
+                                        latency per C/R, which severely bottlenecks deep search and             tracks constantly, this expensive rollback lands repeatedly on
+                                        large-scale fan-outs.                                                   the critical path, creating a severe infrastructure bottleneck.
+                                           This paper observes that consecutive sandbox states be-                 The sandbox state encompasses two tightly coupled
+                                        tween checkpoints differ only slightly. Therefore, instead of           dimensions: durable filesystem state and ephemeral process
+                                        full duplication, a sandbox should only duplicate the changes           state. These dimensions must be captured and restored
+                                        between consecutive checkpoints (Key Insight), yet the lack             jointly to prevent state divergence or context loss.
+                                        of OS support makes this hard to realize. We propose a new                 Test-time search stresses C/R along two axes at once: hori-
+                                        OS-level abstraction, DeltaState, that delivers change-based            zontally, Best-of-N sampling spreads the inference budget
+                                        C/R for agents through two co-designed OS mechanisms.                   across many parallel trajectories, each needing a fast initial
+                                        First, DeltaFS checkpoints file state by freezing the writable          clone [5, 10]; vertically, tree search such as MCTS backtracks
+                                        layer and inserting a new one, turning updates into copy-on-            to arbitrary historical nodes, demanding fine-grained check-
+                                        write and rollback into a layer switch. Second, DeltaCR rolls           point/restore of intermediate states.
+                                        back by forking from a frozen template process, backed by a                Beyond test-time inference, reinforcement-learning (RL)
+                                        CRIU dump. Building on the two mechanisms, we present                   training of agent policies is a second pressure point [11–13].
+                                        DeltaBox, an agent sandbox with millisecond-level C/R. On               Each training step must spin up 𝑘 independent sandboxes
+                                        SWE-bench and RL micro-benchmarks, DeltaBox hides its                   from the same warm starting state, run them as rollouts,
+                                        checkpoint work (≈10.83 ms) under inference and rolls back              and tear them down. Today’s approaches rebuild this warm
+                                        in ≈1.86 ms, letting agents explore more nodes under a fixed            state per rollout with a fresh Docker container or a microVM
+                                        time budget.                                                            snapshot-restore, both in the hundreds-of-milliseconds to
+                                                                                                                seconds regime; with 𝑘 in the tens to low hundreds, fork
+                                        Keywords: AI Agent, Sandbox, Checkpoint/Restore, Over-                  latency directly bounds training throughput.
+                                        layfs, CRIU, Copy-on-Write, State Management                               Existing systems manage filesystem and process state
+                                                                                                                separately, and achieve C/R by duplicating the entire state
+                                        1    Introduction                                                       into a checkpoint image. Full duplication is acceptable for
+                                                                                                                serverless-style cold starts [14–17], but prohibitively slow
+                                        LLM-powered AI agents now automate complex, multi-step                  for agents that checkpoint and roll back at high frequency
+                                        tasks, from code repair [1] to web navigation [2]. Such an              on the critical path. The inefficiency shows up in both state
+                                        agent runs an iterative loop: it generates an action [3], exe-          dimensions:
+                                        cutes it in a secure sandbox [4], observes the outcome, and re-
+                                                                                                                Challenge-1: Lack of efficient C/R for durable file states.
+                                        fines its next step. To push capability further, agents increas-
+                                                                                                                A significant challenge is how to efficiently checkpoint and
+                                        ingly scale test-time compute [5] through tree search such
+                                                                                                                restore the filesystem state of an agent sandbox. Current
+                                        as Monte Carlo Tree Search [6] and Tree of Thoughts [7],
+                                                                                                                systems usually adopt file copying, which incurs high latency.
+                                        which explore multiple candidate paths, check them against
+                                        execution feedback, and backtrack from failures.                        1We use rollback and restore for the same operation from two viewpoints:
+
+                                                                                                                rollback takes the agent’s perspective, restore the underlying sandbox
+                                        ✉ Corresponding author: Dong Du (dd_nirvana@sjtu.edu.cn).               mechanism’s.
+                                                                                     80                                             80
+Methods like Docker commits, git stash/branch, and VM-                                           Linear        MCTS                            Base      RL-trained
+level snapshots [18] are all slow in such cases.
+                                                                                     60                                             60                              +19.2%
+                                                                                                                                                      +27.6%
+
+
+                                                                     Pass rate (%)
+Challenge-2: High latency of process state C/R. Cap-                                                                                     +29.4%
+                                                                                           +5.3%
+                                                                                                                                                             39.0          42.2
+turing and restoring process memory is slow in both direc-                           40                   +6.7%                     40         34.8
+                                                                                                 31.0                  +4.7%
+tions (checkpoint and restore), yet prior sandboxes optimize                              25.7                 24.7                                                 23.0
+                                                                                                        18.0                 21.0
+only restore (cold start) and treat checkpoint as an offline,                        20                               16.3          20
+                                                                                                                                                      11.4
+one-time cost [15, 17, 19–24]. On checkpoint, E2B pauses a                                                                               5.4
+sandbox in ∼4 s per GiB of RAM [25]; on restore, CRIU [26]                           0                                              0
+                                                                                           GPT-4o         Qwen-2.5    DeepSeek           Llama-3.3    Qwen2.5        Qwen3
+reloads pages sequentially, taking seconds for multi-GiB pro-                                               72B         V2.5                70B        72B            32B
+cesses. Agents, however, need both at millisecond scale on
+                                                                                                 (a) MCTS search lift                          (b) RL training lift
+the critical path.
+   This paper observes that consecutive checkpoints in agent          Figure 1. Pass rate on SWE-bench. (a) Linear ReAct vs. MCTS
+workloads differ only marginally, with only a few new files or        on SWE-bench Lite [29]. (b) Base vs. RL-trained on SWE-bench
+modified memory pages between steps. Therefore, instead of            Verified [30–32].
+duplicating the entire state, a sandbox should only duplicate
+the changes between consecutive checkpoints (Key Insight).
+   To this end, we present DeltaBox, an OS-level rollback-
+able sandbox tailored for stateful agents. DeltaBox achieves          • DeltaFS. We enable an overlay filesystem to be reconfig-
+millisecond-level checkpoint/rollback through a new OS ab-              ured at runtime without unmounting, a capability stock
+straction, DeltaState, which treats the filesystem and process          Linux overlayfs does not provide.
+memory as a transactional, change-based state pair. To sup-           • DeltaCR. We make process-restore latency independent
+port DeltaState, we introduce two co-designed OS mecha-                 of memory footprint by forking from a warm template,
+nisms in DeltaBox:                                                      and hide the checkpoint cost inside the LLM inference
+                                                                        window.
+• DeltaFS (filesystem state management, § 4.1): DeltaFS               • Implementation and evaluation. We build DeltaBox on
+  hot-switches the overlay layer stack at runtime without               a Firecracker microVM and demonstrate, on SWE-bench
+  unmounting, freezing the writable layer to preserve his-              MCTS and RL fan-out, that it reduces C/R latency by orders
+  tory and inserting a fresh one, while a lazy switch trans-            of magnitude over baselines.
+  parently handles files left open across a checkpoint. File
+  updates reduce to copy-on-write, and restore to an 𝑂 (1)
+  layer switch.
+• DeltaCR (process state management, §4.2): at every check-           2               Background and Motivation
+  point, DeltaCR performs both a CRIU dump and a template-            2.1                 AI Agent Search Strategies
+  creating fork() (for low-millisecond restore), hiding both
+                                                                      Modern LLM-based agents increasingly rely on search,
+  inside the LLM I/O window. A bounded template pool
+                                                                      whether tree-structured or parallel sampling, to solve
+  caps memory; an evicted template falls back transparently
+                                                                      complex tasks such as SWE-bench code repair [1].
+  to the CRIU slow path, affecting only latency, never cor-
+  rectness.                                                           MCTS and SWE-Search. Search lifts solve rates over single
+                                                                      linear generation (Fig.1). MCTS is the classical tree-search
+   We implement DeltaFS as an overlayfs kernel module                 paradigm, deciding through selection, expansion, evaluation,
+and DeltaCR as a userspace daemon, integrating both                   and backpropagation; LATS [6] adapts it to LLM agents, us-
+in DeltaBox, an agent sandbox based on a Firecracker                  ing UCT-guided selection to pick the most promising node
+microVM. End-to-end evaluations show that a checkpoint’s              and then generating and executing candidate actions in a
+≈10.83 ms of local work is hidden under inference (zero               sandbox. SWE-Search [29] specializes this loop to SWE-
+agent-perceived blocking), while a template-fork restore              bench code repair, the workload our evaluation builds on
+completes in ≈1.86 ms. On SWE-bench MCTS workloads,                   (§6).
+DeltaBox reduces state-management overhead from 23–48%                Best-of-N. BoN runs 𝑁 independent trajectories from the
+of total time on the E2B baseline to 1–2%.                            same initial state and keeps the best by execution feed-
+   This paper makes the following contributions:                      back [5, 10], which means cloning the initial sandbox into
+                                                                      𝑁 instances. Yet within each trajectory the agent still back-
+• Problem and insight. We trace the agent C/R bottleneck              tracks on failed debug-test steps, so both BoN and MCTS
+  to full-state duplication, observe that consecutive check-          need fast intermediate C/R, which no mainstream agent sys-
+  points differ only marginally, and propose change-based             tem provides today (§ 2.3): systems avoid deep search pre-
+  C/R.                                                                cisely because the infrastructure does not yet exist.
+                                                                 2
+                             Table 1. Comparison of sandbox state management approaches for agents.
+
+       Approach                          Ckpt            Restore         Write         Mem.         FS       Process     Arbitrary      Stock host
+                                        Latency          Latency        Amplif.       Sharing†     State      State      Rollback        kernel ∥
+       Git stash/branch                 100 ms–1 s      100 ms–1 s      𝑂 (files)         ✗          ✓          ✗             ✓                ✓
+       shutil.copytree                 100 ms–10 s     100 ms–10 s       𝑂 (dir)          ✗          ✓          ✗             ✓                ✓
+       Docker commit + restart          50 ms–10 s        1–10 s        𝑂 (layer)         ✗          ✓          ✗             ✓                ✓
+       Btrfs/LVM snapshot               10–100 ms       10 ms–1 s         Low             ✗          ✓          ✗             ✓                ✓
+       Firecracker VM snapshot          200 ms–2 s     120–700 ms       𝑂 (VM)            ✗          ✗∗         ✓             ✓                ✓
+       DSec [27]‡                          —‡          WAL replay        𝑂 (log)          ✗          ✗          ✗             ✗                ✓
+       CubeSandbox [28]                 49.8 ms§        63.9 ms§         𝑂 (VM)           ✓          ✓          ✓             ✓                ✗
+       E2B [25]                         ∼4 s/GiB          ∼1 s           𝑂 (VM)           ✗          ✓          ✓             ✓                ✓
+       DeltaBox (ours)                  10.83 ms         1.86 ms ¶      𝑂 (4KB)           ✓          ✓          ✓             ✓                ✓
+∗ Native snapshot captures guest memory and device state only; the block device (filesystem) is excluded and must be snapshotted separately.
+                                                                                                                                          † Mem. Sharing:
+
+a new branch’s writable pages stay CoW-shared with a live source (footprint grows only with dirtied pages). E2B’s UFFD restore (UFFDIO_COPY) copies pages
+  into each instance’s private memory; CubeCoW and DeltaBox share them. ∥ Stock host kernel: runs on an unmodified mainline KVM host. DeltaBox’s
+modified overlayfs ships as a guest-kernel module in the VM image; CubeCoW requires a custom KVM_PVM host kernel (a non-mainline, pagetable-based KVM
+ variant)—a host rebuild and reboot. ‡ DSec [27] recovers via WAL replay of cached outputs; latency proportional to replay depth. § CubeSandbox v0.3.0
+   (CubeCoW) vendor-reported figures [28]: create_snapshot 49.8 ms (p95 54.1), create-from-snapshot 63.9 ms (p95 66.1); in-place rollback (which itself
+ bundles a create_snapshot) is 81.6 ms. ¶ Fast path: 1.86 ms. Slow path (CRIU lazy-pages fallback): 9.29 ms. Both are means from the standard DeltaBox
+                                              replay measurements; see Table.4 for component breakdowns.
+
+2.2    Agent Sandbox                                                                dump the whole guest’s memory and device state but not
+An agent sandbox isolates the actions an agent invokes [15,                         the block device, so a consistent filesystem rollback needs
+18]. Prior systems treat in-sandbox execution as stateless,                         a separate block snapshot; and the memory dump is VM-
+sandboxing individual tool commands while the agent’s rea-                          granular, capturing kernel, slab, and daemon pages irrele-
+soning runs on the host [33, 34], so rolling back can only                          vant to the agent. Agent sandboxes either lack event-level
+undo filesystem side effects. DeltaBox instead keeps a persis-                      coupled rollback altogether (DSec [27] only replays cached
+tent worker process in the sandbox and checkpoints/restores                         outputs from a write-ahead log, with no arbitrary rollback) or,
+its full state, so each search-tree node is a joint (filesystem,                    like E2B [25], offer coupled, transparent C/R only through
+memory) state that must be saved and restored atomically.                           a VM-granular pause/snapshot at seconds scale (∼4 s per
+   The filesystem dimension is the agent’s working directory                        GiB of RAM) that grows with total memory, far too slow
+(e.g., a cloned repository of hundreds of thousands of files),                      for the high-frequency, on-critical-path rollback tree search
+mutated by every edit, pip install, or config change. The                           demands. DeltaBox instead manages the coupled physical
+process dimension is the in-memory context (LLM conver-                             (filesystem, memory) state as a single, atomically consistent
+sation history, tool outputs, open file descriptors); losing it                     unit at millisecond-scale overhead (§4.4).
+on rollback forces replaying all prior actions from the initial
+state, paying latency proportional to search depth.
+Why coupling matters. Rolling back only the filesystem                              2.4   Design Requirements
+leaves the process with stale in-memory context that re-                            Based on the above analysis, we identify four key require-
+members on-disk changes that no longer exist; rolling back                          ments for an efficient agent sandbox:
+only the process leaves it operating on another branch’s
+files. Either mismatch breaks the determinism tree search
+                                                                                    R1 Millisecond-level coupled checkpoint/restore. Both
+requires; our experiments (§ 6) show that filesystem-only
+                                                                                       filesystem and process state must be saved and restored
+rollback without process restore yields observable semantic
+                                                                                       jointly at millisecond scale.
+inconsistency.
+                                                                                    R2 Write amplification proportional to actual changes.
+                                                                                       Storage overhead must scale with the agent’s actual
+2.3    Limitations of Existing Approaches                                              modifications, not working directory size.
+Table.1 summarizes existing approaches along both dimen-                            R3 𝑂 (1) arbitrary rollback. Support rollback to any his-
+sions; none covers both efficiently. Filesystem-only tools (Git                        torical checkpoint in constant time.
+stash/branch [33], shutil.copytree, Docker commit, Btrf-                            R4 Agent transparency. The coupled checkpoint/restore
+s/LVM snapshots) version files but discard process memory,                             should be mostly invisible to the agent, i.e., no code
+forcing a restart and replay. VM snapshots (Firecracker [18])                          changes, no forced restarts, and no context loss.
+                                                                              3
+                       Memory states
+                                                             Changes made by Step-1               Changes made by Step-2
+                       File states                                                                                                             Discard all changes aCer Step-1
+
+                                                                                                                                  rollback to Step-1
+                    Agent App                                    Agent App                            Agent App                                          Agent App
+                                                                                                                                  !
+Agent lifecycle
+                    DeltaBox (microVM)                           DeltaBox (microVM)                   DeltaBox (microVM)                                  DeltaBox (microVM)
+
+                           Step-0                                           Step-1                          Step-2                                           Step-1’
+                              deltaCheckpoint                                   deltaCheckpoint                 deltaCheckpoint                   deltaRestore
+
+
+Sandbox states
+                                                                                                                              !
+                    Delta sandbox states                       Delta sandbox states                   Delta sandbox states            Delta sandbox states Delta sandbox states
+                                                                                                                                                Apply all needed deltas
+
+
+Figure 2. Design Overview. DeltaBox uses diff-based checkpoint/restore (deltaCheckpoint and deltaRestore) to enable
+millisecond-level checkpoint/rollback. The agent worker runs inside the sandbox, so every step is C/R-protected and can be rolled
+back promptly when needed.
+
+                          Layer 4: Search Strategy (Linear / BoN / MCTS)                                Layer 1: Base storage. All DeltaFS layers reside on a real
+                                                                                                        filesystem, e.g., XFS with reflink in DeltaBox’s prototype.
+                         StateManager (coupled snapshot coordination)
+                                                                                                        When DeltaFS performs a copy-up, XFS creates shared block
+                                                                                                        references via reflink rather than duplicating data, deferring
+           NPD               Layer 3: DeltaCR (incremental C/R with                                     physical block allocation to the point of actual write (4 KB
+        (LLM SDK)                    template-fork fast path)
+                                                                               coupled                  granularity).
+                         Layer 2: DeltaFS (overlayfs hot layer switching)                               Layer 2: DeltaFS (filesystem state management). DeltaFS
+                                                                                                        is a new filesystem layer extending Linux overlayfs. Its key
+                              Layer 1: Storage (XFS + reflink CoW)
+                                                                                                        capability is runtime reconfiguration of the overlay layer
+                                                                                                        stack: DeltaBox inserts or removes overlay layers without
+                                                                                                        unmounting, which Linux overlayfs disallows; a lazy switch
+Figure 3. The DeltaBox architecture. The StateManager                                                   additionally handles files left open across checkpoint bound-
+coordinates DeltaFS (Layer 2, filesystem state) and DeltaCR                                             aries (§4.1).
+(Layer 3, process state). Base storage (Layer 1) is an XFS volume
+with reflink, providing block-level CoW to eliminate file-size-                                         Layer 3: DeltaCR (process state management). The sym-
+proportional write amplification.                                                                       metric counterpart to DeltaFS, DeltaCR provides process-
+                                                                                                        level checkpoint/restore atop CRIU (§4.2). On checkpoint it
+3     System Overview                                                                                   performs both an asynchronous CRIU dump and a template-
+                                                                                                        creating fork(), both hidden inside the LLM I/O window; on
+This paper presents DeltaBox, a new agent sandbox that                                                  restore it forks the template, falling back to CRIU lazy-pages
+satisfies the four requirements. Following our key insight                                              restore if the template has been evicted.
+that consecutive checkpoints differ only marginally (§ 1),
+                                                                                                        StateManager (coordination). The StateManager spans
+DeltaBox duplicates only the inter-checkpoint changes
+                                                                                                        two tiers: a host-side Sandbox Controller for global coordi-
+rather than the whole state.
+                                                                                                        nation and a guest-side Guest State Daemon (GSD) for local
+   Fig. 2 sketches the resulting end-to-end workflow. The
+                                                                                                        execution (§4.4). The Controller maintains a snapshot index
+agent worker runs inside the sandbox, so every search step is
+                                                                                                        tree isomorphic to the search tree, each node recording its
+C/R-protected. Concurrently with each LLM round-trip, the
+                                                                                                        CRIU dump path and overlay layer-stack configuration; the
+StateManager issues a deltaCheckpoint that persists only
+                                                                                                        GSD runs the coupled C/R sequences inside the VM, off the
+the delta of the coupled (memory, filesystem) state for that
+                                                                                                        host critical path.
+step. A rollback is a deltaRestore: it switches the overlay
+layer stack to the target in one shot, then reconstructs the
+target process memory by forking a warm template (on hit)                                               3.2     Coupled deltaCheckpoint Flow
+or loading the CRIU image chain (on miss).                                                              We first present the overall checkpoint flow in DeltaBox.
+                                                                                                        1. An agent’s search strategy issues a checkpoint request to
+3.1   System Architecture                                                                                  the StateManager; the Sandbox Controller dispatches it
+DeltaBox adopts a layered architecture (Fig.3), coordinated                                                to the target VM’s GSD, which performs steps 2–4.
+by a StateManager that keeps every checkpoint a consistent,                                             2. DeltaCR: The GSD submits a CRIU dump to a single-
+atomic (filesystem, memory) pair.                                                                          worker background thread pool and does not block on
+                                                                                                  4
+   it. CRIU briefly SIGSTOPs the agent, writes the dump to                                                     App’s view           a    b        c
+
+   tmpfs, and SIGCONTs it on completion.                                 App’s view          a    b        c   Step-2 layer (RW)
+3. DeltaFS: It synchronously issues a DeltaFS ioctl that
+                                                                                                                                                      check
+   atomically demotes the current upper to a new read-only               Upper layer (RW)         b        c   Step-1 layer              b        c
+                                                                                                                                                      point_
+   lower and installs a fresh upper (§4.1).                                                                                                           gen
+                                                                         Lower layer (RO)    a             c   Lower layer (RO)     a             c
+4. DeltaCR (template creation): Once the dump com-
+   pletes, it writes a fork request to the agent’s control FIFO.              Base layer (sandbox Image)             Base layer (sandbox Image)
+
+   The agent fork()s at a quiescent point: the active worker                 (a) Traditional OverlayFS                    (b) DeltaFS
+   continues in its main loop, while the forked child self-                        (static overlay)                    (dynamic overlay)
+
+   suspends (SIGSTOP) as this checkpoint’s template (repar-
+   ented away from the active process so its CRIU dump                 Figure 4. DeltaFS architecture. (a) Traditional overlayfs will
+   excludes prior templates). If the bounded pool (𝑁 tpl en-           prepare an upper layer file system which is writable for apps,
+   tries) is full, the least-recently-used template is evicted         and maintain a lower layer file system which is read-only and
+   (SIGKILL’d) but retains its checkpoint image for slow-path          basically includes everything in the sandbox image. (b) DeltaFS
+   restore.                                                            extends the idea to support dynamic overlay, i.e., when an agent
+                                                                       finishes a step of task and needs to make a checkpoint, instead of
+5. StateManager registers the checkpoint: {ID, CRIU dump
+                                                                       duplicating all files, DeltaFS inserts a new writable layer above
+   path, layer config, template PID if any}.                           the existing one and freezes the existing writable layer into a
+                                                                       read-only state, and all following updates are copy-on-write to
+State consistency. Because the CRIU dump and the DeltaFS               the new upper layer. As a result, the checkpoint operation is
+ioctl both observe the agent at the same SIGSTOP-quiesced              simply a layer insert operation while a rollback is a set of layer
+instant, the (filesystem, memory) pair at each checkpoint is           remove operations.
+consistent (§4.3).                                                     4.1    DeltaFS: Dynamic Overlay Filesystem
+Inference-masked checkpointing. Because a checkpoint                   Standard Linux overlayfs fixes its layer stack at mount time;
+runs while the agent awaits its LLM response, its latency              reconfiguring it requires an umount/mount cycle, impossi-
+is largely hidden behind inference. The one obstacle is the            ble while the agent holds open files and untenable at the
+agent’s live LLM connection; DeltaBox offloads it to a Net-            checkpoint rates MCTS demands.
+work Proxy Daemon (§4.2) so the request keeps progressing
+                                                                       Runtime layer switching. DeltaFS extends the overlayfs
+while CRIU dumps the agent. The agent’s brief SIGSTOP
+                                                                       kernel module with a custom ioctl that reconfigures the
+window (∼11 ms) fits comfortably within the seconds-scale
+                                                                       layer stack without unmounting. The user-space controller re-
+LLM latency.
+                                                                       names the current upper to a new read-only lower before the
+                                                                       ioctl, so only metadata operations hit the critical path. The
+3.3   Coupled deltaRestore Flow                                        ioctl parses the new configuration, builds a layer array (one
+                                                                       private mount clone per path), and performs an atomic swap:
+The restore flow in DeltaBox is as follows:                            publishing the array via release-consistent stores, bump-
+                                                                       ing the per-filesystem checkpoint_gen (red annotation in
+1. The search strategy (of an agent) issues a restore request          Fig.4b), and invalidating stale dentry/inode caches. It splices
+   to the StateManager targeting a prior checkpoint; the               the demoted upper as the topmost lower so pre-checkpoint
+   Sandbox Controller dispatches to the GSD.                           copied-up files stay reachable, and defers freeing the old
+2. The GSD kills the current agent process (SIGKILL).                  array two checkpoints later to protect in-flight readers.
+3. DeltaFS: The ioctl switches the overlay layer stack to
+                                                                       4.1.1 Lazy Switch for Open Files Files (or mmap’d re-
+   the target checkpoint’s configuration, restoring the exact
+                                                                       gions) opened before a checkpoint retain stale inode meta-
+   filesystem state.
+                                                                       data after a hot-switch, since their cached upper-dentry
+4. DeltaCR (fast path): if the target checkpoint’s template            pointers reference the demoted upper. A per-filesystem gen-
+   is alive, fork it; (slow path): otherwise, CRIU lazy-pages          eration counter (checkpoint_gen) resolves this: each inode
+   restore rebuilds the process from the dump images (§4.2).           caches the generation at which it was last resolved, and on
+5. The agent resumes execution from the exact instruction              the write path the kernel compares it against the current
+   after the original checkpoint, unaware of the rollback.             generation. On a match (fast path) the write proceeds di-
+   Both its memory and its filesystem view are consistent.             rectly; on a mismatch (slow path) the kernel re-resolves the
+                                                                       inode against the new layer stack, copying up a fresh upper
+                                                                       if needed, and atomically updates the inode’s generation and
+4     Detailed Design                                                  backing dentry under a per-inode mutex. Concurrent copy-
+This section presents the detailed design of DeltaBox.                 up of the same dentry races (the loser sees EEXIST); DeltaFS
+                                                                   5
+                                                                                          checkpoint                                    restore
+compares the existing upper’s backing mount against the
+current overlay upper, reusing a same-generation upper and                                                    DeltaCR Controller
+                                                                                                                                                              HOST
+discarding a stale pre-checkpoint one.
+                                                                                    Checkpoint
+                                                                                                                                                                VM
+                                                                                                                           Restore
+XFS reflink. Although DeltaFS works over any backing
+filesystem, DeltaBox uses reflink-enabled XFS to bound
+                                                                       Async Dump     GSD        ioctl     DeltaFS           GSD
+per-checkpoint write amplification. Overlayfs copy-up
+uses vfs_clone_file_range, which on reflink-enabled                                 FIFO Req                              Lookup Pool
+XFS clones extents by reference, so an upper file shares all            CRIU
+                                                                        Chain                                NPD                                            CRIU
+                                                                                                                                      Miss
+physical blocks with its source until overwritten. When                              Active                    LLM                                          Chain
+                                                                                     Agent                    Socket
+hot-switch demotes the upper layer via rename(2), it                                                                          Hit                 ioctl
+
+preserves the file’s extent map, meaning the demoted                                   Fork                  LLM Reply
+file enters the new lower chain with its reflink edges                                                                               ioctl   DeltaFS      CRIU Restore
+
+intact. Because reflink composes transitively, an extent                                                       New
+                                                                                    Template                                 Fork
+                                                                                                  Father      Active
+that remains unmodified across 𝑁 checkpoints occupies                                 Pool
+                                                                                                              Agent
+                                                                                                                                                             New
+only a single physical block shared by all 𝑁 generations.                                                                  Template
+                                                                                                                                              Father        Active
+                                                                                                                             Pool
+This extent-map preservation is crucial: it caps the write                                                                                                  Agent
+
+amplification plateau to a bounded constant for large files
+regardless of file size (§ 6.3.2). Approaches that instead             Figure 5. DeltaCR architecture. Checkpointing creates both
+re-materialize the demoted layer (e.g., copying it into a new          a CRIU image and a frozen template. Restores use the template
+layer) lose these reflink edges and scale write amplification          fast path on hit, or the CRIU image on miss; NPD keeps external
+linearly with checkpoint count; DeltaFS’s rename-based                 I/O off the agent path.
+demotion avoids that.
+                                                                       CRIU dump. Page tables are duplicated but no physical mem-
+                                                                       ory is copied (copy-on-write); the template and the active
+4.2   DeltaCR: Diff-based Checkpoint/Restore                           worker initially share all pages. Both the dump and the fork
+DeltaCR manages the process (memory) dimension of each                 run inside the LLM inference window (§3.2), so every node
+checkpoint. It builds on CRIU [26], which provides lazy-               acquires a durable image and a frozen template at near-zero
+pages restores via userfaultfd. DeltaCR introduces three               critical-path cost.
+key mechanisms: (i) a warm-template fast path that preserves           Fast-path restore (template hit). When the search strategy
+checkpointed processes as frozen templates, enabling low-              requests a restore to checkpoint 𝑘 and template_k is alive, the
+millisecond restores via OS-level fork(); (ii) a GSD-side              GSD kills the current active agent. It then issues the DeltaFS
+async-warm thread that runs concurrently with the resumed              ioctl to revert the overlayfs layer stack to checkpoint 𝑘’s
+agent to absorb CoW faults on its anonymous writable pages             exact configuration. Following this, DeltaCR executes a fork
+(§4.2.2); and (iii) a Network Proxy Daemon that decouples              on template_k to spawn a new child process, 𝑃 ′′ . 𝑃 ′′ is re-
+LLM I/O from the agent’s address space, ensuring templates             sumed via SIGCONT and continues execution from the exact
+remain safely forkable (§4.2.3). Fig.5 summarizes these com-           instruction immediately following the original checkpoint,
+ponents and the two restore paths.                                     with both memory and filesystem states consistent. An async-
+                                                                       warm thread (§4.2.2) then absorbs the post-fork CoW faults
+4.2.1 Template Pool and Fork-Based Restore The fast-                   off the critical path. This fork-based restore stays in the low-
+path restore mechanism relies on a template pool, which                millisecond range, as the kernel duplicates only page tables,
+maintains a registry of frozen (SIGSTOP’d) processes, each             not memory contents. Taken from the agent’s main loop at a
+keyed to a specific snapshot ID.                                       quiescent point, the fork copies only the calling thread and
+Checkpoint flow. During checkpoint 𝑘, DeltaCR executes a               sidesteps the multi-thread fork hazards (e.g., a thread frozen
+CRIU dump to tmpfs as a durable fallback for crash recovery            mid-mutex) that would otherwise deadlock the child.
+and cold-path restores. CRIU’s –leave-running mode inter-              Slow-path restore (template miss). If template_k has
+nally SIGSTOPs the agent only for the dump and resumes it              been garbage-collected, DeltaCR falls back to the CRIU
+on completion, so the agent process safely continues. Concur-          lazy-pages restore path. CRIU reconstructs the process
+rently, the GSD writes a fork request to the agent’s control           skeleton, registers all anonymous VMAs with userfaultfd,
+FIFO; the agent processes it at its next quiescent point (no           and resumes the process, faulting in pages on demand from
+syscalls in flight, no files half-written) and inline-forks. The       the tmpfs dump images. To minimize critical-path latency,
+forked child SIGSTOPs and registers as template_k in the               the background async-warm thread (§ 4.2.2) prefetches
+pool, while the active worker continues in the main loop; a            hot-zone pages off the critical path. Once the restored
+short-lived fork helper reparents the frozen template away             process stabilizes, it is frozen and injected back into the
+from the active process, keeping prior templates out of its            template pool to serve future fast-path restores.
+                                                                   6
+Garbage collection. Both the template pool and the snap-               template carries only the agent’s own short-lived threads.
+shot images grow with the live search tree. Evicting a tem-            During a checkpoint only the agent is frozen; the NPD keeps
+plate costs only latency (its CRIU image stays on disk, so a           buffering API responses, so the freeze hides beneath the
+re-selection falls back to the slow path), never correctness.          in-flight LLM inference. After a fork-based restore the child
+Reclaiming snapshot storage must instead respect the search:           inherits the FIFO descriptors from the template, resuming
+a recency- or visit-count policy is unsafe for MCTS, since             communication with no reconnection protocol. DeltaBox
+evicting a dormant node’s images while UCT still holds its             does not currently support network I/O rollback, which may
+𝑄 and visit count induces a restore-fail re-selection loop             incur external side effects.
+that wastes the iteration budget. DeltaBox therefore uses
+a reachability-aware rule: each GC pass keeps the nodes                4.3   StateManager Coupling Protocol
+UCT may still select (non-terminal, with remaining expan-              The StateManager coordinates the system to enforce a strict
+sion budget) plus the terminal candidates retained for the             invariant: every saved state is a consistent (filesystem, memory)
+final discriminator, and reclaims the rest. The rule is safe by        pair.
+construction, discarding only nodes the search itself has de-          Consistency protocol and failure handling. Consistency
+clared unreachable; non-tree search, where nodes are never             relies on tightly synchronizing the two primitives during
+re-selected, simply uses recency.                                      checkpoint and restore. During a checkpoint, the asynchro-
+4.2.2 Async-warm After a fork, the template and child                  nous CRIU dump and the synchronous DeltaFS ioctl both
+share all pages copy-on-write, so the child’s first write to           observe the agent at the exact same SIGSTOP-quiesced in-
+each page triggers a synchronous CoW fault (several mi-                stant, ensuring the persisted memory image matches the
+croseconds). A Python agent dirties many of these pages in             frozen upper layer. During a restore, the ioctl switches the
+its first post-restore turn, scattering fault latency across the       filesystem layer stack before the new agent process resumes,
+critical path.                                                         guaranteeing the agent never executes against mismatched
+   To absorb this, DeltaCR runs a GSD-side async-warm                  files. If the CRIU dump fails (e.g., due to an incompatible re-
+thread (in the GSD, not the agent, so the agent stays                  source), the StateManager gracefully aborts by rolling back
+single-threaded for the next checkpoint) on a separate CPU.            the filesystem ioctl and reporting the error to the search
+Immediately after the fork it walks the child’s anonymous              strategy, preventing any inconsistent half-states.
+writable VMAs via /proc/[pid]/mem, touching each page                  Value-time test isolation. Search frameworks often eval-
+with a read-then-write of one byte to force its CoW copy in            uate states by running tests (e.g., SWE-Search [29]), which
+the background while the child runs. Pages it has privatised           generate unwanted side effects like __pycache__ or tempo-
+no longer fault; pages it has not yet reached fall back to             rary files. In stateless, sandboxed environments, these side
+plain CoW, so there is no penalty over a no-warm baseline.             effects are naturally isolated by discarding the sandbox. Be-
+When the agent’s post-restore work has any idle window,                cause DeltaBox operates a stateful, in-process environment,
+async-warm clears most faults before the bulk of heap                  the StateManager explicitly provides isolation using the C/R
+writes; we quantify the residual in §6.3.1.                            primitive itself. Before executing a test, the StateManager
+                                                                       takes a pre-test checkpoint. Once the agent reads the test
+4.2.3 Reusable I/O during Checkpoint with NPD
+                                                                       results, the StateManager unconditionally restores to the pre-
+Fork-based restore is safe only if the frozen template’s
+                                                                       test checkpoint. Because the agent is quiesced while awaiting
+address space holds no long-lived external state, such as
+                                                                       the test observation, resuming it from the pre-test state and
+live network threads. However, standard LLM SDKs in
+                                                                       injecting the result mimics a side-effect-free execution.
+Python (e.g., openai or anthropic) violate this requirement
+by spawning background HTTP/2 connection pools and
+                                                                       4.4   Compatibility and Deployment Model
+ThreadPoolExecutor workers. Forking a template contain-
+ing these threads leads to fatal issues: keep-alive TCP sockets        Compatibility with agent frameworks. DeltaBox comple-
+survive as half-open file descriptors, connection-pool states          ments application-level frameworks such as LangGraph [35]
+diverge, and threads frozen mid-handshake permanently                  and LangChain [36], whose logical checkpoints cannot undo
+deadlock the frozen template.                                          physical OS-level side effects (§2.3); DeltaBox supplies that
+   DeltaBox resolves this with a Network Proxy Daemon                  missing physical-state layer through two integration modes:
+(NPD), a separate process in the same sandbox that owns                a transparent adapter that wraps the framework’s check-
+all LLM SDK clients and connections. The agent never                   point saver to trigger C/R automatically, and an explicit tool
+links the SDKs; it exchanges fixed-size FIFO tokens (each              node for developer-controlled snapshots.
+≤ PIPE_BUF, hence atomic) with the NPD over a shared                   Deployment model. To balance global search scalability
+directory, keeping every socket and SDK thread out of its              with low-latency local operations, DeltaBox adopts a Host–
+address space. Being a separate process, the NPD is excluded           Guest collaborative architecture. The StateManager is split
+from both the CRIU dump and the template fork, so a                    accordingly: a Sandbox Controller on the Host manages
+                                                                   7
+global coordination and the snapshot index tree, while a              Workloads. We draw four MCTS-trajectory archetypes
+GSD inside each guest VM handles the local C/R execution.             from SWE-bench Verified (grouped in Table. 2): Django
+The system relies on Firecracker [18] microVMs for strict             (fat process), SymPy (read-heavy exploration), Scientific
+hardware-level isolation, with each VM running a custom               (Astropy, Matplotlib, scikit-learn, Xarray; NumPy-heavy,
+Linux 6.8 kernel that natively integrates the DeltaFS mod-            process-dominated), and Tools/small repos (pylint,
+ule and DeltaCR primitives. Because C/R is process-level, a           requests, pytest; lightweight).
+single VM can host multiple independently checkpointable              Baselines. All baselines capture both dimensions; otherwise
+agents that share one kernel and the read-only base layers            MCTS rollback determinism would break (§2.2).
+(via reflink); rolling back one search branch leaves the others
+untouched, which a VM-level snapshot cannot do (it captures           • replay+cp: filesystem state via shutil.copytree of the
+all processes at once).                                                 testbed directory; process state recovered by re-executing
+                                                                        the recorded commands.
+5     Implementation                                                  • FC-Diff+dm: VM-level memory snapshot via Firecracker’s
+                                                                        built-in pause+dump, coupled with a dm-snapshot CoW
+DeltaBox comprises DeltaFS, a new file system based on                  layer for filesystem state.
+Linux 6.8 overlayfs, and DeltaCR, a userspace daemon, co-
+                                                                      • CRIU+cp: filesystem state via shutil.copytree; process
+ordinated by the StateManager and deployed inside Fire-
+                                                                        state via a CRIU dump and restore of the agent process.
+cracker [18] microVMs; the same optimizations apply to
+                                                                      • E2B (diff) [4]: the self-hosted open-source E2B runtime
+container- or other VM-based sandboxes.
+                                                                        (e2b-dev/infra); its built-in pause/resume takes a VM-
+DeltaFS. The checkpoint ioctl (§4.1) adds ∼565 lines of C               level incremental snapshot (dirty memory pages and dirty
+across four files. The layer-array pointer is swapped atomi-            rootfs blocks against the ancestor template), used as a cou-
+cally under a spinlock and the old array freed after an RCU             pled (filesystem, process) C/R baseline. DeltaBox instead
+grace period; cached dentries are marked for revalidation so a          dumps only the agent process’s pages (process-level), not
+stale upper is never served from cache. The concurrent copy-            the whole VM. (Table. 1 lists E2B’s documented full-VM
+up race (§4.1.1) is resolved by comparing mount-namespace               pause, ∼4 s/GiB; the Table. 2 and Fig. 6 figures are this
+identity.                                                               self-hosted incremental path, hence far lower.)
+DeltaCR. DeltaCR is ∼1200 lines of Python orchestrating
+CRIU, the template pool, the async-warm thread, and the               6.2   End-to-End Performance
+NPD (§4.2). CRIU dumps live in tmpfs and overlay uppers
+                                                                      DeltaBox’s coupled checkpoint/restore primitive is designed
+on an XFS rootfs, where reflink CoW is block-granular.
+                                                                      to serve two distinct multi-iteration agent workloads: (i)
+Framework integration. For LangGraph [35] we provide                  inference-time MCTS search, where each tree expansion
+a BaseCheckpointSaver adapter whose put()/get() drive                 checkpoints at a parent node and restores at a new leaf; and
+coupled OS-level C/R alongside the graph-state checkpoint,            (ii) RL training fan-out, where each training step forks 𝑁
+plus sandbox_checkpoint/sandbox_restore tool nodes                    parallel rollout sandboxes from a single warm template. Both
+for explicit control.                                                 stress the per-event primitive at high frequency.
+Deployment. The host-side Sandbox Controller drives the
+in-VM GSD over virtio-vsock, keeping all latency-sensitive            6.2.1 MCTS Search Throughput We characterize the
+C/R in a closed loop inside the guest.                                per-iteration blocking overhead each sandboxing approach
+                                                                      contributes to MCTS search, and corroborate Table.2’s replay-
+6     Evaluation                                                      bench numbers against an end-to-end trajectory-replay ex-
+                                                                      periment.
+6.1   Experimental Setup
+                                                                         Table 2 decomposes per-event latency into checkpoint and
+Hardware. All experiments run on a four-socket server (96             restore phases. DeltaBox’s std ckpt submits an asynchronous
+physical cores / 192 hardware threads) with 760 GiB RAM.              CRIU dump that is masked by LLM inference (§ 4.2); the
+Experiment data and snapshot images are placed on a 400 GB            reported checkpoint time is the API call-to-return blocking
+NVMe SSD. RL training fan-out (Fig.7b–c) additionally uses            interval, excluding the asynchronous dump completion. The
+a single-node 4-GPU cluster (96 GB each). The same node               std path also creates a warm template at checkpoint, so a later
+also hosts the Qwen3-Coder-30B inference endpoint that                restore forks directly off it instead of replaying a full CRIU
+provides the MCTS search trajectories. DeltaBox (based on             restore (§4.2). Restore sits on the agent’s true critical path: no
+Firecracker microVM) is configured with 4 vCPUs, 8 GB RAM,            subsequent MCTS iteration can begin until it returns, and
+and an XFS rootfs block device plus a read-only XFS data              DeltaBox keeps it in the millisecond regime. The replay and
+image (target repository source and conda environment),               VM/container baselines trade cheap or moderate per-event
+with OverlayFS layered on top for rollbackable filesystem             checkpoints for reload, merge, or VM-resume restores orders
+state.                                                                of magnitude larger; DeltaBox reverses this trade by hiding
+                                                                  8
+Table 2. Per-event mean blocking time (ms) on SWE-bench MCTS trajectories. ck/rs = checkpoint/restore; column naming follows
+process-recovery+FS-recovery (see §6.1 for baseline definitions).
+
+                                 replay+cp               FC-Diff+dm                                      CRIU+cp                              E2B (diff)                         DeltaBox
+
+Workload                  ck†                rs        ck             rs             ck                                  rs             ck                    rs               ck                 rs
+
+Django                   568.1           28437       740.7         3784          791.7                                1116            487.7                790.2             12.12              2.23
+SymPy                    171.4           31591       476.9         3279          503.4                                635.7           536.3                900.7             11.96              2.21
+Scientific               265.9           28299       603.0         3256          435.7                                655.1           552.5                952.1             10.86              1.82
+Tools/Small repos         86.4           20883       511.7         2920          361.4                                427.1           515.4                933.3              9.16              1.46
+
+Weighted Avg             347.0           27694       622.3         3429          590.0                                811.4           524.4                899.7             10.83              1.86
+† For replay+cp, ck is the trace-weighted once-per-trace pristine-repo copy proxy; rs is event-weighted over restore events and uses zero-latency replay of
+    recorded completions. FC-Diff+dm’s ck includes one initial root VM checkpoint per trace. Each archetype contributes 4/4/10/6 SWE-bench Verified
+trajectories, each replayed twice; all entries are means over the per-event checkpoint/restore measurements pooled per archetype, so the Weighted Avg row is
+                                                                event-weighted across archetypes.
+
+dump cost asynchronously and keeping the critical-path                                                                   DeltaBox                                  1.0× = LLM+action line
+
+
+
+
+                                                                                   end2end / LLM+action latency
+                                                                                                                         self-hosted e2b-infra (diff)
+restore millisecond-scale.
+   For replay+cp, rmtree+copytree stays below one sec-                                                                                                                                  1.93×
+                                                                                                                  2
+ond on average in every group; the seconds-scale restore is                                                                                    1.43×
+cold replay to rebuild the target search state (startup, CodeIn-                                                              1.31×                                  1.30×
+                                                                                                                      1.01×           1.01×                  1.02×              1.02×
+dex loading, deterministic action execution, and Moatless                                                         1
+parsing). Checkpoint is cheap because it keeps one pris-
+tine repository copy per trace rather than re-copying at
+every MCTS node. Firecracker Diff captures only pages dirt-                                                       0
+ied since the previous snapshot at checkpoint (477–741 ms                                                              Django           SymPy                Scientific        Tools/Small
+mean), but pushes the merging work to restore time: each                                               LLM+act 90.5s                     70.1s                     83.1s             36.2s
+restore must materialize a sparse copy of the base image
+and overlay the diffs along the MCTS ancestor chain (2.92–                       Figure 6. End-to-end time for 30-iteration MCTS trajectories
+3.78 s mean). Self-hosted E2B avoids the expensive diff-chain                    (Qwen3-Coder-30B) across four SWE-bench archetype groups,
+merge but still pays VM pause/resume on every MCTS node,                         comparing DeltaBox against E2B (diff). Each system is normal-
+around 0.5–1.0 s per event.                                                      ized per group to its own LLM+action line (1.0× = LLM RTT +
+   Restore on DeltaBox pays only the OverlayFS layer-switch                      action work, i.e., the ideal end-to-end time if state management
+concurrent with template fork() (low single-digit millisec-                      were free). For a fair comparison, we invoke E2B’s pause/re-
+onds in Table.2). The warm-template-pool interaction and                         sume primitives directly, measuring only the C/R substrate cost
+                                                                                 without control-plane overhead.
+slow-path fallback are discussed in §4.2. E2B restore is ∼480×
+DeltaBox, and several prototype baselines reach even higher
+orders of magnitude (FC-Diff ∼1800×, replay ∼15000×; Ta-                         instance’s end-to-end time to its own LLM+action latency:
+ble.2).                                                                          DeltaBox stays at 1.01–1.02×, while E2B (diff) reaches
+   End-to-end, DeltaBox significantly reduces the overhead                       1.30–1.93×. State management consumes 23–48% of total
+of sandbox operations within the agent’s execution flow:                         time on E2B (diff) vs. 1–2% on DeltaBox.
+only the OverlayFS sink ioctl (a few ms; the std-ckpt’s CRIU
+dump is async and hidden under the 1–9 s LLM inference
+                                                                                 6.2.2 DeltaBox for RL Rewarding A motivating work-
+window, §4.2) plus the restore latency (a few ms), roughly
+                                                                                 load for DeltaBox is RL training, in which a single warm
+low-single-digit to tens of milliseconds total per iteration.
+                                                                                 template spawns 𝑁 parallel children per training step. We
+The E2B baseline has no equivalent inference-masking han-
+                                                                                 characterize the fork primitive’s scaling behavior in two
+dle and contributes its full per-event latencies directly to the
+                                                                                 layers: (i) raw kernel fork() cost on a single host (no VM,
+critical path. These savings become decisive once the LLM
+                                                                                 no overlayfs, no CRIU) to set the ceiling, and (ii) substrate-
+round-trip drops to seconds (Fig.6).
+                                                                                 level fan-out latency including per-child filesystem isolation
+   We replay Qwen3-Coder-30B MCTS trajectories from the
+                                                                                 and process-state recovery, compared against two coupled
+four archetype groups (§6.1), 30 iterations each, end-to-end
+                                                                                 sandbox baselines.
+through two coupled state-management backends: DeltaBox
+                                                                                    As shown in Table.3, fork p50 grows sub-linearly with fan-
+and the self-hosted, incremental-snapshot E2B runtime
+                                                                                 out width (0.57 ms at 𝑁 =1 to 5.5 ms at 𝑁 =64), dominated by
+(E2B (diff)). DeltaBox runs every event through the standard
+                                                                                 the kernel page-table copy, with tails ∼3× p50 (p99=14.7 ms
+CRIU + overlay-sink path, matching the all-standard event
+                                                                                 at 𝑁 =64). Children inherit the parent’s pages copy-on-write,
+semantics the baseline provides. Fig. 6 normalizes each
+                                                                                 so per-child resident stays ∼11 MB and aggregate footprint
+                                                                             9
+         𝑁    p50 (ms)    p99 (ms)    forks/s   RSS (MB)                  Table 4. DeltaBox per-component C/R latency (ms) over the
+          1        0.57        0.61    1419.2         9.4                 standard-path SWE-bench MCTS replay. Fast path is the com-
+          4        0.78        1.31     999.7        42.3                 mon case; the slow path is the CRIU-lazy fallback on template
+         16        1.67        4.67     519.8       169.8                 eviction.
+         64        5.47      14.74      165.9       679.4
+Table 3. Fork-out latency and footprint across 18 SWE-bench                     Component                            ck rs (fast) rs (slow)
+MCTS trajectories (Qwen3-Coder-30B and MiMo V2.5-Pro, ×3
+each from Django, SymPy, Xarray; 5 reps each). The forked                       Overlay ioctl switch               0.07       0.19         0.25
+warm template is DeltaBox’s stdlib-only agent.py with the real                  Fork (stash / template)            8.87       1.34           —
+trajectory in its heap (∼15 MB RSS). Values are per-trajectory                  CRIU C/R                        async‡          —          8.72
+medians. forks/s: 𝑁 over total fan-out time. RSS: summed resi-                  Page-warm§                           —      async        async
+dent across the 𝑁 children.                                                     Agent-perceived                      0∥       1.86        9.29
+                                                                                blocking
+                                                                             ‡ The CRIU dump runs asynchronously, off the perceived path (hidden
+grows only with the per-child write working set (a write-                  under the LLM-inference window); CRIU lazy-pages restore is used only
+sensitivity pass where each child dirties 100 MB raises its               on template eviction (rs (slow)). § Page-warm is a background GSD thread
+resident by exactly that). The fork primitive is thus not the              that pre-touches hot zones after fork() (fast) and serves faults alongside
+fan-out bottleneck at our target scales.                                  the resumed agent (slow); off-path, not included in the latencies above. See
+Substrate-level fan-out cost. The fork-primitive sweep                    Fig.8. ∥ Checkpoint’s 10.83 ms of local work overlaps the LLM-inference
+above (Table.3) isolates kernel fork() only; production tree-                          window (§4.2), so the agent perceives no blocking.
+based RL fan-out additionally pays for per-child filesystem
+                                                                          Restore latency. On the fast path the template fork() dom-
+isolation and for materializing each child’s inherited process
+                                                                          inates (scaling linearly with agent RSS via page-table CoW)
+memory. Fig.7(a) compares the three agent sandboxes that
+                                                                          and the DeltaFS ioctl overlaps inside the fork window; the
+all deliver memory-bearing children through their native
+                                                                          slow path is used only on first restore or after GC eviction
+fork/clone path.
+                                                                          (Table.4).
+   Across the measured range DeltaBox is an order of
+magnitude or more faster than both CubeSandbox and E2B                    Costs of async-warm. Async-warm operates on both re-
+(Fig.7(a)).                                                               store paths: on the common fast path it pre-pays CoW faults
+   We measure generation time 𝑇gen (batched vLLM [37])                    after the template fork(), and on the slow path it overlaps
+and training time 𝑇train (Qwen2.5-7B LoRA fwd+bwd) across                 with CRIU’s userfaultfd page-in from the tmpfs dump images.
+𝑁 =1–64 rollouts (Fig.7(b)). In synchronous training each step            We characterise the fast path below, since it is the dominant
+is sandbox+𝑇gen +𝑇train , so the Fig.7(a) fan-out cost becomes            case; the slow path inherits the same idle-window absorption
+GPU idle time: at 𝑁 ∈{16, 64} (Fig. 7(c)) DeltaBox sustains               argument.
+near-saturating occupation (95–97%) while CubeSandbox                        DeltaBox’s fork-based restore is fast because it utilizes
+(77–80%) and E2B (29–36%) sit below.                                      OS functionalities, duplicating only page tables. The new
+   Production frameworks (verl [38] fully_async, Open-                    child runs immediately on pages still shared with the tem-
+RLHF [39]) close the sync gap by decoupling trainer and                   plate, with no physical memory copy on the critical path.
+rollouter at the cost of staleness (verl threshold <1). With              The flip side is that every page is CoW-shared, so without
+multi-GPU 𝑇train , the trainer is fast enough that all three sand-        intervention the agent’s first write to each hot page triggers
+boxes exceed the staleness threshold at 𝑁 =16: total staleness            a synchronous CoW fault on the critical path, accumulating
+is DeltaBox 1.67, CubeSandbox 2.25, E2B 6.13; DeltaBox sits               hundreds-of-microseconds latencies across the post-restore
+closest to the threshold. At 𝑁 =64 the longer 𝑇train = 4.51 s             turn.
+pulls DeltaBox (staleness 0.81) back under the threshold,                    Async-warm pre-pays these faults from a GSD daemon
+while CubeSandbox (1.25) and E2B (5.04) still exceed it.                  thread off the critical path, so the agent’s later writes find
+                                                                          their pages already private. Fig. 8 verifies that lazy-CoW
+                                                                          restore does not accumulate post-fork page-fault debt under
+6.3   Extended Studies
+                                                                          realistic LLM idle windows.
+6.3.1 Checkpoint/Restore Latency We present the de-
+tailed latency breakdown in Table.4, which shows the cost                 6.3.2 Write Amplification We measure per-edit copy-up
+of each component in DeltaBox in a real-world workload                    bytes (file data re-materialized into the upper layer) and phys-
+(SWE-bench).                                                              ical I/O bytes (loopback sectors written, including journal and
+Checkpoint latency. Per-step checkpoint cost is dominated                 metadata) over real swe-search agent edits sized 1–256 KB,
+by the CRIU dump plus the serial template-fork tail; the                  across ext4, XFS, and XFS+reflink.
+DeltaFS ioctl runs concurrently and is the smaller term (Ta-              Copy-up savings. Reflink-aware copy-up shares unmod-
+ble.4).                                                                   ified extents with the lower layer, so only the 4 KB blocks
+                                                                     10
+                                                                                              6         Tgen Qwen2.5-7B                                                                              97
+                       104
+
+
+
+
+Fan-out latency (ms)
+                                                                                                        Ttrain Qwen2.5-7B                        DeltaBox
+                                                                                                                                                                                                     95
+
+
+
+                                                                          Time per step (s)
+                                                                                              4                                                                                                80
+                       103                                                                                                                  CubeSandbox
+                                                                                                                                                                                              77
+                                                            DeltaBox                                                                                                                                 N = 16
+                                                            CubeSandbox
+                                                                                              2                                                                                                      N = 64
+                            2                                                                                                                                                  36
+                       10                                                                                                                             E2B
+                                                            E2B                                                                                                           29
+                                                                                              0
+                                1     4      16      64                                          1       4      16      64                                      0      25    50    75    100
+                                      N (forks)                                               B (batch / concurrent rollouts)                                         Sync GPU occupation (%)
+                            (a) Substrate fan-out latency                                            (b) Tgen vs Ttrain                                          (c) Expected GPU occupation (7B)
+
+  Figure 7. RL training fan-out characterisation. (a) End-to-end time to fork 𝑁 ∈{1, 4, 16, 64} memory-bearing children from one
+  frozen source via each sandbox’s native fork/clone path (DeltaBox fork_n, CubeSandbox clone, E2B createSnapshot+create). The
+  source touches 64 MiB and each child reads it back and verifies. E2B’s 𝑁 =64 is 4 sequential 16-concurrency batches. (b) 𝑇gen (batched
+  vLLM, 256→512 tok) and 𝑇train (Qwen2.5-7B LoRA-r16 fwd+bwd) for Qwen2.5-7B on 4 GPUs. (c) Expected sync GPU occupation
+  (𝑇gen +𝑇train )/(sandbox+𝑇gen +𝑇train ) at 𝑁 ∈{16, 64} on Qwen2.5-7B, computed from (a) and (b).
+                                                                                                                                        (a) Copy-up duplicated data
+
+
+
+
+Faults absorbed (%)
+                       100
+                                                                                                                                  105                       typical agent range
+
+
+
+                                                                                                                 bytes per edit
+                                                     real idle range                                                                                            (12-65 KB)
+                        50                           (p1-p99: 0.5 s to 8 s)
+                                                                                                                                                                                    without reflink (ext4)
+                                                                                                                                                                                    without reflink (xfs)
+                            0
+                                                                                                                                  104                                               with reflink
+                                       102          103         104                               105
+                                        post-restore idle window (ms)                                                                   (b) Physical I/O
+
+  Figure 8. Per-event CoW fault absorption vs. post-restore idle
+
+
+                                                                                                                 bytes per edit
+  window (50 swe-search MCTS restore events). Shaded band:
+  p1–p99 idle range from 3,817 LLM-driven restore events under                                                                    105
+  4-GPU inference.
+  an edit actually dirties are duplicated, independent of file                                                                                                                        edited file size
+  size. Fig.9(a) shows ext4 and XFS-without-reflink coinciding
+                                                                                                                                            B              KB       2KB 2-64KB -128KB -256KB
+  at every bin, both recopying the whole file on modification                                                                           1-8K       8-16         16-3   3      64    128
+  and growing linearly with size, while the reflink curve stays
+  low and flat, widening the gap as files grow. Real swe-search
+  edits touch only a small fraction of each file, so reflink dupli-                                            Figure 9. Per-edit copy-up bytes (a) and physical I/O bytes (b)
+                                                                                                               vs. edited-file size (log–log); real SWE-bench agent edits across
+  cates a near-constant handful of blocks regardless of the file
+                                                                                                               three filesystem configurations, per-bin medians. Shaded band
+  it lands in.
+                                                                                                               marks the typical agent edit range. ext4 and XFS-without-reflink
+  Physical I/O. Physical I/O reduction comes from both                                                         coincide on (a): copy-up benefit comes entirely from reflink, not
+  XFS metadata efficiency and reflink. Fig. 9(b) shows that                                                    XFS.
+  XFS’s lighter metadata bookkeeping dominates on small
+  files (132 KB → 26 KB at 1–8 KB, with reflink adding little),                                                replaying the action on the parent’s state at restore; we there-
+  while reflink’s block sharing dominates on large files                                                       fore enable LW only when snapshot memory, not restore
+  (315 KB → 141 KB at 128–256 KB). The two mechanisms are                                                      latency, is the bottleneck.
+  complementary across the edit-size range.
+  6.3.3 Adaptive Optimization Effectiveness As a mi-                                                           6.3.4 Cumulative Storage Overhead Beyond the per-
+  nor, optional optimization for memory-constrained settings,                                                  edit copy-up savings of §6.3.2, DeltaBox also bounds cumula-
+  DeltaBox supports a lightweight (LW) checkpoint: for read-                                                   tive snapshot storage through reachability-aware GC (§4.2.1),
+  only, idempotent actions the classifier skips the CRIU dump                                                  which runs asynchronously off the checkpoint critical path.
+  and layer switch, recording only a metadata marker. Since                                                    Across nine SWE-bench MCTS trajectories replayed through
+  read-only steps dominate a typical trajectory, this lowers                                                   real criu dump, it reduces end-of-trajectory dump storage
+  the in-VM snapshot-store footprint (Fig.10a), at the cost of                                                 by 46–63% versus retaining every checkpoint (Fig.10b).
+                                                                                                          11
+                      Standard (n=1081)
+                      Adaptive: LW (n=831)                                                    DeltaBox w/o GC
+                                                                                                                          69
+                                                                                                                                         process creation, language runtime initialization, or post-
+
+                                                                   Dump storage (MB)
+              200     Adaptive: STD (n=250)                                            75     DeltaBox w/ GC
+
+
+ckpt events                                                                            50   43
+                                                                                                                55                       restore fault handling for short-lived functions [14–16, 46–
+              100                                                                                                              38
+                                                                                                                     20
+                                                                                                                                         48]; Spice [48] further moves restore-path fault resolution
+                                                                                       25        17
+                0                                                                                                                        into the kernel with Overlay VMAs. These techniques are
+                    10−1         100          101            102                        0
+                            Per-event checkpoint latency (ms)                                Django             Xarray    Sympy          orthogonal to DeltaBox. A serverless instance typically re-
+              (a) Lightweight-skip latency.                                                 (b) GC dump storage.                         stores a compute image and then runs one request, whereas
+                                                                                                                                         DeltaBox repeatedly descends and backtracks within one
+ Figure 10. Adaptive optimizations (87 MCTS runs, 9 SWE-                                                                                 task.
+ bench repos). (a) Per-event checkpoint latency over 1,689 events:                                                                       Checkpointing optimizations. Existing checkpointing
+ pure-read commands (LW, 𝑛=1047) skip the dump, FS-mutating                                                                              systems [49–54] provide important building blocks, but none
+ (std, 𝑛=642) take it; 62.0% route to the LW peak. (b) End-of-                                                                           provide the coupled, fine-grained rollback interface needed
+ trajectory CRIU dump storage (9 instances, 5 MB process):                                                                               by stateful agents. CRIU [26] enables process-level check-
+ reachability-aware GC vs. retaining every checkpoint.                                                                                   point/restore and underlies DeltaCR’s dump path, while
+                                                                                                                                         DMTCP [55] targets transparent distributed checkpointing
+                                                                                                                                         rather than high-frequency, process-level agent snapshots.
+ 7                  Related Work                                                                                                         Firecracker [18] and Sabre [56] restore whole VMs, which is
+                                                                                                                                         too coarse for branches isolated inside one VM. Filesystem
+Agent sandboxes. Recent agent sandboxes [4, 40–42]                                                                                       snapshots in Btrfs [57] and ZFS [58] provide block-level CoW
+primarily optimize isolation and startup latency, but                                                                                    but require different storage stacks, and EROFS [59] supplies
+provide only coarse-grained rollback. Daytona’s OCI                                                                                      read-only overlay layers without replacing the writable up-
+workspaces [40] use Docker-layer commits and miss live                                                                                   perdir. DeltaFS instead hot-switches overlayfs layers over
+process state. E2B [4] uses Firecracker microVMs and                                                                                     XFS reflinks. At the application layer, LangGraph [35] and
+pre-warmed templates, improving isolation but retaining                                                                                  LangChain [36] checkpoint logical agent state, which cannot
+VM-granularity snapshot costs. ZeroBoot [41] pushes VM                                                                                   undo the effects of executed commands.
+cloning further with KVM-level CoW memory, but each
+branch remains an entire VM, with a shared block device,
+kernel-level dirty state, and no independent rollback for
+                                                                                                                                         8    Conclusion
+multiple in-VM trajectories. Yan’s fault-tolerant sand-                                                                                  We present DeltaBox, an OS-level rollbackable sandbox de-
+box [42] moves toward transactional agent execution, but its                                                                             signed to accelerate agent workloads such as test-time tree
+filesystem rollback based on tool interception and userspace                                                                             search and reinforcement learning. Recognizing that subse-
+CoW simulation yields second-scale checkpoints and no                                                                                    quent agent states are highly similar, DeltaBox eschews full
+coupled memory snapshot.                                                                                                                 state duplication in favor of diff-based checkpoint and restore.
+   A position paper [43] frames agentic exploration as a sys-                                                                            To achieve this, DeltaFS enables dynamic, unmount-free over-
+tems problem and, like DeltaBox, identifies fast forking and                                                                             layfs layer switching for filesystem C/R, while DeltaCR uti-
+fork-aware state management as foundational gaps; it re-                                                                                 lizes CRIU dumps and warm-template forking for memory
+mains a diagnostic framing, whereas DeltaBox contributes a                                                                               C/R.
+concrete millisecond-scale OS mechanism.
+   Crab [44] tackles the same gap from a different angle.                                                                                References
+Crab proposes a semantics-aware approach using an eBPF-                                                                                   [1] Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin
+based inspector to determine checkpoint granularities. In                                                                                     Pei, Ofir Press, and Karthik Narasimhan. 2024. SWE-bench: Can
+contrast, DeltaBox focuses on optimizing the full, OS-level                                                                                   Language Models Resolve Real-world Github Issues?. In Inter-
+checkpoint/restore mechanism itself to achieve millisecond                                                                                    national Conference on Learning Representations, B. Kim, Y. Yue,
+                                                                                                                                              S. Chaudhuri, K. Fragkiadaki, M. Khan, and Y. Sun (Eds.), Vol. 2024.
+latency. We believe the two approaches are complementary;                                                                                     54107–54157. https://proceedings.iclr.cc/paper_files/paper/2024/file/
+integrating Crab’s semantic awareness with DeltaBox’s opti-                                                                                   edac78c3e300629acfe6cbe9ca88fb84-Paper-Conference.pdf
+mized OS primitives could yield even greater performance                                                                                  [2] Shuyan Zhou, Frank F Xu, Hao Zhu, Xuhui Zhou, Robert Lo,
+benefits. Also, both systems share the insight that checkpoint                                                                                Abishek Sridhar, Xianyi Cheng, Tianyue Ou, Yonatan Bisk, Daniel
+latency can be masked by LLM inference.                                                                                                       Fried, Uri Alon, and Graham Neubig. 2024. WebArena: A Real-
+                                                                                                                                              istic Web Environment for Building Autonomous Agents. In In-
+Sandboxes for serverless computing. Serverless systems                                                                                        ternational Conference on Learning Representations, B. Kim, Y. Yue,
+have long optimized sandbox reuse, cold start, and snapshot                                                                                   S. Chaudhuri, K. Fragkiadaki, M. Khan, and Y. Sun (Eds.), Vol. 2024.
+restore, but their unit of reuse is a function invocation rather                                                                              15585–15606. https://proceedings.iclr.cc/paper_files/paper/2024/file/
+than a rollback point inside a long-lived agent trajectory.                                                                                   4410c0711e9154a7a2d26f9b3816d1ef-Paper-Conference.pdf
+                                                                                                                                          [3] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik
+TrEnv-X [45] repurposes sandboxes across invocations us-                                                                                      Narasimhan, and Yuan Cao. 2023. ReAct: Synergizing Reasoning and
+ing OS-level memory templates backed by CXL or RDMA                                                                                           Acting in Language Models. In International Conference on Learning
+memory pools, while earlier cold-start systems accelerate                                                                                     Representations (ICLR).
+                                                                                                                                    12
+ [4] E2B. 2024. E2B: The Enterprise AI Agent Cloud. https://e2b.dev.                    Startup for Serverless Computing with Initialization-less Booting.
+ [5] Charlie Snell, Jaehoon Lee, Kelvin Xu, and Aviral Kumar.                           In Proceedings of the Twenty-Fifth International Conference on Archi-
+     2025.      Scaling LLM Test-Time Compute Optimally Can be                          tectural Support for Programming Languages and Operating Systems
+     More Effective than Scaling Parameters for Reasoning. In In-                       (Lausanne, Switzerland) (ASPLOS ’20). Association for Computing
+     ternational Conference on Learning Representations, Y. Yue,                        Machinery, New York, NY, USA, 467–481. https://doi.org/10.1145/
+     A. Garg, N. Peng, F. Sha, and R. Yu (Eds.), Vol. 2025. 10131–                      3373376.3378512
+     10165.        https://proceedings.iclr.cc/paper_files/paper/2025/file/        [16] Dmitrii Ustiugov, Plamen Petrov, Marios Kogias, Edouard Bugnion,
+     1b623663fd9b874366f3ce019fdfdd44-Paper-Conference.pdf                              and Boris Grot. 2021. Benchmarking, analysis, and optimization
+ [6] Andy Zhou, Kai Yan, Michal Shlapentokh-Rothman, Haohan Wang,                       of serverless function snapshots. In Proceedings of the 26th ACM
+     and Yu-Xiong Wang. 2024. Language agent tree search unifies rea-                   International Conference on Architectural Support for Programming
+     soning, acting, and planning in language models. In Proceedings of the             Languages and Operating Systems (Virtual, USA) (ASPLOS ’21). As-
+     41st International Conference on Machine Learning (Vienna, Austria)                sociation for Computing Machinery, New York, NY, USA, 559–572.
+     (ICML’24). JMLR.org, Article 2572, 23 pages.                                       https://doi.org/10.1145/3445814.3446714
+ [7] Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Tom Grif-                   [17] Xiaohu Chai, Tianyu Zhou, Keyang Hu, Jianfeng Tan, Tiwei Bie, Anqi
+     fiths, Yuan Cao, and Karthik Narasimhan. 2023.               Tree of               Shen, Dawei Shen, Qi Xing, Shun Song, Tongkai Yang, Le Gao, Feng
+     Thoughts: Deliberate Problem Solving with Large Language                           Yu, Zhengyu He, Dong Du, Yubin Xia, Kang Chen, and Yu Chen. 2025.
+     Models. In Advances in Neural Information Processing Sys-                          Fork in the road: reflections and optimizations for cold start latency
+     tems, A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt,                        in production serverless systems. In Proceedings of the 19th USENIX
+     and S. Levine (Eds.), Vol. 36. Curran Associates, Inc., 11809–                     Conference on Operating Systems Design and Implementation (Boston,
+     11822. https://proceedings.neurips.cc/paper_files/paper/2023/file/                 MA, USA) (OSDI ’25). USENIX Association, USA, Article 28, 20 pages.
+     271db9922b8d1f4dd7aaef84ed5ac703-Paper-Conference.pdf                         [18] Alexandru Agache, Marc Brooker, Andreea Florescu, Alexandra Ior-
+ [8] Cheng Zhang, Erhu Feng, Xi Zhao, Yisheng Zhao, Wangbo Gong,                        dache, Anthony Liguori, Rolf Neugebauer, Phil Piwonka, and Diana-
+     Jiahui Sun, Dong Du, Zhichao Hua, Yubin Xia, and Haibo Chen. 2025.                 Maria Popa. 2020. Firecracker: lightweight virtualization for serverless
+     MobiAgent: A Systematic Framework for Customizable Mobile Agents.                  applications. In Proceedings of the 17th Usenix Conference on Networked
+     arXiv:2509.00531 [cs.MA] https://arxiv.org/abs/2509.00531                          Systems Design and Implementation (Santa Clara, CA, USA) (NSDI’20).
+ [9] The OpenClaw Project. 2026. openclaw/openclaw: Your own personal                   USENIX Association, USA, 419–434.
+     AI assistant. Any OS. Any Platform. The lobster way. https://github.          [19] Lazar Cvetković, François Costa, Mihajlo Djokic, Michal Friedman, and
+     com/openclaw/openclaw.                                                             Ana Klimovic. 2024. Dirigent: Lightweight Serverless Orchestration. In
+[10] Bradley Brown, Jordan Juravsky, Ryan Ehrlich, Ronald Clark, Quoc V.                Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems
+     Le, Christopher Ré, and Azalia Mirhoseini. 2024. Large Lan-                        Principles (Austin, TX, USA) (SOSP ’24). Association for Computing
+     guage Monkeys: Scaling Inference Compute with Repeated Sampling.                   Machinery, New York, NY, USA, 369–384. https://doi.org/10.1145/
+     arXiv:2407.21787 [cs.LG] https://arxiv.org/abs/2407.21787                          3694715.3695966
+[11] Jingkai He, Tianjian Li, Erhu Feng, Dong Du, Qian Liu, Tao Liu, Yubin         [20] Dong Du, Qingyuan Liu, Xueqiang Jiang, Yubin Xia, Binyu Zang,
+     Xia, and Haibo Chen. 2026. History Doesn’t Repeat Itself but Roll-                 and Haibo Chen. 2022. Serverless computing on heterogeneous
+     outs Rhyme: Accelerating Reinforcement Learning with RhymeRL. In                   computers. In Proceedings of the 27th ACM International Confer-
+     Proceedings of the 31st ACM International Conference on Architectural              ence on Architectural Support for Programming Languages and Op-
+     Support for Programming Languages and Operating Systems, Volume                    erating Systems (Lausanne, Switzerland) (ASPLOS ’22). Association
+     2 (USA) (ASPLOS ’26). Association for Computing Machinery, New                     for Computing Machinery, New York, NY, USA, 797–813. https:
+     York, NY, USA, 929–945. https://doi.org/10.1145/3779212.3790172                    //doi.org/10.1145/3503222.3507732
+[12] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao            [21] Zijun Li, Jiagan Cheng, Quan Chen, Eryu Guan, Zizheng Bian, Yi Tao,
+     Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo.                  Bin Zha, Qiang Wang, Weidong Han, and Minyi Guo. 2022. RunD:
+     2024. DeepSeekMath: Pushing the Limits of Mathematical Reasoning                   A Lightweight Secure Container Runtime for High-density Deploy-
+     in Open Language Models. arXiv:2402.03300 [cs.CL] https://arxiv.                   ment and High-concurrency Startup in Serverless Computing. In 2022
+     org/abs/2402.03300                                                                 USENIX Annual Technical Conference (USENIX ATC 22). USENIX As-
+[13] Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo,                     sociation, Carlsbad, CA, 53–68. https://www.usenix.org/conference/
+     Yu Yue, Weinan Dai, Tiantian Fan, Gaohong Liu, juncai liu, LingJun                 atc22/presentation/li-zijun-rund
+     Liu, Xin Liu, Haibin Lin, Zhiqi Lin, Bole Ma, Guangming Sheng,                [22] Hanfei Yu, Rohan Basu Roy, Christian Fontenot, Devesh Tiwari, Jian
+     Yuxuan Tong, Chi Zhang, Mofan Zhang, Ru Zhang, Wang Zhang,                         Li, Hong Zhang, Hao Wang, and Seung-Jong Park. 2024. Rainbow-
+     Hang Zhu, Jinhua Zhu, Jiaze Chen, Jiangjie Chen, Chengyi Wang,                     Cake: Mitigating Cold-starts in Serverless with Layer-wise Container
+     Hongli Yu, Yuxuan Song, Xiangpeng Wei, Hao Zhou, Jingjing Liu,                     Caching and Sharing. In Proceedings of the 29th ACM International
+     Wei-Ying Ma, Ya-Qin Zhang, Lin Yan, Yonghui Wu, and Mingxuan                       Conference on Architectural Support for Programming Languages and
+     Wang. 2025. DAPO: An Open-Source LLM Reinforcement Learning                        Operating Systems, Volume 1 (La Jolla, CA, USA) (ASPLOS ’24). As-
+     System at Scale. In Advances in Neural Information Processing Sys-                 sociation for Computing Machinery, New York, NY, USA, 335–350.
+     tems, D. Belgrave, C. Zhang, H. Lin, R. Pascanu, P. Koniusz, M. Ghas-              https://doi.org/10.1145/3617232.3624871
+     semi, and N. Chen (Eds.), Vol. 38. Curran Associates, Inc., 113222–           [23] Jialiang Huang, MingXing Zhang, Teng Ma, Zheng Liu, Sixing Lin,
+     113244. https://proceedings.neurips.cc/paper_files/paper/2025/file/                Kang Chen, Jinlei Jiang, Xia Liao, Yingdi Shan, Ning Zhang, Mengting
+     a4277440d50f1f15d2cb4c14f7e0c0d2-Paper-Conference.pdf                              Lu, Tao Ma, Haifeng Gong, and YongWei Wu. 2024. TrEnv: Trans-
+[14] Lixiang Ao, George Porter, and Geoffrey M. Voelker. 2022. FaaSnap:                 parently Share Serverless Execution Environments Across Different
+     FaaS made fast using snapshot-based VMs. In Proceedings of the Sev-                Functions and Nodes. In Proceedings of the ACM SIGOPS 30th Sym-
+     enteenth European Conference on Computer Systems (Rennes, France)                  posium on Operating Systems Principles (Austin, TX, USA) (SOSP ’24).
+     (EuroSys ’22). Association for Computing Machinery, New York, NY,                  Association for Computing Machinery, New York, NY, USA, 421–437.
+     USA, 730–746. https://doi.org/10.1145/3492321.3524270                              https://doi.org/10.1145/3694715.3695967
+[15] Dong Du, Tianyi Yu, Yubin Xia, Binyu Zang, Guanglu Yan, Chenggang
+     Qin, Qixuan Wu, and Haibo Chen. 2020. Catalyzer: Sub-millisecond
+
+                                                                              13
+[24] Ariel Szekely, Adam Belay, Robert Morris, and M. Frans Kaashoek.               [37] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+     2024. Unifying serverless and microservice workloads with Sig-                      Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.
+     maOS. In Proceedings of the ACM SIGOPS 30th Symposium on Op-                        2023. Efficient Memory Management for Large Language Model
+     erating Systems Principles (Austin, TX, USA) (SOSP ’24). Association                Serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th
+     for Computing Machinery, New York, NY, USA, 385–402. https:                         Symposium on Operating Systems Principles (SOSP ’23).
+     //doi.org/10.1145/3694715.3695947                                              [38] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang,
+[25] E2B. 2026. E2B Sandbox persistence. https://e2b.dev/docs/sandbox/                   Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2025. Hybrid-
+     persistence.                                                                        Flow: A Flexible and Efficient RLHF Framework. In Proceedings of the
+[26] The CRIU Project. 2011. CRIU: Checkpoint/Restore In Userspace.                      Twentieth European Conference on Computer Systems (EuroSys ’25).
+     https://criu.org.                                                              [39] Jian Hu, Xibin Wu, Zilin Zhu, Xianyu, Weixun Wang, Dehao Zhang,
+[27] DeepSeek-AI. 2026. DeepSeek-V4 Technical Report. Technical Report.                  and Yu Cao. 2024. OpenRLHF: An Easy-to-use, Scalable and High-
+     DeepSeek-AI. https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/                    performance RLHF Framework. arXiv:2405.11143 [cs.AI] https://arxiv.
+     blob/main/DeepSeek_V4.pdf                                                           org/abs/2405.11143
+[28] Tencent Cloud. 2026. CubeSandbox v0.3.0: Instant, Concurrent, Se-              [40] Daytona. 2024. Daytona. https://daytona.io.
+     cure & Lightweight Sandbox for AI Agents. https://github.com/                  [41] ZeroBoot. 2026. ZeroBoot: Sub-millisecond VM Sandboxes for AI
+     TencentCloud/CubeSandbox/releases/tag/v0.3.0. CubeCoW Copy-on-                      Agents via Copy-on-Write Forking. https://github.com/zerobootdev/
+     Write snapshot engine (reflink volume + soft-dirty memory); accessed                zeroboot.
+     June 2026.                                                                     [42] Boyang Yan. 2025. Fault-Tolerant Sandboxing for AI Coding
+[29] Antonis Antoniades, Albert Örwall, Kexun Zhang, Yuxi Xie, Anirudh                   Agents: A Transactional Approach to Safe Autonomous Execution.
+     Goyal, and William Wang. 2025. SWE-Search: Enhancing Soft-                          arXiv:2512.12806 [cs.AI] https://arxiv.org/abs/2512.12806
+     ware Agents with Monte Carlo Tree Search and Iterative Re-                     [43] Jiakai Xu, Tianle Zhou, Eugene Wu, and Kostis Kaffes.
+     finement. In International Conference on Learning Representations,                  2025.     Toward Systems Foundations for Agentic Exploration.
+     Y. Yue, A. Garg, N. Peng, F. Sha, and R. Yu (Eds.), Vol. 2025.                      arXiv:2510.05556 [cs.DC] https://arxiv.org/abs/2510.05556
+     64485–64515. https://proceedings.iclr.cc/paper_files/paper/2025/file/          [44] Tianyuan Wu, Chaokun Chang, Lunxi Cao, Wei Gao, and Wei Wang.
+     a1e6783e4d739196cad3336f12d402bf-Paper-Conference.pdf                               2026. Crab: A Semantics-Aware Checkpoint/Restore Runtime for
+[30] Yuxiang Wei, Olivier Duchenne, Jade Copet, Quentin Carbon-                          Agent Sandboxes. arXiv:2604.28138 [cs.OS] https://arxiv.org/abs/
+     neaux, LINGMING ZHANG, Daniel Fried, Gabriel Synnaeve, Rishabh                      2604.28138
+     Singh, and Sida Wang. 2025. SWE-RL: Advancing LLM Rea-                         [45] Jialiang Huang, Teng Ma, Zheng Liu, Sixing Lin, Kang Chen, Jinlei
+     soning via Reinforcement Learning on Open Software Evolution.                       Jiang, Xia Liao, Yingdi Shan, Yongwei Wu, Ning Zhang, Mengting Lu,
+     In Advances in Neural Information Processing Systems, D. Bel-                       Tao Ma, Haifeng Gong, and Mingxing Zhang. 2026. TrEnv-X: Trans-
+     grave, C. Zhang, H. Lin, R. Pascanu, P. Koniusz, M. Ghassemi,                       parently Share Serverless Execution Environments Across Different
+     and N. Chen (Eds.), Vol. 38. Curran Associates, Inc., 78500–                        Functions and Nodes. ACM Transactions on Computer Systems (March
+     78525. https://proceedings.neurips.cc/paper_files/paper/2025/file/                  2026). https://doi.org/10.1145/3805475
+     7107d4d2e837bde2171c6b71b5bde954-Paper-Conference.pdf                          [46] James Cadden, Thomas Unger, Yara Awad, Han Dong, Orran Krieger,
+[31] Alexander Golubev, Maria Trofimova, Sergei Polezhaev, Ibragim                       and Jonathan Appavoo. 2020. SEUSS: skip redundant paths to make
+     Badertdinov, Maksim Nekrashevich, Anton Shevtsov, Simon Karasik,                    serverless fast. In Proceedings of the Fifteenth European Conference
+     Sergey Abramov, Andrei Andriushchenko, Filipp Fisin, Sergei                         on Computer Systems (Heraklion, Greece) (EuroSys ’20). Association
+     Skvortsov, and Boris Yangel. 2025. Training Long-Context, Multi-                    for Computing Machinery, New York, NY, USA, Article 32, 15 pages.
+     Turn Software Engineering Agents with Reinforcement Learning.                       https://doi.org/10.1145/3342195.3392698
+     arXiv:2508.03501 [cs.LG] https://arxiv.org/abs/2508.03501                      [47] Edward Oakes, Leon Yang, Dennis Zhou, Kevin Houck, Tyler Harter,
+[32] Agentica and Together AI. 2025. DeepSWE: Training a Fully Open-                     Andrea Arpaci-Dusseau, and Remzi Arpaci-Dusseau. 2018. SOCK:
+     sourced, State-of-the-Art Coding Agent by Scaling RL. https://www.                  Rapid Task Provisioning with Serverless-Optimized Containers. In
+     together.ai/blog/deepswe.                                                           2018 USENIX Annual Technical Conference (ATC). USENIX Association,
+[33] John Yang, Carlos Jimenez, Alexander Wettig, Kilian Lieret, Shunyu                  57–70. https://www.usenix.org/conference/atc18/presentation/oakes
+     Yao, Karthik Narasimhan, and Ofir Press. 2024. SWE-agent: Agent-               [48] Ben Holmes, Baltasar Dinis, Lana Honcharuk, Joshua Fried, and Adam
+     Computer Interfaces Enable Automated Software Engineering. In                       Belay. 2025. Taming Serverless Cold Starts Through OS Co-Design.
+     Advances in Neural Information Processing Systems, A. Globerson,                    arXiv:2509.14292 [cs.OS] https://arxiv.org/abs/2509.14292
+     L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang            [49] Yanning Yang, Dong Du, Haitao Song, and Yubin Xia. 2024. On-
+     (Eds.), Vol. 37. Curran Associates, Inc., 50528–50652. https://doi.org/             demand and Parallel Checkpoint/Restore for GPU Applications. In Pro-
+     10.52202/079017-1601                                                                ceedings of the 2024 ACM Symposium on Cloud Computing (Redmond,
+[34] Xingyao Wang, Boxuan Li, Yufan Song, Frank F Xu, Xiangru Tang,                      WA, USA) (SoCC ’24). Association for Computing Machinery, New
+     Mingchen Zhuge, Jiayi Pan, Yueqi Song, Bowen Li, Jaskirat Singh,                    York, NY, USA, 415–433. https://doi.org/10.1145/3698038.3698510
+     Hoang Tran, Fuqiang Li, Ren Ma, Mingzhang Zheng, Bill Qian, Daniel             [50] P. Tullmann, J. Lepreau, B. Ford, and M. Hibler. 1996. User-level check-
+     Shao, Niklas Muennighoff, Yizhe Zhang, Binyuan Hui, Junyang Lin,                    pointing through exportable kernel state. In Proceedings of the Fifth
+     Robert Brennan, Hao Peng, Heng Ji, and Graham Neubig. 2025.                         International Workshop on Object-Orientation in Operation Systems.
+     OpenHands: An Open Platform for AI Software Developers as Gen-                      85–88. https://doi.org/10.1109/IWOOOS.1996.557874
+     eralist Agents. In International Conference on Learning Representa-            [51] Dirk Vogt, Armando Miraglia, Georgios Portokalidis, Herbert Bos,
+     tions, Y. Yue, A. Garg, N. Peng, F. Sha, and R. Yu (Eds.), Vol. 2025.               Andy Tanenbaum, and Cristiano Giuffrida. 2015. Speculative Mem-
+     65882–65919. https://proceedings.iclr.cc/paper_files/paper/2025/file/               ory Checkpointing. In Proceedings of the 16th Annual Middleware
+     a4b6ad6b48850c0c331d1259fc66a69c-Paper-Conference.pdf                               Conference (Vancouver, BC, Canada) (Middleware ’15). Association
+[35] LangChain, Inc. 2024. LangGraph: Building Stateful, Multi-Actor                     for Computing Machinery, New York, NY, USA, 197–209. https:
+     Applications with LLMs. https://github.com/langchain-ai/langgraph.                  //doi.org/10.1145/2814576.2814802
+[36] LangChain, Inc. 2022. LangChain: Building Applications with LLMs               [52] A. Dearle and D. Hulse. 1995. On page-based optimistic process
+     through Composability. https://github.com/langchain-ai/langchain.                   checkpointing. In Proceedings of International Workshop on Object
+
+                                                                               14
+     Orientation in Operating Systems. 24–32. https://doi.org/10.1109/                Distributed Processing (IPDPS ’09). IEEE Computer Society, USA, 1–12.
+     IWOOS.1995.470583                                                                https://doi.org/10.1109/IPDPS.2009.5161063
+[53] Emil Tsalapatis, Ryan Hancock, Tavian Barnes, and Ali José Mash-            [56] Nikita Lazarev, Varun Gohil, James Tsai, Andy Anderson, Bhushan
+     tizadeh. 2021. The Aurora Single Level Store Operating System.                   Chitlur, Zhiru Zhang, and Christina Delimitrou. 2024. Sabre: hardware-
+     In Proceedings of the ACM SIGOPS 28th Symposium on Operating                     accelerated snapshot compression for serverless MicroVMs. In Pro-
+     Systems Principles (Virtual Event, Germany) (SOSP ’21). Association              ceedings of the 18th USENIX Conference on Operating Systems Design
+     for Computing Machinery, New York, NY, USA, 788–803. https:                      and Implementation (Santa Clara, CA, USA) (OSDI’24). USENIX Asso-
+     //doi.org/10.1145/3477132.3483563                                                ciation, USA, Article 1, 18 pages.
+[54] James S. Plank, Micah Beck, Gerry Kingsley, and Kai Li. 1995.               [57] The Btrfs Project. 2009. Btrfs Documentation. https://btrfs.
+     Libckpt: transparent checkpointing under Unix. In Proceedings of                 readthedocs.io.
+     the USENIX 1995 Technical Conference Proceedings (New Orleans,              [58] OpenZFS. 2013. OpenZFS Documentation. https://openzfs.github.io/
+     Louisiana) (TCON’95). USENIX Association, USA, 18.                               openzfs-docs/.
+[55] Jason Ansel, Kapil Arya, and Gene Cooperman. 2009. DMTCP: Trans-            [59] Linux Kernel Project. 2018. EROFS: Enhanced Read-Only File System.
+     parent checkpointing for cluster computations and the desktop. In                https://erofs.docs.kernel.org.
+     Proceedings of the 2009 IEEE International Symposium on Parallel and
+
+
+
+
+                                                                            15
+

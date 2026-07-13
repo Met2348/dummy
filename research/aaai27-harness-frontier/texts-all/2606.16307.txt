@@ -1,0 +1,559 @@
+                                                            State-Grounded Multi-Agent Synthetic Data Generation
+                                                                         for Tool-Augmented LLMs
+
+                                                      Rahul Khedar∗ , Eshita∗ , Sneha Teja Sree Reddy Thondapu∗ , Mayank Malhotra∗
+                                             Arup Das , Jitesh Chandra† , Yun-Shiuan Chuang† , Chaitanya Kulkarni† , Arun Menon† , Linsey Pang,
+                                                      †
+
+                                                                          Avinash Karn, Mouli V, Prakhar Mehrotra
+                                                                                               PayPal AI
+
+
+
+
+arXiv:2606.16307v1 [cs.AI] 15 Jun 2026
+                                         Abstract                                                          tators produce 10–40 examples per hour, the majority of
+                                                                                                           which fail quality review, making a 10K-sample dataset a
+                                         Training tool-augmented LLM agents requires large cor-            multi-month project. Meanwhile, real conversation logs
+                                         pora of multi-turn, tool-grounded conversational data             from production systems contain PII, payment creden-
+                                         that is expensive to annotate, privacy-constrained in pro-        tials, and sensitive metadata that make them unsuitable
+                                         duction settings, and largely absent from public datasets.        as training data without extensive redaction.
+                                         We present S TATE G EN, a synthetic data generation plat-
+                                                                                                             Public datasets offer little help for agentic training.
+                                         form that produces scored, reasoning-trace-rich training
+                                                                                                           ShareGPT, Dolly, and similar corpora contain almost no
+                                         conversations by orchestrating a four-role LLM loop: a
+                                                                                                           tool-use trajectories. Benchmarks like τ -bench [8] and
+                                         persona-conditioned user simulator, an agent under test,
+                                                                                                           AgentBench [11] provide hundreds of trajectories for
+                                         a state-grounded tool simulator, and a multi-axis LLM
+                                                                                                           evaluation but not the tens of thousands needed for fine-
+                                         judge. The key architectural contribution is an authori-
+                                                                                                           tuning. The gap between evaluation-scale and training-
+                                         tative state manager that maintains a structured world-
+                                                                                                           scale agentic data remains largely unaddressed.
+                                         state object across turns, enforcing a backend-is-truth
+                                         invariant that eliminates the dominant class of tool-call            We present S TATE G EN, a synthetic data generation
+                                         hallucinations by construction. S TATE G EN extends natu-         platform that addresses this gap through four design prin-
+                                         rally to hierarchical multi-agent settings by declaring           ciples:
+                                         sub-agents as tools, all sharing a single state object. We        (1) State-grounded tool simulation. An authoritative
+                                         report results on 64,698 evaluated conversations across               state manager maintains a structured world-state ob-
+                                         three production corpora: tool-call hallucination scores              ject that every simulated tool response must be con-
+                                         reach 9.66/10, the system supports persona-driven varia-              sistent with. This invariant backend is the source
+                                         tion via a 23-dimensional trait vector, and a cleanly sep-            of truth that eliminates the class of hallucinations
+                                         arated train and golden evaluation set split confirms the             where a tool “discovers” records that do not exist
+                                         data is not memorization bait (per-criterion gap analysis).           (Section 4).
+                                         Comparison with eight external systems shows that no              (2) Multi-role generation loop. Four LLM roles (user
+                                         single publicly available platform combines multi-turn                simulator, agent under test, tool simulator, judge) run
+                                         generation, state-grounded tool simulation, hierarchical              in a coordinated loop, each with independent model
+                                         multi-agent support, and built-in judge scoring.                      assignment and temperature, producing conversa-
+                                                                                                               tions that are simultaneously realistic, tool-grounded,
+                                         1     Introduction                                                    and scored (Section 3).
+                                                                                                           (3) Hierarchical multi-agent support. Sub-agents
+                                         The rapid deployment of LLM-based agents that interact                are declared as tools, sharing a single state object
+                                         with external tools like APIs, databases, CRM systems,                through the state manager. This enables training
+                                         payment processors has created an acute data bottleneck.              data generation for orchestrator–sub-agent systems
+                                         Fine-tuning a strong function-calling model for a single              without hand-written simulation code (Section 5).
+                                         business domain requires thousands of multi-turn, tool-           (4) Persona-conditioned user simulation. A three-tier
+                                         grounded conversations covering the long tail of user                 persona vector (6 categorical demographics, 12 con-
+                                         intents, edge cases, and adversarial inputs. Human anno-              tinuous behavioral traits, 5 scenario-reactive emo-
+
+                                                                                                       1
+    tional states) drives measurable variation in gener-           across eight environments but does not generate training
+    ated conversations (Section 6).                                data.
+
+Contributions. (i) We formalize a state-grounded tool              Reasoning distillation. DeepSeek-R1 [12] demon-
+simulation paradigm where the world-state object is the            strated that chain-of-thought distillation from a large
+single source of truth, achieving 9.66/10 on tool-call             reasoning model into smaller students yields strong
+hallucination across 49K+ samples. (ii) We introduce a             gains on math and code benchmarks. Our platform cap-
+hierarchical multi-agent generation architecture where             tures reasoning traces from any model with an OpenAI-
+sub-agents are tools sharing authoritative state. (iii) We         compatible endpoint and exports them in fine-tune-ready
+propose a three-tier persona vector with 23 dimensions             JSONL, enabling the same distillation pattern for agentic,
+and demonstrate a 15.8 percentage-point spread in goal-            tool-grounded domains.
+achievement across personas. (iv) We present an 8-axis
+LLM judge with per-project extensibility and show that
+hallucination axes are empirically independent from goal-          Positioning. The distinguishing feature of S TATE G EN
+achievement (ρ ≈ 0.21). (v) We compare against eight               is the combination: multi-turn generation, state-grounded
+external systems and identify the capability gap that mo-          tool simulation, hierarchical multi-agent support, persona
+tivates this work.                                                 conditioning, and built-in multi-axis judging. Individual
+                                                                   capabilities exist in isolation across the systems cited
+2    Related Work                                                  above and no current single platform ships all five.
+
+Synthetic data for LLMs. Self-Instruct [1] and Al-
+paca [2] showed that LLM-generated instruction data
+                                                                   3     System Architecture
+can improve model performance, but these are single-               S TATE G EN converts a scenario specification, a persona
+turn and lack tool grounding. WizardLM [3] introduced              vector, and a playbook into a scored, reasoning-trace-
+complexity-driven evolution but remained in the text-              rich conversation. The core is a four-role conversational
+only domain. Phi-1 [4] demonstrated the value of high-             loop: user simulator, agent under test, tool simulator, and
+quality synthetic data at scale for code generation. None          judge, supported by a fifth LLM, the authoritative state
+of these address multi-turn, tool-grounded conversations.          manager, which maintains world-state consistency but
+                                                                   does not participate in the conversation itself. Figure 1
+Tool-augmented LLM agents. Toolformer [5] taught                   illustrates the architecture.
+models when and how to call APIs. ReAct [6] interleaved
+reasoning and action. Function-calling conventions from
+                                                                   3.1   Input Specification
+OpenAI and open-source equivalents in vLLM estab-                  Each generation run requires three inputs:
+lished the dominant API pattern. These works focus on                 Scenario. A structured YAML document specifying:
+inference-time tool use and our contribution is on the             user facts Fu (what the customer knows), system facts Fs
+training data generation side.                                     (ground-truth backend state including balances, records,
+                                                                   KYC status), a user goal g (success condition from the
+LLM-based evaluation and judging. MT-Bench [7]                     user’s perspective), and a final state S ∗ (expected back-
+introduced pairwise LLM judging for chatbot quality. τ -           end changes and agent actions). The system facts Fs
+bench [8] proposed task-level evaluation for tool-agent-           initialize the state manager’s world-state object S0 .
+user interaction with hand-curated database states. Our               Persona vector. A 23-dimensional vector p compris-
+judge operates on eight independent axes with per-project          ing 6 categorical demographics, 12 continuous behav-
+extensibility, and it runs inside the generation loop rather       ioral traits, and 5 continuous emotional states (Section 6).
+than as a post-hoc evaluation.                                        Playbook. An orchestrator system prompt (Jinja2
+                                                                   template), tool definitions with JSON schemas, per-tool
+Multi-agent systems. AutoGen [9], CrewAI, and                      capability templates that instruct the tool simulator, and
+LangGraph provide runtime orchestration for multi-agent            an optional guardrail library.
+LLM applications. Meta’s Matrix [10] is the closest work
+on multi-turn multi-agent data generation, but it remains          3.2   The Four Roles
+a research prototype without an explicit shared-state ob-          User simulator. Reads the scenario and persona vector
+ject. AgentBench [11] curates evaluation trajectories              p, producing a realistic turn-by-turn query stream. Per-
+
+                                                               2
+                                                                                      Scenario
+           Persona p                          Playbook                             (Fu , Fs , g, S ∗ )
+
+
+
+            User             query qt      Agent Under             tool call at         Tool
+          Simulator                           Test                 response rt        Simulator
+
+                        response                                                             (at , rt )                      St
+
+
+                                                                                       State                 update      World
+                                                transcript
+                                                                                      Manager                           State St
+
+
+                                            LLM Judge
+                                             (8 Axes)
+
+
+                                           Scored JSONL
+                                         + Reasoning Traces
+
+Figure 1: The S TATE G EN four-role architecture. The state manager (center right) maintains a world-state object St
+that the tool simulator must be consistent with. After the conversation completes, the judge scores the full transcript
+on 8 independent axes.
+
+
+sona traits drive vocabulary, impatience, assertiveness,           Role                  Temp.                        Rationale
+and when to push back.                                             User simulator          0.7               Natural linguistic variation
+                                                                   Agent under test        0.7               Match production inference
+Agent under test. The production-shape model that                  Tool simulator          0.3                State coherence priority
+will eventually be fine-tuned. S TATE G EN supports                State manager           0.0               Deterministic state updates
+both OpenAI-style function-calling and ReAct-style [6]             LLM judge               0.2           Slight randomness for tie-breaking
+agents. The rest of the loop is architecture-agnostic.
+                                                                   Table 1: Default per-role temperatures. The state man-
+                                                                   ager runs at τ =0 to prevent state drift.
+Tool simulator. For every tool call the agent issues, a
+second LLM receives the tool’s Jinja2 capability tem-
+plate and the current world state St . It must respond
+                                                                   4      State-Grounded Tool Simulation
+consistently with St , this is the state-grounding invariant
+(Section 4).                                                       The state manager is the architectural element that dis-
+                                                                   tinguishes S TATE G EN from prior synthetic data systems.
+LLM judge. After each conversation, the judge scores               We formalize its operation and the invariant it enforces.
+the transcript on eight independent criteria on a 0–10
+scale with per-criterion rationale (Section 7).                    4.1      Formal Specification
+                                                                   Let S0 = Fs be the initial world state loaded from the
+3.3   Per-Role Model Routing
+                                                                   scenario’s system facts. At each tool invocation step t,
+Each role is bound to a model independently through a              the agent issues a tool call at = (name, args). The tool
+configuration registry. This separation serves two pur-            simulator produces a response rt conditioned on both the
+poses: (i) the judge should not be the same model family           capability template Tname and the current state:
+as the agent to avoid score drift toward the model’s own
+preferences; (ii) using different cost tiers per role makes                       rt ∼ LLMtool (Tname , St−1 , at )                  (1)
+the economics of 50K+ sample runs tractable.
+                                                                       The state manager then updates the world state:
+
+                                                                                   St = LLMstate (St−1 , at , rt )                   (2)
+
+                                                               3
+4.2    The Backend-is-Truth Invariant                                                  Algorithm 1: The S TATE G EN generation loop.
+The critical design constraint is:                                                     Tmax = 10 (turns), Smax = 5 (tool calls per
+                                                                                       turn). Sub-agent calls in multi-agent mode use
+      A fact enters St if and only if it either (a) was                                the same tool-call pathway, with capability tem-
+      in S0 = Fs , or (b) was legally created by a                                     plates replacing sub-agent code.
+      tool call aj (j ≤ t) with write authority.                                         Input :Scenario (Fu , Fs , g, S ∗ ), Persona p,
+   This invariant is enforced by the state manager’s sys-                                         Playbook Π
+                                                                                         Output :Scored conversation C, judge vector j ∈ R8
+tem prompt, which explicitly instructs: “If the state says
+                                                                                       1 S ← Fs ;
+a transaction exists, you must find it; if the state says it                           2 C ← [];
+does not exist, you must return an error consistent with                               3 for t = 1 to Tmax do
+that.” The tool simulator receives St−1 and is similarly                               4     qt ← LLMuser (p, Fu , g, C) ;         // User sim
+instructed to respect it as the sole source of truth.                                  5     C.append(user, qt );
+                                                                                       6     for s = 1 to Smax do
+4.3    Why This Matters                                                                7         ast ← LLMagent (Π, C) ;                // Agent
+Without state grounding, a tool simulator LLM can hal-                                 8         if ast is terminal action then
+lucinate records, transactions, or system responses that                               9               C.append(assistant, ast );
+                                                                                      10               break outer loop;
+have no basis in the scenario. This is the dominant fail-
+                                                                                      11         end
+ure mode in prompt-only tool simulation: the tool LLM                                 12         rts ← LLMtool (Tast .name , S, ast ) ; // Tool
+generates a plausible-looking response that references a                              13         S ← LLMstate (S, ast , rts ) ;         // State
+nonexistent account or fabricates a transaction amount.                               14         C.append(tool, rts );
+Since each turn builds on previous tool responses, a sin-                             15     end
+gle hallucinated fact propagates through the entire con-                              16 end
+                                                                                                              ∗
+versation.                                                                            17 j ← LLMjudge (C, S ) ;         // 8-axis scoring
+   The state manager breaks this chain. By maintain-                                  18 return C, j
+
+ing an explicit, structured world-state object that every
+tool response must be consistent with, the system pre-
+vents the fabricated facts from accumulating across turns.                            5.1    Sub-Agents as Tools
+Empirically, this achieves a tool-call hallucination score                            The pattern is sub-agents are declared as tools in the
+of 9.66/10 across 49,331 evaluated conversations (Sec-                                orchestrator’s tool definitions. The orchestrator calls
+tion 10).                                                                             call_disputes_agent(subquery=...) the
+                                                                                      same way it would call any other tool. The tool simulator,
+5 Hierarchical Multi-Agent Genera-                                                    given the appropriate capability template, responds as if
+  tion                                                                                it were the sub-agent’s backend.
+S TATE G EN’s most distinctive capability is generating                               5.2    Shared State Across Sub-Agents
+training data for hierarchical multi-agent systems, not
+just single agents. Figure 2 illustrates the pattern.                                 The hidden invariant that makes hierarchical generation
+                                                           Agent under test           work is that every sub-agent shares one authoritative
+                                                                                      state object. When the orchestrator routes to a finance
+                               Orchestrator
+                                                                                      sub-agent, then to a disputes sub-agent, both read and
+                     call_*                 call_*       call_*                       write the same St . Without shared state, the two sub-
+                                                                                      agents can return mutually incompatible facts at turn
+          Disputes                  Finance                         Integration
+         Sub-Agent                 Sub-Agent                        Sub-Agent
+                                                                                      5–10, producing training data that teaches the agent to
+                                                                                      tolerate contradictions.
+                        tool simulator + capability templates
+
+                                Shared State S
+                                                                                      5.3    Zero-Code Sub-Agent Authoring
+                          read & write via state manager
+                                                              Sub-agent capability templates can be generated from
+                                                              natural-language specifications via a knowledge engine
+  Figure 2: Hierarchical multi-agent generation. Sub- module. An engineer describes the sub-agent’s scope,
+  agents are declared as tools sharing a single authoritative capabilities, and constraints in structured YAML; the sys-
+  state object S, ensuring cross-agent consistency.           tem produces Jinja2 capability templates, tool definitions,
+
+                                                                                  4
+and configuration files. This reduces the authoring cost              The delta map encodes domain knowledge: a dispute
+from Python implementation to specification review.                scenario increases frustration by +0.25 and decreases
+                                                                   trust by −0.20, making the same persona behave differ-
+6     Three-Tier Persona Model                                     ently across scenarios.
+Persona is where S TATE G EN gets its variation. The
+                                                                   6.4    Trait Correlations
+persona vector p has three tiers: six categorical demo-
+graphic attributes, twelve continuous behavioral traits            Correlations are introduced through two mechanisms: (i)
+in [0, 1], and five continuous emotional-state traits that         profile-encoded, where correlated traits are co-set in the
+are scenario-reactive. Orthogonal to persona, a 4-level            base vector by design; (ii) rule-described, where post-
+query-complexity overlay controls how the user simula-             sampling rules emit natural-language correlation state-
+tor phrases each turn.                                             ments into the prompt when threshold pairs are crossed
+                                                                   (e.g., “High digital literacy correlates with high domain
+6.1   Tier 1: Demographics (Categorical)
+                                                                   knowledge” fires only when both are ≥ 0.70). Seven
+Six attributes namely jurisdiction, age bracket, channel,          such rules are shipped. This is deliberately simpler than
+device type, language proficiency, time availability, each         full covariance modeling, trading expressiveness for au-
+drawn independently from a categorical distribution:               ditability.
+                                          P
+  ak ∼ Categorical(Pk ), Pk,j = pk,j / m pk,m (3)                  6.5    Query-Complexity Overlay
+Each category carries a prompt-guidance string injected            Independent of persona, each sample draws a complexity
+into the user simulator’s system prompt (e.g., jurisdic-           tier: simple (3–8 words, direct intent), medium (8–15
+tion=IN adds “Uses INR, familiar with UPI”).                       words), complex (15–30 words, backstory), or vague (3–
+                                                                   15 words, intent guessable but never named). The vague
+6.2   Tier 2: Behavioral Traits (Continuous)
+                                                                   tier is critical for agent training: it forces multi-turn clar-
+Twelve traits namely cost sensitivity, patience, assertive-        ification before tool selection, matching the distribution
+ness, verbosity, politeness, domain knowledge, risk tol-           of real user traffic.
+erance, compliance tendency, platform trust, digital lit-
+eracy, slang usage, emoji usage are sampled around a
+hand-curated base vector tbase from a named profile:               7     Multi-Axis LLM Judge
+ti = clip tbase
+                         
+                              εi ∼ N (0, σ 2 ), σ = 0.08           S TATE G EN does not produce a single quality score.
+           i +εi , 0, 1 ,
+                                                        (4)        It produces a vector of eight independent scores j ∈
+   The choice of σ = 0.08 ensures 95% of samples stay              {1, . . . , 10}8 , plus rationale, enabling downstream filter-
+within ±0.157 of the base value, tight enough to remain            ing by axis.
+in-persona but wide enough to avoid duplicate-looking
+                                                                   7.1    The Eight Default Criteria
+samples. Continuous values are bucketed into {low,
+medium, high} using fixed breakpoints:                             Table 2 lists the eight criteria shipped with every project.
+                                                                  Each produces an integer score in {1, . . . , 10} with a
+                    low
+                                v < 0.35                          per-criterion rationale.
+      bucket(v) = medium 0.35 ≤ v < 0.70                (5)
+                                                                   7.2    Why Eight, Not One
+                    
+                       high      v ≥ 0.70
+                    
+
+                                                                   A single aggregate score conflates distinct failure modes.
+   Each bucket maps to a hand-written prompt-guidance
+                                                                   A conversation where the agent solves the problem but
+string per trait.
+                                                                   hallucinates a tool along the way is a failure for produc-
+6.3 Tier 3:          Emotional State (Scenario-                    tion deployment, even if the final message reads well.
+    Reactive)                                                      Splitting axes lets data consumers filter for their specific
+Five states: frustration, anxiety, trust, confidence, stress       need: safety training, politeness, tool reliability. Empiri-
+are initialized from a profile-specific range and then             cally, the two hallucination axes form their own cluster
+shifted by scenario-dependent deltas:                              (ρ = 0.66 pairwise) but correlate only weakly with goal
+                                                                  achievement (ρ ≈ 0.21), confirming hallucination is its
+       ei = clip U(li , hi ) + ∆i (scenario), 0, 1       (6)       own failure mode (Section 10).
+
+                                                               5
+Criterion                   What it measures                             8.1   Distillation Use Case
+Goal achievement            Did the agent accomplish the                 The primary downstream application is reasoning dis-
+                            user’s goal?                                 tillation: generate N scored conversations where the
+Tool usage                  Right tool, right arguments, right           agent under test is a large reasoning model, filter to the
+                            sequence?                                    top decile by judge score, and fine-tune a smaller stu-
+Tool-call halluc.           Did the agent invent tool calls, pa-
+                                                                         dent model on the filtered set. The student acquires
+                            rameters, or results?
+Reasoning quality           Is the chain-of-thought coherent,
+                                                                         teacher-quality reasoning behavior at a fraction of the
+                            on-policy, necessary?                        deployment cost. S TATE G EN makes this operational
+Reasoning halluc.           Did the agent reason about facts             by: (i) capturing reasoning traces as a first-class field,
+                            not in scope?                                not requiring regex extraction; (ii) exporting in OpenAI
+Communication quality       Clarity, tone, length, format for the        function-calling JSONL unchanged; (iii) carrying per-
+                            persona                                      sample judge scores in metadata for filtering.
+Consistency                 Does the agent contradict itself
+                            across turns?                                8.2   Export Format
+Error handling              Gracefulness under tool failures,
+                                                                         One conversation is one line; one line is one
+                            pushback, or ambiguity
+                                                                         {messages, tools, metadata} object. Three
+                                                                         properties: reasoning content is a first-class field on
+Table 2: The eight default judge criteria. Projects can
+                                                                         every assistant message; terminal actions do not emit
+add domain-specific axes (e.g., booking-flow compliance
+                                                                         spurious tool-response messages; metadata carries judge
+for CRM agents).
+                                                                         scores, scenario ID, persona profile, and complexity tier
+                                                                         for downstream filtering.
+7.3    Per-Project Extensibility
+                                                                         9     Scenario Validation Pipeline
+Each project can add, remove, or re-weight criteria. In
+                                                                         LLM-authored scenarios are fast but unreliable. A sce-
+our CRM case study, two domain-specific axes were
+                                                                         nario might declare that the user wants to dispute a
+added: booking-flow compliance (mean 5.73 on train-
+                                                                         charge while the system facts contain no matching trans-
+ing, 4.93 on golden) and channel-safety compliance
+                                                                         action. Running generation with such a scenario pro-
+(mean 9.37 on training, 9.01 on golden). The former
+                                                                         duces plausible-looking conversations that teach halluci-
+captures workflow-specific failure modes; the latter cap-
+                                                                         nation.
+tures safety invariants. Different business concerns get
+                                                                           The scenario validator is a two-stage pipeline:
+different numbers.
+
+7.4    Scoring Protocol                                                  Stage 1: Programmatic checks. JSON-Schema vali-
+                                                                         dation, referential integrity between user facts and system
+The judge LLM receives the full conversation transcript                  facts, intent-specific invariants (e.g., a dispute intent must
+and the expected final state S ∗ . It returns per-criterion              reference at least one transaction), and near-duplicate de-
+integer scores c1 , . . . , c8 ∈ {1, . . . , 10}, a holistic over-       tection via gestalt matching:
+all score, and a boolean goal-achieved flag. The overall
+score is LLM-chosen rather than a deterministic function                                sim(x, y) = 2M/(|x| + |y|)                 (7)
+of the eight criterion scores; this is intentional to avoid              where M is the total length of matching subsequences.
+over-weighting non-blocking issues.                                      Scenarios with sim ≥ 0.85 (descriptions) or ≥ 0.90
+                                                                         (goals) are flagged.
+8 Reasoning-Trace Capture and Ex-
+  port                                                                   Stage 2: LLM semantic checks. A frontier model an-
+                                                                         swers six questions about the scenario: goal achievability,
+Modern open-source models emit reasoning content ei-                     amount/ID consistency, final-state plausibility, edge-case
+ther natively (via reasoning_content in OpenAI-                          validity, state exposure, and persona-intent fit. Consen-
+compatible vLLM responses) or inside explicit tags                       sus voting across N models uses a pass ratio threshold
+(<think>, <reasoning>). S TATE G EN captures all                         of ≥ 0.5. Issues are graded critical/error/warning/info;
+three modes via a reasoning extractor module and pre-                    only scenarios with zero critical and zero error findings
+serves them in the exported JSONL.                                       are promoted into a generation corpus.
+
+                                                                     6
+                        20                                                 Criterion            Mixed (49K)           CRM Train
+
+
+
+       Proportion (%)
+                        15                                                                         µ           σ       µ       σ
+                        10                                                 Goal achievement     5.52      3.24        5.26    2.03
+                        5                                                  Tool usage           6.79      2.81        5.13    1.77
+                                                                           Tool-call halluc.    9.66      1.15        8.62    1.99
+                        0
+                             1   2   3 4 5 6 7 8            9 10           Reasoning quality    6.12      2.35        5.95    1.70
+                                                                           Reasoning halluc.    9.11      1.70        7.59    2.23
+                                      Overall Judge Score
+                                                                           Communication        6.37      2.18        7.61    1.14
+                                                                           Consistency          8.47      1.68        —†       —
+Figure 3: Overall judge score distribution across 49,331                   Error handling       6.13      2.46        —†       —
+conversations. The bimodal shape reflects binary agentic
+success. Mean 6.54, median 7.0, σ=2.25.                                Table 4: Per-criterion means. Hallucination axes are
+                                                                       near-ceiling, validating the state-grounding invariant.
+                                                                       † Replaced by domain-specific axes in the CRM project.
+10            Experiments and Results
+We report results on three corpora produced by S TATE -
+G EN, totaling 64,698 evaluated conversations.                         10.4     Persona Variation
+                                                                       The persona model produces measurable behavioral vari-
+10.1                Corpora                                            ation: across eight persona profiles with ≥400 samples
+Before presenting results, we define the three evaluation              each, goal-achievement rates range from 51.2% to 67.0%,
+corpora. The CRM (Customer Relationship Manage-                        a 15.8 percentage-point spread. This confirms persona is
+ment) AI Assistant corpus refers to a domain-specific                  a real lever on agent performance, not decoration.
+conversational agent dataset designed to evaluate tool-
+                                                                       10.5     Correlation Structure
+augmented assistant performance across customer-facing
+scenarios.                                            Two observations from the correlation matrix (Figure 4):
+                                                      (i) reasoning quality, communication quality, and error
+Corpus                     n   Scen. Purpose          handling form a tight cluster (ρ > 0.85); (ii) the halluci-
+Mixed (Mar 2026)        49,331 312 Training pool      nation axes correlate with each other (ρ = 0.66) but only
+CRM Train (Apr 2026) 12,224 77 Domain fine-tune       weakly  with goal achievement (ρ ≈ 0.21). This confirms
+CRM Golden (Apr 2026) 3,143 20 Benchmark (0 overlap)  hallucination is its own failure mode, not a symptom of
+                                                      poor reasoning.
+Table 3: Corpus inventory. The CRM Golden Set has
+zero scenario overlap with CRM Training Set, enabling 10.6 Train-vs-Golden Gap Analysis
+clean train/test measurement.
+                                                                              Criterion                Train       Golden     ∆
+                                                                              Overall score            6.25         5.44     −0.81
+10.2                Overall Score Distribution                                Goal achievement         5.26         4.38     −0.88
+Across the 49,331-sample mixed corpus, mean overall                           Tool usage               5.13         4.29     −0.84
+score is 6.54 (median 7.0, σ=2.25). The distribution is                       Tool-call halluc.        8.62         7.93     −0.69
+bimodal with peaks near 3 and 9 (Figure 3), reflecting a                      Reasoning quality        5.95         5.06     −0.89
+                                                                              Reasoning halluc.        7.59         6.43     −1.16
+two-population pattern: conversations where the agent
+                                                                              Communication            7.61         7.20     −0.41
+either cleanly solves the scenario or fails at an identifiable                Booking compliance       5.73         4.93     −0.80
+step. The middle bucket is relatively empty as agentic                        Channel safety           9.37         9.01     −0.36
+success tends to be binary.
+                                                                       Table 5: Train-vs-golden per-criterion gap. Content crite-
+10.3                Per-Criterion Analysis
+                                                                       ria drop the most; safety criteria are robust across splits.
+The two hallucination axes sit at 9.66 and 9.11 in the
+mixed corpus and these are the axes the state manager is                  The golden set scores lower on every criterion (Ta-
+built to protect. Goal achievement at 5.52 is the residual             ble 5), with the largest drops on reasoning hallucina-
+hard problem: not hallucination, but reasoning-under-                  tion (−1.16), reasoning quality (−0.89), and booking-
+uncertainty and persona handling.                                      flow compliance (−0.80). Channel-safety compliance
+
+                                                                   7
+                             GA     TU     TH     RQ RH CQ CO                 EH         official repositories.
+
+                        GA   1.00   0.72   0.21   0.83   0.21   0.86   0.68   0.85
+                                                                                         System                   MT       SG        MA      Judge
+                        TU   0.72   1.00   0.35   0.71   0.30   0.70   0.58   0.69       NeMo Designer          ✓      Partial∗    —    Plugin
+                                                                                         Gretel               Tabular     —        —      —
+                        TH   0.21   0.35   1.00   0.19   0.66   0.18   0.25   0.20
+                                                                                         MOSTLY AI            Tabular     —        —      —
+                        RQ   0.83   0.71   0.19   1.00   0.23   0.88   0.72   0.87       OpenAI Evals           ✓     User-coded   —      ✓
+                                                                                         AutoGen [9]          Runtime Implicit Runtime —
+                        RH   0.21   0.30   0.66   0.23   1.00   0.20   0.28   0.22
+                                                                                         LangGraph            Runtime Implicit Runtime —
+                        CQ   0.86   0.70   0.18   0.88   0.20   1.00   0.74   0.89
+                                                                                         τ -bench [8]           ✓      Scripted    —      ✓
+                                                                                         Matrix [10]            ✓       Partial Research —
+                        CO   0.68   0.58   0.25   0.72   0.28   0.74   1.00   0.71
+                                                                                         S TATE G EN (ours)       ✓        ✓          ✓        ✓
+                        EH   0.85   0.69   0.20   0.87   0.22   0.89   0.71   1.00
+                                                                                         Table 6: Capability comparison. MT=Multi-turn gen.,
+Figure 4: Pearson correlation across 8 criteria (49K sam-                                SG=State-grounded tool sim., MA=Multi-agent data
+ples). TH and RH form their own cluster (ρ = 0.66)                                       gen. ∗ Prompt-templated only. “Runtime”=inference-
+but correlate weakly with GA (ρ ≈ 0.21). GA=Goal                                         time only. “—”=not documented.
+Achievement, TU=Tool Usage, TH=Tool-call Halluci-
+nation, RQ=Reasoning Quality, RH=Reasoning Halluci-
+nation, CQ=Communication Quality, CO=Consistency,                                        Honest positioning. S TATE G EN is not the right tool
+EH=Error Handling.                                                                       for every synthetic data task. Gretel and MOSTLY AI
+                                                                                         have more mature differential-privacy guarantees for
+                                                                                         tabular data. NeMo Data Designer achieves higher to-
+
+
+
+       Proportion (%)
+                                                           Mixed (µ=6.54)
+                        20                                                               kens/second for single-turn instruction generation. τ -
+                                                           CRM train (µ=6.25)
+                                                                                         bench has more rigorous task design for academic bench-
+                                                           CRM golden (µ=5.44)
+                        10                                                               marking. The defensible claim is narrower: for agentic
+                                                                                         training data that requires multi-turn generation, state-
+                         0                                                               grounded tool simulation, hierarchical multi-agent sup-
+                              1     2      3 4 5 6 7 8                        9 10       port, and built-in judge scoring, we could not find a single
+                                            Overall Judge Score                          publicly available system that ships all four.
+
+Figure 5: Overall-score distributions for the three cor-
+                                                                                         12     Limitations and Future Work
+pora. The mixed corpus is bimodal; CRM training is
+roughly normal; CRM golden is left-shifted (harder).                                     Judge calibration. The 8-axis judge has not been cali-
+                                                                                         brated against human gold-standard annotations. While
+                                                                                         inter-axis correlation structure (Figure 4) is informative,
+barely moves (−0.36) because safety rules are scenario-                                  absolute score levels may carry systematic bias from the
+independent. A model that closes this gap is genuinely                                   judge model. Collecting 1–2K human-rated samples and
+generalizing, not memorizing scenario patterns.                                          learning per-criterion bias corrections is planned.
+10.7                Turn-Count and Scale
+                                                                                         Persona covariance. Trait correlations are currently
+Conversations finishing in 1–2 turns often hit the termi-                                rule-described, not learned. Fitting a covariance matrix
+nal action without enough context; those past 7–8 turns                                  from the 64K sample corpus would yield more realistic
+typically indicate the agent is stuck in a loop. The sweet                               trait co-occurrence without manual rule authoring.
+spot is 4–6 turns, matching production traffic patterns.
+                                                                                         Overall score transparency. The overall score is
+11 Comparison with External Systems                                                      LLM-chosen rather than a deterministic function of the
+We compare S TATE G EN against eight external systems                                    eight criterion scores. This creates a transparency con-
+across the four capabilities that define our platform. Ta-                               cern for downstream consumers. Future work includes
+ble 6 summarizes the landscape. Claims are verified                                      either making the aggregation explicit or documenting
+against vendor documentation, peer-reviewed papers, or                                   the empirical relationship.
+
+                                                                                     8
+State manager fidelity. The state manager runs at tem-              [3] C. Xu, Q. Sun, K. Zheng, et al. WizardLM: Em-
+perature 0 but is still an LLM, not a database. Complex                 powering large language models to follow complex
+state updates (multi-record transactions, partial rollbacks)            instructions. arXiv:2304.12244, 2023.
+may introduce subtle inconsistencies. Hybrid approaches
+with deterministic state logic for structured operations            [4] S. Gunasekar, Y. Zhang, J. Aneja, et al. Textbooks
+are under investigation.                                                are all you need. arXiv:2306.11644, 2023.
+
+                                                                    [5] T. Schick, J. Dwivedi-Yu, R. Dessi, et al. Tool-
+Near-term extensions. Tool-failure injection (time-                     former: Language models can teach themselves to
+outs, rate limits, malformed responses) to train graceful               use tools. In NeurIPS, 2023.
+degradation. Preference-pair generation for RLHF/DPO                [6] S. Yao, J. Zhao, D. Yu, et al. ReAct: Synergizing
+from same-scenario winning/losing conversations. Multi-                 reasoning and acting in language models. In ICLR,
+teacher ensembling across frontier models per scenario.                 2023.
+
+13     Conclusion                                                   [7] L. Zheng, W.-L. Chiang, Y. Sheng, et al. Judg-
+                                                                        ing LLM-as-a-judge with MT-Bench and Chatbot
+We presented S TATE G EN, a synthetic data generation                   Arena. In NeurIPS, 2023.
+platform for tool-augmented LLM agents. The core con-
+tribution is an authoritative state manager that enforces           [8] S. Yao, et al.      τ -bench: A benchmark for
+a backend-is-truth invariant across the generation loop,                tool-agent-user interaction in real-world domains.
+achieving 9.66/10 on tool-call hallucination across 49K+                arXiv:2406.12045, 2024.
+samples. The platform extends to hierarchical multi-
+                                                                    [9] Q. Wu, G. Bansal, et al. AutoGen: Enabling next-
+agent generation through a sub-agents-as-tools pattern
+                                                                        gen LLM applications via multi-agent conversation.
+with shared state, supports persona-conditioned user sim-
+                                                                        arXiv:2308.08155, 2023.
+ulation via a 23-dimensional trait vector with measur-
+able downstream impact (15.8 percentage-point spread               [10] K. Mei, et al. Matrix: An agent-based multi-
+on goal achievement), and produces per-sample 8-axis                    turn data synthesis framework. Meta FAIR, arXiv
+judge scores that enable fine-grained corpus filtering.                 preprint, 2024.
+   Across 64,698 evaluated conversations spanning 3 pro-
+duction corpora, the train-vs-golden gap analysis con-             [11] X. Liu, H. Yu, et al. AgentBench: Evaluating LLMs
+firms the output is not memorization bait: content criteria             as agents. arXiv:2308.03688, 2023.
+drop on held-out scenarios while safety criteria remain            [12] DeepSeek-AI. DeepSeek-R1: Incentivizing reason-
+robust. Comparison with eight external systems identi-                  ing capability in LLMs via reinforcement learning.
+fies the capability combination of multi-turn generation,               arXiv:2501.12948, 2025.
+state-grounded tool simulation, multi-agent data genera-
+tion, and built-in multi-axis judging as the architectural
+contribution that no single existing platform provides.
+   The platform reduces the timeline for training-data
+generation from months of human annotation to days of
+configured generation, making it practical for organiza-
+tions deploying multiple agentic products in parallel.
+
+References
+ [1] Y. Wang, Y. Kordi, S. Mishra, et al. Self-Instruct:
+     Aligning language models with self-generated in-
+     structions. In ACL, 2023.
+
+ [2] R. Taori, I. Gulrajani, T. Zhang, et al. Stanford
+     Alpaca: An instruction-following LLaMA model.
+     GitHub repository, 2023.
+
+                                                               9
+

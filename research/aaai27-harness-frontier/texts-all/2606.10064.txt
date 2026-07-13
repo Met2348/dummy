@@ -1,0 +1,790 @@
+                                                       Bittensor Agent Arenas as a Trajectory Primitive:
+                                               Distilling a Shopping Agent from ShoppingBench Subnet Traces
+                                                                      Shardul Bansal1            Seth Schilbe1          Jarrod Barnes2
+                                                                                    1                2
+                                                                                        ORO AI           Dynamical Systems
+
+                                                                                                 June 10, 2026
+
+                                                                                                   Abstract
+
+
+
+
+arXiv:2606.10064v1 [cs.LG] 8 Jun 2026
+                                            Small-model agentic post-training is bottlenecked less by the choice of algorithm than by the trajectory substrate it
+                                            consumes. The leading recipes (RLVR, group-relative RL, rejection-sampled re-SFT) all require multi-turn traces
+                                            that carry per-trajectory supervision, and the two existing sources fall short on their own: frontier-synthesised
+                                            data inherits the synthesizer’s biases and collapses the distribution’s long tail, while unfiltered production logs
+                                            are unjudged and contaminated by shortcut behaviour. We argue that an incentive-aligned agent arena can be
+                                            deliberately engineered to manufacture such trajectories, and we demonstrate this on ORO Subnet 15 (SN15), a
+                                            Bittensor deployment of the ShoppingBench agentic-commerce benchmark. SN15’s race mechanism, LLM reasoning
+                                            judge, and rotating leak-cluster-guarded problem suite together yield a corpus with three properties that separate it
+                                            from both prior sources: incentive-aligned diversity, per-trajectory judging, and anti-memorised held-out evaluation.
+                                            We introduce a structural-quality filter that converts the raw firehose into a trainable corpus by selecting agentic
+                                            trajectories (those in which the language model itself emits the tool calls) and rejecting sub-task trajectories (those in
+                                            which the language model is used only as a classifier or narrator over a deterministic search loop), and we post-train
+                                            Qwen3-4B on the result with a recipe closely matched to the published ShoppingBench SFT-then-GRPO pipeline.
+                                            On a leak-cluster-guarded held-out partition scored production-strict, the model lifts from the published Qwen3-4B
+                                            base of 18.0% ASR to 42.7%, a 24.7-point gain that lands within single-problem noise of the published synthetic-data
+                                            SFT-only baseline (43.6%), while training on a slice that is a small fraction of a single day of subnet output. The
+                                            supervised stack leaves a large pass@8 to pass@1 gap (53.3% vs 34.8%); a per-step teacher-grounded Dr. GRPO
+                                            reward converts that latent headroom into measurable process improvement, and we identify the sub-task firehose
+                                            currently outside our training pipeline as the primary lever for closing the remaining gap to the published 48.7%
+                                            SFT+GRPO bar. We release the filter, the corpus splits, and the arena mechanics.
+
+                                        1 Introduction                                                        such behaviour are far harder to source than ordinary
+                                                                                                              instruction data: a single problem produces a tree of par-
+                                        Recent work on tool-using and web-browsing agents has                 tially correct trajectories, only a small fraction of which
+                                        converged on a recurring observation: as base model                   represent a policy worth imitating, and the difference
+                                        capability climbs, the marginal lift on agentic bench-                between the good and the bad is rarely surface visible.
+                                        marks (SWE-Bench, OSWorld, WebArena, Shopping-                        The post-training recipe is therefore only as strong as the
+                                        Bench) comes increasingly from the post-training recipe               trajectory substrate it has access to, and the substrate
+                                        applied to the agent, that is, the choice of algorithm,               question is increasingly about per-trajectory judged qual-
+                                        the verifier signal, and the trajectory filter at each stage,         ity rather than sheer volume.
+                                        rather than from raw parameter count or pre-training
+                                        scale [1, 6, 14, 17]. The recipes that lead the recent                    Two families of data have been used to fill this gap,
+                                        literature, including RLVR, group-relative RL with ex-                and each has well-documented limitations when used on
+                                        ternal verifiers, and rejection-sampled re-SFT, share a               its own. The first is fully synthetic data, where a frontier
+                                        structural feature: they consume trajectories that carry              model is prompted to roleplay both the user and the
+                                        per-trajectory supervision independent of the synthe-                 agent and the resulting traces are filtered with hand-
+                                        sizer, and they pay back the additional supervision in                written rules. This is the recipe used by the original
+                                        measurable lift. A capable shopping agent has to issue                ShoppingBench paper [1] and by widely-cited tool-use
+                                        many short tool calls, reason over noisy product listings,            corpora such as ToolLLM and ToolACE [8, 10], and it
+                                        track soft constraints across turns, and recover from dead            has produced strong open baselines. The recipe inher-
+                                        ends, all before it commits to a recommendation. The                  its the synthesizer’s biases, however, and the broader
+                                        supervised and reinforcement signals required to train                literature on training language models on recursively
+
+
+
+                                                                                                          1
+    SN15 Agent Arena
+                                      Data Pipeline                   Policy Training                 Distilled Agent
+     Independent miners
+                                          Trac format                   Qwen3-4B base.                 Held-out ASR lifts
+       submit AI agents
+                                         normalisation,                SFT → rejection-                18.0% → 42.7% on
+     to a continuous race
+                                    judge-coefficient gate,           sampled re-SFT →              the leak-cluster-guarded
+      on ShoppingBench.
+                                      structural-quality            continued teacher-SFT            75-problem partition.
+      Every trajectory is
+                                      filter, leak-cluster          → KTO → Dr. GRPO                  Re-enters the arena
+      scored by an LLM
+                                         held-out split.                 turn-level RL.                   as a miner.
+        reasoning judge.
+
+
+
+Figure 1: End-to-end pipeline of this work. Trajectories produced by an incentive-aligned agent arena (left) flow
+through a data pipeline that normalises, judges, and structurally filters them (centre-left) to yield a trainable corpus,
+on which Qwen3-4B is post-trained via a five-stage recipe (centre-right) into a distilled shopping agent (right). The
+dashed arrow indicates the substrate-level feedback loop: the distilled agent can re-enter the arena as a competing
+miner, raising the bar for the next generation of trajectories.
+
+
+generated outputs has shown that pure self-distillation           single economic mechanism we built and operate. The di-
+reliably collapses the long tail of the data distribution         versity property in particular is a property of the firehose,
+before it degrades aggregate quality [13, 15]. The recipes        not of every slice of it: the trained model in this paper
+that have escaped this trap, such as Tülu 3’s RLVR               draws from the agentic subset of the firehose, which in-
+and DeepSeek-R1’s verifier-grounded RL [4, 7], all share          herits properties (ii) and (iii) directly but is a narrower
+a property the original ShoppingBench recipe lacks: a             draw from (i) than the firehose as a whole, and Section 9
+verifier external to the synthesizer that grades each tra-        returns to bringing the rest of the firehose into training
+jectory before it enters the training set. The second             as the substrate-side lever.
+family is unfiltered production logs from deployed agents.
+These contain real diversity but are unjudged, unbal-
+anced, dominated by the prevailing top deployed policy,           ShoppingBench as a concrete instance. We in-
+and routinely contaminated by shortcut behaviour in               stantiate this argument on the ORO Subnet 15 (SN15)
+which an agent produces the right answer through illegit-         deployment of ShoppingBench, a public benchmark in
+imate reasoning. Neither family, on its own, is the clean         which agents are given a natural-language shopping in-
+source of judged multi-turn trajectories that small-model         tent and are scored on whether their final recommen-
+agentic post-training appears to require.                         dation satisfies the intent’s price, service, SKU, and
+                                                                  attribute constraints. SN15 has produced a large stand-
+                                                                  ing corpus of judged trajectories on this task surface,
+Building a subnet to manufacture trajectories.                    governed by a race system, a reasoning judge, and a ver-
+The contribution of this work is to argue, and to demon-          sioned problem suite rotation that together implement
+strate, that an incentive-aligned agent arena can be de-          the three properties above. We treat this corpus, not the
+liberately engineered as a trajectory-data generator, and         underlying agents, as the contribution of the subnet to
+that the resulting corpus is the right shape for small-           the broader research community.
+model agentic post-training. We built ORO Subnet 15
+(SN15) on Bittensor with exactly this goal. We designed
+its task surface, scoring pipeline, and rotation schedule         Distilling a small open agent. On the model side,
+so that the trajectories falling out of it have three prop-       we ask a focused question: can the structurally-filtered
+erties that, taken together, separate them from both              slice of this corpus post-train a small open model into a
+synthetic data and ordinary production logs, and that             competent ShoppingBench agent using a recipe closely
+we describe in detail in Section 4: (i) incentive-aligned         matched to the published ShoppingBench SFT-then-
+diversity, with many independent teams continuously               GRPO pipeline? We start from the same base model
+paid in tokens to discover policies their competitors have        family (Qwen3-4B), apply the same broad two-stage
+not; (ii) per-trajectory judging, by an LLM reasoning             pipeline (supervised fine-tuning on filtered trajectories,
+judge we built that scores each trajectory’s reasoning            followed by reinforcement learning with tool-grounded
+quality alongside its outcome; and (iii) rotating held-           rewards on multi-turn rollouts), and evaluate on a leak-
+out problems, with a leak-cluster guard that defeats              cluster-guarded held-out partition of the same task sur-
+paraphrase memorisation. The novelty is not that any              face. We make two documented substitutions against
+single property is unprecedented; it is that the whole            the published recipe (continued teacher-SFT in place
+combination is produced as a continuous side effect of a          of step-wise on-policy distillation, and KTO preference
+
+
+                                                              2
+refinement as an added stage); both are motivated in               2 Related work
+Section 6. The first-order difference between our setup
+and the published baseline is then the source of the tra-          We compare against three research threads: post-training
+jectories: subnet-generated and judge-filtered, instead of         corpora for tool-using agents, training and evaluation
+synthesised by a frontier model.                                   of commerce-specific agents, and incentive-aligned data
+                                                                   generation. The comparison axes are the three structural
+                                                                   properties claimed in Section 1: source of diversity, per-
+                                                                   trajectory verifier, and treatment of held-out evaluation.
+Contributions. This paper makes four contributions:
+
+• We characterise Bittensor agent subnets as a new                 Agentic post-training corpora. ToolLLM and Tool-
+  shape of training-data primitive for agentic post-               Bench [10] introduced large-scale API tool-use SFT data
+  training, identifying incentive-aligned diversity, per-          generated by frontier-model role-play; ToolACE [8] adds
+  trajectory judging, and rotating held-out problems               a self-evolution loop, and Magpie [15] generalises the
+  as the structural properties that make subnet traces             recipe to alignment data. Tülu 3 [7] and DeepSeek-R1
+  qualitatively different from both synthetic data and             [4] demonstrate that recipes adding an external verifier
+  ordinary production logs.                                        to synthetic data materially outperform ones that do
+• We document the SN15 arena mechanics in enough                   not. All five generate the corpus as a one-shot batch, at-
+  detail to make these properties reproducible, includ-            tach supervision to outcomes rather than per-trajectory
+  ing the race and qualifying loop, the LLM reasoning              reasoning, and construct held-out partitions offline. The
+  judge, and the versioned problem suite rotation, and             model-collapse literature [13] is the published reason why
+  we surface the trajectory firehose they collectively             pure self-distillation is brittle at scale.
+  produce.
+• We propose a structural-quality filter for converting            Production-trajectory post-training in vertical
+  raw subnet trajectories into a trainable SFT corpus.             coding agents. The closest production-side precedent
+  The filter applies a judge-coefficient gate, a format-           is the new generation of vertical coding-agent companies.
+  validity gate, a deduplication and structural-quality            Cursor’s Composer 2.5 [3] post-trains a strong open base
+  ranking pass, and a final selection step that keeps              with targeted SFT and on-policy RL against rollouts in a
+  agentic trajectories and rejects sub-task trajectories.          controlled coding environment, feeding successful RL tra-
+  We release the filter as code along with the trainable           jectories back into the SFT pool. Cognition’s SWE-1.5
+  corpus it produces.                                              [2] reports a closely matched recipe with three grading
+• We post-train Qwen3-4B on this corpus with a recipe              mechanisms (test suites, code-quality rubrics, and agen-
+  closely matched to the published ShoppingBench SFT-              tic grading via browser-based testing) in place of a single
+  then-GRPO pipeline (with two documented substitu-                outcome score. Both are explicit that production tra-
+  tions detailed in Section 6) and report results on a leak-       jectories, not synthetic data, are what makes the recipe
+  cluster-guarded held-out partition, framed against               land. Our work is the agentic-commerce instantiation
+  both the published Qwen3-4B base (18.0%) and the                 of the same playbook: trajectories from a continuous
+  published SFT+GRPO bar (48.7%). Full numbers                     subnet competition rather than a single company’s prod-
+  and per-component breakdowns are reported in Sec-                uct telemetry, graded by a per-trajectory LLM reasoning
+  tion 7.                                                          judge rather than a stack of outcome rubrics.
+
+
+                                                                   Commerce and shopping agents. ShoppingBench
+What this paper does not claim. We do not claim                    [1] established the Qwen3-4B SFT-then-GRPO recipe
+that subnet trajectories can replace either synthetic data         and a synthetic GPT-4.1 trajectory corpus that we mea-
+or production logs in general; for many task surfaces              sure ourselves against. The Shopify Flow engineering
+neither subnets nor the surrounding evaluation infras-             write-up reports a matched recipe (synthetic trajecto-
+tructure exist yet. We do not claim that the resulting             ries plus an LLM judge) in production and explicitly
+model is a finished product. And we are explicit, in Sec-          acknowledges that offline benchmarks mask a substantial
+tion 8, about three risks that the reader should keep in           fraction of real-world failure modes. Amazon Rufus has
+mind throughout: the skew toward sub-task trajectories             been described in public communications as a retrieval-
+in the raw firehose (much of which is filtered out before          augmented shopping assistant, but no methodology is
+training), the sensitivity of measured lifts to harness            published. The consistent gap across the published com-
+format and prompting nudges, and the fact that the su-             merce work is the absence of a continuously refreshed,
+pervision available from a reasoning judge is correlational        judged, held-out evaluation surface, which is precisely
+rather than gold.                                                  the surface SN15 produces as a side effect of its race
+
+
+                                                               3
+mechanism.                                                        tools (recommend product and terminate).1 A valid
+                                                                  trajectory ends with exactly one recommend product
+                                                                  call followed by terminate; trajectories that terminate
+Incentivised and decentralised data generation.                   without a recommendation are scored as failures.
+LMSYS Chatbot Arena [16] crowdsources continuous
+head-to-head preference judgements, but the supervision
+                                                                  ASR and the four rule axes. The headline metric
+is a pairwise preference rather than a multi-turn judged
+                                                                  reported in the ShoppingBench paper is the average
+trajectory, and the population is uncompensated rather
+                                                                  success rate (ASR), defined as the fraction of held-out
+than incentive-aligned, which compresses diversity as the
+                                                                  problems on which the agent’s final recommendation
+most active users self-select. Within the Bittensor ecosys-
+                                                                  simultaneously satisfies all of the problem’s rule con-
+tem [11], sibling subnets run continuous competitions
+                                                                  straints. Rule constraints are decomposed into four axes:
+on different task surfaces (inference-cost minimisation,
+                                                                  price (the recommended product’s price falls within the
+pretraining races, crowdsourced annotation) and produce
+                                                                  requested band), service (the recommended product
+data shapes that are not directly usable as agent trajec-
+                                                                  ships under the requested service terms, for example free
+tories. To our knowledge, the specific combination we
+                                                                  shipping or cash on delivery), SKU (the recommended
+describe in Section 4 (a multi-turn agentic task surface,
+                                                                  product carries the requested SKU-level attributes), and
+a per-trajectory LLM reasoning judge, rotating held-out
+                                                                  attribute (the recommended product matches the re-
+problems, and continuous token emissions tied to the
+                                                                  quested free-form product attributes, for example colour,
+consensus ranking) has not been described in the public
+                                                                  material, or feature). We report ASR as the headline
+literature.
+                                                                  number, alongside the per-axis breakdown, throughout
+                                                                  the paper.
+3 Background
+Bittensor primitives. Bittensor [11] is a permission-             Index-based agentic commerce. ShoppingBench is
+less network of independent subnets, each running its own         an example of index-based agentic commerce, in which
+continuous evaluation competition. Three roles matter             the agent operates against a static, queryable product
+for this paper. A miner is an independent participant             index rather than against a live retail website. The sub-
+who submits a candidate model or agent to the subnet              strate is shared by industry shopping agents that route
+for evaluation. A validator is an independent operator            through structured catalogues (notably the published
+who runs miner submissions against the subnet’s task              Shopify Flow recipe) and contrasts with browser-use
+surface, scores the outputs, and reports the scores back          agents that navigate live web pages (Computer Use, Op-
+to the chain. Emissions are the token reward stream the           erator). The choice of substrate is load-bearing for both
+chain distributes to miners at each block, with the per-          the task and the evaluation. Index-based evaluation is re-
+miner share determined by the validator consensus over            producible by construction (the same catalogue snapshot
+recent scores. Every interaction with the subnet, both            returns the same observations for any agent), it is de-
+submission and evaluation, is cryptographically signed            terministic (no transient network state can leak into the
+by an SS58 hotkey, which makes every artefact stored              score), and it scales to the trajectory volumes a compet-
+downstream traceable to the participant that produced             itive subnet requires. SN15 inherits this substrate from
+it.                                                               ShoppingBench, and the rest of the paper assumes that
+                                                                  all evaluation runs through the same indexed catalogue.
+
+ShoppingBench task surface. ShoppingBench [1] is
+                                                                  4 SN15 arena mechanics
+a multi-turn tool-use benchmark for agentic commerce.
+The agent receives a natural-language shopping intent             SN15 is engineered, end to end, so that the three tra-
+(for example, “find a black hosport waist bag under               jectory properties claimed in Section 1 arise from the
+twenty dollars from a shop with at least 4.5 stars”) and          mechanism rather than from luck. The Bittensor prim-
+is required to issue tool calls against an indexed product        itives the subnet runs on (miner, validator, emissions,
+catalog until it commits to a final recommendation. The           hotkey-signed submissions) are introduced in Section 3;
+tool surface used in this paper, which is a small super-          SN15 additionally gates every submission with a static-
+set of the surface in the published benchmark, exposes            analysis pass that rejects hard-coded answer tables and
+catalogue-lookup tools (search by query, fetch product
+                                                                     1 Paper-upstream ShoppingBench at yjwjy/ShoppingBench ex-
+by identifier, fetch shop information, fetch voucher infor-
+                                                                  poses the catalogue-lookup and terminal tools only; the three
+mation), three helper tools we added to support multi-            helpers are added in our fork at ORO-AI/ShoppingBench. The fork
+constraint queries (attribute-match check, in-shop prod-          is what SN15 evaluates against and what we use for all numbers
+uct expansion, voucher arithmetic), and two terminal              in this paper.
+
+
+                                                              4
+a small set of restricted constructs, and persists every          to a specific agent, validator, and chain commit, and
+validator evaluation append-only. The rest of this sec-           every row carries the reasoning coefficient as a separate
+tion names the three mechanisms that make this baseline           column from the outcome score, which is what makes
+produce trainable data.                                           the structural filter in Section 5 possible.
+
+
+Incentive-aligned diversity via the race. Submit-                 5 Trajectory corpus and structural filter
+ted agents are filtered through a qualifying phase, then
+                                                                  We convert the SN15 trajectory firehose described in
+enter a continuous race against a rotating problem bank.
+                                                                  Section 4 into a training corpus in two steps. First, every
+The race promotes a new top agent on a daily cadence,
+                                                                  raw trajectory is normalised into a canonical OpenAI
+rate-limits each miner to one submission every twelve
+                                                                  tool-calls schema using Trac, an annotation framework
+hours, and embargoes the winning miner’s source code
+                                                                  contributed by Jarrod Barnes (Dynamical Systems);2 we
+until the next weekday noon Pacific. The daily promo-
+                                                                  use only Trac’s converter front-end in production (see
+tion, the cooldown, and the embargo together sustain a
+                                                                  Appendix A.1). Second, we apply a structural-quality
+discover-then-share pressure that no single synthesizer
+                                                                  filter to the normalised traces.
+can replicate: many independent teams are continuously
+paid to find policies their competitors have not yet found.
+                                                                  Structural-quality filter. The filter has three stages,
+Per-trajectory judging. Every race trajectory is                  detailed in Appendices A.2 and A.3. A reasoning-
+scored along two independent axes. An outcome score is            coefficient gate drops any trajectory whose validator-
+computed by a fixed rule-based scorer on the four Shop-           side reasoning-quality coefficient (Section 4) falls below
+pingBench rule axes (price, service, SKU, attribute). A           a fixed threshold; this is the concrete point at which the
+reasoning-quality coefficient is then assigned by an LLM          per-trajectory judge becomes load-bearing for training, in
+judge we built, which reads the full think-and-tool-call          that it determines which trajectories are even eligible to
+trace and assigns a coefficient that multiplies the outcome       enter the structural filter. A format-validity gate then
+score before aggregation. The judge is trace-grounded             hard-rejects malformed traces on five structural invari-
+(it must cite specific spans of the trace as evidence),           ants. A deduplication and ranking pass picks one to
+decoupled from the outcome scorer, and run by valida-             two trajectories per problem by a small set of structural-
+tors rather than miners. The reasoning coefficient is the         quality signals (think-and-tool-call depth, search-query
+per-trajectory process-supervision signal that synthetic          reformulation count, presence of a verification step, step-
+pipelines have to manufacture and that production logs            shape regularity). The reasoning coefficient gates the
+do not have at all.                                               pool; the structural signals rank within it. A final axis-A
+                                                                  versus axis-B split retains only the agentic trajectories:
+                                                                  axis-A trajectories are those in which the language model
+Rotating held-out problems. The race operates                     itself emits the tool calls and the surrounding Python
+against two pools. Three small versioned suites (v1,              harness only dispatches them, while axis-B trajectories
+v2, v3) are reserved as untouched evaluation territory            are those in which the surrounding Python emits tool
+and never enter training. A continuously growing race             calls and the language model is used only as a classifier,
+bank is rotated through open and held-out partitions              scorer, or narrator. A model fine-tuned on axis-B traces
+on a cadence we control, with a leak-cluster guard that           becomes a strong intent classifier, match scorer, and nar-
+groups paraphrased or attribute-reordered variants of             rator, but does not become a competent agent because
+the same underlying problem so that surface-form drift            there is no agent-level policy in the data to imitate. Sec-
+cannot smuggle held-out problems into the open pool.              tion 8 returns to the axis-A versus axis-B distinction as
+The combination is what makes held-out performance                the dominant constraint on the headline number, and
+a real generalisation surface rather than a paraphrase            Section 9 sketches how the axis-B firehose is brought into
+trap.                                                             training in follow-up work.
+
+Trajectory provenance. Each evaluation writes a                   Leak-cluster-guarded held-out partition. A naive
+single canonical trajectory record carrying the agent ver-        train-eval split at the trajectory level would silently leak.
+sion and miner hotkey, the validator hotkey, the problem          Race-bank problems are answered repeatedly across rota-
+identifier, the full multi-turn trace, the outcome score          tions and miner generations, with surface-text differences
+and its rule-axis breakdown, the reasoning coefficient            (paraphrase, attribute reordering, retailer substitution)
+and the trace spans the judge cited as evidence, and              that look like distinct problems but are not, and the leak
+the scoring-pipeline version. Every row that enters the
+training corpus in Section 5 can therefore be traced back            2 Open-sourced at jbarnes850/Trac.
+
+
+
+
+                                                              5
+is invisible to outcome metrics. We construct the held-            fits a setting in which the undesirable trajectories share
+out partition with a leak-cluster guard (Appendix A.4):            the format of the desirable ones but differ on rule-check
+leak clusters are partitioned into a training pool, an eval-       satisfaction. The desirable and undesirable labels come
+uation pool, and a never-touch pool that reserves the              from production-strict scoring of the teacher trajecto-
+static problem suites used by the subnet’s formal miner            ries used in Stage 3. On the parity-validated held-out
+evaluation; the intersection between training and evalua-          evaluation (Figure 3), KTO does not produce overall
+tion problem identifiers is verified to be exactly empty           lift over the post-teacher-SFT checkpoint: both score
+across leak clusters; and the evaluation pool is stratified        32 of 75 problems. Within buckets, KTO redistributes
+by intent bucket (product, shop, voucher), seeded for              the policy (voucher +4.3pp, product −3.6pp, shop flat);
+reproducibility, and frozen before any training kicks off.         we read this as the refinement moving probability mass
+With the guard in place, the held-out partition reported           within buckets without expanding the underlying capabil-
+in Section 7 is a real generalisation surface within the           ity set. A tighter-β variant over-optimised and regressed
+task family.                                                       across every bucket, which we report as a negative result.
+                                                                   We retain the post-teacher-SFT checkpoint as the final
+                                                                   reported model. Configuration in Appendix B.5.
+6 Post-training pipeline
+The pipeline proceeds in five stages on top of the Qwen3-
+4B base and the structural-filter corpus from Section 5,           Stage 5: Dr. GRPO turn-level RL. The final stage
+with two substitutions against the published recipe [1]            applies a Dr. GRPO [9, 12] turn-level reinforcement-
+that we motivate below. Hyperparameters, the practice-             learning pass on top of the post-teacher-SFT checkpoint.
+run bug catalog, and the renderer-parity work live in              The structural motivation is that rejection sampling
+Appendix B.                                                        (Stage 2) and KTO (Stage 4) only extract signal from
+                                                                   groups in which at least one rollout succeeds, with the
+                                                                   gradient applied uniformly across the tokens of a kept
+Stage 1: SFT on the structural-filter corpus.                      trajectory. Dr. GRPO extracts signal from every rollout
+One-epoch LoRA SFT on the structural-filter corpus                 in the group through a group-relative advantage, applies
+produces the SFT base. The reported runs use the                   the gradient per-token, and removes the group-standard-
+shared SFT configuration in Appendix B.1.                          deviation normalisation that suppresses the signal on
+                                                                   saturated groups. It is the only stage that can apply a
+Stage 2: Rejection-sampled re-SFT. We sample                       negative gradient to systematic failure modes and per-
+k = 8 rollouts per training-set problem at temperature             token credit to the residual pass@k gap.
+0.9, score each under the ShoppingBench bucket-aware                   We attempted three Dr. GRPO variants on top of
+reward, keep only score-1.0 rollouts, and concatenate              the post-teacher-SFT checkpoint, and the progression
+with the SFT corpus before re-fine-tuning. The leak-               between them is informative for downstream work. The
+cluster guard from Section 5 is enforced at sampling time          first variant (outcome-only reward, small B, low KL an-
+so that no held-out problem enters the training pool.              chor) plateaued at 40-43% over the first twenty optimisa-
+Detailed parameters in Appendix B.3.                               tion steps; diagnostic logging traced this to optimisation
+                                                                   instability rather than to reward degeneracy. The second
+                                                                   variant (stability fix on B, learning rate, and β; same re-
+Stage 3: Continued SFT on frontier-teacher roll-                   ward) contained the KL spikes but the mean reward did
+outs (substitutes step-wise OPD). The published                    not climb through the first ten steps. We read this as the
+recipe runs step-wise on-policy distillation against a fron-       sparse outcome-only reward failing to provide a usable
+tier teacher at this point. Per-step KL targeting over             gradient at the step granularity Dr. GRPO operates at.
+multi-turn rollouts at the corpus scales we operate at
+                                                                      The third variant followed the ShoppingBench paper’s
+is prohibitively expensive, so we substitute continued
+                                                                   own recipe and replaced the outcome-only reward with
+SFT on a Sonnet 4.6 teacher’s production-strict-scored
+                                                                   a blended outcome-plus-tool-match reward, in which
+rollouts through the same evaluation harness. The sub-
+                                                                   the tool-match component grades the policy’s per-step
+stitution trades the per-token KL signal of step-wise
+                                                                   tool-name and tool-argument choice against a Sonnet 4.6
+OPD for an outcome-filtered corpus, which is sufficient
+                                                                   teacher trajectory. We retained the stability hyperparam-
+for the post-training lift we report. Corpus details in
+                                                                   eters from the second variant and raised the per-rollout
+Appendix B.4.
+                                                                   step cap to match the held-out evaluation. The third
+                                                                   variant trained stably for twenty optimisation steps un-
+Stage 4: KTO preference refinement. We use                         der a clean wall-clock limit and produced a clear process
+KTO [5] for the preference-refinement pass. KTO ac-                climb: the in-training rule score lifted from 0.02 at step
+cepts unpaired desirable and undesirable labels, which             one to 0.42 at step twenty, the per-step product-ID hal-
+
+
+                                                               6
+                                 90
+                                                 ShoppingBench 75-set: production-strict, 7-tool harness                                                    Per-bucket redistribution: KTO on top of the SFT stack (75-set)
+                                 80                                                                                 77.3                               80                                                 ORO SFT stack
+                                                                                                                                                                                                          ORO SFT stack + KTO
+
+
+
+
+ASR (%) on 75-problem held-out
+                                 70                                                            64.0                                                    70       67.9
+                                                                                                                                                                        64.3
+                                 60                                                                                                                    60
+
+
+
+                                                                                                                                      Bucket ASR (%)
+                                 50                                                    Published Qwen3-4B SFT+GRPO bar: 48.7
+                                                           38.7
+                                                                           42.7                                                                        50
+                                 40
+                                 30
+                                                                                                                                                       40
+                                                                                                                                                                                     29.2          29.2             30.4
+                                 20       18.0                                                                                                         30                                                  26.1
+                                 10                                                                                                                    20
+                                  0                                                                                                                    10
+                                      Qwen3-4B base       GPT-5.5      ORO SFT stack         Sonnet 4.6           Top miner
+                                         (paper)                        (this paper)     (frontier teacher)   (7-tool ensemble)
+                                                                                                                                                        0
+                                                                                                                                                                  Product                   Shop              Voucher
+Figure 2: Overall ASR on the 75-problem leak-cluster-
+guarded held-out partition, scored production-strict                                                                                  Figure 3: Per-bucket effect of the KTO refinement (Sec-
+through the 7-tool ORO ShoppingBench harness. The                                                                                     tion 6) on top of the SFT stack, on the 75-problem
+ORO SFT stack at 42.7% sits roughly halfway between                                                                                   held-out. Overall ASR is unchanged at 32 of 75 prob-
+GPT-5.5 (38.7%) and the frontier teacher (Sonnet 4.6,                                                                                 lems for both checkpoints. KTO redistributes probability
+64.0%), and within single-problem noise of the pub-                                                                                   mass within buckets: voucher ASR rises by 4.3 percent-
+lished Qwen3-4B SFT-only baseline (43.6% from the                                                                                     age points, product ASR falls by 3.6, and shop ASR is
+ShoppingBench paper) despite using subnet trajecto-                                                                                   flat. We read this as bucket-level redistribution without
+ries rather than synthetic ones as the SFT corpus. The                                                                                expansion of the underlying capability set.
+dashed reference line at 48.7% is the published Qwen3-4B
+SFT+GRPO bar; closing the gap to that line is identified
+as the open frontier in Section 6.                                                                                                    held-out partition. The roughly 19-point spread says
+                                                                                                                                      the policy retains substantial latent capability that the
+                                                                                                                                      supervised stack does not extract at sampling pass@1,
+lucination count fell from fourteen to zero, and partial                                                                              and is the headroom number Section 6 identifies as the
+successes rose from zero to twenty-four of forty-eight on a                                                                           target for downstream Dr. GRPO work.
+held-out diagnostic. The strict exact-match success rate,
+however, remained at zero across all twenty steps; the
+                                                                                                                                      8 Limitations
+policy learned to navigate toward the correct catalogue
+neighbourhood without yet learning to land on the exact                                                                               The most important limitation of the work reported here
+ground-truth product. The curve was still climbing. Full                                                                              is that the model is trained on the smaller of two qualita-
+hyperparameters for all three variants in Appendix B.6.                                                                               tively different slices of the SN15 trajectory firehose, and
+   The post-teacher-SFT checkpoint has a measurable                                                                                   the larger slice is currently outside our training pipeline.
+pass@k headroom on the held-out partition, with pass@8
+at 53.3% versus pass@1 at 34.8%, which says that the                                                                                  Axis-A and axis-B trajectories. Trajectories pro-
+latent capability for a downstream stage to extract is                                                                                duced by miner agents on SN15 fall into two qualitatively
+present. The third Dr. GRPO variant converts that la-                                                                                 distinct shapes that we label here for the purposes of
+tent capability into process improvement, and the trend                                                                               the discussion. Axis-A trajectories are agentic: the
+across the three variants identifies the right shape of re-                                                                           language model itself emits the tool call blocks, the
+ward signal: dense, per-step, teacher-grounded. Closing                                                                               surrounding Python harness only dispatches them, and
+the remaining gap to exact-match conversion is the open                                                                               the policy of where to search next, when to verify, and
+frontier (Section 9).                                                                                                                 when to commit to a recommendation lives inside the
+                                                                                                                                      language model’s output. Axis-B trajectories are sub-
+7 Results                                                                                                                             task: the surrounding Python emits the tool calls (often
+                                                                                                                                      via deterministic search-strategy code), and the language
+We report the SFT stack described in Section 6 as the                                                                                 model is invoked only as a classifier, a match scorer, or a
+final model. Figure 2 shows the headline ASR compar-                                                                                  narrator over the dispatch results. The structural-quality
+ison on the 75-problem held-out, Figure 3 shows the                                                                                   filter in Section 5 keeps only axis-A trajectories. This
+per-bucket effect of the KTO refinement, and Table 1                                                                                  is the right choice for the agentic post-training objec-
+consolidates every variant worth discussing into a single                                                                             tive of this paper, because a model fine-tuned on axis-B
+comparison.                                                                                                                           trajectories acquires the language model’s narration and
+  The pass@k probe on the SFT-stack checkpoint shows                                                                                  classification roles without acquiring an agent-level policy
+pass@8 = 53.3% versus pass@1 = 34.8% on the same                                                                                      at all, but it has a consequence we have to name.
+
+
+                                                                                                                                  7
+Table 1: All variants worth discussing in this paper. Production-strict scoring through the 7-tool ORO ShoppingBench
+harness on the 75-problem leak-cluster-guarded held-out, unless otherwise noted in the Notes column.
+ Model / variant                              75-set ASR          Notes
+ Published baselines from the ShoppingBench paper
+ Qwen3-4B base                                   18.0%            Paper baseline
+ Qwen3-4B + paper SFT (synthetic)                43.6%            Paper recipe with synthetic GPT-4.1 trajectories
+ Qwen3-4B + paper SFT+GRPO                       48.7%            Paper bar this work is measured against
+ Frontier closed-source baselines
+ GPT-5.5                                          38.7%           90-set: 34.4%
+ Claude Sonnet 4.6                                64.0%           Frontier teacher; sourced rollouts for Stage 3
+ ORO SFT stack progression (this paper)
+ rejection v2                                    34.7%            Rejection-sampled re-SFT; 90-set: 25.6%
+ opd sonnet                                      34.7%            Continued teacher-SFT; 90-set: 33.3%
+ opd rebal                                       40.0%            Voucher-balanced teacher corpus; 90-set: 33.3%
+ opd renderers (final SFT stack)                 42.7%            Final reported model; 90-set: 35.6%; pass@1 34.8% / pass@8 53.3%
+    + KTO (β = 0.02, 1 ep)                       42.7%            No net lift on parity eval; bucket-level redistribution
+    + KTO (β = 0.01, 2 ep)                       35.1%            Negative result; over-optimised
+    + Dr. GRPO v19 (per-step tool-match)      process climb       rule score 0.02 → 0.42; hallucinations 14 → 0; exact-match unchanged
+ SN15 leaderboard top miner
+ agent 23175                                      77.3%           Multi-LLM ensemble; 90-set: ∼65%
+
+
+The axis-B firehose is the bulk of the data. In-                   a corpus that is structurally a small fraction of what
+spection of recent SN15 race winners (whose source code            the subnet generates on a single day, and the SFT →
+is open after the post-race embargo) confirms that the             RL pipeline that the published recipe runs on top of
+top-scoring miner policies on the leaderboard are dom-             the corpus has, in our hands, identified the right reward
+inated by sub-task patterns. The race-winning agent                shape (Section 6) but has not yet converted the pass@8
+whose code we audited in detail at the time of writing             headroom into exact-match pass@1 within the training
+is approximately 1,850 lines of Python that calls the              budget we ran. The bottleneck is not the recipe family;
+language model as a narrow intent classifier, a match              the bottleneck is the size of the agentic slice the recipe
+scorer, and a recommendation narrator, while routing               has access to.
+all of the actual catalogue tool calls in deterministic
+Python. The leaderboard reliably converges on this pat-
+tern because, under the current scoring, it outscores              Secondary limitations. Three further limitations are
+the agentic baseline on every quality axis we have mea-            worth flagging briefly. (i) The held-out numbers reported
+sured. The empirical consequence is that the daily SN15            in Section 7 are measured through the 7-tool ORO Shop-
+firehose, in the present configuration of the subnet, is           pingBench harness; published baselines are reported in
+order-of-magnitude dominated by axis-B trajectories: of            the literature against a 4-tool harness with different
+the roughly 12,000 to 27,000 trajectories produced per             system-prompt nudges. We have cross-checked the har-
+day, only the small minority that come from the default            ness shift on a subset of conditions, but the harness is
+agentic baseline or from direct forks of it are axis-A. The        part of the measurement and a reviewer should not over-
+trained model in this paper is therefore working from              interpret a comparison between our numbers and a pub-
+a slice that is much smaller than the published agen-              lished number that does not name its harness. (ii) The
+tic post-training corpora it is being measured against             reasoning-quality coefficient used by the structural filter
+(Glaive Function Calling at approximately 110,000 tra-             is itself an LLM judgement, not a gold label. We rely
+jectories, ToolBench at approximately 16,000, ToolACE              on the coefficient as a per-trajectory process-supervision
+at approximately 11,000).                                          signal, but it inherits the judge’s failure modes; high-
+                                                                   judge-quality trajectories are not guaranteed to encode
+                                                                   the policy we want to imitate, only to encode reasoning
+What this implies about the headline result. The                   that the judge considers consistent with the recommen-
+lift we report in Section 7 is therefore best read as a            dation. (iii) The Dr. GRPO variants we ran do not close
+lower bound on what the subnet trajectory primitive can            the gap to the published SFT+GRPO bar of 48.7%. We
+produce, not as an estimate of the ceiling. The trained            trace this in Section 6 to a combination of reward shape
+model matches the published SFT-only baseline using                at the turn granularity, importance-sampling drift from
+
+
+                                                              8
+the frozen behaviour policy used to seed the rollouts, and        the open-source agent code that produced it as joint
+the same axis-A versus axis-B skew described above.               inputs and rewrite the trace into an agentic axis-A form,
+                                                                  with natural-language reasoning between each tool call,
+9 Future work                                                     grounded in what actually happened. The result is syn-
+                                                                  thetic in the sense that the agentic reasoning is generated,
+The limitations described in Section 8 map cleanly to             but it is grounded in the sense that the tool calls, the
+two threads of future work.                                       observations, and the final recommendation are all real
+                                                                  and verifier-graded. We expect this path to produce,
+                                                                  from a single month of subnet trajectories, a corpus of
+Improving the RL extraction stage. The three
+                                                                  agentic SFT data on the order of the published synthetic
+Dr. GRPO variants reported in Section 6 together iden-
+                                                                  corpora it would be compared against, with the addi-
+tify a specific failure mode and a clear next step. The
+                                                                  tional structural property that the underlying tool calls
+third variant established that a dense, per-step, teacher-
+                                                                  and observations are not hallucinated.
+grounded tool-match reward converts the SFT-stack’s
+latent capability into measurable process improvement                 The second path is on the subnet side, and is the
+within a small number of optimisation steps. The con-             longer-term lever. The reason the axis-B pattern domi-
+version did not reach exact-match success rate on the             nates the leaderboard today is that, under the current
+held-out partition in the twenty steps we were able to            scoring, an axis-B policy outscores an axis-A policy on
+run, but the trend was monotonic and consistent with              the same problem. A modest reweighting of the scoring
+the published recipe’s reported convergence over forty            along an agentic-richness dimension, such that a fraction
+to sixty steps. The first downstream step is therefore            of the score derives from whether the language model
+simply to run the same recipe longer. Beyond that, three          itself emitted the tool calls that the harness dispatched,
+structural improvements appear necessary to fully close           gradually rebalances the population. We are in the pro-
+the pass@8 headroom into pass@1: a periodic refresh               cess of designing and pilot-testing this reweighting on
+of the rollout policy into the trained policy, which ad-          the subnet itself, and we expect the resulting shift in the
+dresses the importance-sampling drift between the frozen          firehose composition to compound with the corpus-side
+behaviour policy that seeds the rollouts and the policy           synthesis path described above: the subnet produces
+currently being updated; a finer turn-level reward signal         more axis-A trajectories at the source, and the corpus-
+that distinguishes good from bad intermediate decisions           side pipeline rewrites the remaining axis-B trajectories
+at the token granularity Dr. GRPO operates at, rather             into agentic form. Together, these change the data pic-
+than rolling up the credit to the rollout level; and a sep-       ture in Section 8 from “a model trained on the small
+arate process-reward head trained on per-trajectory rule          slice of the firehose” into “a model trained on the full
+decomposition (price, service, SKU, attribute), which             firehose,” which we believe is where the headline number,
+gives the policy a denser gradient on the buckets where           the pass@8 gap, and the recipe-versus-substrate framing
+the SFT stack already plateaus. Implementations of all            of Section 1 all converge.
+three are in progress in our open project and are out of
+scope for this paper.
+
+Bringing the axis-B firehose into training. The
+much larger lever, however, is on the data side. The
+current trained model uses only the agentic axis-A slice          Reporting cadence. Both threads have explicit ac-
+of the SN15 firehose. The axis-B slice, which is roughly          ceptance criteria internal to our open project, and we
+an order of magnitude larger by volume and is currently           intend to publish the next round of results as a focused
+the dominant shape of leaderboard policy, is unused. We           follow-up: the RL-extraction work paired with a single
+see two paths to bringing it in.                                  sharper headline number, and the axis-B utilisation work
+                                                                  paired with an analysis of how the recipe behaves as
+    The first path is a corpus-side transformation that           the corpus shifts from axis-A-only to a mixed corpus.
+synthesises axis-A trajectories from axis-B inputs. The           The combination, on the timeline we currently project,
+technique is precedented in the published literature for          is what we expect to close the remaining gap to the
+synthetic agentic data (notably ToolACE and the broader           published SFT+GRPO bar and beyond.
+family of self-evolution recipes), but the input substrate
+in our setting is qualitatively different: the axis-B trace
+already carries a verified outcome, a real catalogue-
+grounded tool-call timeline, and a reasoning-quality coef-
+ficient on the underlying language-model calls. A strong
+external language model can take the axis-B trace plus                               Appendices
+
+                                                              9
+A Corpus construction details                                      2. Single recommend product call. The terminal
+                                                                      recommend product function must appear exactly
+A.1 Trac stages evaluated but not run in produc-                      once across the trace. Multiple recommendations
+    tion                                                              or none disqualify the trace.
+Trac’s later stages, beyond the converter front-end we             3. Parseable recommendation arguments. The ar-
+use in production, constitute a per-row quality oracle for            guments to recommend product must parse as valid
+agentic trajectories. We evaluated all four and chose not             JSON and resolve to product identifiers that the
+to run them at corpus scale on cost grounds. They are                 search server can return.
+summarised here for reproducibility.                               4. Token-count budget. The total token count of the
+                                                                      trace, measured under the trainer’s tokeniser, must be
+1. Freeze. A freeze-admit gate that admits only traces                at most max length = 14336. Longer traces silently
+   whose outcome was successful by default. We added                  truncate during training and are rejected upstream.
+   an ORO ALLOW FAILED TRACES flag that admits failed
+                                                                   5. No assistant-only-think-then-stop. The trace
+   traces too and lets the downstream supervisor decide
+                                                                      must not terminate on an assistant think turn without
+   their usability.
+                                                                      committing to a recommendation. Traces that stop
+2. Annotate. Five LLM agents annotate each admitted                   mid-loop without emitting recommend product or
+   trace in sequence, each scoring a different dimension              terminate are rejected.
+   (intent understanding, search-strategy quality, obser-
+   vation interpretation, recommendation justification,            A.3 Structural-quality ranking signals
+   supervisor pass with a binary train use decision).
+   Annotators are required to cite specific spans of the           Within each problem, candidate trajectories are ranked
+   trace as evidence.                                              by a small set of structural-quality signals computed
+                                                                   directly from the trace.
+3. Tasklet compile. For each accepted trace, Trac
+   compiles a self-contained tasklet whose target prod-            • Think-and-tool-call depth. A proxy for gen-
+   uct identifiers must be retrievable from policy-visible           uine search refinement rather than one-shot guessing.
+   prompt terms. Tasklets that fail this grounding check             Higher is better.
+   are dropped.
+                                                                   • Search-query reformulation count. The number
+4. Autodata verifier. A teacher-student verifier loop                of distinct search queries the language model emits.
+   attempts the tasklet with two models of different                 Higher counts indicate iterative refinement.
+   capability. Tasklets where the teacher succeeds with
+                                                                   • Verification step presence. Trajectories that issue
+   a calibrated margin over the student, but where the
+                                                                     a check product match or follow-up view product
+   student does not trivially solve the task, are accepted
+                                                                     call before the final recommendation are ranked
+   as final training rows.
+                                                                     higher.
+    The end-to-end conversion rate from raw trajectory             • Step-shape regularity. Trajectories with long
+to a verifier-accepted training row, measured on a repre-            stretches of identical tool calls (a proxy for loops,
+sentative run, is roughly one in a thousand. The largest             retries, or pathological behaviour) are ranked lower.
+single drops are at the freeze stage (most production
+traces fail strict outcome checks) and the autodata ver-              When two trajectories on the same problem tie on
+ifier stage (the most common failure mode is that the              these signals, ties are broken by selecting trajectories with
+student model trivially solves the tasklet, which collapses        maximally different tool-call shape signatures, so each
+the teacher-student gap). At the corpus scales needed              problem teaches at least two distinct policies wherever
+for a ShoppingBench-class model, the annotator cost of             possible.
+running Trac end-to-end on the full firehose is substan-
+                                                                   A.4 Leak-cluster guard for the held-out partition
+tial, and only strictly grounded-output frontier models
+survived Trac’s evidence-citation gate.                            Race-bank problems can be paraphrased, attribute-
+                                                                   reordered, or retailer-substituted into surface forms that
+A.2 Format-validity gate (five hard rejects)                       look distinct but share the same underlying reward spec-
+The format-validity gate hard-rejects any trace that fails         ification. The subnet maintains a clustering of problem
+any one of five structural invariants.                             identifiers by leak-cluster membership, and validators
+                                                                   are required to honour the clustering when partitioning
+1. Tool-call ↔ tool-response pairing. Every assis-                 race-bank problems between open and held-out. Con-
+   tant tool-call must be matched by a corresponding               cretely, we cluster all race-bank problems by leak-cluster
+   tool-response in the next turn. Unmatched tool calls            identifier, partition leak clusters into a training pool,
+   indicate a truncated or malformed trace.                        an evaluation pool, and a never-touch pool, and verify
+
+
+                                                              10
+that the intersection between training problem identi-            rollouts that score 1.0 are kept. Passing rollouts are
+fiers and evaluation problem identifiers is exactly empty         concatenated with the SFT corpus at a fixed ratio (50/50
+across leak clusters. The evaluation pool is stratified by        in the reported run, with an ablation against 70/30 noted
+intent bucket (product, shop, voucher), seeded for repro-         in the project log) and used as the next-stage training
+ducibility, and frozen before any training kicks off. The         set.
+static problem suites are disjoint from both partitions
+by construction.                                                  B.4 Continued teacher-SFT corpus
+                                                                  The teacher trajectory pool used in this paper comes
+B Post-training hyperparameters and in-                           from running Claude Sonnet 4.6 through the held-out
+  frastructure                                                    evaluation harness on a 498-problem race-bank training
+                                                                  set. Roughly 210 of the 498 trajectories score under
+B.1 Common SFT configuration                                      production-strict scoring; these are rendered to a step-
+                                                                  wise corpus (with the voucher bucket up-sampled 3×
+All supervised fine-tuning stages share a common con-
+                                                                  to match the shop count) and stacked on the rejection-
+figuration. The base model is Qwen3-4B. We train
+                                                                  sampled SFT base.
+one epoch with LoRA, sweeping the learning rate over
+{1×10−5 , 3×10−5 , 1×10−4 } and selecting by held-out             B.5 KTO configuration
+loss. Across all SFT stages we set max length = 14336,
+use SDPA attention, and turn on gradient checkpointing.           We train KTO with the TRL implementation. The re-
+We use the PrimeIntellect renderers package version               ported runs use β = 0.02, learning rate 5 × 10−6 , one
+0.1.7 for input rendering and assistant-loss-mask com-            epoch, attention-only LoRA with rank r = 16, and a
+putation; bare Hugging Face apply chat template for               context length of 16384. Training is monitored with an
+Qwen3-4B produces a token sequence that diverges from             early-stop guard on the recommend product emission
+the Trac-exported rows by approximately twenty tokens             rate that halts training the moment the rate drops be-
+and cannot compute the mask at all because the Qwen               low 0.9. Final training-time KL is approximately 0.9.
+template lacks the markers the standard template uses.            A tighter-β variant (β = 0.01, two epochs, otherwise
+                                                                  identical) was trained and evaluated; it over-optimised
+B.2 Practice-run bug catalog                                      and regressed across every bucket, and is reported as a
+                                                                  negative result.
+The practice run surfaced a handful of bugs that we
+explicitly guard against in all reported runs.                    B.6 Dr. GRPO variants
+
+• Dropout during generation. Sampling rollouts                    We report three Dr. GRPO variants on top of the post-
+  under model.train() mode leaves dropout active                  teacher-SFT checkpoint.
+  and corrupts the on-policy data. All rollout sampling
+  is now performed under model.eval().                            • v17. B = 3 problems per step, K = 6 samples
+                                                                    per problem, learning rate 10−6 , KL anchor β = 0.1,
+• Loss-mask          drift.                 The      TRL
+                                                                    outcome-only reward. Plateaued at 40-43% with KL
+  DataCollatorForCompletionOnlyLM silently masks
+                                                                    loss spikes into the 17-21 range.
+  past the assistant boundary on Qwen3 traces because
+  Qwen3 strips the </im end> token from non-final                 • v18. B = 8, learning rate 5×10−7 , β = 0.2, otherwise
+  assistant turns. We replace it with the PrimeIntellect            identical. KL contained within 1.0-2.0; mean reward
+  renderers masker for all SFT stages.                              did not climb.
+• Mask validation. Before every GRPO update we                    • v19.       v18 hyperparameters plus a blended
+  assert that mask= 1 positions decode to valid assistant           outcome-plus-tool-match reward, tool weight = 0.5,
+  content.                                                          max rollout steps raised from 15 to 25 to match the
+                                                                    held-out harness. Tool-match component grades the
+• Stop-token off-by-one. Qwen3 strips </im end>
+                                                                    policy’s per-step tool name and tool argument choice
+  from non-final assistant turns; the rollout-step counter
+                                                                    against a Sonnet 4.6 teacher trajectory. Trained sta-
+  must account for this when computing rewards on the
+                                                                    bly for 20 of a planned 30 steps on a Modal 12-hour
+  surface text.
+                                                                    wall-clock limit. References: opd sonnet 500, 430 of
+B.3 Rejection-sampled re-SFT parameters                             527 training problems matched (82% coverage).
+
+We sample k = 8 rollouts per training-set problem at                 All three variants use the multi-turn execution har-
+temperature 0.9, top p = 0.95, and max turns = 8                  ness against a deployed Lucene index serving roughly
+through the multi-turn execution harness. Rollouts are            2.7M ShoppingBench products. The rollout server
+scored under the ShoppingBench bucket-aware reward;               runs vLLM 0.9.2 on a dedicated H200 instance with
+
+
+                                                             11
+max model len = 32768 (raised from the previous 16384            [11] Yuma Rao, Jacob Steeves, and Ala Shaabana. Bit-
+after a context-overflow bug surfaced in v19 with rollout             tensor: A peer-to-peer intelligence market. Bittensor
+histories averaging 19 turns).                                        Foundation, 2024. URL https://docs.bittensor.
+                                                                      com/.
+References                                                       [12] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu,
+ [1] ShoppingBench Authors. Shoppingbench: A multi-                   Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan
+     turn, tool-use benchmark for agentic commerce.                   Zhang, Y. K. Li, Y. Wu, and Daya Guo. Deepseek-
+     arXiv preprint arXiv:2508.04266, 2025. URL https:                math: Pushing the limits of mathematical rea-
+     //arxiv.org/abs/2508.04266.                                      soning in open language models. arXiv preprint
+                                                                      arXiv:2402.03300, 2024. URL https://arxiv.org/
+ [2] Cognition. Introducing swe-1.5. Cognition Engi-                  abs/2402.03300.
+     neering Blog, 2025. URL https://cognition.ai/
+                                                                 [13] Ilia Shumailov, Zakhar Shumaylov, Yiren Zhao,
+     blog/swe-1-5.
+                                                                      Nicolas Papernot, Ross Anderson, and Yarin
+ [3] Cursor. Introducing composer 2.5. Cursor Engineer-               Gal. Ai models collapse when trained on recur-
+     ing Blog, 2025. URL https://cursor.com/blog/                     sively generated data. Nature, 631(8022):755–759,
+     composer-2-5.                                                    2024. URL https://www.nature.com/articles/
+                                                                      s41586-024-07566-y.
+ [4] DeepSeek-AI. Deepseek-r1: Incentivizing reasoning
+                                                                 [14] Tianbao Xie, Danyang Zhang, Jixuan Chen, et al.
+     capability in llms via reinforcement learning. arXiv
+                                                                      Osworld: Benchmarking multimodal agents for
+     preprint arXiv:2501.12948, 2025. URL https://
+                                                                      open-ended tasks in real computer environments.
+     arxiv.org/abs/2501.12948.
+                                                                      arXiv preprint arXiv:2404.07972, 2024. URL https:
+ [5] Kawin Ethayarajh, Winnie Xu, Niklas Muennighoff,                 //arxiv.org/abs/2404.07972.
+     Dan Jurafsky, and Douwe Kiela. Kto: Model align-            [15] Zhangchen Xu, Fengqing Jiang, Luyao Niu, Yun-
+     ment as prospect theoretic optimization. arXiv                   tian Deng, Radha Poovendran, Yejin Choi, and
+     preprint arXiv:2402.01306, 2024. URL https:                      Bill Yuchen Lin. Magpie: Alignment data synthesis
+     //arxiv.org/abs/2402.01306.                                      from scratch by prompting aligned llms with noth-
+ [6] Carlos E. Jimenez, John Yang, Alexander Wettig,                  ing. arXiv preprint arXiv:2406.08464, 2024. URL
+     Shunyu Yao, Kexin Pei, Ofir Press, and Karthik                   https://arxiv.org/abs/2406.08464.
+     Narasimhan. Swe-bench: Can language models re-              [16] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Tianle
+     solve real-world github issues? International Con-               Li, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang,
+     ference on Learning Representations (ICLR), 2024.                Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao
+     URL https://arxiv.org/abs/2310.06770.                            Zhang, Joseph E. Gonzalez, and Ion Stoica. Chatbot
+                                                                      arena: An open platform for evaluating llms by
+ [7] Nathan Lambert, Jacob Morrison, Valentina Py-
+                                                                      human preference. arXiv preprint arXiv:2403.04132,
+     atkin, et al. Tülu 3: Pushing frontiers in open
+                                                                      2024. URL https://arxiv.org/abs/2403.04132.
+     language model post-training. arXiv preprint
+     arXiv:2411.15124, 2024. URL https://arxiv.org/              [17] Shuyan Zhou, Frank F. Xu, Hao Zhu, Xuhui Zhou,
+     abs/2411.15124.                                                  Robert Lo, Abishek Sridhar, Xianyi Cheng, Yonatan
+                                                                      Bisk, Daniel Fried, Uri Alon, and Graham Neubig.
+ [8] Weiwen Liu, Xu Huang, Xingshan Zeng, et al.                      Webarena: A realistic web environment for build-
+     Toolace: Winning the points of llm function call-                ing autonomous agents. International Conference
+     ing. arXiv preprint arXiv:2409.00920, 2024. URL                  on Learning Representations (ICLR), 2024. URL
+     https://arxiv.org/abs/2409.00920.                                https://arxiv.org/abs/2307.13854.
+ [9] Zichen Liu et al.     Understanding r1-zero-like
+     training: A critical perspective. arXiv preprint
+     arXiv:2503.20783, 2025. URL https://arxiv.org/
+     abs/2503.20783.
+
+[10] Yujia Qin, Shihao Liang, Yining Ye, et al. Toolllm:
+     Facilitating large language models to master 16000+
+     real-world apis. arXiv preprint arXiv:2307.16789,
+     2023. URL https://arxiv.org/abs/2307.16789.
+
+
+                                                            12
+

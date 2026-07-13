@@ -1,0 +1,1769 @@
+                                               From Patches to Trajectories: Privileged Process
+                                                Supervision for Software-Engineering Agents
+
+
+                                                        Murong Ma1∗ Tianyu Chen2† Yun Lin3† Shuai Lu2 Qinglin Zhu4
+                                                     Yeyun Gong2† Zhiyong Huang1 Peng Cheng2 Yan Lu2 Jin Song Dong1
+                                                             1
+                                                               National University of Singapore 2 Microsoft Research Asia
+                                                                3
+                                                                  Shanghai Jiao Tong University 4 King’s College London
+
+
+
+
+arXiv:2605.21996v1 [cs.SE] 21 May 2026
+                                                                                               Abstract
+                                                     Supervised fine-tuning (SFT) on long teacher trajectories is the dominant
+                                                     method for instilling investigation and reasoning capabilities into open software-
+                                                     engineering (SWE) agents. Under SFT, every retained response is an imitation
+                                                     target, so the student inherits not only the trajectory’s outcome but also any flaw
+                                                     in its intermediate steps, including ungrounded leaps and redundant loops. High-
+                                                     quality training data must therefore be jointly effective (each step is grounded and
+                                                     narrows the agent’s epistemic gap to the correct fix) and efficient (each step is
+                                                     information-bearing rather than redundant or looping). Existing recipes filter or
+                                                     relabel teacher rollouts using only a binary terminal verifier, which does not directly
+                                                     target these axes and provides no supervision on instances where the teacher fails.
+                                                     Every real issue ships with a developer-authored reference patch p⋆ that implicitly
+                                                     testifies to the file paths, runtime behaviors, and conventions a fix presupposes,
+                                                     but the standard pipeline discards it. We propose P2T (Patches-to-Trajectories),
+                                                     which uses p⋆ as privileged information during curation, and frames trajectory
+                                                     construction as a bi-objective program over per-step effectiveness and trajectory
+                                                     length. A reverse phase distills p⋆ into a latent process graph G⋆ of contextual
+                                                     facts and solution milestones, encoding dense intermediate anchors in constructive
+                                                     ordering. A forward phase curate trajectories from blinded teacher continuations,
+                                                     scoring per-step progress against G⋆ under a leakage-blocking groundedness check
+                                                     and committing the shortest segments that retain effectiveness.
+                                                     Using only 1.8k curated SWE-Gym instances, P2T improves both axes simultane-
+                                                     ously over outcome-filtered SFT and its tool-error-masking variant: on SWE-bench
+                                                     Verified, it lifts Pass@1 by up to +10.8 points while cutting per-instance inference
+                                                     cost by ∼ 15%, with consistent gains on SWE-bench Lite and across two teach-
+                                                     ers. A size-matched ablation and qualitative analysis further isolate per-trajectory
+                                                     quality from data scale.
+
+
+                                         1     Introduction
+                                         Autonomous software-engineering agents built on large language models (LLMs) are now routinely
+                                         competitive on real GitHub issue-resolution benchmarks [5, 2, 29, 26], navigating repositories,
+                                         localizing faults, editing code, and validating fixes [23, 17]. A capable agent must do more than
+                                         emit a final patch that happens to pass: it must learn to investigate, reason, and validate, the per-
+                                         step competencies that make terminal success reproducible rather than incidental. The dominant
+                                         route to instilling these competencies in open base models is supervised fine-tuning (SFT) on long
+                                         trajectories from strong teacher models [9, 10, 4, 28], which provides dense process supervision
+                                             ∗ Work done during internship at Microsoft Research.
+                                             † Corresponding authors: chentianyu@microsoft.com, lin_yun@sjtu.edu.cn, yegong@microsoft.com.
+
+
+
+                                         Preprint.
+across turns of ReAct-style interactions [25]. Under SFT—a behavior-cloning objective for sequential
+decision problems [13]—every retained response is an imitation target, so the student inherits not
+only the trajectory’s outcome but also any flaw in its intermediate steps. Each trajectory therefore
+needs two complementary properties. Effectiveness: each step narrows the agent’s epistemic gap
+to the correct fix by uncovering a fact the fix presupposes, grounded in the visible prefix with no
+unsupported leaps or premature conclusions. Efficiency: each step is information-bearing, advancing
+the trajectory rather than re-deriving established facts, looping on uninformative actions, or padding
+with redundant exploration. The two are in direct tension: cautious exploration lengthens trajectories,
+while aggressive shortening invites unsupported shortcuts. Constructing trajectories on the right side
+of this tradeoff is the central data problem for SFT of SWE agents.
+Existing recipes do not directly target these axes. The standard pipeline samples teacher rollouts
+and retains only those whose final patch passes the issue’s tests [10]; variants scale the instance
+pool by procedurally synthesizing executable issues [24, 4, 28]. All inherit the same binary terminal
+verifier: an outcome-supervision signal that supplies feedback only on the final result rather than
+on intermediate reasoning steps [7]. It is therefore structurally indifferent to either axis. On the
+SWE-Gym training pool, retained trajectories often exhaust the 100-iteration budget without reaching
+a normal finish, accidentally tripping the test suite (7.6% under the Qwen3-Coder-480B teacher, 9.3%
+under GLM-5-FP8); 6.8%/8.6% of their file-viewing actions revisit content already viewed earlier in
+the trajectory; and 70.2%/64.7% of instances contribute no supervision because the teacher never
+produces a passing patch. Independent audits further show that a non-trivial share of “passing” patches
+reflect weak tests or solution leakage rather than correctness [1]; more broadly, test-suite-based
+program repair has long been known to admit plausible but incorrect or overfitted patches [12, 14].
+The verifier is therefore not even tight on its own axis. The remaining question is therefore not how
+to acquire more tasks, but how to extract better per-trajectory supervision from the real ones.
+The signal that addresses both axes is already available, but unused: the developer-authored reference
+patch p⋆ associated with each issue–pull-request instance in real-issue SWE benchmarks [5], which
+enters the standard pipeline only as a discarded ground truth. As process supervision, p⋆ is uniquely
+well-positioned, since each line of it implicitly testifies to the file paths, runtime behaviors, and
+conventions a solver would have had to uncover before the edit becomes derivable. We therefore
+propose to use p⋆ as privileged information [16] during curation: a quantity the data-construction
+procedure may consult to score and shape trajectories, but that the student never sees. With p⋆ in scope,
+the curator can score per-step progress against the prerequisites a fix presupposes (effectiveness), keep
+only information-bearing steps (efficiency), and recover supervision precisely on the hard instances
+where ordinary teacher rollouts fail.
+The challenge is that conditioning trajectory generation directly on p⋆ leaks the answer: any prefix
+built with p⋆ in scope risks splicing in edits, claims, or file references no honest investigation could
+yet support, and a student that imitates such a trace internalizes the same unjustified leaps. We
+therefore propose P2T (Patches-to-Trajectories), which frames trajectory curation as a bi-objective
+program over per-step effectiveness and trajectory length, and mediates p⋆ through a latent process
+graph G⋆ distilled from it, so the curator can shape trajectories along both axes without ever exposing
+p⋆ to the student. Empirically, P2T improves both axes simultaneously over outcome-filtered SFT
+and its tool-error-masking variant: on SWE-bench Verified, it lifts Pass@1 by up to +10.8 points
+while cutting per-instance inference cost by ∼ 15%, and a size-matched control already beats both
+baselines on both axes, isolating per-trajectory quality from data scale. Our contributions are as
+follows:
+
+
+       • We frame SWE-agent SFT data construction as a bi-objective program over per-step effec-
+         tiveness and trajectory length, and show that outcome-filtered rejection sampling provides
+         no per-step or length signal.
+
+       • We propose P2T, a curation framework that uses p⋆ as privileged information: a reverse
+         phase distills p⋆ into a process graph G⋆ of contextual facts and solution milestones, and a
+         forward phase realizes trajectories that are short, grounded, and steered by G⋆ .
+
+       • Using only 1.8k curated SWE-Gym trajectories, P2T improves Pass@1 by up to +10.8
+         points while cutting per-instance inference cost by ∼ 15% over outcome-filtered SFT, on
+         SWE-bench Verified and Lite across two students and two teachers.
+
+
+                                                   2
+2     Related Work
+
+SWE agents and benchmarks. SWE-bench [5] catalyzed a line of inference-time systems for
+repository-level issue resolution: ReAct-style tool use [25], SWE-agent’s agent–computer inter-
+face [23], the OpenHands platform [18], structure-aware retrieval in AutoCodeRover [30], and the
+simpler localize–repair–validate pipeline of Agentless [20]. Audits show that terminal pass/fail can
+overstate correctness when tests are weak or issues leak the solution [1, 19]. Our work is orthogonal
+to these scaffolds: we improve the per-step quality of the SFT trajectories on which such agents are
+trained.
+Trajectory data for open SWE agents. Existing recipes scale executable tasks and retain trajectories
+that pass a terminal verifier: SWE-Gym [10] on real Python issues, R2E-Gym [4] with procedural
+construction and hybrid verifiers, SWE-smith [24] via test-breaking synthesis, and Skywork-SWE [28]
+on large-scale curation and trajectory scaling. All retain whole successful rollouts, inheriting their
+detours, redundant observations, and unsupported inferences. P2T instead treats p⋆ as privileged
+curation information, distilled into G⋆ to expose only the prerequisites a fix presupposes, while never
+showing p⋆ to the student.
+Trajectory and context reduction for LLM agents. A complementary line attacks the inference-time
+cost of long agent histories: AgentDiet prunes useless, redundant, or expired entries from coding-
+agent trajectories at run time [21], while ACON learns to compress observations and interaction
+histories for long-horizon agents [6]. These methods leave the underlying policy fixed and shorten
+what it consumes; P2T instead shortens what it produces at training time, so the resulting student is
+intrinsically efficient and remains compatible with such inference-time compressors.
+
+
+3     Problem Setting
+
+We study the construction of process-supervision data for supervised fine-tuning (SFT) of autonomous
+software-engineering agents. Under SFT, every response in a training trajectory becomes an imitation
+target, so a trajectory’s training value is bounded by its weakest step: a passing terminal patch does
+not redeem a prefix that contains hallucinated reasoning, redundant exploration, non-progressing
+action loops, or uninformative tool calls. Data construction must therefore control two complementary
+properties of each trajectory: process effectiveness—every step makes prefix-grounded progress
+toward the reference fix, and process efficiency—the trajectory is short, to limit student inference cost
+and reduce the surface area of imitation noise. The two are in direct tension: cautious, well-grounded
+exploration lengthens trajectories, while aggressive shortening invites unsupported leaps. We frame
+trajectory curation as a bi-objective optimization problem over these two criteria.
+
+
+3.1   Trajectories and the SFT Objective
+
+A task instance is a tuple Ii = (di , Ri , Ei , Ti , p⋆i ), where di is the issue description, Ri the
+repository at the pre-fix commit, Ei a sandboxed execution environment exposing a fixed tool set
+(file viewing, shell execution, code editing), Ti the issue’s test suite, and p⋆i the reference fix patch.
+We split the components of Ii into the non-oracle bundle xi := (di , Ri , Ei ) that any solver may
+consume, and the oracle bundle (p⋆i , Ti ), which the data-construction procedure may use to evaluate
+trajectories.
+The agent interacts with Ri through Ei . At turn t it observes the visible prefix ht =
+(di , y1 , o1 , . . . , yt−1 , ot−1 ) and emits a ReAct-style response yt = (ct , at ), comprising reason-
+ing ct and an action at ; executing at in Ei returns an observation ot . A trajectory is the result-
+ing sequence τi = (di , y1 , o1 , . . . , yT , oT ), and a constructed collection induces the SFT dataset
+D = {(ht , yt ) : (ht , yt ) ∈ τi }. The student πθ is trained by behavioral cloning,
+                                                                       
+                             LSFT (θ) = − E(ht ,yt )∼D log πθ (yt | ht ) .
+
+Because every retained response becomes a training target, data construction must control not only
+whether the final patch is correct, but whether the intermediate process is itself worth imitating.
+
+
+                                                    3
+3.2   Outcome-Filtered Trajectory Collection
+
+The dominant paradigm uses Ti purely as a terminal verifier and discards p⋆i . Given a teacher policy
+                                 (k)
+πT , one samples K trajectories τi ∼ πT (· | xi ) per instance and retains those whose induced patch
+  (k)          (k)
+p̂i = patch(τi ) passes the test suite:
+                                                  (k)         (k) 
+                           DOF = (ht , yt ) ∈ τi        : Ti p̂i     =1 .
+This procedure treats terminal success as the only supervision signal. As a result, retained data might
+include low-quality trajectories, i.e. failing to distinguish a concise, evidence-driven solution from
+one that succeeds after redundant search, unsupported claims, or accidental edits.
+
+3.3   Patch-Oracled Bi-objective Trajectory Construction
+
+To avoid such low-quality trajectory, in this paper, we propose to utilize the reference patch p⋆i , which
+encodes precisely how a competent developer resolves the issue as a source of process supervision.
+Specifically, we make p⋆i a process oracle: a trajectory is judged by whether its steps uncover the
+evidence—file and symbol localizations, runtime behavior, and implementation choices—needed
+to derive a fix equivalent to p⋆i . This admits any trajectory that establishes the right intermediate
+evidence, and rejects trajectories whose patch happens to pass.
+Bi-objective trajectory target. We score each trajectory along two axes. Process effectiveness
+Eff i (τ ) ∈ [0, 1] rewards steps that uncover fix-relevant evidence without leaping ahead of what the
+prefix supports; we keep it abstract here and instantiate it in Sec. 4 via a process graph G⋆i distilled
+from p⋆i . Process efficiency is the trajectory length in generated response tokens, Leni (τ ). When
+given a set of trajectories T (Ii ) on task Ii , we pick our target one by the shortest-above-floor rule:
+among trajectories whose effectiveness clears a calibrated floor ηi , take the shortest (a standard
+ε-constraint scalarization of bi-objective programs [8]); the chosen trajectory is admitted into the SFT
+dataset only if its final patch passes the test suite Ti :
+        τi⋆ = arg min Leni (τ )         s.t.   Eff i (τ ) ≥ ηi ,   Dours = {(ht , yt ) ∈ τi⋆ }N
+                                                                                              i=1 .
+                    τ ∈T (Ii )
+
+
+Open challenges. This formulation leaves two questions for Sec. 4: (i) how to anchor process
+effectiveness so that it captures fix-relevant progress, is sensitive to ungrounded leaps, and is not itself
+a leakage channel for p⋆i ; and (ii) how to operationalize the resulting bi-objective program tractably,
+given that T (Ii ) cannot be searched exhaustively.
+
+4     Method
+We instantiate the bi-objective program of Section 3.3 with a two-phase pipeline that resolves its two
+open challenges in turn:
+
+       • Phase 1: Process Graph Distillation (Sec. 4.1). We distill p⋆i into a latent process graph
+         G⋆i whose nodes name the intermediate contextual facts and solution milestones that must
+         be established before the fix becomes derivable, and on top of G⋆i we define a progress
+         score that measures how much of the graph a trajectory legitimately uncovers—this resolves
+         challenge (i).
+       • Phase 2: Receding-Horizon Bi-Objective Trajectory Realization (Sec. 4.2). We grow the
+         trajectory one segment at a time via a sliding window. Within each window, we sample a set
+         of candidate segments and apply the same shortest-above-floor rule from Sec. 3.3 locally,
+         then repeat on the extended prefix—this resolves challenge (ii).
+
+Figure 1 illustrates the pipeline.
+
+4.1   Phase 1: Process Graph Distillation
+
+The reference patch p⋆i defines the target state of the repository, but does not itself describe a valid
+discovery process: conditioning trajectory generation directly on p⋆i would let edits and unsupported
+
+
+                                                      4
+            Phase 1: Process Graph Distillation                                                             Phase 2: Bi-Objective Trajectory Realization
+                                  (From Patch to Graph)                                                                            (From Graph to Trajectory)
+                                                                                                                                                                                                        Environment
+                    Stage 1: Candidate Node Distillation                                               Privileged
+                                                                                                                                                                     Blinded Solver 𝝅𝒃𝒍𝒊𝒏𝒅
+                                                                                                                              Prerequisite graph 𝑮∗                   Observe visible history ℎ𝑡 only
+                 Proposer Agent                                                                        Curator                (privileged guidance)
+                                                                         Sufficiency                                                                               visible history at step t:
+             Sufficiency expansion
+                                                                                                                                                                   ℎ𝑡 = 𝑥, 𝑦1 , 𝑜1 , … , 𝑦𝑡−1 , 𝑜𝑡−1
+     • identify missing fact or invariant                                expansion                   • Update node
+     • propose static/dynamic unlocker                                                                 usage state                                                                            𝑘
+                                                                                                                                                                     Rollout k blinded seeds 𝜏blind
+     • expand K                                                          Minimality
+                          Environment                                                                • Monitor and
+                                                                          pruning
+                                                                                                       curate rollout                                            resp. obs.      resp.   obs. … resp.      obs.
+                                                                                                       candidates.    visible history at step t ℎ𝑡 and
+                                                                                                                                             𝑘                    𝑦𝑡1   𝑂𝑡1       𝑦𝑡2     𝑂𝑡2    𝑦𝑡𝑘       𝑂𝑡𝑘
+                                                                Critic Agent                                               blinded rollout 𝜏blind
+                  Candidate Nodes                                                                                                                                blinded seeds
+                  𝑉 = {𝑉1 , 𝑉2 , 𝑉3 , … , 𝑉𝑛}                   Minimality pruning
+        static     view code 𝑆1 : relevant code                 • Non-leakage
+                                                                • merge redundant                resp. 𝑦෤𝑡𝑖
+        static        grep        𝑆2 : API behavior                                                                  curated mutants                                                     Commit 𝑦𝑡⋆
+                                                                • drop unnecessary               rejected
+       dynamic     python -c 𝑆3 : runtime value                                                                          𝑦෤𝑡1 …,𝑦෤𝑡𝑘                                                     update ℎ𝑡
+                         …                                      •…
+                                                                                                                                                          Candidate pool                            Curated
+                                                                                                     Hybrid Groundness Critic
+                                                                                                                                                         𝒮𝓉 = {𝑦𝑡1 , … , 𝑦𝑡𝐾 }                     grounded
+                                                                                                     visible history at step t ℎ𝑡 and   resp. 𝑦෤𝑡𝑖            ෪1 , … , 𝑦෪
+                                                                                                                                                                        𝐾                         trajectory 𝝉
+                                                                                                                                                           ∪ {𝑦         𝑡 }
+                       Stage 2: Prerequisite edges wiring                                                                     (t:t+n)
+                                                                                                       exploratory rollout 𝜏blind       accepted               𝑡
+                                                                                                                                                                                                     resp. 𝑦̂0
+                                                                                                         Neural Casual Closure                           Bi-Objective Trajectory                        obs. 𝑜0
+                                                                             Fact nodes 𝑉𝐹               no premature claims or
+      Routing Agent                                                                                                                                             Selection                               resp. 𝑦̂1
+      Generate graph 𝐺 ∗                                                     Artifact nodes 𝑉𝐴           reasoning
+                                                 issue     relevant
+    • Wire prerequisite                                      code                                                                                    𝑠𝑡⋆ = arg min Lent 𝑠                               obs. 𝑜1
+                                                                                                           Symbolic Referential                                     𝑠∈𝒫𝓉                                   …
+      edges into a DAG
+                                                runtime      failing       API                             Integrity                                     s.t.   Efft 𝑠; 𝐺𝑖⋆ ≥ 𝜂𝑡                      resp. 𝑦̂T−1
+                                                 value     invariant     behavior                       𝐸 yො 𝑡 ⊆ 𝑂𝑏𝑠𝑒𝑟𝑣𝑒𝑑 ℎ<𝑡
+         Environment                                                                                                                                                                                   obs. 𝑜T−1
+                                                                                                         • extract referenced                        • Efft 𝑠; 𝐺𝑖⋆ : realizing
+                                                               issue         reproduction                  files, symbols, APIs                        node in trajectory
+                                                fix plan                                                 • Existence checking
+       Feasible                                               analysis           script                                                              • Lent 𝑠 : token-level
+                                                                                                                                                                                                  Process
+       ordering                                                                                                                                        length
+                                                                                                                                                                                                  supervision
+                                                                                                         Trajectory control flow
+                                                                                                                                                                                                  dataset 𝑫𝒄𝒖𝒓
+                                                                                                         Trajectory data flow
+
+
+
+
+Figure 1: Overview of P2T. Phase 1 (Sec. 4.1) distills the reference patch p⋆i into a minimal latent
+process graph G⋆i of contextual facts and solution milestones—including the eventual edits and
+validations—that any solver would need to uncover. Phase 2 (Sec. 4.2) realizes a trajectory by
+sampling blinded continuations, locally mutating them toward currently available graph nodes, and
+committing the segment that achieves both effectiveness and efficiency (defined in Sec. 3.3).
+
+leaps appear in the prefix before the agent has any evidence to justify them. We therefore convert p⋆i
+into a latent process graph
+                                          G⋆i = (Vi , Ei ),
+in which each node v ∈ Vi names an intermediate contextual fact or solution milestone that any
+solver would need to establish before the fix becomes derivable, and each edge encodes a prerequisite
+relation. G⋆i is the structure on which the per-step effectiveness signal is defined.
+Node format. Each node is represented as v = (sv , ηv , uv ), where sv is a natural-language
+statement, ηv a type tag, and uv an explicit unlocker: the environment interaction needed to discover
+sv . We use two kinds of nodes. Contextual-fact nodes record claims about the repository or its
+runtime behavior whose discovery is a prerequisite for fixing the issue; their unlockers are either
+static (no execution required, e.g., reading a file, inspecting a class hierarchy, or a repository-wide
+grep) or dynamic (require execution, e.g., running a test, evaluating a probe script, or inspecting
+runtime values). Solution-milestone nodes record the intermediate products an agent must construct
+on the way to the fix—reproduction scripts, root-cause analyses, fix plans, code edits, and validation
+runs—whose unlockers are the corresponding tool calls (writing a script, drafting an analysis or plan,
+applying an edit, running the test suite).
+Three desiderata for G⋆i . We require G⋆i to be jointly: (i) sufficient—the issue, repository, and
+graph nodes together make p⋆i plausibly derivable, so that no essential localization, behavioral, or
+implementation fact is omitted; (ii) non-leaking—each node’s unlocker is conceivable from the issue,
+repository, and the node’s predecessors alone, so that proposing the unlocker does not presuppose
+knowledge of p⋆i (e.g. an edit node may not appear before its motivating root-cause-analysis and fix-
+plan nodes); (iii) feasibly ordered—the graph admits a topological order realizable through ordinary
+environment interaction, with each node discoverable only after its prerequisites are established.
+Instantiation. We construct G⋆i by an iterative proposer–critic procedure implemented with two
+                                          (0)
+specialized LLM agents. Starting from Vi = ∅, the proposer adds candidate nodes that close the
+                            ⋆
+remaining logical gap to pi , each annotated with a candidate unlocker; this targets desideratum (i),
+sufficiency. The critic then prunes any candidate whose declared unlocker is not motivated by the
+                    (t)
+nodes already in Vi —for instance, an edit node introduced before any root-cause-analysis or fix-
+
+
+                                                                                                 5
+plan node—and emits feedback indicating which aspects remain under-determined; this enforces
+desideratum (ii), non-leakage. The loop terminates when the node set stabilizes. A final organization
+step then links the surviving nodes into the DAG G⋆i by drawing a prerequisite edge from u to v
+whenever u must be established before v’s unlocker can apply, enforcing desideratum (iii), feasible
+ordering. Full prompts are deferred to App. D; a worked example on a real SWE-Gym instance is
+given in App. I.
+Node establishment. We say a node v is established by a trajectory prefix ht , written Est(v, ht ) = 1,
+when both: (a) some action in ht matches requirement specified by uv (e.g., a repository-wide grep
+for an unlocker requiring a grep action); and (b) an LLM verifier, conditioned only on the text of ht ,
+judges that the resulting observations entail the statement sv . Restricting the verifier to ht —rather
+than letting it probe the repository on its own—ensures that establishment reflects what the trajectory
+has actually surfaced, not what is in principle knowable. We write Ut = {v ∈ Vi : Est(v, ht ) = 1}
+for the established set at step t. The verifier prompt is deferred to App. H.
+Graph-aware progress. We want each step of a trajectory to advance coverage of G⋆i —establishing
+more of its nodes, in dependency-respecting order—without leaping to a solution-milestone move (fix
+plan, edit, validation) before the contextual facts it presupposes have been established. We capture
+both desiderata in a single per-step score Progt ∈ [0, 1] that rewards new coverage and zeroes out the
+moment a node is established prematurely. Formally, at step t, let
+                       At−1 (G⋆i ) = v ∈ Vi \ Ut−1 : PredG⋆i (v) ⊆ Ut−1
+                                       
+
+be the available frontier: nodes legitimately discoverable from ht−1 . Then we define
+                            |Ut \ Ut−1 |
+                                              · ⊮ Ut \ Ut−1 ⊆ At−1 (G⋆i ) ∈ [0, 1].
+                                                                        
+             Progt =                 ⋆
+                         max(|At−1 (Gi )|, 1)
+The numerator counts newly established nodes; the denominator normalizes by what was eligible to be
+established; and the indicator hard-zeros the score if any newly established node is non-discoverable
+from ht−1 . Progt is the per-step backbone on which Phase 2 builds segment-level effectiveness Eff t ,
+by aggregating across a segment’s steps and composing with a complementary groundedness gate
+(Sec. 4.2).
+
+4.2   Phase 2: Receding-Horizon Bi-Objective Trajectory Realization
+
+Phase 1 supplies G⋆i and the per-step backbone Progt ; Phase 2 turns them into an executable trajectory.
+We grow the trajectory one segment at a time (Fig. 1) and apply the bi-objective rule of Sec. 3.3
+segment by segment: at each step t we form a small pool of length-n candidate segments, commit
+the shortest whose effectiveness clears a local floor ηt , and replan from the updated prefix.
+                                                                                           P Both Eff
+and Len are additive over the segment partition, so under a matching floor calibration ( t ηt = ηi )
+these greedy commits realize the trajectory-level shortest-above-floor rule on the family of rollouts
+the per-window pools induce (See proof sketch in App. E).
+Candidate generation: blind seed plus single mutation. At each window we draw K length-n
+                                 (k,0)    (n)
+seeds from the blinded solver, s̃t     ∼ πblind (· | ht ), so every seed is on-prefix and on-distribution.
+A pure seed may miss the next available frontier node of G⋆i ; the curator is therefore allowed to
+perturb at most one of its steps—picking a position t + j and a target v ∈ At+j (G⋆i ), proposing
+                           ′
+a replacement response yt+j    under prefix ht+j , and letting πblind re-roll the suffix. The window-t
+candidate pool St is the union of the K pure seeds and their single-edit graph-aware variants (App. F).
+Because every candidate is a blinded continuation modulo at most one localized rewrite, the pool
+stays close to the student distribution while remaining steerable by G⋆i , and any (Eff t , Lent ) gap
+between a seed and one of its variants is attributable to that single edit.
+Per-segment effectiveness. We assemble the per-segment effectiveness Eff t demanded by Sec. 3.3
+by aggregating the per-step progress over the segment, and composing with a binary groundedness
+gate,                             X
+              Eff t (s; G⋆i ) = (   Progτ ) · Groundt (s),     Groundt ∈ {0, 1}.
+                                  τ ∈s
+The gate applies only to the curator-introduced edit: blinded seeds are by construction on-prefix, so
+we set Groundt (s) = 1. A failure sends Eff t (s) to zero, removing the candidate from contention
+regardless of how much progress it appears to make. The binary leakage rejection inside Progt zeros
+
+
+                                                    6
+out any step in the segment with a premature establishment, while the gate inspects only the mutated
+step itself, so the two operate on disjoint scopes within a candidate.
+Groundedness. For a mutated step y under prefix h, let Ents(y) be the repository entities (file paths,
+identifiers, function and class names) it references and let Obs(h) be the entities that have appeared
+in observations within h; a symbolic referential-integrity check passes when Ents(y) ⊆ Obs(h),
+blocking references to an as-yet-unseen entity. A complementary LLM judge returns Claim(y, h) ∈
+{0, 1} on whether the reasoning of y is entailed by the observations in h, ruling out premature
+root-cause assertions and unsupported leaps. For a mutated candidate with edit at position t + j,
+                                             ′                             ′
+                                                              
+                Groundt (s) = ⊮ Ents(yt+j       ) ⊆ Obs(ht+j ) · Claim(yt+j    , ht+j ),
+i.e., the mutated step must clear both the symbolic check (cheap, catches concrete entity leakage) and
+the neural judge (catches semantic leaps that are syntactically grounded but logically unsupported).
+Entity-extractor patterns and the LLM-judge prompt are deferred to App. H.
+Selection
+P           and commit. Segment length is measured either as response-token mass Lent (s) =
+   y∈s |y| or as step count Lent (s) = |s|. Among all candidate segments whose effectiveness clears a
+local threshold ηt , we commit the shortest (following the shortest-above-floor rule in Sec. 3.3),
+                          s⋆t = arg min Lent (s) s.t. Eff t (s; G⋆i ) ≥ ηt ,
+                                               s∈St
+falling back to the segment of maximum effectiveness if no candidate clears the floor. To avoid
+locking in a stale suffix, we adopt a half-segment stride: only the first half of s⋆t is appended to the
+prefix before the procedure replans, so consecutive critic windows overlap by half their length (e.g., a
+window over steps 1–10 is followed by one over 6–15). The procedure terminates when the agent
+submits a patch; trajectories whose patch fails the test suite Ti are discarded. The end-to-end pipeline
+is summarized in Algorithm 1 (App. G).
+
+5     Experiments
+5.1    Experimental Setup
+
+Training instances. We draw the training pool from SWE-Gym [10] (2,438 real Python issue-
+resolution instances over 11 repositories), keeping the 1.8k instances with a working Docker envi-
+ronment and a reference patch that passes its tests, Ti (p⋆i ) = 1 (required because P2T consumes p⋆i
+as privileged information). Rejection-sampling baselines, which never inspect p⋆i , run on the full
+2,126 executable instances. The reverse phase yields 33,106 graph nodes (median 18 per instance),
+dominated by static and dynamic facts; full breakdown in App. B.
+Curators, scaffold, students, baselines. We curate trajectories with two teachers, Qwen3-Coder-
+480B-A35B-Instruct [22] (Qwen3-C-480B in tables) and GLM-5-FP8 [27], under the OpenHands [17]
+scaffold with a 100-iteration ReAct budget. The P2T forward phase uses a sliding window of n = 10
+steps with overlap k = 5. We fine-tune two student backbones, Qwen2.5-Coder-14B/32B-Instruct [3]
+(Qwen2.5-C-14B/32B in tables). Two prior recipes provide the baselines: Test-pass rejection sampling
+(SWE-Gym) [10], which keeps whole rollouts whose final patch passes Ti ; and SWE-Lego [15],
+which masks the SFT loss on assistant turns followed by a tool-error observation.
+Evaluation. We evaluate on SWE-bench Verified (500 instances) and SWE-bench Lite (300) [5]
+under the same OpenHands scaffold and 100-iteration budget. Following the bi-objective target of
+Sec. 3.3, we report two metrics per (student, teacher) cell: effectiveness as resolve rate (Pass@1, ↑)
+under a single greedy rollout per instance; and efficiency as average per-instance inference cost in
+US$ (↓), metering prompt and completion tokens at official Alibaba Cloud Model Studio list prices
+for Qwen2.5-Coder-14B/32B-Instruct.3 Cost is averaged over the full evaluation set, capturing the
+inference burden a downstream user incurs whether or not the rollout resolves the issue. Full SFT
+hyperparameters, parallelism, and context-window extension are deferred to App. J.
+
+5.2    Overall Effectiveness and Efficiency
+
+We compare four trajectory-construction recipes under identical teacher, scaffold, and student-training
+pipelines: (i) the test-pass rejection-sampling baseline of SWE-Gym, (ii) the SWE-Lego process-level
+    3 Token rates from https://www.alibabacloud.com/help/en/model-studio/model-pricing; the same rate is
+
+applied to all conditions, so cost differences reflect only trajectory length.
+
+
+                                                                 7
+Table 1: Main evaluation results on SWE-bench Verified and SWE-bench Lite. For each (student,
+teacher) pair we report two metrics: effectiveness as resolve rate (Pass@1, %, ↑) and efficiency as
+average per-instance inference cost (Cost, US$, ↓). Bold denotes the best result in each row; (+X.X)
+reports the absolute Pass@1 gain over the test-pass rejection-sampling baseline, (−X.X) the absolute
+cost reduction.
+                                                                   SWE-bench Verified                                                   SWE-bench Lite
+Student         Teacher (Curator)   Metric                Baselines                            Ours                         Baselines                        Ours
+                                                   Test-Pass RS   SWE-Lego       Size-Matched            Full        Test-Pass RS   SWE-Lego       Size-Matched        Full
+                                    Pass@1 (%) ↑      39.6        40.6 (+1.0)         42.4 (+2.8)     50.4 (+10.8)      28.7        28.7 (+0.0)      29.3 (+0.6)     36.0 (+7.3)
+                Qwen3-C-480B
+                                    Cost ($) ↓        0.92        0.95 (+0.03)       0.85 (−0.07)     0.78 (−0.14)      0.93          0.93          0.88 (−0.05)    0.80 (−0.13)
+Qwen2.5-C-32B
+                                    Pass@1 (%) ↑      38.4         38.8 (+0.4)        39.2 (+0.8)     49.0 (+10.6)      31.6        32.3 (+0.7)      33.6 (+2.0)     38.6 (+7.0)
+                GLM-5-FP8
+                                    Cost ($) ↓        0.94        0.93 (−0.01)       0.89 (−0.05)     0.81 (−0.13)      0.92        0.95 (+0.03)    0.85 (−0.07)    0.78 (−0.14)
+                                    Pass@1 (%) ↑      36.0        36.2 (+0.2)         37.6 (+1.6)      43.2 (+7.2)      22.0        22.7 (+0.7)      23.3 (+1.3)     30.0 (+8.0)
+                Qwen3-C-480B
+                                    Cost ($) ↓        0.92        0.93 (+0.01)       0.87 (−0.05)     0.78 (−0.14)      0.94        0.95 (+0.01)    0.90 (−0.04)    0.83 (−0.11)
+Qwen2.5-C-14B
+                                    Pass@1 (%) ↑      34.8        35.4 (+0.6)         36.6 (+1.8)      42.8 (+8.0)      24.3         25.3 (+1.0)     26.3 (+2.0)     32.0 (+7.7)
+                GLM-5-FP8
+                                    Cost ($) ↓        0.93        0.94 (+0.01)       0.86 (−0.07)     0.80 (−0.13)      0.93        0.92 (−0.01)    0.89 (−0.04)    0.80 (−0.13)
+
+
+
+
+error-masking baseline, (iii) P2T (size-matched), in which we randomly subsample our curated
+trajectories down to the size of the rejection-sampled pool to control for data scale, and (iv) P2T
+(full), which uses every trajectory we curate from the 1.8k-instance training pool. Following the
+bi-objective trajectory target of Sec. 3.3, Table 1 reports both axes for each (student, teacher) pair:
+effectiveness as Pass@1 resolve rate (higher is better) and efficiency as average per-instance inference
+cost in US$ (lower is better), on SWE-bench Verified and SWE-bench Lite for two student backbones
+(Qwen2.5-C-14B/32B) and two teacher curators (Qwen3-C-480B and GLM-5-FP8).
+Results. Across every (student, teacher, benchmark) cell of Table 1, P2T (full) is simultaneously
+more effective and more efficient than both baselines, lifting Pass@1 by up to +10.8 points (Qwen2.5-
+C-32B under Qwen3-C-480B on Verified) while cutting per-instance cost by ∼ 15%; SWE-Lego’s
+tool-error masking yields at most marginal Pass@1 gains and never reduces cost, since it relabels
+the same rejection-sampled rollouts without changing trajectory length. Two controls explain where
+the lift comes from. First, the size-matched configuration already beats both baselines on both axes
+(+2.8 Pass@1 and −$0.07 on Verified for the 32B/Qwen3-C-480B cell), so the gain is per-trajectory
+quality, not data scale. Second, moving to P2T (full) adds another +8.0 Pass@1 while still lowering
+cost; because the additional trajectories come from instances on which a blinded teacher rollout
+would have failed, this margin is supervision recovered from hard issues that rejection sampling
+silently discards, and the simultaneous cost drop rules out a verbosity confound. A complementary
+compute-matched control (App. K) further confirms that redirecting P2T’s curation GPU-hours into
+4× additional teacher rollouts does not close the gap, isolating the gain from raw compute as well
+as from data scale. The lift is robust: under the weaker GLM-5-FP8 teacher absolute Pass@1 gains
+are within 0.2 pts and cost reductions within $0.01 of those under Qwen3-C-480B, indicating the
+privileged-information factorization, not raw teacher capability, drives the improvement, and the
+same pattern transfers from the 32B to the 14B student.
+
+5.3       Trajectory Quality
+
+The improvements in §5.2 establish that P2T jointly raises resolve rate and lowers inference cost, but
+they do not yet explain where the savings come from. We trace the joint lift to a single mechanism:
+curated trajectories are shorter and less redundant while covering more of the fix-relevant facts the
+issue presupposes, and the property is induced both in the supervision data and in the rollouts the
+trained student emits. Below we report the population-level shifts in length and redundancy; an
+end-to-end worked example on getmoto/moto #6041, tracing both phases of P2T on this instance
+and contrasting the curated trajectory with the blinded rollout, is deferred to App. I (Fig. 7) for space.
+Quantitative effect of curation. We measure two metrics: interaction length (number of agent steps)
+and redundant exploration (fraction of file-viewing actions whose visible range is fully covered by an
+earlier view in the same trajectory). Every comparison is restricted to instances that rollout resolve,
+and is measured at two pipeline stages: an SFT-data view pairing each rejection-sampled rollout
+with its P2T-curated counterpart on the same SWE-Gym instance under the GLM-5-FP8 teacher
+(Fig. 2 a,b), and a student-eval view comparing rollouts of the Qwen2.5-C-32B student trained on
+each supervision source on SWE-bench Verified (Fig. 2 c,d). At the SFT stage, P2T trajectories
+are −9.3% shorter (66.3 → 57 steps) and −31.0% less redundant (6.7% → 4.7%); the heavy upper
+
+
+                                                                                 8
+                      (a) Interaction length (SFT)                                    (b) Redundant exploration (SFT)                             (c) Interaction length (eval)                                     (d) Redundant exploration (eval)
+                      p < 1e-4   Δμ=-14.1%   d=+0.29                                      p < 1e-4   Δμ=-31.0%   d=+0.33                          p < 1e-4   Δμ=-10.3%   d=+0.22                                        p < 1e-4   Δμ=-19.5%   d=+0.20
+                                                                                                                                            110
+                                                                                    16%                                                                                                                           16%
+
+
+
+
+                                                       redundant exploration rate                                                                                                    redundant exploration rate
+                100                                                                                                                         100
+                                                                                    14%                                                                                                                           14%
+                                                                                                                                             90
+                                                                                    12%                                                                                                                           12%
+
+
+
+
+# agent steps                                                                                                               # agent steps
+                 80                                                                                                                          80
+                                                                                    10%                                                                                                                           10%
+                                                                                                                                             70
+                                                                                    8%                                                                                                                            8%
+                 60
+                                                                                                                                             60
+                                                                                    6%                                                                                                                            6%
+                                                                                                                                             50
+                 40                                                                 4%                                                                                                                            4%
+                                                                                                                                             40
+                                                                                    2%                                                                                                                            2%
+                 20                                                                                                                          30
+                                                                                    0%                                                                                                                            0%
+                         Rollout             P2T                                             Rollout             P2T                                  Rollout            P2T                                               Rollout             P2T
+
+                                                                                Rollout (SFT data)         P2T (SFT data)                   Rollout (eval)       P2T (eval)        mean
+
+
+
+Figure 2: Effect of P2T on trajectory quality, traced from supervision (a, b) to evaluation (c, d).
+Each panel reports the paired Mann–Whitney p-value, the relative shift in mean (∆µ), and Cliff’s δ;
+diamonds mark means.
+
+
+tail of rollouts that exhaust the 100-iteration budget largely disappears (Fig. 2 a). Both shifts are
+paired-Mann–Whitney significant (p < 10−4 , δ = +0.29/ + 0.33) and align with the design: the
+receding-horizon rule commits the shortest segment that clears the local effectiveness floor, while
+the groundedness critic suppresses the speculative re-inspection loops typical of unguided rollouts.
+Crucially, the same shifts reappear at evaluation time, where neither the curator nor any oracle is in
+the loop: the P2T-trained student emits rollouts that are −10.3% shorter and −19.5% less redundant
+than its rejection-sampled counterpart (p < 10−4 , δ ≈ 0.20). Behavioral cloning therefore transmits
+the structural property rather than merely the token-level distribution, which is the mechanism behind
+the −$0.13–$0.14 inference-cost gap in Table 1.
+
+5.4                    Component Ablation
+
+We isolate the two design choices that the bi-objective program hinges on: the groundedness check
+that gates leakage on the effectiveness side, and the shortest-above-floor commit rule that controls
+length on the efficiency side. Each is removed in turn from the full pipeline; all other settings
+(Qwen3-C-480B teacher, OpenHands scaffold, 1.8k-instance pool, SFT recipe) are held fixed.
+Effectiveness: groundedness check. Without the groundedness check, any frontier-advancing edit is
+committed verbatim, so curated trajectories may reference entities or claims the visible prefix does
+not yet support. On Qwen2.5-C-32B, removing it drops Pass@1 from 50.4% to 43.2% (−7.2 pts),
+with a similar −8.2 pt drop on Qwen2.5-C-14B. The student internalizes the same unjustified leaps at
+test time, exactly the failure mode the check was designed to block.
+Efficiency: shortest-above-floor commit. Replacing the shortest-above-floor rule with a uniform-
+random pick from the candidate pool of equally effective segments removes the only term that
+pressures the trajectory to be short. Curated trajectories grow accordingly: average step count rises
+from 72.5 to 77.8 (+7.3%) and per-trajectory token length from 64k to 72k (+12.5%). Pass@1 also
+slips from 50.4% to 48.8% on Qwen2.5-C-32B, indicating that the shorter trajectories are not just
+cheaper but carry less imitation noise: behavioral cloning amplifies the lower-information steps that
+the rule would have pruned. Together, the two ablations show that the bi-objective rule is load-bearing
+on both axes simultaneously rather than trading them off.
+Is G⋆ doing the work? A value-of-information study (App. C) confirms that the gains track G⋆ itself,
+not the forward-phase scaffolding: progressively disclosing G⋆ to a blinded reference solver lifts
+its Pass@1 from 29–35% to 94–97% under both teachers, and incidental G⋆ coverage of unguided
+rollouts correlates strongly with success (r ≈ 0.36). Both indicate that G⋆ encodes substantive
+prerequisites rather than post-hoc narration of p⋆ .
+
+6                     Conclusion
+We presented P2T, a framework that converts a reference patch into per-step process supervision
+for software-engineering agents without ever exposing the patch in the trajectory shown to the
+student. The pipeline factorizes curation into a reverse decomposition that distills a sufficient yet
+non-leaky prerequisite graph G⋆ from p⋆ , and a forward grounded realization that uncovers G⋆
+through ordinary tool calls under a hybrid groundedness critic and a surprisal trust region. On SWE-
+
+
+                                                                                                                            9
+bench Verified, training on 1.8k curated SWE-Gym instances improves Qwen2.5-Coder-32B/14B-
+Instruct by +10.8/+7.2 points Pass@1 over an outcome-filtered baseline, with consistent gains on
+SWE-bench Lite and across two structurally different teacher curators. Controlled subsampling, a
+value-of-information study with progressive disclosure of G⋆ , an observational coverage analysis, a
+quantitative trajectory-quality comparison, and a component ablation jointly indicate that the gains
+are attributable to the prerequisite-graph factorization itself rather than to data scale or any single
+safeguard. We discuss limitations and outlook in App. L.
+
+References
+ [1] Aleithan, R., Xue, H., Mohajer, M. M., Nnorom, E., Uddin, G., and Wang, S. SWE-bench+:
+     Enhanced coding benchmark for LLMs. arXiv preprint arXiv:2410.06992, 2024.
+
+ [2] Deng, X., Da, J., Pan, E., He, Y. Y., Ide, C., Garg, K., Lauffer, N., Park, A., Pasari, N., Rane,
+     C., et al. Swe-bench pro: Can ai agents solve long-horizon software engineering tasks? arXiv
+     preprint arXiv:2509.16941, 2025.
+
+ [3] Hui, B., Yang, J., Cui, Z., Yang, J., Liu, D., Zhang, L., Liu, T., Zhang, J., Yu, B., Lu, K., et al.
+     Qwen2. 5-coder technical report. arXiv preprint arXiv:2409.12186, 2024.
+
+ [4] Jain, N., Singh, J., Shetty, M., Zheng, L., Sen, K., and Stoica, I. R2E-gym: Procedural
+     environments and hybrid verifiers for scaling open-weights SWE agents. arXiv preprint
+     arXiv:2504.07164, 2025.
+
+ [5] Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., and Narasimhan, K. R. Swe-
+     bench: Can language models resolve real-world github issues? In The Twelfth International
+     Conference on Learning Representations.
+
+ [6] Kang, M., Chen, W.-N., Han, D., Inan, H. A., Wutschitz, L., Chen, Y., Sim, R., and Rajmohan,
+     S. ACON: Optimizing context compression for long-horizon LLM agents. arXiv preprint
+     arXiv:2510.00615, 2025.
+
+ [7] Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J.,
+     Sutskever, I., and Cobbe, K. Let’s verify step by step. In The Twelfth International Conference
+     on Learning Representations, 2024.
+
+ [8] Miettinen, K. Nonlinear Multiobjective Optimization, volume 12 of International Series in
+     Operations Research & Management Science. Springer, 1999.
+
+ [9] Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., Zhang, C., Agarwal,
+     S., Slama, K., Ray, A., Schulman, J., Hilton, J., Kelton, F., Miller, L., Simens, M., Askell,
+     A., Welinder, P., Christiano, P., Leike, J., and Lowe, R. Training language models to follow
+     instructions with human feedback. In Advances in Neural Information Processing Systems,
+     volume 35, pp. 27730–27744, 2022.
+
+[10] Pan, J., Wang, X., Neubig, G., Jaitly, N., Ji, H., Suhr, A., and Zhang, Y. Training software
+     engineering agents and verifiers with swe-gym. arXiv preprint arXiv:2412.21139, 2024.
+
+[11] Peng, B., Quesnelle, J., Fan, H., and Shippole, E. Yarn: Efficient context window extension of
+     large language models. arXiv preprint arXiv:2309.00071, 2023.
+
+[12] Qi, Z., Long, F., Achour, S., and Rinard, M. C. An analysis of patch plausibility and correctness
+     for generate-and-validate patch generation systems. In Proceedings of the 24th International
+     Symposium on Software Testing and Analysis, pp. 24–36. ACM, 2015. doi: 10.1145/2771783.
+     2771791.
+
+[13] Ross, S., Gordon, G., and Bagnell, D. A reduction of imitation learning and structured prediction
+     to no-regret online learning. In Proceedings of the Fourteenth International Conference on
+     Artificial Intelligence and Statistics, volume 15 of Proceedings of Machine Learning Research,
+     pp. 627–635. PMLR, 2011.
+
+
+                                                  10
+[14] Smith, E. K., Barr, E. T., Le Goues, C., and Brun, Y. Is the cure worse than the disease?
+     overfitting in automated program repair. In Proceedings of the 10th Joint Meeting of the
+     European Software Engineering Conference and ACM SIGSOFT Symposium on the Foundations
+     of Software Engineering, pp. 532–543. ACM, 2015. doi: 10.1145/2786805.2786825.
+[15] Tao, C., Chen, J., Jiang, Y., Kou, K., Wang, S., Wang, R., Li, X., Yang, S., Du, Y., Dai, J.,
+     et al. Swe-lego: Pushing the limits of supervised fine-tuning for software issue resolving. arXiv
+     preprint arXiv:2601.01426, 2026.
+[16] Vapnik, V. and Vashist, A. A new learning paradigm: Learning using privileged information.
+     Neural Networks, 22(5–6):544–557, 2009. doi: 10.1016/j.neunet.2009.06.042.
+[17] Wang, X., Li, B., Song, Y., Xu, F. F., Tang, X., Zhuge, M., Pan, J., Song, Y., Li, B., Singh,
+     J., et al. Openhands: An open platform for ai software developers as generalist agents. arXiv
+     preprint arXiv:2407.16741, 2024.
+[18] Wang, X., Li, B., Song, Y., Xu, F. F., Tang, X., Zhuge, M., Pan, J., Song, Y., Li, B., Singh, J.,
+     Tran, H. H., Li, F., Ma, R., Zheng, M., Qian, B., Shao, Y., Muennighoff, N., Zhang, Y., Hui, B.,
+     Lin, J., Brennan, R., Peng, H., Ji, H., and Neubig, G. OpenHands: An open platform for AI
+     software developers as generalist agents. arXiv preprint arXiv:2407.16741, 2025.
+[19] Wang, Y., Pradel, M., and Liu, Z. Are" solved issues" in swe-bench really solved correctly? an
+     empirical study. arXiv preprint arXiv:2503.15223, 2025.
+[20] Xia, C. S., Deng, Y., Dunn, S., and Zhang, L. Agentless: Demystifying LLM-based software
+     engineering agents. arXiv preprint arXiv:2407.01489, 2024.
+[21] Xiao, Y.-A., Gao, P., Peng, C., and Xiong, Y. Reducing cost of LLM agents with trajectory
+     reduction. In Proceedings of the ACM International Conference on the Foundations of Software
+     Engineering (FSE), 2026. doi: 10.1145/3797084. arXiv:2509.23586.
+[22] Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C.,
+     et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+[23] Yang, J., Jimenez, C. E., Wettig, A., Lieret, K., Yao, S., Narasimhan, K. R., and Press, O.
+     SWE-agent: Agent-computer interfaces enable automated software engineering. In Advances in
+     Neural Information Processing Systems, 2024. URL https://arxiv.org/abs/2405.15793.
+[24] Yang, J., Lieret, K., Jimenez, C. E., Wettig, A., Khandpur, K., Zhang, Y., Hui, B., Press, O.,
+     Schmidt, L., and Yang, D. SWE-smith: Scaling data for software engineering agents. arXiv
+     preprint arXiv:2504.21798, 2025.
+[25] Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., and Cao, Y. ReAct: Synergizing
+     reasoning and acting in language models. arXiv preprint arXiv:2210.03629, 2023.
+[26] Zan, D., Huang, Z., Liu, W., Chen, H., Zhang, L., Xin, S., Chen, L., Liu, Q., Zhong, X., Li,
+     A., et al. Multi-swe-bench: A multilingual benchmark for issue resolving. arXiv preprint
+     arXiv:2504.02605, 2025.
+[27] Zeng, A., Lv, X., Hou, Z., Du, Z., Zheng, Q., Chen, B., Yin, D., Ge, C., Huang, C., Xie, C., et al.
+     Glm-5: from vibe coding to agentic engineering. arXiv preprint arXiv:2602.15763, 2026.
+[28] Zeng, L., Li, Y., Xiao, Y., Li, C., Liu, C. Y., Yan, R., Wei, T., He, J., Song, X., et al.
+     Skywork-SWE: Unveiling data scaling laws for software engineering in LLMs. arXiv preprint
+     arXiv:2506.19290, 2025.
+[29] Zhang, L., He, S., Zhang, C., Kang, Y., Li, B., Xie, C., Wang, J., Wang, M., Huang, Y., Fu, S.,
+     et al. Swe-bench goes live! arXiv preprint arXiv:2505.23419, 2025.
+[30] Zhang, Y., Ruan, H., Fan, Z., and Roychoudhury, A. AutoCodeRover: Autonomous program
+     improvement. In Proceedings of the 33rd ACM SIGSOFT International Symposium on Software
+     Testing and Analysis, 2024.
+[31] Zhao, Y., Huang, J., Hu, J., Wang, X., Mao, Y., Zhang, D., Jiang, Z., Wu, Z., Ai, B., Wang, A.,
+     Zhou, W., and Chen, Y. Swift:a scalable lightweight infrastructure for fine-tuning, 2024. URL
+     https://arxiv.org/abs/2408.05517.
+
+
+                                                  11
+Appendix
+
+A Technical appendices and supplementary material                                                        13
+
+B Prerequisite-graph node distribution                                                                   13
+
+C Value of information in the prerequisite graph                                                         13
+
+D Reverse-phase agent prompts and implementation details                                                 15
+
+E Segment-wise commits and the trajectory-level objective                                                16
+
+F Candidate generation in detail                                                                         17
+
+G Full curation algorithm                                                                                18
+
+H Forward-phase agent prompts and implementation details                                                 18
+
+I   End-to-end worked example                                                                            21
+                                       ⋆
+    I.1   Issue x and oracle patch p       . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .   21
+    I.2   Phase 1 — Process graph distillation . . . . . . . . . . . . . . . . . . . . . . . . .         21
+    I.3   Phase 2 — Receding-horizon trajectory realization . . . . . . . . . . . . . . . . .            22
+
+J Training details                                                                                       25
+
+K Compute-matched rejection-sampling baseline                                                            25
+
+L Limitations and outlook                                                                                26
+
+
+
+
+                                                      12
+A    Technical appendices and supplementary material
+This appendix provides material complementary to the main paper: prerequisite-graph statistics
+(App. B), a value-of-information study for G⋆ (App. C), reverse-phase agent prompts (App. D), the
+segment-wise commit analysis (App. E), candidate generation in detail (App. F), the full curation
+algorithm (App. G), forward-phase agent prompts (App. H), an end-to-end worked example (App. I),
+training details (App. J), the compute-matched RS baseline (App. K), and limitations and outlook
+(App. L).
+
+B    Prerequisite-graph node distribution
+Figure 3 characterizes the prerequisite graphs {G⋆i } produced by the reverse phase on the N = 1,815
+SWE-Gym training instances used to curate P2T trajectories, comprising 33,106 in-scope nodes in
+total. Panel (a) shows that the aggregate node population is dominated by static facts (66.2%, e.g.,
+file/symbol locations and type signatures readable from the repo at h), followed by dynamic facts
+(16.7%, observations that require executing code), and the three artifact categories—reproduction,
+analysis, and fix plan—each contributing roughly 5–6%. Panel (b) reports the per-instance mean
+count alongside the fraction of instances that contain at least one node of each category: every instance
+has at least one static fact and a fix plan (100% coverage), reproduction and analysis artifacts appear
+in essentially every instance as well, while dynamic facts have lower per-instance mass (3.0 nodes on
+average) but appear whenever the issue’s behavior is meaningfully runtime-dependent. Panel (c) gives
+the distribution of total in-scope graph size: the mode is concentrated around 15–20 nodes (median 18,
+mean 18.2), with a thin right tail extending past 25. Panels (d,e) examine variation across instances.
+The stacked composition in (d), with instances sorted by total graph size, shows that the static-fact
+share grows roughly linearly with graph size, while artifact counts (≤ 2 per category in nearly all
+instances) are remarkably stable; the per-category spreads in (e) confirm this—artifact categories are
+tightly concentrated near their median, whereas static and dynamic facts carry essentially all of the
+cross-instance variance.
+Three consequences for our method follow. First, because static facts dominate, the bulk of the
+curator’s frontier-advancement work consists of grounded read-only inspection actions (file reads,
+symbol lookups, ripgrep), which are cheap and naturally on-policy for a non-privileged solver. Second,
+the small but stable artifact budget per instance (∼ 1–3 nodes each for reproduction/analysis/plan)
+bounds the number of synthesized intermediate steps the forward phase has to inject, keeping
+curated trajectories close in length to organic rollouts. Third, the long tail in panel (c) identifies
+a sub-population of instances with large graphs (> 25 nodes) where the gap between curated and
+rejection-sampled trajectories is largest, since these are precisely the instances on which a single
+greedy blinded rollout is least likely to incidentally cover the required prerequisites (cf. App. C).
+
+C    Value of information in the prerequisite graph
+The improvements in Sec. 5.2 establish that P2T trajectories help a student, but they do not on their
+own show that the prerequisite graph G⋆ itself carries the right information; one might worry that
+the gains come entirely from the forward-phase machinery (segment-level bi-objective optimization
+selection, groundedness gating) and that G⋆ is little more than a post-hoc rationalization of p⋆ . This
+appendix tests the alternative directly through two complementary protocols. First, an interventional
+disclosure study progressively reveals nodes of G⋆ to a blinded reference solver and measures the
+resulting end-to-end resolve rate. Second, an observational coverage study verifies that, even when
+G⋆ is never exposed, blinded rollouts whose incidental coverage of G⋆ is highest are also the ones
+most likely to succeed. Both directions converge on the same conclusion.
+
+Protocol (interventional disclosure). We define a nested chain of information bundles B (0) ⊂
+B (1) ⊂ B (2) ⊂ B (3) ⊂ B (4) , each augmenting the visible prefix at the start of an episode:
+
+       • B (0) : issue x only;
+       • B (1) : B (0) + all facts in VF⋆ (context);
+       • B (2) : B (1) + the reproduction-script artifact;
+
+
+                                                       13
+                                              Prerequisite-graph node composition (N = 1,815 instances, 33,106 in-scope nodes)
+                              (a) Aggregate node composition                                                     (b) Per-instance mean                                               (c) Graph size distribution
+                                                 5.5%                                                                                                                            median = 18                               100
+                                                     5.5%                                                 12.1
+
+
+
+
+                                                                          Mean nodes / instance
+                                                                                                  12.5                                                              150          mean = 18.2
+                                                          6.1%
+                                                                                                                                                                                                                           80
+                                                                                                  10.0
+
+
+
+                                                                                                                                                  # instances                                                                    CDF (%)
+                                              33,106                                                                                                                100                                                    60
+                                                            16.7%                                  7.5
+                                              nodes
+                                                                                                   5.0                                                                                                                     40
+                                66.2%                                                                              3.0                                                      50
+                                                                                                   2.5                                                                                                                     20
+                                                                                                                          1.1       1.0   1.0
+                                                                                                   0.0                                                                       0                                             0
+                                                                                                          Static DynamicReprod.AnalysisFix plan                                      5       10     15    20       25
+                                                                                                                                                                                     In-scope nodes per instance
+
+                                                       (d) Per-instance composition (stacked)                                                                                            (e) Per-category spread
+                                Static fact      Dynamic fact        Reproduction                          Analysis      Fix plan
+                     25
+                                                                                                                                                                            20
+
+
+
+
+Nodes per instance                                                                                                                                     Nodes per instance
+                     20
+                                                                                                                                                                            15
+                     15
+                                                                                                                                                                            10
+                     10
+                                                                                                                                                                             5
+                      5
+
+                                                                                                                                                                             0
+                      0
+                          0           250           500             750                            1000          1250           1500      1750                                   Static DynamicReprod. Analysis Fix plan
+                                                  Instance index (sorted by graph size, N=1,815)
+
+
+Figure 3: Composition of the prerequisite graphs {G⋆i } across the N = 1,815 SWE-Gym training
+instances (33,106 in-scope nodes). (a) Aggregate node-type breakdown: static facts dominate
+(66.2%), with dynamic facts (16.7%) and the three artifact categories (reproduction, analysis, fix
+plan) at 5–6% each. (b) Per-instance mean count by category (bars) and fraction of instances
+containing at least one node of that category (right axis): every instance has at least one static fact
+and fix plan; dynamic facts are sparser on average but still present in most instances. (c) Distribution
+of total in-scope graph size across instances (median 18, mean 18.2) and its CDF. (d) Per-instance
+stacked composition with instances sorted by graph size, showing that static-fact share grows with
+size while artifact counts remain stable. (e) Per-category spread: artifact categories are tightly
+concentrated, whereas static and dynamic facts account for nearly all of the cross-instance variance.
+
+
+
+                               • B (3) : B (2) + the root-cause analysis artifact;
+
+                               • B (4) : B (3) + the fix-plan artifact.
+
+Crucially, p⋆ is never disclosed at any stage, so each bundle is something a non-privileged solver
+could in principle have constructed for itself. We restrict the study to the 1.8k training instances on
+which p⋆i passes Ti (the same pool used for our curated trajectories) so that variation in resolve rate is
+attributable to the bundle, not to broken evaluation environments. For each bundle and each teacher,
+the same teacher model is then used as the reference solver under the OpenHands scaffold with the
+standard 100-iteration budget, and we measure Pass@1 averaged over a single rollout per instance.
+
+
+Results (interventional). Figure 4 shows that the resolve rate increases monotonically as more
+of G⋆ is revealed, under both teachers. From issue-only context, the reference solver resolves 29%
+(35%) of instances under the Qwen3-Coder-480B (GLM-5-FP8) curator. Adding the fact statements
+alone—no scripts, no plans—more than doubles this to 65% (61%). Revealing the reproduction
+script delivers the largest single jump, to 84% (89%); the root-cause analysis adds a further +2 (+1)
+points; and the fix plan plus validation stub take performance to 94% (97%). Every marginal addition
+is non-negative for both teachers.
+Three observations follow. First, the magnitude of the lift from B (0) to B (4) in Fig. 4a—roughly +65
+percentage points—is far too large to be explained away as cosmetic narration: the curated graph
+encodes substantive, action-relevant knowledge. Second, the bulk of the improvement comes from
+facts (+∼30 pts) and the reproduction script (+∼20 pts), confirming that the reverse phase’s two
+staples—atomic fact distillation and concrete artifact scaffolding—are precisely the components
+that carry information for a non-privileged solver. Third, the consistency of the trend across two
+structurally different teachers indicates that the prerequisite-graph structure, rather than any teacher-
+specific stylistic bias, is what supplies the value of information.
+
+
+                                                                                                                          14
+                                                                                                                              Blinded-rollout coverage of G ⋆ predicts success
+                                                                         97%                              100
+               100%                                                                                                  Qwen3-Coder-480B (r=0.37, ρ=0.35)
+                                             89%            90%                                                      GLM-5-FP8 (r=0.36, ρ=0.34)
+
+                                                                         94%                               80
+
+               80%                           84%            86%                                                                                                                           66%
+
+
+
+
+Resolve Rate                                                                           Resolve rate (%)
+                                                                                                           60
+                               61%
+               60%             65%                                                                                                                                      40%            53%
+                                                                                                           40
+                                                                                                                                                        32%
+                                                                                                                                                                      38%
+                                                                                                                                       22%
+               40% 35%                                                                                     20
+                                                                                                                    19%
+                                                                                                                                                     26%
+
+                                                                                                                                    19%
+                                                       SWE-Gym & Qwen3-Coder
+               20% 29%                                 SWE-Gym & GLM5-FP8                                   0
+                                                                                                                 10%
+                                                                                                                    Q1                 Q2               Q3              Q4                Q5
+
+                 Issue only   +Facts     +Reproduction +Analysis        +Edits                                  [0.03,0.30]        [0.30,0.36]      [0.36,0.41]     [0.41,0.48]
+                                                                                                                              Total graph coverage (quintile bins; equal n per bin)
+                                                                                                                                                                                      [0.48,0.95]
+
+                                                                   & Validation Plan
+                                     Accumulative Factors
+                                                                                       (b) Observational coverage of G⋆ in blinded rollouts
+                                                   ⋆
+               (a) Progressive disclosure of G to a blinded solver.                    vs. resolve rate.
+  Figure 4: Value of information in G⋆ . (a) Resolve rate of a blinded reference solver on the 1.8k
+  training instances as elements of the prerequisite graph are progressively revealed; the oracle patch
+  p⋆ is never exposed. Each addition contributes a non-negative marginal gain under both teachers,
+  with facts and the reproduction script accounting for most of the lift. (b) When the graph is not
+  disclosed, instances on which a blinded rollout incidentally covers more nodes of G⋆ are resolved at
+  substantially higher rates: rollouts in the top coverage quintile succeed at 53–66%, vs. 10–19% in the
+  bottom quintile, with a consistent positive correlation under both teachers (r ≈ 0.36, ρ ≈ 0.35).
+
+
+  Observational coverage predicts success without disclosure. A natural concern with the dis-
+  closure protocol is that prepending structured text to the prompt may help for reasons unrelated to
+  the content of G⋆ —e.g., framing or anchoring effects. We therefore complement Fig. 4a with an
+  observational test in which the graph is never exposed to the solver. For each of the 1.8k instances,
+  we take a fully blinded rollout under each teacher (issue only, no G⋆ , no p⋆ ) and apply the same
+  unlock criterion the curator uses during forward realization—a node is counted as covered when an
+  unlocker action (or an equivalent action) is executed and the associated statement (or an equivalent
+  concept) is encoded in the trajectory. The total coverage of an instance is then the fraction of nodes
+  in VF⋆ ∪ VA⋆ that are covered. We bin instances into quintiles of equal size by this coverage and report
+  the resolve rate per bin in Fig. 4b.
+  Resolve rate increases monotonically with coverage under both teachers, climbing from 10%/19%
+  in the lowest-coverage quintile to 53%/66% in the highest, with Pearson r ≈ 0.36 and Spearman
+  ρ ≈ 0.35. Because the solver is given no privileged information in this analysis, the correlation cannot
+  be an artifact of prompt augmentation: it shows that the very prerequisites identified by reverse
+  decomposition are, on the issues a blinded solver does resolve, the ones it tends to establish on its own.
+  The two panels of Fig. 4 thus triangulate the same conclusion from opposite directions—disclosing
+  G⋆ helps, and independently establishing G⋆ correlates with success—providing converging evidence
+  that G⋆ tracks information genuinely required to solve the issue rather than post-hoc narration of p⋆ ,
+  and justifying the use of G⋆ as the per-step effectiveness signal in Sec. 4.2.
+
+  D               Reverse-phase agent prompts and implementation details
+  We instantiate the proposer–critic loop of Sec. 4.1 with two LLM agents that share a tool-mediated
+  view of the repository (file-viewer, ripgrep, sandboxed python/pytest) and exchange JSON node
+  sets. Both agents see the issue di , the repository Ri , the reference patch p⋆i , and the test suite Ti ;
+  only the proposer is allowed to introduce new nodes, and only the critic is allowed to delete or revise
+  them. The DAG-organization step is a deterministic post-pass: an edge is drawn from u to v iff
+  v’s unlocker action references an entity (file, symbol, line range, runtime value) first surfaced by
+  u’s unlocker observation, or v is an artifact whose type strictly follows u’s in the canonical order
+  repro → analysis → plan → edit → validation.
+
+  Unlocker taxonomy. Each node carries an unlocker uv = (ACTION, OBSERVATION) drawn from
+  a fixed taxonomy: (i) VIEW⟨file, lines⟩ for static reads; (ii) VIEW problem_statement for issue-
+  derived facts; (iii) BASH⟨command⟩ for grep, runtime probing, or test execution (dynamic facts);
+  (iv) CREATE⟨path, content⟩ and STR _ REPLACE⟨file, old, new⟩ for reproduction scripts and edits;
+
+
+                                                                               15
+(v) THINK⟨text⟩ for analysis and fix-plan artifacts. Every action string must be copy-pasteable;
+abbreviations such as ... are rejected by the critic on sight.
+
+Stopping criterion. Writing V (t) for the node set after critic round t, the loop terminates when (a)
+V (t) = V (t−1) (set-level fixed point under hashed canonical statements), or (b) the proposer returns
+∆V = ∅ for two consecutive rounds, or (c) a hard cap of Tmax = 6 rounds is reached. In our runs,
+96% of instances converge by round 3.
+
+LLM and decoding. Both agents are run on the same teacher backbone used for blinded rollouts
+(Qwen3-Coder-480B or GLM-5-FP8) with temperature 0.4, top-p 0.95, max output 8k tokens, JSON-
+mode constrained decoding, and a 40-step tool-call budget per round. Outputs are validated against
+a JSON schema; on schema violation the agent is re-prompted up to twice with the validator error
+before the round is dropped.
+The two prompt templates below are abstracted versions of the production prompts: we preserve
+the role, inputs, hard rules, and output schema verbatim but elide engineering boilerplate (tool-API
+specifications, output-format examples, retry instructions, and repository-specific stop-lists) for
+readability.
+  Proposer prompt (reverse phase, Sec. 4.1)
+  Role. You are the Proposer. Working backwards from a known-correct reference patch p⋆ , your job is to enumerate the contextual facts
+  and solution milestones a non-privileged developer would need to discover before p⋆ becomes derivable. You are NOT producing a
+  description of p⋆ — you are producing the prerequisite knowledge that motivates p⋆ .
+  Inputs. Issue di ; repository Ri (read/grep/exec via tools); reference patch p⋆  i ; failing-to-passing tests; current node set V
+                                                                                                                                    (t)
+                                                                                                                                        with critic
+  feedback ϕ(t) .
+  Task. Emit ∆V (t+1) : a JSON list of new candidate nodes that close the largest remaining gap to p⋆ . Each node has id, node_type ∈
+  {fact, reproduce_script, issue_analysis, fix_plan, code_edit, validation}, a one-claim statement, and a fully-specified unlocker. Cover
+  every logically distinct change in p⋆ : imports, registration entries, exception classes, parameter additions, helper reuse, schema/template
+  updates.
+  Hard rules. (R1) One claim per fact; split compounds. (R2) The unlocker action is restricted to the taxonomy above; no
+  [view] golden patch, [view] hints, or any reference to p⋆ . (R3) Action strings are complete and replayable — no ...,
+  no prose placeholders. (R4) Observations are the actual tool output you obtained when you executed the action — do not para-
+  phrase from p⋆ . (R5) For every reproduce_script and validation node, you must execute the script in the sandbox and record
+  output_before_fix/actual_output; nodes without recorded execution are rejected. (R6) For every code_edit, old_str must
+  match the current pre-fix source byte-for-byte.
+  Investigation protocol. (i) Index every distinct change in p⋆ . (ii) For each change, trace the call chain backwards to the user-facing
+  symptom and forwards to the user-facing effect. (iii) Search the repository for analogous implementations and cite at least one concrete
+  location (file + line range) when p⋆ follows an existing pattern. (iv) Probe runtime behavior with python -c or pytest when types,
+  dispatch, or values are not statically obvious. (v) Narrow the bug: test the failing case AND the working case to confirm the fix scope is
+  minimal. (vi) Apply the critic feedback ϕ(t) and address each cited gap.
+  Output. A JSON object {instance_id, nodes : [ . . . ]} written via create_file to the designated path. Nothing else.
+
+
+  Critic prompt (reverse phase, Sec. 4.1)
+  Role. You are the Critic. Your job is to enforce desideratum (ii), non-leakage: every surviving node’s unlocker must be conceivable from
+  the issue, the repository, and the node’s predecessors — never from p⋆ . You also enforce minimality and discoverability.
+  Inputs. di , Ri , p⋆ i, V
+                             (t)
+                                 ∪ ∆V (the proposer’s latest output).
+  Per-node verdict. For each candidate v, assign exactly one of: keep (passes all checks); prune (fails at least one hard check); revise
+  (salvageable with the noted edit). Output a JSON list with id, verdict, reasons[], and (for revise) patched_node.
+  Hard checks (any failure ⇒ prune). (H1) PATCH LEAKAGE . The statement describes what p⋆ does (e.g. “the patch adds X”, “the fix is
+  to call Y”) rather than a property of the pre-fix codebase or runtime. (H2) F ORBIDDEN UNLOCKER . Action references p⋆ , the test patch,
+  or hidden hints; uses a tool outside the taxonomy; or contains an abbreviation that prevents replay. (H3) U NVERIFIED OBSERVATION .
+  The recorded observation cannot be reproduced by re-executing action on the pre-fix repository. (H4) P REMATURE ARTIFACT. A
+  code_edit node appears without an upstream fix_plan; a fix_plan appears without an upstream issue_analysis; a validation
+  appears without the code_edit it validates. (H5) C OMPOUND CLAIM . A fact bundles two or more distinct propositions. (H6) E DIT
+                                                                                                                                           ⋆
+  DRIFT. A code_edit node’s old_str does not match the current source byte-for-byte, or the union of all edits does not reproduce p .
+  Soft checks (issue revise). (S1) Two facts state the same claim with different evidence ⇒ merge, keeping the stronger evidence. (S2)
+  An action is replayable but unnecessarily wide (e.g. view 1–500) when 10 lines suffice ⇒ tighten the line range. (S3) A static fact whose
+  statement obviously requires execution to verify ⇒ re-tag as dynamic and provide a probe.
+  Feedback to proposer. For every cited gap, append a one-sentence ϕ-entry naming (a) the missing fact category, and (b) a concrete next
+  investigation (e.g. “add a fact identifying the analogous handler in the same file”). The feedback is consumed verbatim by the next proposer
+  round.
+  Output. A JSON object {instance_id, verdicts : [ . . . ], feedback : [ . . . ]} written via create_file. The next proposer round receives
+  V (t+1) = V (t) ∪ {v : verdict(v) = keep} ∪ {patched(v) : verdict(v) = revise} together with the feedback list.
+
+
+
+E     Segment-wise commits and the trajectory-level objective
+Sec. 4.2 commits trajectories one segment at a time: at each window t it forms a candidate pool
+St , restricts to the locally non-dominated set Pt = ND(St ) under (Eff t , Lent ), and commits s⋆t =
+
+
+                                                                        16
+arg mins∈Pt Lent (s) s.t. Eff t (s; G⋆i ) ≥ ηt . Section 3.3, by contrast, formulates a trajectory-level
+rule: among trajectories satisfying Eff i (τ ) ≥ ηi , pick the shortest. We sketch why the segment-wise
+commits realize the trajectory-level rule on the family of trajectories that the per-window pools
+induce.
+
+Setup. A trajectory built by the procedure decomposes into disjoint windows, τ = s1 ⊕ · · · ⊕ sW ,
+where ⊕ denotes concatenation along the prefix. Both objectives are additive over this partition:
+                                     W
+                                     X                                       W
+                                                                             X
+                      Leni (τ ) =          Lent (st ),        Eff i (τ ) =         Eff t (st ),
+                                     t=1                                     t=1
+                                                                  P
+where Len is response-token mass (or step count) and Eff t (st ) = τ ∈st Progτ on segments that
+pass the groundedness gate. Additivity holds because windows are non-overlapping and Progτ is
+computed against the realized-node set Uτ −1 at the step’s own prefix, with the leakage rejection
+inside Progτ and the groundedness gate Groundt operating on disjoint scopes within a segment
+(Sec. 4.2).
+                                                                      PW
+Floor calibration. Let the per-window floors be calibrated so that t=1 ηt = ηi . In practice we
+set a constant ηt = ηi /W ⋆ for an expected horizon W ⋆ and absorb stochasticity in the fallback rule
+of Sec. 4.2 (commit the maximum-effectiveness segment when no candidate clears the floor); the
+proof statement below pertains to the deterministic case in which the floor is met at every window.
+
+Greedy feasible set. Conditioned on the prefix produced by previous commits, each window
+induces a candidate pool St and an admissible subset Ft = {s ∈ Pt | Eff t (s) ≥ ηt }. The greedy
+feasible family is
+                         
+              Tgreedy = s1 ⊕ · · · ⊕ sW : st ∈ Ft under prefix s1 ⊕ · · · ⊕ st−1 ,
+i.e. all trajectories formable by picking one admissible segment per window from the pools the
+procedure actually encounters.
+
+Claim.    The trajectory τ ⋆ = s⋆1 ⊕ · · · ⊕ s⋆W returned by the segment-wise procedure satisfies
+                        Eff i (τ ⋆ ) ≥ ηi ,       Leni (τ ⋆ ) =       min        Leni (τ ),
+                                                                    τ ∈Tgreedy
+
+and is therefore the shortest-above-floor trajectory in Tgreedy .
+
+Proof sketch. (i) Floor. For each window t, the commit rule P       enforces Eff t (s⋆t )P
+                                                                                         ≥ ηt . Summing
+across windows and using additivity of Eff gives Eff i (τ ⋆ ) =                  ⋆
+                                                                       t Eff t (st ) ≥    t ηt = ηi . (ii)
+Length-optimality. Fix any τ = s1 ⊕ · · · ⊕ sW ∈ Tgreedy . Pointwise minimality of s⋆t within Ft gives
+Lent (s⋆t ) ≤ Lent (st ) at every t; summing and using additivity of Len yields Leni (τ ⋆ ) ≤ Leni (τ ).
+Combined with (i), τ ⋆ is feasible and length-minimal in Tgreedy , which is the trajectory-level shortest-
+above-floor rule restricted to that family.
+
+Scope. The proof shows no Pareto regret within Tgreedy , not global optimality over the full trajectory
+space T (Ii ) of Sec. 3.3: greedy commits change the prefix, and a different early commit could open
+downstream pools containing strictly better segments. Two choices control this gap. First, replanning
+(the receding-horizon δ < n execution in Sec. 4.2) shrinks the prefix that any single commit locks
+in, reducing the loss from greediness. Second, drawing seeds from πblind and bounding curator
+intervention to one edit per segment keeps the per-window pools well-distributed across reasonable
+continuations, so the greedy family is a representative slice of the trajectory space rather than a
+degenerate corner of it. The empirical comparison against rejection sampling and the ablations in
+Sec. 5 measure how much this restriction costs in practice.
+
+F    Candidate generation in detail
+
+This appendix expands the candidate-pool construction sketched in Sec. 4.2.
+
+
+                                                         17
+Blinded seeds.     At window t we draw K length-n continuations
+                               (k,0)       (n)
+                              s̃t      ∼ πblind (· | ht ),      k = 1, . . . , K,
+each executed in a sandbox copy of the environment so that side effects on Ri (file edits, test runs,
+package installs) do not leak across candidates.
+
+                                                  (k,0)
+Single-mutation variants. For each seed s̃t      the curator may additionally pick a position t + j
+                                         ⋆                                         (k)
+(0 ≤ j < n) and a target node v ∈ At+j (Gi ) available under the simulated prefix ht+j , then draw a
+one-step replacement response
+                                          ′                    (k)
+                                         yt+j ∼ qmut (· | ht+j , v)
+                                                                                        ′
+that points the next action at v’s unlocker. The sandbox is rolled back to step t + j, yt+j is executed,
+and the remaining n − j steps of the suffix are regenerated from πblind under the new prefix. Indexing
+the resulting variants by their target m, the window-t pool is
+                                              (k,0) K            (k,m)
+                                    St = {s̃t      }k=1      ∪ {st       }k,m .
+
+Why one edit per segment. Confining curator intervention to a single step per segment plays two
+roles. First, it isolates causality inside the local Pareto problem: every variant differs from some pure
+seed by exactly one localized rewrite, so any (Eff t , Lent ) gap between them can be attributed to that
+edit, which makes the per-segment selection rule of Sec. 4.2 well-posed and the groundedness gate
+                                         ′
+cheap to evaluate (it inspects only yt+j     ). Second, it keeps each committed action a blinded action
+up to a single rewrite, bounding the trajectory’s deviation from the student-facing distribution and
+ensuring the resulting tokens remain safe imitation targets under SFT.
+
+
+G     Full curation algorithm
+
+Algorithm 1 gives the end-to-end pseudocode for P2T, combining the process graph distillation
+of Sec. 4.1 with the receding-horizon bi-objective trajectory realization of Sec. 4.2. The notation
+matches Sec. 4: G⋆i = (Vi , Ei ) is the distilled process graph, Ut is the realized-node set, At the
+available frontier, Progτ the per-step progress score, Groundt the binary groundedness gate, and
+(ηt , n, K, δ) the per-window floor, segment length, seed count, and commit horizon.
+
+
+H     Forward-phase agent prompts and implementation details
+
+The forward phase (Sec. 4.2) instantiates four specialized components, each with a fixed prompt
+template: a curator that proposes single-step mutations toward an available frontier node; a symbolic
+entity extractor that implements the referential-integrity half of Groundt ; a neural claim-grounding
+judge that implements the entailment half of Groundt ; and a node-establishment verifier that decides
+Est(v, ht ) for the per-step progress score Progt (Sec. 4.1). All four components see only the visible
+prefix ht , the issue di , and (for the curator and verifier) the relevant graph nodes; none of them ever
+sees p⋆i or the test suite. The prompt panels below are abstracted versions of the production prompts
+— role, inputs, hard rules, and output schema are preserved verbatim, while tool-API specifications,
+output-format examples, and engineering boilerplate are elided for readability. The full production
+prompts will be released with the code. The curator additionally receives the available frontier At+j
+and the realized set Ut+j at the position it chooses to mutate.
+
+Sliding-window and hyperparameter settings. We use a window length n = 10 ReAct steps,
+half-segment stride (commit horizon δ = 5, so consecutive windows overlap by 5 steps), and K = 2
+blinded seeds per window plus up to one mutation per seed (≤ 4 candidates per pool). The per-
+window floor is ηt = max(1, |At−1 |) · 0.5 (i.e., realize at least half the currently available frontier),
+with the fallback rule of Sec. 4.2 when no candidate clears the floor. Seeds are drawn from πblind
+at temperature 0.6 (top-p 0.95, max output 2k tokens per step), with a per-seed sandbox snapshot
+rolled back after scoring. The curator and judge run on the same teacher backbone as the seeds at
+temperature 0.2; the entity extractor is a deterministic Python pass over the regex set listed below.
+
+
+                                                      18
+Algorithm 1 P2T: oracle-guided process graph distillation and trajectory realization
+Require: Task instance Ii = (di , Ri , Ei , Ti , p⋆i ); blinded solver πblind ; window length n; seeds per
+    window K; commit horizon δ ≤ n; per-window floor ηt
+Ensure: Curated trajectory τi⋆ admitted into Dours , or ⊥
+    Phase 1: Process Graph Distillation (Sec. 4.1)
+ 1: V ← ∅
+ 2: repeat                                                                               ▷ proposer–critic loop
+ 3:      ∆V ← Proposer(di , Ri , V, p⋆i )                           ▷ (i) sufficiency: close logical gap to p⋆i
+ 4:      V ← Critic(V ∪ ∆V, di , Ri ) ▷ (ii) non-leakage: prune nodes whose unlocker presupposes
+    p⋆i
+ 5: until V stabilizes
+ 6: E ← {(u, v) : u must be realized before v’s unlocker applies}                       ▷ (iii) feasible ordering
+ 7: G⋆ i ←   (V,  E)
+    Phase 2: Receding-Horizon Bi-Objective Realization (Sec. 4.2)
+ 8: h ← di ; U ← ∅; τ ← (); t ← 0
+ 9: while agent has not call finish tool do
+10:      A ← {v ∈ V \ U : PredG⋆i (v) ⊆ U }                                                  ▷ available frontier
+11:      St ← ∅
+12:      for k = 1, . . . , K do                                               ▷ K blinded seeds, sandboxed
+                           (n)
+13:           s̃(k,0) ∼ πblind (· | h); add to St with Ground = 1
+14:           for each position j ∈ {0, . . . , n−1} and target v ∈ At+j (G⋆i ) under s̃(k,0) do
+                                                               ′                  (k)
+15:                Roll back sandbox to step t + j; draw yt+j       ∼ qmut (· | ht+j , v) ▷ single-mutation
+    variant
+                               ′
+16:                Execute yt+j     ; regenerate suffix from πblind ⇒ s(k,v)
+                                                      ′                                ′
+17:                Groundt (s(k,v) ) ← ⊮[Ents(yt+j        ) ⊆ Obs(ht+j )] · Claim(yt+j     , ht+j )
+                          (k,v)
+18:                Add s         to St
+19:           end for
+20:      end for
+21:      for each s ∈ St do                                                         ▷ score under (Eff t , Lent )
+22:           Simulate s on h; for each step τ ∈ s compute Uτ , Aτ −1 , ∆τ = Uτ \ Uτ −1
+                                   |∆τ |                        
+23:           Progτ ←                          · ⊮ ∆τ ⊆ Aτ −1              ▷ indicator hard-zeros leaky steps
+                           max(|Aτ −1 |, 1)  P                           P
+24:           Eff t (s) ← Groundt (s) · τ ∈s Progτ ; Lent (s) ← y∈s |y| (or |s|)
+25:      end for
+26:      Pt ← ND(St ) under (Eff t , Lent ); Ft ← {s ∈ Pt : Eff t (s) ≥ ηt }
+27:      if Ft ̸= ∅ then
+28:           s⋆t ← arg mins∈Ft Lent (s)                                                 ▷ shortest-above-floor
+29:      else
+30:           s⋆t ← arg maxs∈Pt Eff t (s)                                                              ▷ fallback
+31:      end if
+32:      scommit
+           t         ← first δ steps of s⋆t
+33:      Execute scommit
+                      t        on the live environment; append (y, o) pairs to τ and h; update U
+34:      t←t+δ
+35: end while
+36: p̂ ← patch(τ )
+37: if Ti (p̂) = 1 then return τi⋆ ← τ
+38: else return ⊥
+39: end if
+
+
+
+
+                                                      19
+Entity-extractor pattern set (symbolic check). Ents(y) and Obs(h) are defined as the union of
+strings matched by the following Python-regex family, applied to the assistant message and tool-call
+arguments of y (resp. to all observations and assistant messages in h):
+
+  Entity regex set (case-sensitive; flags re.MULTILINE)
+  FILE_PATH_REL := (?:[\w.\-]+/)+[\w.\-]+\.(?:py|pyx|pyi|c|cpp|h|js|ts|json|yaml|yml|toml|cfg|md|txt|sh)
+  FILE_PATH_ABS := /(?:workspace|testbed|opt|usr|home)/[\w./\-]+
+  DOTTED_MODULE := (?:[a-z_][a-z0-9_]*\.)1,[a-zA-Z_][a-zA-Z0-9_]*
+  QUALIFIED_NAME := \b[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b
+  IDENTIFIER_DEF := (?:def|class|async\ def)\s+([A-Za-z_][A-Za-z0-9_]*)
+  IDENTIFIER_REF := \b[_a-zA-Z][_a-zA-Z0-9]{2,}\b (filtered by stop-list of Python keywords + 200 most
+  common English words)
+  LINE_REF := (?:line|lines|L)\s#?\d+(?:\s*[-–]\s*\d+)?
+  ERROR_TYPE := \b[A-Z][A-Za-z]*(?:Error|Exception|Warning)\b
+  SHELL_FLAG := (?<=\s)–?[a-zA-Z][a-zA-Z_\-]+
+  NUMERIC_LITERAL := \b\d{3,}\b (e.g., issue numbers, large constants; small ints are excluded as
+  non-discriminative)
+
+The symbolic check passes iff every match in y is also a match in h, modulo a path-normalization step
+that strips workspace prefixes and a trailing-suffix collapse for nested attribute access (a.b.c matches
+if either a.b.c or b.c appears in h). Single-token English identifiers shorter than three characters and
+members of the keyword stop-list are excluded from Ents(y) to avoid spurious failures. Empirically
+the symbolic gate fires on 13.4% of mutated candidates, and 91% of those are downstream rejected
+by the neural judge as well.
+
+                                                                        (k,0)
+Curator prompt. Given a sandboxed seed s̃t , the curator picks a position j and a target
+                                                   ′
+v ∈ At+j , then writes a one-step replacement yt+j     intended to advance toward v’s unlocker. It does
+not receive p⋆ ; it sees only the issue, the visible prefix at position t + j, and the natural-language
+statement and unlocker action of the targeted graph node.
+
+  Curator prompt (forward phase, Sec. 4.2)
+ Role. You are guiding a blinded coding agent. The agent’s next ReAct step is currently candidate, but you believe a small redirection
+ would unlock more useful evidence. You may rewrite at most one step.
+ Visible to you. (a) The issue description di . (b) The full prefix ht+j including all prior assistant messages, tool calls, and observations. (c)
+ The target node v: a single statement and its unlocker action (e.g., “read responses/security_groups.py lines 183–197 to compare
+ with sibling describe_security_groups”). (d) The candidate step candidate the blinded agent originally produced.
+ Hidden from you. The reference patch, the test suite, the rest of the graph, and any future steps. Do not speculate about them.
+                     ′
+ Task. Produce yt+j      = (c′t+j , a′t+j ), a single ReAct response whose action moves the trajectory toward v’s unlocker.
+ Hard rules. (C1) The reasoning c′t+j must be entailed by what is visible in ht+j — no claim that requires evidence the prefix has not
+ yet produced. Frame the redirection as a natural next thought (“before going deeper into X, let me first check Y”). (C2) Every entity (file
+ path, identifier, line number) you mention must already appear somewhere in ht+j , either via the issue text or via earlier observations. If
+ v’s unlocker mentions an entity not yet observed, choose a smaller approach action that surfaces that entity first. (C3) The action a′t+j is
+ a single tool call from the agent’s tool ontology (str_replace_editor view, execute_bash, think, create_file, str_replace);
+ arguments must be fully specified. (C4) Do not write or refer to any meta-concept (“oracle”, “graph”, “target node”, “reference patch”).
+ Your output must read as if a skilled developer wrote it from scratch. (C5) Stay within one step. Do not stack multiple tool calls; do not
+ pre-announce future steps in detail.
+ Output. JSON: {response_content : c′t+j , response_tool_calls : [a′t+j ]}. Nothing else.
+
+
+                                                                      ′
+Claim-grounding judge prompt. The judge implements Claim(yt+j            , ht+j ) ∈ {0, 1} and is
+invoked only on the curator-mutated step. It runs after the symbolic check and is by construction
+blinded to p⋆ and to the target node.
+
+  Claim-grounding judge prompt (forward phase, Sec. 4.2)
+ Role. You are an independent reviewer. You decide whether a single proposed assistant step is grounded in the prior interaction history —
+ meaning every claim it makes and every entity it references is either stated in the issue, visible in earlier tool outputs, or trivially derivable
+ from them.
+                                                                                                                                           ′
+ Inputs. (i) Issue di . (ii) Full untruncated prefix ht+j (every assistant message and every observation). (iii) Proposed step yt+j             (its
+ reasoning text and its tool call).
+ Hidden. You do not have access to the reference patch, the test suite, or any oracle. Judge solely from (i)–(iii).
+ Decision criteria (all must hold). (J1) R EASONING ENTAILMENT. Every assertion in the reasoning text is either present in di / ht+j
+ verbatim, or is an immediate one-step inference from content that is. Disallowed: identifying a root cause whose symptom has not yet been
+ observed; asserting that a method “probably” does X without having read its body. (J2) A RGUMENT REACHABILITY. Every argument of
+ the tool call (file paths, line numbers, symbol names, shell flags) appears in ht+j or di , or is a transparent transformation thereof (e.g.
+ widening a previously viewed line range by a few lines). (J3) N O ORACLE ARTIFACTS . The text contains no reference to “oracle”, “golden
+ patch”, “reference solution”, “ground truth”, or any meta-concept about being guided. (J4) C ONTINUITY. The step is a natural incremental
+ continuation of ht+j ; there is no sudden jump in knowledge or unexplained change of focus.
+ Output. JSON: {valid : true | false, reasons : [. . .]}, where reasons cites the violated criterion and the offending span when
+ valid=false. Return valid=true iff (J1)–(J4) all hold.
+
+
+
+                                                                        20
+Establishment verifier prompt. For each candidate window the verifier is invoked on every
+(v, hτ ) pair where v is a node not yet in Uτ −1 and hτ extends hτ −1 by exactly one step. It returns
+Est(v, hτ ) ∈ {0, 1}, feeding directly into Uτ , Aτ −1 , and Progτ (Sec. 4.1).
+    Establishment verifier prompt (Sec. 4.1)
+    Role. Decide whether the trajectory prefix hτ has established the graph node v = (sv , ηv , uv ), where sv is a natural-language statement
+    and uv is a required interaction (e.g., a file view, a grep, a script execution).
+    Two-part criterion. Establishment requires both: (E1) ACTION MATCH . Some action in hτ matches the requirement specified by uv .
+    Equivalence is judged by intent, not by string match: a view of a wider line range that includes the target lines counts; an execute_bash
+    python -c ’...’ that exercises the same code path as a probe script counts; a grep over a superset of the requested directory counts.
+    (E2) S TATEMENT ENTAILMENT. The observation produced by the matching action, conditioned only on hτ , entails sv . You may NOT
+    consult the repository directly — restrict the judgment to what the trajectory has actually surfaced. If the observation is consistent with sv
+    but does not entail it (e.g., a function name appears but its body is not shown), return false.
+    Inputs. di ; the full prefix hτ ; the node v. You do NOT see p⋆ , the test suite, or other graph nodes.
+    Output.           JSON: {established             :       true | false, matched_action         :      (step index or null), evidence           :
+    (short quote from the matching observation), reason : (one sentence; required when false)}.
+
+
+Termination, retries, and trajectory acceptance. A candidate that fails either half of Groundt is
+dropped from St without re-prompting — the curator may not retry on the same (j, v) pair within
+a window, since unbounded retries would let the curator search for a leakage-free phrasing of an
+inherently leaky claim. If all mutated candidates fail and no pure seed clears ηt , the fallback rule of
+Sec. 4.2 commits the maximum-effectiveness pure seed. The forward loop terminates when the agent
+emits the finish action; the resulting patch is then run against Ti and the trajectory is admitted into
+Dours iff all targeted tests pass.
+
+I      End-to-end worked example
+This      appendix     traces     a     single     SWE-Gym          instance,      getmoto/moto#6041
+(“ec2.describe_security_group_rules does not use filter”), end-to-end through the P2T pipeline. The
+instance is representative because (i) the oracle patch is one line, giving a clean contrast between a
+wandering blinded rollout and the curated trajectory; (ii) the blinded teacher over-engineers the fix on
+the model layer and breaks an existing test, so curation has to both remove a long detour and insert a
+small correction; and (iii) the distilled graph G⋆ contains every node category (static fact, dynamic
+fact, reproduction, analysis, plan, edit, validation), so a single instance illustrates the full recipe.
+
+I.1      Issue x and oracle patch p⋆
+
+    Issue x
+    ec2.describe_security_group_rules                does    not    use     filter. Calling it with
+    Filters=[{"Name":"group-id","Values":[sg_id]}] returns rules for all security groups
+    (default + dummy) instead of only the dummy SG. The user’s repro uses boto3 + moto.mock_ec2 and
+    expects exactly the default egress rule for the new SG; actually gets two.
+
+    Oracle patch p⋆ (one line)
+    –- a/moto/ec2/responses/security_groups.py
+    +++ b/moto/ec2/responses/security_groups.py
+    @@ class SecurityGroups(EC2BaseResponse):
+      def describe_security_group_rules(self) -> str:
+        group_id = self._get_param("GroupId")
+    - filters = self._get_param("Filter")
+    + filters = self._filters_from_querystring()
+        rules = self.ec2_backend.describe_security_group_rules(group_id, filters)
+
+The fix replaces a flat _get_param("Filter") (which looks for a literal "Filter" key in the
+querystring, finds none, and returns None) with the EC2 helper used by every other describe_*
+handler in the same file.
+
+I.2      Phase 1 — Process graph distillation
+
+The reverse phase converts p⋆ into a latent process graph G⋆ = (V, E) with 10 contextual-fact
+nodes and 6 solution-milestone nodes (1 reproduction, 1 analysis, 1 plan, 1 edit, 2 validations). The
+converged fact set VF⋆ is summarised in Table 2 and the full DAG is shown in Fig. 5.
+
+
+                                                                         21
+Table 2: Converged fact set VF⋆ for moto#6041. Each node carries a natural-language statement, a
+type tag, and an explicit unlocker (omitted from this table for brevity; see Fig. 5).
+       id      type        statement
+       f1      static      Repro shows describe_security_group_rules returning rules for all SGs when a group-id filter is
+                           passed.
+       f2      static      Line 197 of the response handler uses self._get_param(’Filter’) to parse filters.
+       f3      static      Sibling describe_security_groups (line 186) uses self._filters_from_querystring() – the
+                           standard EC2 pattern.
+       f4      static      _filters_from_querystring in EC2BaseResponse parses the numbered Filter.N.* querystring
+                           into a {name: values} dict.
+       f5      static      _get_param(p) does an exact key lookup; for p=’Filter’ it never matches Filter.1.Name and
+                           returns None.
+       f6      dynamic     At       runtime        the      querystring         contains      Filter.1.Name/Filter.1.Value.1;
+                           _get_param(’Filter’)→None, helper → correct dict.
+       f8      static      Backend describe_security_group_rules delegates to describe_security_groups(group_ids,
+                           filters).
+       f9      static      Backend filter step (line 540: if filters:) is skipped when filters is None, so all groups match.
+       f10     static      _filters_from_querystring is the standard pattern across all other EC2 describe_* handlers
+                           (instances.py, hosts.py, . . . ).
+       f11     static      The existing test masks the bug – it iterates all returned rules looking for an id match, never asserts the
+                           count.
+
+
+
+One iteration of the proposer–critic loop. We illustrate non-leakage enforcement on a single
+                                                                          (1)
+round. Starting from V (0) = {f1 }, the Proposer reads p⋆ and proposes ∆VF = {c1 , . . . , c5 }
+(Table 3).
+
+                              Table 3: Proposer round 1 candidates for moto#6041.
+  cand.      proposed statement                                                               critic verdict
+  c1         Buggy line 197 uses _get_param(’Filter’).                                        keep (→ f2 )
+  c2         The fix is to call _filters_from_querystring() at line 197.                      prune (leaks p⋆ )
+  c3         Sibling describe_security_groups uses the correct helper.                        keep (→ f3 )
+  c4         At runtime the querystring uses Filter.N.* keys, not Filter.                     keep (→ f6 )
+  c5         Backend silently skips filtering when filters is None.                           keep (→ f9 )
+
+
+The critic’s feedback to the Proposer is
+             ϕ: “c2 is the patch itself; its unlocker presupposes knowledge of p⋆ . Decompose into (a)
+             a fact identifying the bug location, (b) a fact identifying the correct alternative pattern
+             observed elsewhere in the repo, and (c) a plan node that conjoins them.”
+                                       (2)
+A second iteration adds ∆VF = {f4 , f5 , f8 , f10 , f11 } to close residual gaps (the helper definition,
+the _get_param semantics, the backend delegation, the cross-file prevalence of the pattern, and
+the masking test); the loop converges. A subsequent S CAFFOLDA RTIFACT DAG pass appends
+VA⋆ = {repro1 , analysis, plan, edit1 , val1 , val2 } and links every node into the DAG of Fig. 5.
+
+I.3    Phase 2 — Receding-horizon trajectory realization
+
+We trace one sliding window in detail. Setup: window length n = 10, commit horizon δ = 4, K = 2
+                           P graph-aware mutation each (≤ 4 candidates per window), per-window
+blinded seeds plus up to one
+floor ηt calibrated so that t ηt ≈ |V |.
+
+State at window start. The window we trace begins at prefix end-step t = 22 of the original
+blinded rollout. The realized-node set and available frontier are
+                              U22 = {f1 , repro1 , f2 },                A22 = {f3 , f5 , f8 , f11 }
+(f3 , f5 , f8 have f2 ∈ U22 as their only predecessor; f11 has f1 ∈ U22 ). This window is exactly where
+the blinded teacher takes its wrong turn: it omits f3 (the sibling-method comparison) and is therefore
+biased to “fix” the backend rather than the response handler.
+
+Two blinded seeds.            Both seeds are length-10 continuations from πblind (· | h22 ).
+As a worked example of the Eff computation, take s(0,f3 ) . The initial frontier is A22 =
+{f3 , f5 , f8 , f11 } (|A| = 4). The mutation step itself realizes only f3 (Prog = 1/4 = 0.25).
+
+
+                                                                   22
+                                                      ★
+                                                                                                                                                 ✕
+
+                                                                                           Fact       ● Static
+
+
+
+
+                                                                                           The sibling method describe_security_groups in the
+                                                                                           same file at line 186 uses
+                                                                    repro
+                                                                                           self._filters_from_querystring() to parse filters, which
+
+                                                                                           is the correct pattern for EC2 filter parsing.
+
+
+
+
+                                                                                          🔒 Unlocker:
+                                                                                           [view] moto/ec2/responses/
+                                                                                           security_groups.py 183-193
+                                      analysis
+
+
+                                                                                          Observation:
+                                       plan
+
+                                                                                           Line 186: filters =
+                                      edit                                                 self._filters_from_querystring()
+                               (security_groups.py)
+
+
+
+
+                   ✓ val                              ✓ val
+
+
+
+     ★ Root Fact        Static Fact           Dynamic Fact    Reproduce        Analysis       Plan               Code Edit      ✓ Validation
+
+
+
+
+Figure 5: Distilled prerequisite graph G⋆ for moto#6041. Static facts (blue) form the contextual
+layer; the dynamic fact f6 (orange) requires execution; the artifact layer (green/grey/red/purple)
+encodes the reproduction, analysis, plan, edit, and validation milestones. Edges denote prerequisite
+relations enforced by the critic during distillation.
+
+                                                                        P
+Table 4: Window-22 candidate pool (n=10 steps each). Eff 22 = τ Progτ aggregates per-step
+ratios Progτ = |∆τ |/|Aτ −1 | ∈ [0, 1]; Len22 is response-token mass. Both mutated variants tie at
+Eff 22 = 0.70 above the floor η22 ≈ 0.5; s(0,f3 ) wins the length tie-break and is committed as s⋆22 .
+                   candidate                                   ∆ realized           |∆|      Ground              Eff 22      Len22
+                    (0,0)
+                   s̃       (seed, model-first)                {f8 }                  1     1 (no edit)           0.25       4.7k
+                   s̃(1,0) (seed, test-first)                  {f11 , f5 }            2     1 (no edit)           0.58       8.7k
+                      (1,f3 )
+                   s          (curation on seed 1)             {f3 , f8 , f9 }        3          1                0.70       5.4k
+                   s(0,f3 ) = s⋆  22 (curation on seed 0)      {f3 , f4 , f10 }       3         1                 0.70       4.3k
+
+
+
+
+In the 7-step re-rolled suffix the blinded model – now seeing that the sibling handler uses
+_filters_from_querystring – naturally opens _base_response.py to learn what the helper
+does, realizing f4 (frontier grew to |A| = 5 after f3 , so 1/5 = 0.20); a follow-up grep -rn for the
+pattern across moto/ec2/responses/ realizes f10 (1/4 = 0.25). Summing the three per-step ratios
+gives Eff 22 ≈ 0.70. The leakage rule rejects f9 in s̃(0,0) : even though step 26’s view of the model
+file would expose it in the same observation as f8 , f9 ’s prerequisite (f8 ) is not yet in Uτ −1 , so it
+contributes 0 and can be realized only at a later window.
+
+Single-curation construction. The curator scans positions j = 0, . . . , 9 along seed k = 0 and picks
+j = 2 (the first non-trivial branching point: the seed wastes step 25 on an empty assistant thought).
+Among A24 = A22 = {f3 , f5 , f8 , f11 } (steps 23–24 of seed k = 0 realize no new node; f8 would be
+realized only at step 26 of the unmutated seed via the model-file view, so at j = 2 it is still on the
+
+
+                                                                          23
+frontier), the v = f3 has is chosen as the curation target node. The replacement response and its critic
+verdicts are:
+                ′
+  Mutated step y22+2 (curator-authored, target f3 )
+ Assistant:      “Before diving deeper into the model, let me first check how the nearby
+ describe_security_groups method in the same response file parses its filters — it’s the clos-
+ est sibling and should reveal the standard pattern.”
+ Tool      call:        execute_bash cmd="grep -n ’def describe_security_groups\|filters’
+ moto/ec2/responses/security_groups.py | head -20"
+
+Symbolic referential-integrity check. Entities mentioned in y ′ – describe_security_groups,
+filters, moto/ec2/responses/security_groups.py, the grep flag -n – all appear in
+Obs(h24 ) (the issue text and the views at steps 22 and 24). ✓ PASS.
+Neural claim-grounding judge. The claim “the sibling method is in the same file and is
+a similar operation” is entailed by the view at step 22 (lines 190–210), where the tail of
+describe_security_groups is visible just above the buggy method. ✓ PASS. Therefore
+Ground22 (s) = 1. A counterfactual mutation targeting f5 with the claim “_get_param does
+exact-key matching, which is why Filter fails” would ✗ FAIL the neural judge – that semantics has
+not yet been observed – and would zero out Eff.
+
+Selection and commit. The two mutated variants both clear three new nodes and tie at Eff 22 = 0.70,
+well above the floor η22 ≈ 0.5, but they realize different parts of the graph: s(0,f3 ) extends along the
+response-handler chain ({f3 , f4 , f10 }, branching from f3 into the helper definition and its cross-file
+prevalence), whereas s(1,f3 ) extends along the model-layer chain ({f3 , f8 , f9 }, since the seed-1 prefix
+had already oriented the agent toward the backend). Both pure seeds fall below the floor. The two
+mutated variants thus form the local non-dominated set on the Eff axis, and the tie-break by length
+selects the seed-0 mutation, which has the shorter prefix (Len = 4.3k vs 5.4k tokens). s(0,f3 ) is
+committed as s⋆22 (Fig. 6). The first δ = 4 steps are appended to the trajectory; the remaining suffix
+is replanned from the new prefix. The non-selected candidates are rolled back and never enter the
+trajectory.
+
+
+                                                                                              s(0,
+                                                                                               ̃ 0) (seed k = 0)
+                                                                                              s(1,
+                                                                                               ̃ 0) (seed k = 1)
+                                                                                              s (1, f3) (mutation, k = 1)
+
+
+
+
+                      Effectiveness Eff22 = ∑Progτ
+                                                                                              s (0, f3) = s22
+                                                                                                           ⋆
+                                                     0.70
+                                              τ
+                                                     0.58
+
+                                                     0.50                                                       floor η22 = 0.5
+
+
+
+
+                                                     0.25
+
+
+
+
+                                                       0
+
+                                                            4k     6k        8k        10k      12k             14k
+                                                                 Segment length Len22 (response tokens)
+
+
+Figure 6: Window-22 candidate pool in (Len22 , Eff 22 ) space, with Len22 measured in response
+tokens (assistant messages plus their observations). Both pure seeds (grey circles) sit far below the
+floor η22 = 0.50 (shaded band, dashed line). The two mutated variants tie at Eff = 0.70; the tie-break
+by length picks the seed-0 mutation (red star), which is committed as s⋆22 .
+
+
+Side-by-side comparison. Fig. 7 contrasts the unmodified blinded rollout (steps 23–32) with the
+P2T trajectory (steps 23–37) over the same window. The committed prefix is the first δ = 4 steps of
+s⋆22 – step 23, step 24, the mutated y ′ at step 25, and the re-rolled step 26 that immediately benefits
+from y ′ – and only the assistant message at step 25 is curator-authored; every other committed token
+is a blinded continuation. Follow-on windows then replan from the new prefix and converge on
+
+
+                                                                                  24
+the one-line response-handler fix, whereas the unmodified rollout commits to a 100-step backend
+over-engineering loop that edits SecurityRule, the response template, and breaks an existing test.
+
+          Blinded rollout (w/o curation)                          P2T trajectory (with curation)
+          [23] A: Now let me check the model                  [23] A: Examine
+          implementation                                      responses/security_groups.py
+          [24] O: grep describe_security_group_rules          [24] O: view responses/security_groups.py
+          → models:545                                        190-210 → f2
+          [25] A: (empty thought)                             [25] A: Let me check the backend model
+          [26] O: view models/security_groups.py              implementation (blinded)
+          540-560 → f8,f9                                     [25] A: Check sibling
+                                                              describe_security_groups parses
+          [27] A: I see! filters=None passed to               ← y ′ (curated)
+          backend
+                                                              [26] O: grep → line 186
+          [28] O: re-view                                     filters=_filters_from_querystring()
+          responses/security_groups.py 195-205                → f3
+          [29] A: Look at examples of filter parsing          [27] A: _filters_from_querystring uses
+          [30] O: grep Filter (30K chars of noise)            _get_multi_param
+          [31] A: Trace SecurityRule for skipped              [28] O: view _base_response.py 1-31 → f4
+          filtering                                           [29] A: Is this the standard EC2 pattern
+          [32] O: view                                        across responses?
+          models/.../SecurityRule.__init__                    [30] O: grep -rn _filters_from_querystring
+          → wrong path                                        responses/ → f10
+         ↓ commits to BACKEND fix; next 100 steps add         [31] A: Plan: replace _get_param(’Filter’)
+         group_id to SecurityRule, edit response template,    with helper at line 197
+         BREAK test_create_and_describe_security_grp_rule.
+                                                              [32] O: (commits, replans from new prefix)
+                                                              ↓ one-line edit at responses/security_groups.py:197;
+                                                              both validations pass.
+
+Figure 7: Side-by-side fragment of the same window in πblind (left) and P2T (right). Rows labelled A
+are assistant responses; rows labelled O are environment observations. The single curator-authored
+step (red, y ′ at j=2) replaces an empty assistant thought with a frontier-aware inspection of the
+sibling describe_security_groups method, unlocking f3 . The 7-step re-rolled blinded suffix
+then organically realizes only the two facts naturally implied by that observation (f4 , f10 , green steps),
+whereas the unmodified rollout (red steps) wanders into the model layer and breaks an existing test.
+
+
+J   Training details
+Student SFT. We fine-tune Qwen2.5-Coder-14B/32B-Instruct [3] with ms-swift’s Megatron-LM
+backend [31]. Full-parameter SFT runs for 3 epochs with Adam (lr 2×10−5 , β1 = 0.9, β2 = 0.999,
+weight decay 0.01, gradient clipping 1.0), global batch size 4 with sequence packing up to 131,072
+tokens, linear warm-up over the first 5% of steps and cosine decay to 0, and BF16 mixed precision.
+The loss is computed on assistant tokens only.
+
+Context window and parallelism. Curated trajectories frequently exceed the base 32,768-token
+window of Qwen2.5-Coder; we extend the effective context to 131,072 tokens via YaRN positional
+interpolation [11] (factor 4) for both training and inference. Training uses tensor parallelism 2,
+context parallelism 4, and Megatron-style sequence parallelism.
+
+Compute resources. All experiments—curation, SFT training, and SWE-bench evaluation—are
+run on a single node with 8× NVIDIA H200 (141 GB) GPUs. Teacher rollouts and student inference
+are served via vLLM on the same node, and the curation pipeline (reverse-phase graph distillation
+and forward-phase trajectory construction) is executed on the same hardware.
+
+K    Compute-matched rejection-sampling baseline
+The size-matched control in Sec. 5.2 fixes the number of curated trajectories but ignores the GPU-
+hours P2T spends on graph distillation, blinded seeding, mutation, and gating. A skeptical reader
+may ask whether the same compute, redirected into additional plain rollouts, would close the gap.
+This appendix runs that experiment under a strict compute-parity protocol on the same hardware
+
+
+                                                             25
+(single 8×H200 node, vLLM-served Qwen3-Coder-480B teacher, OpenHands scaffold, 100-iteration
+ReAct budget).
+
+Compute accounting. End-to-end P2T curation over the 1.8k SWE-Gym instances costs ≈ 226
+GPU-hours (reverse-phase proposer/critic + forward-phase blinded seeds, mutations, rollbacks, and
+per-step LLM gating). One full pass of plain teacher rollouts over the same SWE-Gym pool costs ≈ 68
+GPU-hours. We therefore allocate the rejection-sampling baseline a budget of 4 rollout passes (≈ 272
+GPU-hours, ∼ 20% more than P2T), aggregate the resolved trajectories across passes (deduplicating
+per instance by keeping the shortest passing trajectory), and SFT Qwen2.5-Coder-32B-Instruct on
+the result under the same recipe as Sec. 5.1. As an upper bound on the supervision the 4-run baseline
+could in principle harvest, the cumulative resolve rate (Pass@4) over the 4 rollout passes on the
+SWE-Gym training pool reaches 34.3%, vs. a per-run Pass@1 of ∼ 29%; the additional passes thus
+recover only a sub-set of new instances rather than uniformly improving every trajectory.
+
+Results. Table 5 compares the compute-matched RS baseline against P2T (full) on SWE-bench
+Verified, reporting Pass@1, per-instance inference cost, and total curation GPU-hours.
+
+Table 5: Compute-matched comparison on SWE-bench Verified (Qwen3-C-480B teacher,
+Qwen2.5-C-32B student). The RS baseline is allocated 4 rollout passes (≈ 272 GPU-hours, ∼ 20%
+more than P2T’s curation budget); resolved trajectories are aggregated across passes (shortest passing
+kept per instance) and used as SFT data under the same recipe as Sec. 5.1. Bold denotes the better
+cell.
+       Recipe                          Pass@1 (%) ↑       Cost ($) ↓    Curation GPU-hours ↓
+       Test-Pass RS (4× rollouts)            43.2            0.86                 ≈ 272
+       P2T (full)                            50.4            0.78                 ≈ 226
+
+Even with ∼ 20% more curation compute, the rejection-sampling baseline remains bounded by its
+own ceiling: the additional rollout passes recover supervision only on instances the teacher happens to
+solve at least once across 4 tries, and contribute nothing to the per-step quality of the trajectories that
+do get retained. P2T spends comparable GPU-hours but allocates them differently—toward distilling
+G⋆ and shaping each retained trajectory along (Eff, Len)—which is what unlocks the simultaneous
+Pass@1 gain and per-instance inference-cost reduction in Table 1.
+
+L    Limitations and outlook
+Limitations. P2T inherits four constraints worth flagging. (i) Privileged-signal availability. The
+reverse phase requires a reference patch p⋆ and an executable test suite per instance. Both hold on
+SWE-Gym and SWE-bench but exclude issues without a maintained CI; extending the recipe to such
+issues would require a surrogate verifier (e.g., teacher-generated patches gated by self-consistency or
+property-based tests). (ii) LLM-mediated guarantees. Both the non-leakage critic in Phase 1 and the
+groundedness/establishment judges in Phase 2 are LLM-instantiated. Our value-of-information and
+component ablations (App. C, Sec. 5.4) show the resulting graphs and gates carry the right signal
+in aggregate, but per-instance correctness is empirical rather than formal; a tighter, model-agnostic
+certificate of minimality and grounding remains open. (iii) Curation compute. Distillation and forward
+realization cost on the order of 102 GPU-hours for 1.8k instances (App. K); while compute-matched
+against rollout scaling, this is non-trivial and scales with graph size. (iv) Scaffold and student scope.
+Experiments fix OpenHands as the scaffold and the Qwen2.5-Coder family as the student; transfer to
+agentless pipelines, browser-augmented agents, or non-Qwen students is not yet validated.
+
+Outlook. Two extensions follow naturally. First, G⋆ is a generic latent representation of process
+supervision: training a process reward model to score per-step compliance with G⋆ would lift
+the signal from behavior cloning to online RL while preserving non-leakage, addressing a known
+weakness of SFT under distribution shift. Second, the privileged-signal → latent-structure → blinded-
+realization factorization is not specific to code; any task with a verifiable terminal artifact and a
+partially observable, tool-mediated solution process (theorem proving, scientific protocol execution,
+multi-step data analysis) admits the same recipe. Together, these directions suggest that the right unit
+
+
+                                                    26
+of supervision for capable agents is neither the trajectory nor the terminal artifact in isolation, but the
+structure that links them.
+
+
+
+
+                                                    27
+

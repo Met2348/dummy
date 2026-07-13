@@ -1,0 +1,1763 @@
+                                            TACT: Mitigating Overthinking and Overacting in
+                                                Coding Agents via Activation Steering
+
+
+                                                      Yuan Sui1 , Yulin Chen1 , Yibo Li1 , Xue Jiang2 , Yufei He1 , Yihong Dong2
+                                                                      Xiaoxin He3 , Tianyu Gao1 , Bryan Hooi1
+                                                          1
+                                                            National University of Singapore 2 Peking University 3 Meta
+
+
+
+
+arXiv:2605.05980v1 [cs.AI] 7 May 2026
+                                                                                         Abstract
+                                                    When language model agents tackle complex software engineering tasks, they
+                                                    often degrade over long trajectories, which we define as agent drift. We focus
+                                                    on two recurring failure modes overthinking and overacting, i.e., where the agent
+                                                    repeatedly reasons over information it already has, and where it issues tool calls
+                                                    without integrating recent observations or acquiring new evidence. In this paper,
+                                                    we introduce TACT (Think-Act Calibration via activation sTeering), to detect and
+                                                    mitigate agent drift in the residual stream before it surfaces as a behavioral failure.
+                                                    In specific, we label trajectory steps as overthinking, overacting, or calibrated, and
+                                                    find that their hidden states can separate linearly along two drift axes, pointing
+                                                    from calibrated behavior toward each failure mode (AUC ≈ 0.9). To mitigate
+                                                    agent drift, we project each step’s activation onto these axes at test time and pull
+                                                    drifted ones back toward the calibrated region. Experiments show that TACT
+                                                    outperforms unsteered baselines across SWE-bench Verified, Terminal-Bench 2.0,
+                                                    and CLAW-Eval, lifting average resolve rate by +5.8 pp on Qwen3.5-27B and
+                                                    +4.8 pp on Gemma-4-26B-A4B-it while cutting steps-to-resolve by up to 26%.
+                                                    These gains frame agent drift as a steerable direction in the residual stream, and
+                                                    position TACT as a viable handle for reliable long-horizon agents.
+
+
+                                        1    Introduction
+                                        Software engineering benchmarks such as SWE-bench [Jimenez et al., 2024] have become a central
+                                        testbed for evaluating autonomous coding agents. Unlike single-turn code generation, these bench-
+                                        marks require agents to operate over long horizons: they must navigate large repositories, localize
+                                        bugs, and produce correct patches. A successful trajectory therefore depends not only on whether
+                                        the underlying language model can reason or generate code, but also on whether the agent can con-
+                                        tinuously allocate its computation between thinking and acting, which is empirically fragile [Wang
+                                        et al., 2025b]. As trajectories grow to dozens or hundreds of steps [Yang et al., 2024], agents often
+                                        degrade over time, which we refer to as agent drift. We focus on two failure modes overthinking
+                                        and overacting, i.e., where the agent repeatedly reasons over information it already has, and where it
+                                        issues tool calls without integrating recent observations or acquiring new evidence.
+                                        These failures matter because they affect both task success and efficiency. Overthinking wastes
+                                        context and delays useful actions, and also can cause failure: when the agent keeps reasoning from
+                                        the same evidence, it may reinforce a wrong hypothesis [Zhao et al., 2025], postpone the tool call
+                                        that would disconfirm it, and run out of steps or context before finding the right fix [Cuadron et al.,
+                                        2025]. In contrast, overacting wastes tool calls by repeating searches, re-reading files, or running
+                                        commands without first using the information already observed; tools should be called only when
+                                        they are needed to obtain new evidence [Wang et al., 2025b]. It can also cause failure by flooding
+                                        the trajectory with redundant observations, making it harder to track which evidence matters and
+                                        which hypothesis should be updated. Both patterns reduce agent performance, but they are hard to
+                                        diagnose from final outcomes alone: two failed trajectories can look the same even if one failed by
+
+                                        Preprint.
+                 Overacting Trace                                                                                                                            Overthinking Trace
+                                                                       Projection in Activation Space
+                                            Trajectory in                  Overacting Axis                … 𝒔𝒏                             Trajectory in
+                                            Activation Space                                        𝒔𝟓                                     Activation Space
+                                                                                                             Overacting Drift
+                                                       𝒔𝟏                                   𝒔𝟒                                                       𝒕𝟏
+                                                                                      𝒔𝟑
+
+                                                                           𝒔𝟐                                                                   𝒕𝟐
+                                                             𝒔𝟐
+                                                                                 𝒔𝟏                                   Overthinking Drift
+                                                                          Calibrated Steps                                        … 𝒕𝒏     𝒕𝟑
+                                                                        (Well-aligned Region)
+                                                                  𝒔𝟑                        𝒄𝟓
+                                                                            𝒄𝟏
+                                                                                                                             𝒕𝟓
+                                                                                                     𝒄𝟒                𝒕𝟒
+                                                                                                                      Overthinking Axis     𝒕𝟒
+                                                                 𝒔𝟒                                              𝒕𝟑
+                                                                          𝒄𝟐                                𝒕𝟐
+                                                                                           𝒄𝟑        𝒕𝟏
+                                                                                                                                                 𝒕𝟓
+                                                            𝒔𝟓
+
+
+                                                                                                                                                      … 𝒕𝒏
+                                                … 𝒔𝒏
+  <Overacting>: fires rapid tool calls without synthesizing                                                                                <Overthinking>: Extended reasoning loops without
+  what it already knows.                                                                                                                   seeking new information.
+
+
+
+
+Figure 1: Two failure modes of a coding agent, mapped into activation space. The left and right
+panels show concrete steps from an overacting trajectory (left) and an overthinking trajectory (right).
+The center panel projects each step’s hidden state at the </think> token onto our two drift axes:
+calibrated steps cluster in the central band, while overthinking and overacting trajectories drift
+outward in opposite directions. Both failure modes are linearly separable from calibrated activations
+along their respective axes, motivating the dual-axis steering used at test time (Section 2.4).
+
+
+
+premature action and the other by excessive deliberation. This suggests coding agent evaluation
+should move beyond task-level success and check whether each step is well-calibrated to the agent’s
+current information state [Yehudai et al., 2025].
+A growing body of work studies such failures behaviorally [Cuadron et al., 2025, Wang et al.,
+2025b, Yue et al., 2025, Rath, 2026] and mitigates them through mechanisms outside the model.
+Reflexion [Shinn et al., 2023] and Self-Refine [Madaan et al., 2023] ask the model to critique and
+revise its own outputs. Tree-of-Thoughts [Yao et al., 2023a] searches over alternative reasoning
+paths. Meta-reasoner [Sui et al., 2025a] uses an external controller to select reasoning strategies.
+These approaches are useful, but they treat the model as a black box: drift is observed only after it
+manifests in reasoning context or tool use, and interventions are applied through prompts, search, or
+orchestration. This leaves open a lower-level question: Can agent drift be detected and mitigated
+at test time, before it fully surfaces as a behavioral failure?
+This question is motivated by representation engineering (RepE) [Zou et al., 2023], showing that
+high-level model behaviors are often linearly represented in transformer residual streams. Properties
+such as refusal [Arditi et al., 2024], truthfulness [Li et al., 2023], and style or persona [Zou et al.,
+2023] can be captured by contrastive activation directions and steered at inference time. The closest
+precedent is the assistant axis of Lu et al. [2026], which stabilizes an instruction-tuned model’s
+assistant-like behavior over long contexts. However, existing activation-steering results mostly target
+behaviors that can be identified from a single model response, such as refusal, truthfulness, persona,
+or response style. Long-horizon agents pose a different problem: whether a step is overthinking or
+overacting depends not only on the step itself, but also on what the agent has already observed and
+what information is still needed. It is therefore unclear whether such context-dependent failures can
+be captured by a simple linear direction in activation space as shown in Figure 1..
+To this end, we propose TACT (Think-Act Calibration via activation sTeering), a three-stage pipeline
+to detect and mitigate agent drift in the residual stream before it surfaces as a behavioral failure:
+1. Annotate. We design an LLM-as-judge pipeline [Zhuge et al., 2025] that labels each step of
+   an agent trajectory as overthinking, overacting, or calibrated. The pipeline carries a validated
+   rolling state, a compressed summary of the agent’s accumulated knowledge audited by a dedicated
+   validator with a reflection loop, so each step is judged in full context rather than in isolation.
+2. Extract. We collect hidden states at the </think> token for each labeled step and compute
+   contrastive axes via the balanced mean-difference method [Zou et al., 2023]. For intervention, we
+   use two failure-vs-calibrated axes, overthinking-vs-calibrated and overacting-vs-calibrated, and
+   orthogonalize them via Gram-Schmidt [Trefethen and Bau, 1997] to enable independent steering.
+   We additionally compute an overthinking-vs-overacting axis to analyze the three-class geometry.
+
+
+                                                                                                2
+           Stage 1: Trajectory annotation                                    Stage 2: Drift axes                          Stage 3: Dual-axis steering
+
+                 Agent steps s1 , . . . , sN                            Hidden states at </think>                                Test-time intervention
+                 labeled by LLM-as-judge                                projected to activation space                          at out-of-band activations
+                                                                                                    v̂OT
+
+      s1    s2    s3   s4    s5   s6   s7      s8   s9
+                                                                                                                                     calibrated band
+
+    OT OT CAL OA OA CAL OT CAL OT
+                                                                     v̂OA⊥
+
+ ■ OT overthinking ■ OA overacting ■ CAL calibrated                   linear separation of OT, OA, CAL                   ⇒ higher resolve rate, no retraining
+
+
+Figure 2: Pipeline overview. Left to right: (1) we run an agent on a coding task and use an LLM-
+as-judge to label every step as overthinking (OT), overacting (OA), or calibrated (CAL); (2) we
+extract hidden states at the reasoning-action boundary (the </think> token) and compute contrastive
+drift axes that linearly separate failure modes from calibrated behavior; (3) at test time we apply
+dual-axis steering to nudge out-of-band activations back into the calibrated band, to improve task
+completion without retraining.
+
+3. Test-time Steering. At test time, we project each step’s hidden state onto the two axes; when a
+   step drifts toward overthinking or overacting, we subtract a small step along the corresponding
+   axis to pull the residual stream back toward the calibrated region, without fine-tuning or prompt
+   changes [Turner et al., 2023, Rimsky et al., 2024]. Figure 2 illustrates the full pipeline.
+Our contributions: (1) We formalize overthinking and overacting as agent’s step-level miscalibration,
+and build a three-stage LLM-as-judge pipeline that labels each step as overthinking, overacting,
+or calibrated. (2) We find that across transformer layers, the hidden states of annotated steps can
+form well-separable clusters (AUC ≈ 0.9); to analyze agent drift, we derive two drift axes as the
+vectors from the centroid of the calibrated steps to the centroids of the overthinking and overacting
+steps. (3) We demonstrate that test-time steering along these axes improves agent performance across
+SWE-bench Verified, Terminal-Bench 2.0, and CLAW-Eval, raising resolve rate by +5.8 pp on
+Qwen3.5-27B and +4.8 pp on Gemma-4-26B-A4B-it while reducing steps-to-resolve by up to 26%.
+
+
+2          Method
+
+2.1         Problem Formulation
+
+Consider a coding agent fixing a bug in a large repository. At each step it can make progress through
+internal reasoning (analyzing a stack trace, forming a hypothesis) or external interaction (running
+grep -rn "QuerySet", executing pytest). Either mode can drift: the agent may re-derive facts it
+already has, or call tools to retrieve information it already knows [Wang et al., 2025b].
+Let a trajectory T = (s1 , . . . , sN ) be a sequence of steps, where st = (rt , at , ot ) consists of a
+reasoning block, an action, and an observation. Let Kt denote the agent’s information state before
+step t: the facts, hypotheses, and observations accumulated from steps 1, . . . , t − 1. We classify each
+step by whether it expands Kt . Overthinking. rt re-derives a conclusion already in Kt , or spends
+reasoning on a question a simple tool call would resolve. Overacting. at returns an observation
+already in Kt , or fires without adequately processing recent observations. Calibrated. The step
+expands Kt , either by deriving a new hypothesis or by retrieving previously unavailable information.
+To quantify the trajectory-level agent drift, we aggregate the step-level labels into trajectory-level
+metrics, denoted as drift ratios γt . Let yi ∈ {OT, OA, CAL} denote the label of step i. After t steps,
+we define drift ratios γtOT and γtOA as the fractions of those t steps labeled OT and OA:
+
+                                                           t
+                                                           X                                               t
+                                                                                                           X
+                                               γtOT = 1t         1[yi = OT],               γtOA = 1t             1[yi = OA].                                    (1)
+                                                           i=1                                             i=1
+
+
+                    OT       OA
+We find that both γN   and γN   correlate with lower resolve rate on SWE-bench Verified (Figure 3):
+an agent with higher γN is less likely to fix the bug. This tight link between drift and resolve rate
+motivates our approach: if step-level drift is detectable in the agent’s activations, then correcting it
+during a rollout should raise the resolve rate, with no fine-tuning or prompt changes.
+
+
+                                                                                     3
+                                                   Overthinking drift                                                                         Overacting drift
+               100%
+                90%
+
+
+Resolve rate
+                80%
+                70%
+                60%
+                50%
+                40%
+                          0-2% 2-4% 4-6% 6-8% 8-10% 10-15%15-20%20-30%                                             0-10%                     10-20%     20-30%    30-70%
+                         (n=36) (n=60) (n=76) (n=72) (n=79) (n=81) (n=39) (n=13)                                   (n=19)                    (n=99)     (n=189)   (n=149)
+                                              Overthinking ratio               OT
+                                                                               N                                                         Overacting ratio    OA
+                                                                                                                                                             N
+
+Figure 3: Resolve rate vs trajectory-level drift ratio on Qwen3.5-27B SWE-bench Verified, binned by
+ OT             OA
+γN  (left) and γN  (right). Error bars are Wilson 95% confidence intervals; n is the bin’s trajectory
+count. Higher overthinking and overacting ratios both correlate with lower resolve rates.
+
+2.2             Trajectory Annotation via LLM-as-Judge
+
+To extract drift axes, we need labels for each trajectory step: was step i overthinking, overacting,
+or calibrated? The challenge is to manage context efficiently. Judging step 50 requires knowing
+what the agent learned in steps 1–49; a stateless judge cannot tell “re-reading a file already seen”
+from “reading a new file.” The trajectory is divided into chunks of W steps (we use W =10). Before
+annotating a chunk, we carry forward a verified state summarizing all previous chunks. This state has
+two components: KnownFacts records concrete information the agent has observed so far, including
+files read, hypotheses under consideration, edits applied, test outcomes, and key discoveries. Progress
+records how the agent’s behavior is evolving, including the current bug-fixing stage, how many steps
+have passed since KnownFacts last grew, and counts of re-read files, repeated actions, and cycled
+hypotheses. For each chunk, we run three agents in sequence: a state maintainer, a state verifier, and
+an annotator. The overall pipeline is shown in Figure 4.
+
+
+               Previous chunks(validated)                                           Current chunk (𝑁 = 10)
+
+                1       2      3    …       39     40      …        41    42    43      44    45       46    47    48    49        50
+
+
+           State Maintainer                                         Visible pre steps 𝑠! , … , 𝑠"#$                Candidate step 𝑠"
+                                                                           (steps 41-49)                               (𝑡 = 50)
+           Input: verified rolling state + visible pre steps
+          Rolling State      (𝑠! , … , 𝑠"#$ )                            Annotator
+                          𝑲𝒕 (what is agent known so far):                             Input: verified rolling state +
+                     e.g., files read, hypotheses, edits applied,                            candidate steps
+                           tests outcomes, key discoveries
+                                                                           Label 𝑠" based on rolling state context:
+                            𝑷𝒕 (how the trace is moving):
+                     e.g., what is the goal, what progress been                     Overthinking: re-derives or reasons about
+                        made, any abnormal behaviors like                           information already in agent’s state
+                                      repetition?                                   Overacting: takes an action to obtain or
+                                                 Revise Rolling State               repeat information already in agent’s state
+        State Verifier
+                                                                                    Calibrated: advances the state with new,
+         Audit 𝑲𝒕 and 𝑷𝒕 to see whether there are errors,                           relevant information
+          if so, will do reflection to revise rolling state
+                                                                           Output: per-step label with justification +
+         Flag errors (up to 3 iterations):                                 confidence (high / medium / low)
+                    Hallucination: claims not in original steps
+
+                    Omission: concrete fact is missing
+                                                                          41    42     43    44   …         46    47    48    49        50
+                    Contradiction: conflicts with original steps
+
+
+
+Figure 4: Per-step annotation pipeline and judge reliability. Left: the trajectory is split into chunks of
+W steps. For each chunk, a State Maintainer updates the rolling state; a State Verifier audits it against
+raw steps and triggers revisions when necessary; and an Annotator labels each step using the verified
+rolling state from earlier chunks and the prefix within the current chunk. Right: reliability analysis of
+the LLM-as-Judge. (a) Confusion matrix between the judge and human consensus, showing recalls
+of 84%/82%/87% for OT/OA/CAL. (b) Cohen’s κ between the judge and four references (human
+consensus, Claude Opus 4.6, Kimi K2.6, and Grok-4.1-fast) falls in the substantial range (0.73–0.81).
+Full reliability analysis appears in Appendix B.2.
+Stage 1: State Maintainer. Given the verified rolling state from previous chunks and the raw steps
+in the current chunk, the maintainer updates the rolling state. Its role is to summarize what the
+
+
+                                                                                                   4
+agent has newly learned or done in the current chunk. In particular, it updates KnownFacts with new
+observations, edits, and test results, and updates Progress with signals of stagnation or repetition.
+Stage 2: State Verifier. Because errors in the rolling state can accumulate over long trajectories, we
+use a separate verifier to audit the maintained state against the raw steps. The verifier checks for three
+types of errors: (1) hallucination, where the state claims something not supported by the raw steps,
+such as listing a file as read when no step reads it; (2) omission, where a concrete fact from the raw
+steps is missing, such as leaving edits_made empty after an edit step; and (3) contradiction, where
+the state conflicts with the step text, such as recording a test as passed when the observation shows
+failure. If the verifier flags an error, the maintainer revises the state using the verifier’s feedback, and
+the verifier audits the revised state again.
+Stage 3: Annotator. After verification, the annotator labels each step in the chunk as OVERTHINKING,
+OVERACTING , or CALIBRATED .Each label comes with a justification grounded in the rolling state
+and a confidence level (high, medium, low); we keep only high- and medium-confidence labels for
+axis extraction. Full system prompts and the rolling state schema are in Appendix G.
+
+2.3   Drift Axes Extraction
+
+Given per-step labels, we extract hidden states to build a geometric representation of agent behavior.
+We focus on the </think> token as a canonical decision point, which marks the end of reasoning
+and the start of actions. For each rollout, we run a single forward pass through the model and extract
+the hidden states of each </think> token under the causal mask. This yields a per-step activation
+tensor Ht ∈ RL×d , where L is the number of layers and d is the hidden dimension.
+Overthinking and overacting represent distinct failure modes, and we do not assume that they lie on a
+single shared direction relative to calibrated behavior. We therefore construct separate contrastive
+directions for each failure mode against calibrated steps using the mean-difference method [Zou et al.,
+2023]. In addition, we compute the OT-vs-OA direction as a diagnostic axis to characterize how the
+two failure modes are arranged in activation space. For each problem, we compute the difference
+between the two class means and then average these differences across problems. For an axis pointing
+from class B to class A at layer ℓ, this is:
+                                                                               
+                         (ℓ)       1  X
+                                            1
+                                                   X      (ℓ)     1   X     (ℓ)
+                       vA-vs-B =               j
+                                                        ht − j            ht                      (2)
+                                  |J|        |SA |    j         |SB |   j
+                                       j∈J          t∈SA               t∈SB
+
+                                                             j    j
+where J is the set of problems containing both classes and SA  , SB   are the steps of problem j labeled
+A and B. Each axis is L2-normalized per layer. We define three axes accordingly: (1) vOT-vs-CAL ,
+(2) vOA-vs-CAL and (3) vOT-vs-OA . We use the first two for TACT steering. The third axis vOT-vs-OA
+points from one failure mode to the other rather than toward calibrated behavior, so steering along
+it would shift between two failure modes instead of moving the agent toward the CAL cluster. We
+therefore reserve vOT-vs-OA for analyzing three-class geometry in Section 3.3. The two failure-mode
+axes are not designed to be orthogonal, so steering along one would interfere with steering along
+the other. To remove this interference, we fix one axis as the primary direction at each layer and
+orthogonalize the other against it via Gram-Schmidt [Trefethen and Bau, 1997]. Our experiments
+find OT-vs-CAL the more separable of the two on held-out problems (Section 3.3), so we keep
+                                                                                (ℓ)      (ℓ)
+the normalized OT-vs-CAL direction as the primary overthinking axis, v̂OT ≡ v̂OT-vs-CAL , and
+orthogonalize OA-vs-CAL against it:
+                                                                       
+                                      (ℓ)             (ℓ)           (ℓ)     (ℓ)
+                                    v̂OA-vs-CAL − v̂OA-vs-CAL · v̂OT v̂OT
+                         (ℓ)
+                       v̂OA⊥ =                                                  .                  (3)
+                                     (ℓ)             (ℓ)          (ℓ)      (ℓ)
+                                   v̂OA-vs-CAL − v̂OA-vs-CAL · v̂OT v̂OT
+                                                                                 2
+
+This decoupling ensures that steering along one axis does not perturb the projection onto the other.
+We also estimate the calibrated centroid and projection scale from the axis-training split. For each
+selected layer ℓ, let
+                                      (ℓ)      1      X (ℓ)
+                                    µCAL =                ht                                      (4)
+                                             |SCAL |
+                                                         t∈SCAL
+
+
+                                                     5
+ be the calibrated centroid: the empirical mean of hidden states for steps the judge labeled CAL,
+ which serves as the reference point that steering pulls drifted activations back toward. For each axis
+ a ∈ {OT, OA⊥ }, we compute the calibrated projection standard deviation
+                                                  h                     i
+                              (ℓ)                     (ℓ)      (ℓ)
+                            σCAL,a = stdt∈SCAL ht − µCAL · v̂a(ℓ) .                                 (5)
+                                                                                   (ℓ)
+ This sets a per-axis scale for how far calibrated steps typically deviate along v̂a , so that a threshold
+                          (ℓ)                                                            (ℓ)         (ℓ)
+ expressed in units of σCAL,a has a consistent meaning across layers. Together, µCAL and σCAL,a
+ define the calibrated band used by the test-time steering. The full extraction procedure is given in
+ Algorithm 2 (Appendix A).
+
+  2.4   Test-time Steering with Agent Drift Axes
+
+ We implement steering as a hook on the residual stream that runs while the agent is rolling out, with
+ no fine-tuning and no prompt changes. Steering is the only thing that differs between the baseline
+ rollouts and the steered rollouts in our experiments.
+ Where it fires. We register a forward hook at each of the top-K transformer layers, ranked by
+ validation per-problem AUC (Section 3). The hook fires only on the forward pass that produces the
+                                                               (ℓ)
+ </think> token of each step, where it reads the hidden state ht ∈ Rd , modifies it along that layer’s
+ two drift axes, and writes the result back.
+
+ Algorithm 1. Dual-axis test-time steering (one forward pass at token t)
+                            (ℓ)   (ℓ)              (ℓ)
+  Input: Per-layer axes (v̂OT , v̂OA⊥ ), centroid µCAL , threshold τa,ℓ for each ℓ ∈ L; strategy
+           ∈ {A DD, C AP, G ATED} with hyperparameters (s, λ)
+1 for ℓ ∈ L do
+2     if strategy = A DD then
+             (ℓ)       (ℓ)       (ℓ)     (ℓ)
+3          ht ← ht + s (v̂OT + v̂OA⊥ )
+4     else                                                          ▷ C AP: β = 1; G ATED: β = λ
+5          for a ∈ {OT, OA⊥ } do
+                         (ℓ)    (ℓ)       (ℓ)
+6               p ← (ht − µCAL ) · v̂a
+                                     (ℓ)      (ℓ)                         (ℓ)
+7               if |p| > τa,ℓ then ht ← ht − β sign(p) (|p| − τa,ℓ ) v̂a
+
+
+ What it modifies. At every selected layer ℓ, we steer along the orthogonalized pair from Section 2.3:
+   (ℓ)                                       (ℓ)
+ v̂OT (primary, from OT-vs-CAL) and v̂OA⊥ (secondary, orthogonalized from OA-vs-CAL). For a
+ given axis a at layer ℓ, the hook first computes the centered scalar projection
+                                                           
+                                         (ℓ)      (ℓ)   (ℓ)
+                                       pt,a = ht − µCAL · v̂a(ℓ)                                   (6)
+
+ which says how far the current hidden state has drifted along that axis from the calibrated centroid.
+                                 (ℓ)                                    (ℓ)
+ Around the question of, given pt,a , how much to subtract back along v̂a , we design three test-time
+ steering methods below (full procedure in Algorithm 1). The chosen method is applied independently
+      (ℓ)      (ℓ)
+ to v̂OT and v̂OA⊥ at every selected layer.
+  Method 1: Bidirectional Capping (TACT-C AP). Bidirectional capping treats the calibrated region
+  as a two-sided band along each drift axis. For each axis a ∈ {OT, OA⊥ }, it clamps the centered
+               (ℓ)
+  projection pt,a into [−τa,ℓ , +τa,ℓ ], leaving in-band activations unchanged and pulling out-of-band
+  activations back to the nearest band boundary:
+                                    (ℓ)        (ℓ)          (ℓ)      (ℓ)
+                                   ht − (pt,a − τa,ℓ ) v̂a
+                                                                 if pt,a > τa,ℓ ,
+                            (ℓ)          (ℓ)    (ℓ)          (ℓ)      (ℓ)
+                          ht ← ht − (pt,a + τa,ℓ ) v̂a            if pt,a < −τa,ℓ ,                 (7)
+                                    (ℓ)
+                                   
+                                      ht                          otherwise.
+                                        (ℓ)          (ℓ)
+  The threshold is set as τa,ℓ = k · σCAL,a , where σCAL,a is the calibrated projection standard deviation
+  and k controls the band width. Although the positive direction of each axis corresponds to the named
+
+
+                                                     6
+failure mode, unusually negative projections also fall outside the empirical calibrated distribution.
+We therefore clip both tails. This makes capping conservative: it intervenes only when the activation
+leaves the calibrated band.
+Method 2: Additive (TACT-A DD). Additive steering applies a fixed shift at every forward pass,
+regardless of the current projection. At each selected layer, it moves the hidden state along the two
+steering directions with a scalar strength s:
+                                                                  
+                                   (ℓ)     (ℓ)        (ℓ)      (ℓ)
+                                 ht ← ht + s · v̂OT + v̂OA⊥ .                                      (8)
+
+In our convention, negative s pushes the activation away from both failure-mode directions. Unlike
+capping, additive steering does not require estimating a threshold and does not check whether the
+activation is already calibrated. This makes it simple and strong, but also less selective: if |s| is too
+large, the same uniform shift can perturb otherwise well-calibrated activations.
+Method 3: Projection-Gated (TACT-G ATE). Projection-gated steering combines capping’s selec-
+tivity with a tunable correction strength. Like capping, it fires only when the centered projection
+                              (ℓ)
+leaves the calibrated band, |pt,a | > τa,ℓ . But it does not necessarily return the projection exactly to
+the band boundary; instead, it subtracts a λ-scaled amount of the out-of-band excess:
+                                                                   
+                               (ℓ)      (ℓ)                  (ℓ)
+                              ht ← ht − λ · excess pt,a , τa,ℓ v̂a(ℓ) ,                               (9)
+
+where excess(p, τ ) = p − τ if p > τ , excess(p, τ ) = p + τ if p < −τ , and 0 otherwise. Here, λ
+controls the correction strength: λ = 1 recovers bidirectional capping, λ < 1 leaves residual drift
+outside the band, and λ > 1 over-corrects past the boundary.
+
+3     Experiments
+In this section, we organize the experiments around three questions. (Q1) Does steering along the
+drift axes improve resolve rate? We compare an unsteered baseline against three steering operators
+(TACT-C AP, TACT-A DD, TACT-G ATE) on SWE-bench Verified, Terminal-Bench 2.0, and CLAW-
+Eval in Section 3.1. (Q2) Which design choices in TACT drive the performance gain? We ablate axis
+choice, layer selection, and per-method hyperparameters of our method in Section 3.2. (Q3) How
+well does the drift axis capture agent drift in hidden-state space? We probe the axis at the step level
+(per-problem AUC), trajectory level (drift-ratio correlations), and across alternative judge labels in
+Section 3.3. Beyond the core questions, we further check robustness of our method, including (1)
+hyperparameter sweep in Appendix B.1 and (2) judge label reliability against humans and alternative
+judges in Appendix B.2. The detailed experiment setups are in Appendix C.
+
+3.1   Main Results
+
+We compare against four baselines that either inject prompt-level reminders to the agent rollout
+(R EMINDER, R E CAP [Zhang et al., 2025]) or use post-hoc reflection to provide feedback for the next
+rollout step (AGENT R EFLECT, AGENT D EBUG [Zhu et al., 2025]). We also compare three TACT
+variants (TACT-C AP, TACT-A DD, TACT-G ATE in Section 2.4). Detailed protocols and prompts
+are in Appendix F; all methods are evaluated on the same test set with the same judge labels, so the
+resolve rate differences reflect the pure effect of each method’s intervention.
+Baselines. As shown in Table 1, R EMINDER does not significantly improve resolve rate on either
+model. R E CAP and AGENT R EFLECT each add about +1 pp on average. AGENT D EBUG is the
+strongest baseline at +2.7 pp on Qwen and +1.8 pp on Gemma, but pays for the gain with at least
+two rollouts per task; the steps grows to 1.4-1.7× compared to other methods for each rollout.
+TACT. In addition, all three TACT variants improve resolve rate over all setups, while adding no
+extra LLM calls, prompt tokens, or retries; TACT-G ATE gives the largest resolve gain (+5.8 pp on
+Qwen, +4.8 pp on Gemma), with TACT-A DD close behind. TACT-C AP gives a smaller resolve gain
+but reduces the steps-to-resolve most with 26% on SWE-V for both models. TACT-C AP fires only
+when an activation leaves the calibrated band, so it reduces unnecessary steps without perturbing the
+rest of the trajectory; TACT-A DD and TACT-G ATE act on most steps with smaller shifts, which
+accumulate into a behavioral bias that lifts resolve rate. Compared with AGENT D EBUG, the TACT
+activation hook is a constant-time read-write on the residual stream, which lets TACT-C AP match
+
+
+                                                   7
+Table 1: Main result across two open-weight reasoning models on SWE-bench Verified (SWE-V),
+Terminal-Bench 2.0 (TB2), and CLAW-Eval (CLAW). Res. refers to resolve rate; Steps refers to
+steps-to-resolve. † AGENT D EBUG requires at least two rollouts per task (initial attempt + retry on
+failure); all other methods, including TACT, complete each task in a single rollout.
+                                                    SWE-V                TB2                     CLAW           Avg. Res.
+ Model                   Method              Res. ↑     Steps ↓   Res. ↑     Steps ↓     Pass@3 ↑     Steps ↓      ↑
+                         Base Model              67.0    75.2     30.3         48.2        55.9         12.3      51.1
+                         R EMINDER               66.2    78.0     29.8         50.4        55.5         12.7      50.5
+                         R E CAP                 67.9    75.8     31.1         49.5        56.4         12.5      51.8
+                         AGENT R EFLECT          68.4    73.1     32.0         46.8        57.0         11.9      52.5
+ Qwen3.5-27B
+                         AGENT D EBUG†           70.5   116.4     32.8         81.7        58.2         16.9      53.8
+                         TACT-C AP (Ours)        69.1    55.7     32.6         36.5        57.8          9.4      53.2
+                         TACT-A DD (Ours)        73.0    67.5     35.9         42.7        61.2         11.1      56.7
+                         TACT-G ATE (Ours)       73.3    65.3     36.0         41.2        61.5         10.8      56.9
+                         Base Model              59.7    52.1     15.7         18.2        56.3          9.2      43.9
+                         R EMINDER               60.0    53.2     15.9         18.6        56.8          9.3      44.2
+                         R E CAP                 61.0    52.5     16.7         18.4        57.6          9.1      45.1
+                         AGENT R EFLECT          60.4    51.0     16.0         17.7        56.9          9.0      44.4
+ Gemma-4-26B-A4B-it
+                         AGENT D EBUG†           62.0    78.9     17.2         31.5        58.0         12.6      45.7
+                         TACT-C AP (Ours)        61.6    38.6     17.0         13.9        58.2         7.0       45.6
+                         TACT-A DD (Ours)        65.2    46.2     18.9         16.5        61.0         8.4       48.4
+                         TACT-G ATE (Ours)       65.5    44.7     19.1         16.0        61.4         8.1       48.7
+
+
+
+Table 2: Ablation on SWE-bench Verified with Qwen3.5-27B, TACT-G ATE with λ = 0.5. Each
+row removes one component of the full method. Columns under OT axis and OA axis mark whether
+each contrastive direction is used; Orthog marks whether Gram-Schmidt is applied to make the two
+axes orthogonal; Layers reports which transformer layers are hooked. We choose top-K layers by
+validation per-problem AUC. ∆ is the gain in resolve rate over the unsteered baseline.
+Variant                      OT axis      OA axis       Orthog      Layers            Resolve (%) ↑       ∆       Steps ↓
+Baseline (no steering)            –          –               –           –                67.0             –        75.2
+Full method (main)                ✓          ✓              ✓       top-10                73.3           +6.3       65.3
+  w/o OT axis                     –          ✓              –       top-10                69.6           +2.6       71.5
+  w/o OA axis                     ✓          –              –       top-10                71.2           +4.2       69.7
+  w/o orthogonalization           ✓          ✓              –       top-10                70.5           +3.5       70.0
+  w/o layer selection             ✓          ✓              ✓        all 64               68.4           +1.4       73.9
+
+
+AGENT D EBUG’s resolve gain at half the rollout cost (+2.1 vs +2.7 pp on Qwen, +1.7 vs +1.8 pp
+on Gemma), and TACT-G ATE exceed it by roughly +3 pp on both models.
+
+3.2   Ablations
+
+We ablate two design choices in TACT as shown in Table 2: (i) which axes we steer along (dual vs.
+single, with vs. without orthogonalization), and (ii) which transformer layers we hook (top-K by
+validation AUC vs. all). We ablate on TACT-G ATE with fixed config λ=0.5 on SWE-bench Verified
+with Qwen3.5-27B; More detailed per-method hyperparameter sweeps are in Appendix B.1.
+Axis choice. We find dual orthogonalized axes outperform OT-only by +2.1 pp and OA-only by
++3.7 pp on resolve rate, and outperform a non-orthogonalized dual by +2.8 pp. It demonstrates
+overthinking and overacting often co-occur within a trajectory, steering along only one axis may
+leave the other failure mode uncorrected. The two failure modes are also not fully orthogonal in the
+residual stream, overthinking steps often carry some overacting signal and vice versa, so without
+Gram-Schmidt (Eq. 3), steering along one axis may perturb the projection along the other.
+Layer selection. Hooking the top-10 layers ranked by validation AUC (K=10) outperforms hooking
+all 64 by +4.9 pp on resolve rate (73.3 vs 68.4) and cuts steps-to-resolve from 73.9 to 65.3. The drift
+signal is concentrated in the early-to-middle layers: OT-vs-CAL per-problem AUC peaks at 0.91 on
+layer 3 and stays above 0.86 through layer ∼20, then drops below 0.7 in the late layers (Figure 5a);
+hooking all 64 mixes this clean early signal with late-layer axes that are too noisy to steer with.
+
+
+                                                         8
+        0.95
+                                                                                                           Overthinking (n=1198)
+                                                                                                       0   Overacting (n=3441)
+                                                                                                           Calibrated (n=7887)
+
+
+
+
+                                                                       LDA 2 (23% between-class var)
+        0.90
+
+                                                                                                       2
+        0.85
+
+AUROC   0.80                                                                                           4
+
+
+        0.75                                                                                           6
+                                         Overthink vs Calibrated
+                                         Overthink vs Overact
+        0.70                             Overact vs Calibrated                                         8
+               0      10    20      30      40      50       60                                            2      4      6         8   10      12      14
+                                 Layer index                                                                   LDA 1 (77% between-class var)
+
+                   (a) Per-problem AUC by layer                                                            (b) 3-class LDA at layer 14
+Figure 5: Quality of drift axes. (a) Per-problem AUC by transformer layer: OT-vs-CAL peaks at 0.91
+(layer 3), OT-vs-OA at 0.89 (layer 17), OA-vs-CAL at 0.77. (b) 3-class LDA projection at layer 14,
+showing OT/OA/CAL as separable clusters.
+
+Table 3: Judge-label robustness of the drift axis on SWE-bench Verified. Only the judge used to label
+per-step labels differs; We keep the other configuration matching Table 1.
+Label source                                   Method                                                      Resolve (%) ↑                            Steps ↓
+–                                              Baseline                                                         67.0                                 75.2
+GPT-5.4 (main)                                 TACT-C AP                                                        69.1                                 55.7
+GPT-5.4 (main)                                 TACT-A DD                                                        73.0                                 67.5
+GPT-5.4 (main)                                 TACT-G ATE                                                       73.3                                 65.3
+Claude Opus 4.6                                TACT-C AP                                                        68.6                                 57.0
+Claude Opus 4.6                                TACT-A DD                                                        72.5                                 68.4
+Claude Opus 4.6                                TACT-G ATE                                                       72.7                                 66.6
+
+
+3.3       Quality of Drift Axis
+
+The axis carries drift signal. We find OT-vs-CAL and OT-vs-OA AUCs both stay above 0.86 through
+layer ∼20, peaking at 0.91 and 0.89, while OA-vs-CAL peaks at 0.77 in later layers (Figure 5a). It
+demonstrates drift is a stable, multi-layer feature in the residual stream rather than a single-layer
+artifact, so the contrastive axes pick up a property the model carries throughout its forward pass. As
+shown in Figure 5b, the three classes are also separable in the 3-class LDA projection.
+Robustness to judge labels. As shown in Table 3, we find the end-to-end gain does not depend on
+which judge produced the per-step labels. We use Claude Opus 4.6 to rerun the labeling, and find
+that the resolve rate stays within 1 pp of the GPT-5.4 for all three variants. Further reliability checks
+(human audit, cross-judge agreement) are in Appendix B.2.
+
+
+4        Conclusion
+
+We presented TACT, a training-free pipeline that locates agent drift in the residual stream and corrects
+it at inference time. The pipeline labels each step as overthinking, overacting, or calibrated; extracts
+an orthogonalized pair of contrastive directions from these labels; and steers along the directions
+during rollouts. On SWE-bench Verified, Terminal-Bench 2.0, and CLAW-Eval, TACT raises average
+resolve rate by up to +5.8 pp on Qwen3.5-27B and +4.8 pp on Gemma-4-26B-A4B-it and cuts steps-
+to-resolve by up to 26%, while adding no extra LLM calls, prompt tokens, or retries. These gains
+frame agent drift as a steerable direction in the residual stream, and position TACT as a viable handle
+for reliable long-horizon agents. Future work can explore more complex activation interventions
+(e.g., sparse autoencoders) and extend the framework to non-coding domains.
+
+
+                                                                   9
+References
+Andy Arditi, Oscar Balcells Obeso, Aaquib Syed, Daniel Paleka, Nina Rimsky, Wes Gurnee, and Neel
+  Nanda. Refusal in language models is mediated by a single direction. In The Thirty-eighth Annual
+  Conference on Neural Information Processing Systems, 2024. URL https://openreview.net/
+  forum?id=pH3XAQME6c.
+Alejandro Cuadron, Dacheng Li, Wenjie Ma, Xingyao Wang, et al. The danger of overthinking:
+  Examining the reasoning-action dilemma in agentic tasks. arXiv preprint arXiv:2502.08235, 2025.
+DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Peiyi Wang, et al. DeepSeek-
+  R1: Incentivizing reasoning capability in LLMs via reinforcement learning. Nature, 645:633–638,
+  2025.
+Xiang Deng, Jeff Da, Edwin Pan, Yannis Yiming He, et al. SWE-bench pro: Can AI agents solve
+  long-horizon software engineering tasks? arXiv preprint arXiv:2509.16941, 2025.
+Leo Gao, Tom Dupre la Tour, Henk Tillman, Gabriel Goh, Rajan Troll, Alec Radford, Ilya Sutskever,
+  Jan Leike, and Jeffrey Wu. Scaling and evaluating sparse autoencoders. In The Thirteenth
+  International Conference on Learning Representations, 2025. URL https://openreview.net/
+  forum?id=tcsZt9ZNKD.
+Soumya Suvra Ghosal, Souradip Chakraborty, Avinash Reddy, Yifu Lu, Mengdi Wang, Dinesh
+  Manocha, Furong Huang, Mohammad Ghavamzadeh, and Amrit Singh Bedi. Does thinking
+  more always help? mirage of test-time scaling in reasoning models. In The Thirty-ninth Annual
+  Conference on Neural Information Processing Systems, 2026. URL https://openreview.net/
+  forum?id=tKPqbamNb9.
+Google DeepMind. Gemma 4: Byte for byte, the most capable open models. https://deepmind.
+  google/models/gemma/gemma-4/, 2026.
+Jiale Guo, Suizhi Huang, Mei Li, Dong Huang, Xingsheng Chen, Regina Zhang, Zhijiang Guo,
+   Han Yu, Siu-Ming Yiu, Pietro Lio, and Kwok-Yan Lam. A comprehensive survey on bench-
+   marks and solutions in software engineering of LLM-empowered agentic system. arXiv preprint
+   arXiv:2510.09721, 2025.
+Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik
+  Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In International
+  Conference on Learning Representations, 2024.
+Kimi Team. Kimi k1.5: Scaling reinforcement learning with LLMs. arXiv preprint arXiv:2501.12599,
+  2025.
+Bruce W Lee, Inkit Padhi, Karthikeyan Natesan Ramamurthy, Erik Miehling, Pierre Dognin, Manish
+  Nagireddy, and Amit Dhurandhar. Programming refusal with conditional activation steering. arXiv
+  preprint arXiv:2409.05907, 2024.
+Kenneth Li, Oam Patel, Fernanda Viegas, Hanspeter Pfister, and Martin Wattenberg. Inference-time
+  intervention: Eliciting truthful answers from a language model. In Advances in Neural Information
+  Processing Systems, 2023.
+Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paranjape, Michele Bevilacqua, Fabio Petroni, and
+  Percy Liang. Lost in the middle: How language models use long contexts. Transactions of the
+ Association for Computational Linguistics, 12:157–173, 2024.
+Christina Lu, Jack Gallagher, Jonathan Michala, Kyle Fish, et al. The assistant axis: Situating and
+  stabilizing the default persona of language models. arXiv preprint arXiv:2601.10387, 2026.
+Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe, Uri
+ Alon, Nouha Dziri, Shrimai Prabhumoye, Yiming Yang, et al. Self-refine: Iterative refinement
+ with self-feedback. In Advances in Neural Information Processing Systems, 2023.
+Samuel Marks and Max Tegmark. The geometry of truth: Emergent linear structure in large language
+  model representations of true/false datasets. In First Conference on Language Modeling, 2024.
+  URL https://openreview.net/forum?id=aajyHYjjsk.
+
+
+                                                10
+Mike A Merrill, Alexander G Shaw, Nicholas Carlini, Boxuan Li, Harsh Raj, Ivan Bercovich, Lin
+ Shi, Jeong Yeon Shin, Thomas Walshe, E Kelly Buchanan, et al. Terminal-bench: Benchmarking
+ agents on hard, realistic tasks in command line interfaces. arXiv preprint arXiv:2601.11868, 2026.
+
+Grégoire Mialon, Clémentine Fourrier, Thomas Wolf, Yann LeCun, and Thomas Scialom. GAIA: a
+  benchmark for general AI assistants. In International Conference on Learning Representations,
+  2024.
+
+Niklas Muennighoff, Zitong Yang, Weijia Shi, Xiang Lisa Li, Li Fei-Fei, Hannaneh Hajishirzi, Luke
+  Zettlemoyer, Percy Liang, Emmanuel Candès, and Tatsunori Hashimoto. s1: Simple test-time
+  scaling. arXiv preprint arXiv:2501.19393, 2025.
+
+Kiho Park, Yo Joong Choe, and Victor Veitch. The linear representation hypothesis and the geometry
+  of large language models. In International Conference on Machine Learning, 2024.
+
+Abhishek Rath. Agent drift: Quantifying behavioral degradation in multi-agent LLM systems over
+  extended interactions. arXiv preprint arXiv:2601.04170, 2026.
+
+Nina Rimsky, Nick Gabrieli, Julian Schulz, Meg Tong, Evan Hubinger, and Alexander Turner.
+  Steering llama 2 via contrastive activation addition. In Lun-Wei Ku, Andre Martins, and Vivek
+  Srikumar, editors, Proceedings of the 62nd Annual Meeting of the Association for Computational
+  Linguistics (Volume 1: Long Papers), pages 15504–15522, Bangkok, Thailand, August 2024.
+  Association for Computational Linguistics. doi: 10.18653/v1/2024.acl-long.828. URL https:
+  //aclanthology.org/2024.acl-long.828/.
+
+Noah Shinn, Federico Cassano, Edward Berman, Ashwin Gopinath, Karthik Narasimhan, and Shunyu
+ Yao. Reflexion: Language agents with verbal reinforcement learning. In Advances in Neural
+  Information Processing Systems, 2023.
+
+Dong Shu, Xuansheng Wu, Haiyan Zhao, Daking Rai, Ziyu Yao, Ninghao Liu, and Mengnan Du. A
+  survey on sparse autoencoders: Interpreting the internal mechanisms of large language models.
+  arXiv preprint arXiv:2503.05613, 2025.
+
+Charlie Victor Snell, Jaehoon Lee, Kelvin Xu, and Aviral Kumar. Scaling LLM test-time compute
+  optimally can be more effective than scaling parameters for reasoning. In The Thirteenth In-
+  ternational Conference on Learning Representations, 2025. URL https://openreview.net/
+  forum?id=4FWAwZtd2n.
+
+Yuan Sui and Bryan Hooi. Conversation for non-verifiable learning: Self-evolving LLMs through
+  meta-evaluation. arXiv preprint arXiv:2601.21464, 2026.
+
+Yuan Sui, Yufei He, Tri Cao, Simeng Han, Yulin Chen, and Bryan Hooi. Meta-reasoner: Dy-
+  namic guidance for optimized inference-time reasoning in large language models. arXiv preprint
+  arXiv:2502.19918, 2025a.
+
+Yuan Sui, Yanming Zhang, Yi Liao, Yu Gu, Guohua Tang, Zhongqian Sun, Wei Yang, and Bryan
+  Hooi. What-if analysis of large language models: Explore the game world using proactive thinking.
+  arXiv preprint arXiv:2509.04791, 2025b.
+
+Adly Templeton, Tom Conerly, Jonathan Marcus, Jack Lindsey, Trenton Bricken, Brian Chen, Adam
+  Pearce, Craig Citro, Emmanuel Ameisen, Andy Jermyn, Christopher Olah, et al. Scaling monose-
+  manticity: Extracting interpretable features from Claude 3 Sonnet. Transformer Circuits Thread,
+  2024. URL https://transformer-circuits.pub/2024/scaling-monosemanticity/.
+
+Lloyd N. Trefethen and David Bau. Numerical Linear Algebra. SIAM, 1997.
+
+Alexander Matt Turner, Lisa Thiergart, Gavin Leech, David Udell, Juan J Vazquez, Ulisse Mini,
+  and Monte MacDiarmid. Steering language models with activation engineering. arXiv preprint
+  arXiv:2308.10248, 2023.
+
+Anyi Wang, Xuansheng Wu, Dong Shu, Yunpu Ma, and Ninghao Liu. Enhancing LLM steering
+  through sparse autoencoder-based vector refinement. arXiv preprint arXiv:2509.23799, 2025a.
+
+
+                                                11
+Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan, and
+ Anima Anandkumar. Voyager: An open-ended embodied agent with large language models. In
+ Transactions on Machine Learning Research, 2024a.
+Hongru Wang, Cheng Qian, Manling Li, Jiahao Qiu, et al. Position: Agent should invoke external
+  tools only when epistemically necessary. arXiv preprint arXiv:2506.00886, 2025b.
+Lei Wang, Chen Ma, Xueyang Feng, Zeyu Zhang, Hao Yang, Jingsen Zhang, Zhiyuan Chen, Jiakai
+  Tang, Xu Chen, Yankai Lin, Wayne Xin Zhao, Zhewei Wei, and Ji-Rong Wen. A survey on large
+  language model based autonomous agents. Frontiers of Computer Science, 18(6), 2024b.
+Xingyao Wang, Yangyi Chen, Lifan Yuan, Yizhe Zhang, Yunzhu Li, Hao Peng, and Heng Ji.
+  Executable code actions elicit better llm agents. In ICML, 2024c.
+Xingyao Wang, Boxuan Li, Yufan Song, Frank F Xu, et al. OpenHands: An open platform for AI
+  software developers as generalist agents. In International Conference on Learning Representations,
+  2025c.
+Zehong Wang, Fang Wu, Hongru Wang, Xiangru Tang, et al. Why reasoning fails to plan: A planning-
+  centric analysis of long-horizon decision making in LLM agents. arXiv preprint arXiv:2601.22311,
+  2026.
+Chunqiu Steven Xia, Yinlin Deng, Soren Dunn, and Lingming Zhang. Demystifying llm-based
+  software engineering agents. Proc. ACM Softw. Eng., 2(FSE), 2025a. doi: 10.1145/3715754. URL
+  https://doi.org/10.1145/3715754.
+Chunqiu Steven Xia, Zhe Wang, Yan Yang, Yuxiang Wei, and Lingming Zhang. Live-SWE-agent:
+  Can software engineering agents self-evolve on the fly? arXiv preprint arXiv:2511.13646, 2025b.
+Tianbao Xie, Danyang Zhang, Jixuan Chen, Xiaochuan Li, Siheng Zhao, Ruisheng Cao, Toh Jing
+  Hua, Zhoujun Cheng, et al. OSWorld: Benchmarking multimodal agents for open-ended tasks in
+  real computer environments. In Advances in Neural Information Processing Systems, 2024.
+John Yang, Carlos E Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan,
+  and Ofir Press. SWE-agent: Agent-computer interfaces enable automated software engineering. In
+  Advances in Neural Information Processing Systems, 2024.
+Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Thomas L Griffiths, Yuan Cao, and Karthik
+  Narasimhan. Tree of thoughts: Deliberate problem solving with large language models. In
+  Advances in Neural Information Processing Systems, 2023a.
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao.
+  ReAct: Synergizing reasoning and acting in language models. In International Conference on
+  Learning Representations, 2023b.
+Bowen Ye, Rang Li, Qibin Yang, Yuanxin Liu, Linli Yao, Hanglong Lv, Zhihui Xie, Chenxin An, Lei
+  Li, Lingpeng Kong, et al. Claw-eval: Toward trustworthy evaluation of autonomous agents. arXiv
+  preprint arXiv:2604.06132, 2026.
+Asaf Yehudai, Lilach Eden, Alan Li, Guy Uziel, Yilun Zhao, Roy Bar-Haim, Arman Cohan,
+  and Michal Shmueli-Scheuer. Survey on evaluation of LLM-based agents. arXiv preprint
+  arXiv:2503.16416, 2025.
+Siyu Yuan, Zehui Chen, Zhiheng Xi, Junjie Ye, Zhengyin Du, and Jiecao Chen. Agent-R: Training
+  language model agents to reflect via iterative self-training. arXiv preprint arXiv:2501.11425, 2025.
+Linan Yue, Yichao Du, Yizhi Wang, Weibo Gao, Fangzhou Yao, Li Wang, Ye Liu, Ziyu Xu, Qi Liu,
+  Shimin Di, et al. Don’t overthink it: A survey of efficient r1-style large reasoning models. arXiv
+  preprint arXiv:2508.02120, 2025.
+Zhenyu Zhang, Tianyi Chen, Weiran Xu, Alex Pentland, and Jiaxin Pei. Recap: Recursive context-
+  aware reasoning and planning for large language model agents. arXiv preprint arXiv:2510.23822,
+  2025.
+
+
+                                                 12
+James Xu Zhao, Bryan Hooi, and See-Kiong Ng. Test-time scaling in reasoning models is not
+  effective for knowledge-intensive tasks yet. arXiv preprint arXiv:2509.06861, 2025.
+Shuyan Zhou, Frank F Xu, Hao Zhu, Xuhui Zhou, Robert Lo, Abishek Sridhar, Xianyi Cheng,
+  Tianyue Ou, Yonatan Bisk, Daniel Fried, Uri Alon, and Graham Neubig. WebArena: A realistic
+  web environment for building autonomous agents. In International Conference on Learning
+  Representations, 2024.
+Kunlun Zhu, Zijia Liu, Bingxuan Li, Muxin Tian, Yingxuan Yang, Jiaxun Zhang, Pengrui Han,
+  Qipeng Xie, Fuyang Cui, Weijia Zhang, et al. Where LLM agents fail and how they can learn from
+  failures. arXiv preprint arXiv:2509.25370, 2025.
+Mingchen Zhuge, Changsheng Zhao, Dylan R. Ashley, Wenyi Wang, Dmitrii Khizbullin, Yunyang
+ Xiong, Zechun Liu, Ernie Chang, Raghuraman Krishnamoorthi, Yuandong Tian, Yangyang Shi,
+ Vikas Chandra, and Jürgen Schmidhuber. Agent-as-a-judge: Evaluate agents with agents. In
+ Forty-second International Conference on Machine Learning, 2025. URL https://openreview.
+ net/forum?id=Nn9POI9Ekt.
+Andy Zou, Long Phan, Sarah Chen, James Campbell, Phillip Guo, Richard Ren, Alexander Pan,
+ Xuwang Yin, Mantas Mazeika, Ann-Kathrin Dombrowski, et al. Representation engineering: A
+  top-down approach to AI transparency. arXiv preprint arXiv:2310.01405, 2023.
+
+
+
+
+                                              13
+     Limitations
+
+     TACT targets open-sourced models, which requires activations to be directly accessible. Within
+     this scope, our axes are fit on coding trajectories; transfer to non-coding agent domains and probes
+     beyond a single linear axis (e.g., sparse autoencoders) are natural directions to extend the framework.
+
+
+     A    Drift Axis Extraction
+
+     This section provides more details regarding the axis-extraction introduced in Section 2.3.
+     Pipeline at a glance. Given a corpus of labeled trajectories, we (i) run one forward pass per labeled
+     step and read the hidden state at the </think> token from every transformer layer; (ii) at each layer,
+     compute two contrastive direction vectors, OT-vs-CAL and OA-vs-CAL, by per-problem balanced
+     mean difference, then L2-normalize; (iii) at each layer, orthogonalize OA-vs-CAL against OT-vs-CAL
+                                                      (ℓ)  (ℓ)
+     via Gram-Schmidt to produce the dual pair (v̂OT , v̂OA⊥ ); (iv) at each layer, estimate the calibrated
+               (ℓ)                                                  (ℓ)
+     centroid µCAL and the per-axis projection standard deviation σCAL,a on calibrated training steps only;
+     (v) on the held-out Axis-val split, rank layers by per-problem AUC of the OT-vs-CAL axis and keep
+     the top-K as the steering layer set L. Algorithm 2 states the full procedure.
+
+
+     Algorithm 2. Drift axis extraction (per-layer)
+                               (ℓ)
+     Input: Labeled steps {(hi , yi )} at </think> from L layers; problem IDs {ji }; calibrated step
+            set SCAL ; problems-with-both-classes set J
+                                                (ℓ)    (ℓ)                         (ℓ)
+     Output: For each ℓ: orthogonalized pair (v̂OT , v̂OA⊥ ), calibrated centroid µCAL , calibrated std
+                (ℓ)
+              σCAL,a ; selected layer set L
+1 for ℓ ∈ {1, . . . , L} do
+      // Per-problem balanced mean-difference axes (Eq. 2)
+2     for (A, B) ∈ {(OT, CAL), (OA, CAL)} do
+            (ℓ)          1
+                            P     j,(ℓ)    j,(ℓ) 
+3          vA-vs-B ← |J|     j∈J hA     − hB
+              (ℓ)       (ℓ)          (ℓ)
+ 4             v̂A-B ← vA-vs-B /∥vA-vs-B ∥2
+         // Gram-Schmidt: keep OT-vs-CAL primary, orthogonalize OA-vs-CAL (Eq. 3)
+           (ℓ)        (ℓ)
+5        v̂OT ← v̂OT-vs-CAL
+                  (ℓ)            (ℓ)        (ℓ)  (ℓ)
+6        u ← v̂OA-vs-CAL − v̂OA-vs-CAL · v̂OT v̂OT
+           (ℓ)
+7        v̂OA⊥ ← u/∥u∥2
+         // Calibrated band statistics (Eqs. 4, 5)
+            (ℓ)          1
+                             P        (ℓ)
+8        µCAL ← |SCAL      |  i∈SCAL hi
+9        for a ∈ {OT, OA⊥ } do
+              (ℓ)               (ℓ)   (ℓ)       (ℓ) 
+10           σCAL,a ← stdi∈SCAL (hi − µCAL ) · v̂a
+   // Layer selection on Axis-val split
+                                                       (ℓ)
+11 L ← top-K layers by validation per-problem AUC of v̂OT-vs-CAL
+
+
+
+     Regarding the design choices in the procedure, we have the following justifications:
+     (1) Why OT-vs-CAL is the primary axis. On Qwen3.5-27B, OT-vs-CAL reaches a per-problem
+     AUC of 0.91 at its best layer (layer 3) and stays above 0.86 across most of the network, while
+     OA-vs-CAL only reaches 0.77 at its best layer and falls below 0.7 across the early and middle layers
+     (Figure 5a). The 0.14-point gap at peak makes OT-vs-CAL the cleaner signal for layer selection and
+     the more reliable direction to preserve under orthogonalization. We orthogonalize the weaker axis
+     against the stronger one, so the weaker axis only loses its overlap with the cleaner direction. The
+     3-class LDA projection in Figure 5b shows the same separation geometrically: the OT, OA, and CAL
+     clusters are linearly separable at a representative middle layer.
+
+
+                                                      14
+Table 4: Per-method strength sweeps on SWE-bench Verified with Qwen3.5-27B, complementing the
+axis-choice and layer-selection ablations in Table 2. All rows use per-layer dual-axis orthogonalized
+pairs at the top-10 layers selected by validation per-problem AUC. ∆ is the gain in resolve rate over
+the unsteered baseline.
+Variant                                       Resolve (%) ↑               ∆                  Steps ↓
+Baseline (no steering)                            67.0                    –                   75.2
+TACT-C AP (main, k = 2.0)                         69.1                   +2.1                 55.7
+  k = 1.0                                         67.1                   +0.1                 59.8
+  k = 1.5                                         68.3                   +1.3                 56.4
+  k = 3.0                                         68.0                   +1.0                 66.0
+TACT-A DD (main, s = −0.5)                        73.0                   +6.0                 67.5
+  s = −1.0                                        71.1                   +4.1                 70.0
+  s = −2.0                                        64.8                   –2.2                 82.2
+  s = +0.5                                        63.0                   –4.0                 82.8
+TACT-G ATE (main, λ = 0.5)                        73.3                +6.3                     65.3
+  λ = 1.0 (k = 2.0)                                  equivalent to TACT-Cap (k = 2.0); see row above
+  λ = 1.5                                         71.6                +4.6                     63.1
+  λ = 2.0                                         69.0                +2.0                     65.5
+
+
+Table 5: Judge vs. human consensus on n=300 audited steps (balanced 100/100/100 across
+OT/OA/CAL). Overall Cohen’s κ is 0.78.
+                         Class    Precision       Recall        F1     OT↔OA confusion
+                         OT            0.87        0.84         0.85    5% (OT→OA)
+                         OA            0.88        0.82         0.85    6% (OA→OT)
+                         CAL           0.79        0.87         0.83         –
+
+
+
+(2) Measuring drift from calibrated behavior. To decide when to intervene, we need to know how
+                                                                          (ℓ)
+far the current state has drifted from calibrated behavior. The centroid µCAL gives the reference point,
+                                (ℓ)
+and the standard deviation σCAL,a gives the unit of measurement along each axis. The threshold in
+                                 (ℓ)
+Algorithm 1 is then τa,ℓ = k σCAL,a , which is just k standard deviations of normal calibrated behavior
+at that specific layer and axis.
+(3) Layer selection. We rank layers by per-problem AUC of the OT-vs-CAL axis on Axis-val and
+keep the top-K, with K = 10 as the default.
+                                                                                (ℓ)
+(4) Cost. Axis extraction is cheap. After one forward pass to cache ht at every layer, the rest of the
+pipeline is closed-form linear algebra and finishes in seconds on a single GPU.
+(5) Why orthogonalize per-layer. The residual stream changes from layer to layer, so the direction
+that captures “overthinking” at layer 5 is a different vector from the corresponding direction at layer
+12. We extract OT-vs-CAL and OA-vs-CAL independently at every layer, then apply Gram-Schmidt
+within that layer to remove the OT-vs-CAL component from OA-vs-CAL. The orthogonalized pair
+lives in the layer-ℓ residual space, and because the two axes are orthogonal, the OT correction and the
+OA⊥ correction at test time (Algorithm 1) can be applied in any order without affecting the result.
+
+
+B     Robustness Studies
+
+This section reports two robustness checks: a test-time steering hyperparameter sweep (Appendix B.1),
+and a reliability check of the judge labels (Appendix B.2).
+
+B.1   Full ablation sweeps
+
+Each steering method has a single scalar that controls how strongly it pulls the hidden state back
+toward calibrated behavior at every selected layer. We refer to it as the strength hyperparameter:
+
+
+                                                           15
+k (TACT-C AP band width in standard deviations), s (TACT-A DD shift along the axes), and λ
+(TACT-G ATE correction strength). Table 4 varies this scalar for each method on SWE-bench Verified
+with Qwen3.5-27B, with all other settings fixed (top-10 layers, dual-axis pair). The goal is to see how
+each method responds as we turn its strength knob.
+Each method has a sweet spot. Every method has a best strength setting. TACT-C AP works best at
+k = 2.0 (resolve rate 69.1, +2.1). TACT-A DD works best at s = −0.5 (73.0, +6.0). TACT-G ATE
+works best at λ = 0.5 (73.3, +6.3). A setting too weak does not remove enough drift, and a setting
+too strong starts to pull calibrated steps off course, so resolve rate drops on either side.
+Steps shrink even when resolve rate is flat. Even a weak setting saves compute. TACT-C AP at
+k = 1.0 gives the same resolve rate as the baseline (67.1 vs 67.0), but average steps fall from 75.2 to
+59.8. The intervention is making trajectories shorter even on problems the agent would have solved
+anyway.
+TACT-A DD is the most aggressive, TACT-G ATE the most stable. The three methods are not
+equally forgiving when the strength is set wrong. TACT-A DD is the touchiest: at s = −2.0 it loses
+2.2 points to the baseline, and at s = +0.5 it loses 4.0 points. TACT-G ATE, by contrast, stays
+within 4.3 points of its peak across λ ∈ {0.5, 1.5, 2.0}. If the same strength has to cover many tasks,
+TACT-G ATE is the safer pick. We omit λ=1 from the sweep because Eq. 9 reduces algebraically to
+bidirectional capping at that setting, so its row is exactly the TACT-C AP (k = 2.0) row.
+
+B.2   Judge label reliability
+
+Figure 4(a,b) summarizes the two reliability checks behind our judge labels: (a) agreement with a
+human consensus and (b) cross-model consistency against three alternative judges. This subsection
+provides more details on the procedures and results.
+Human verification. We selected a sample of n=300 labeled steps from the trajectories, balanced
+across the three labels (100 OT, 100 OA, 100 CAL) and across short (N <50) and long (N ≥150)
+trajectories so the audit covers both early and late drift. Human annotators with prior SWE-bench
+experience then label each step as OT, OA, or CAL, and we compare the judge against the human
+consensus using Cohen’s κ, per-class precision and recall, and the OT↔OA confusion entries that
+would most directly contaminate the contrastive axes.
+In Table 5, the judge agrees with humans at κ = 0.78 (substantial agreement) and all three classes
+have F1 above 0.83. The CAL row has the lowest precision (0.79): among the steps the judge predicts
+as CAL, about 21% are labeled OT or OA by humans, so the CAL bucket absorbs some borderline
+drift steps as false positives. Recall on CAL is high (0.87), so genuine calibrated steps are rarely
+missed. The most consequential failure for our pipeline is OT↔OA confusion, since it would mix
+the two contrastive classes that define the axes; this confusion is at 5–6%, low enough that the axis
+direction is dominated by correctly labeled steps.
+Cross-model consistency. A natural concern about the pipeline is that the labels rely too heavily on
+one specific judge model (we use GPT-5.4 as the default judge): if GPT-5.4 has its own biases, the
+extracted axis would just encode those biases. To check this, we rerun the same three-stage pipeline
+(Section 2.2) with three alternative language models of comparable capability, Claude Opus 4.6,
+Kimi K2.6, Grok-4.1-fast. We compare their per-step labels against GPT-5.4, and find that the
+Cohen’s κ falls in the substantial-agreement range (Figure 4(b)). The four judges therefore produce
+close-to-identical labels.
+
+C     Experiment Setup
+This section provides the full experimental setup, expanding the summary in Section 3.
+Benchmarks. We evaluate on three coding benchmarks that require long trajectories. SWE-bench
+Verified [Jimenez et al., 2024] contains 500 real GitHub issues in Python repositories, where each
+instance requires agents to localize a bug in a large codebase and produce a correct patch; solving
+these tasks typically requires long trajectories (50–250+ steps), which often surface overthinking
+or overacting. Terminal-Bench 2.0 [Merrill et al., 2026] contains 89 hard terminal tasks across 10
+technical domains (bash, Python, system administration, environment setup, debugging), each run in
+a Docker sandbox with pytest-based verification; its diverse action space and shorter horizons expose
+
+
+                                                  16
+overacting failures more often. CLAW-Eval [Ye et al., 2026] contains 300 human-verified agent
+tasks spanning 9 categories and the agent performance is judged by rubric-based metrics. We report
+pass@3 as the resolve-rate analogue for this benchmark. We use two splits: general (single-agent
+service orchestration) and multi-turn (user-agent dialogue where a second LLM plays the user), which
+together probe long-horizon reliability under both autonomous and interactive control.
+Agent and models. We collect trajectories on SWE-bench-verified using mini-swe-agent, a
+lightweight scaffold in which every action is a single bash tool call. This yields a clean bound-
+ary between Eint (tokens inside <think>...</think>) and Eext (tool calls and observations). On
+Terminal-Bench 2.0 we wrap the same scaffold in its Dockerized harness; on CLAW-Eval we adopt
+the upstream harness with its native trace format (full details in Appendix E). Since hidden-state
+extraction and activation steering both require model internals, we study open-weight reasoning
+models whose native <think> blocks make the reasoning-action boundary explicit. We consider
+two models with different architectures: Qwen3.5-27B (dense, 64 layers, hidden dimension 5120,
+bfloat16) and Gemma-4-26B-A4B-it [Google DeepMind, 2026], a sparse mixture-of-experts with
+26B total and ∼4B active parameters. Spanning dense versus MoE and different pretraining families
+lets us test whether the drift axis is a general property of reasoning-model activations rather than a
+Qwen-specific artifact. We run the three-stage LLM-as-judge pipeline (Section 2.2) with GPT-5.4 as
+default. To verify label reliability, we conduct (i) a human audit and (ii) a cross-judge consistency
+check against Claude Opus 4.6, Kimi K2.6, and Grok-4.1-fast in Appendix B.2; both show substantial
+agreement with the main judge.
+Labels and hidden states. Each collected trajectory is labeled by the three-stage LLM-as-judge
+pipeline (Section 2.2), producing a label (OVERTHINKING, OVERACTING, or CALIBRATED), a one-
+sentence justification, and a confidence level for every step. We then run a single forward pass over
+the full conversation and extract the hidden state at the </think> token from every transformer
+layer. All data splits are at the problem level, so no steps from the same task appear in more than
+one split. We use three disjoint splits. Axis-train fits the mean-difference axes, calibrated centroids,
+and calibrated projection scales. Axis-val is used for model selection: we rank layers by per-problem
+AUC on the primary OT-vs-CAL axis, choose the top-K layers, and select steering hyperparameters
+by validation resolve rate. Eval is reserved for the final reported resolve rate and steps, and is not
+used to fit axes, choose layers, or tune steering hyperparameters.
+Steering configurations. All steering runs operate on per-layer orthogonalized axis pairs
+    (ℓ)    (ℓ)
+{(v̂OT , v̂OA⊥ )}ℓ (Section 2.4), which correct both failure modes simultaneously within each se-
+lected layer since the axes are Euclidean-orthogonal and their interventions commute. For each
+of the three methods (TACT-C AP, TACT-A DD, TACT-G ATE), we select the single best hyper-
+parameter configuration on Axis-val by resolve rate, then apply that fixed configuration once to
+the evaluation set. Hyperparameter sweeps: TACT-C AP k ∈ {1.0, 1.5, 2.0, 3.0}; TACT-A DD
+s ∈ {−2.0, −1.0, −0.5, +0.5}; TACT-G ATE λ ∈ {0.5, 1.5, 2.0} at k = 2.0 (λ=1 is excluded
+because it reduces to TACT-C AP at the same k). Unless noted, we steer the top-10 layers ranked by
+validation per-problem AUC on the primary axis.
+Metrics. For each benchmark we report two metrics per instance, averaged over the evaluation set:
+resolve rate (the primary success measure, defined per benchmark below) and average steps (number
+of agent turns before submission or max-step cutoff). For SWE-bench Verified and Terminal-Bench
+2.0, resolve rate is the fraction of instances passing the benchmark’s grading script. CLAW-Eval does
+not expose a single pass/fail signal, so we use pass@3 (whether the rubric Completion grader passes
+on at least one of three independent trials) as the resolve-rate analogue. Steps describe efficiency,
+since a good intervention should raise resolve rate without inflating trajectory length.
+Baselines. We compare TACT against four baselines from two paradigms that mitigate drift outside
+the model. Pre-failure Prompt-level reminders inject a fixed instruction every turn: (i) R EMINDER
+(ours) appends a two-clause anti-drift instruction that mirrors the OT/OA definitions in Section 2.1;
+(ii) R E CAP [Zhang et al., 2025] re-injects the parent plan at every recursive return. Post-failure
+Reflective feedback runs a separate reflector after drift may have surfaced: (iii) AGENT R EFLECT
+(ours) pauses every K=10 steps and prepends a reflector’s three-line summary (progress, stuck
+signals, next direction) to the next turn; (iv) AGENT D EBUG [Zhu et al., 2025] root-causes a failed
+trajectory and feeds the corrective feedback into a retry. TACT differs along two axes. It acts earlier,
+modifying hidden states at the </think> token before any drift token is emitted, and more selectively,
+
+
+
+                                                  17
+firing only when the projection onto a drift axis exceeds the calibrated band τa,ℓ . Full prompts and
+protocols are in Appendix F.
+
+
+D    Related work
+
+Long-horizon LLM agents. LLM agents now solve tasks that span hundreds of steps: editing
+real GitHub repositories [Jimenez et al., 2024, Deng et al., 2025], completing terminal workflows
+[Merrill et al., 2026], navigating realistic web environments [Zhou et al., 2024, Mialon et al., 2024],
+controlling full operating systems [Xie et al., 2024], and exploring open-ended worlds [Wang et al.,
+2024a]. A standard recipe combines tool use with structured reasoning: ReAct interleaves thoughts
+and actions [Yao et al., 2023b], CodeAct executes code as the action space [Wang et al., 2024c], and
+harnesses such as SWE-agent, OpenHands, and Agentless wrap a reasoning model with file-editing
+and shell tools [Yang et al., 2024, Wang et al., 2025c, Xia et al., 2025a,b]. Surveys catalog the
+resulting design space and the rapid pace of benchmark saturation [Wang et al., 2024b, Yehudai
+et al., 2025, Guo et al., 2025]. Most of this work treats the agent as a black box and reports outcome
+metrics like resolve rate; we instead ask why long trajectories fail and locate the answer in the model’s
+internal state.
+Agent drift, overthinking, and overacting. A growing body of work characterizes how language
+model agents degrade over long trajectories. Cuadron et al. [2025] show that reasoning-heavy models
+over-deliberate at the expense of external grounding; Wang et al. [2025b] argue the opposite symptom,
+that agents over-invoke tools when reasoning would suffice; and Rath [2026] quantify cumulative
+behavioral degradation under the name “agent drift.” Related planning analyses [Wang et al., 2026]
+find that reasoning and acting lose alignment as trajectories grow. A parallel literature on reasoning
+models reports the same pathology in a single forward pass: optimal allocation of test-time compute
+is highly prompt-dependent [Snell et al., 2025, Muennighoff et al., 2025], thinking budgets that help
+small problems hurt large ones [Ghosal et al., 2026], and R1-style models construct redundant chains
+that survey work identifies as the dominant efficiency bottleneck [Yue et al., 2025, DeepSeek-AI
+et al., 2025, Kimi Team, 2025]. Long-context studies report a related “lost in the middle” effect
+that compounds with reasoning failures over long agent contexts [Liu et al., 2024]. These studies
+converge on the diagnosis (agents behave worse as context accumulates) but stop at external metrics
+such as resolve rate or token count. What is missing is a mechanistic handle: where in the model do
+overthinking and overacting live, and can we intervene on them directly? We answer both questions
+by locating drift in the hidden-state geometry at the reasoning-action boundary.
+Self-improvement and inference-time control of reasoning. A separate thread tries to fix drift
+through verbal feedback or learned guidance rather than activation-level intervention. Reflexion and
+Self-Refine ask the model to critique its own outputs and revise [Shinn et al., 2023, Madaan et al.,
+2023]; Tree of Thoughts and follow-ups search over alternative reasoning paths [Yao et al., 2023a];
+Agent-R trains agents to reflect via iterative self-training over recovered trajectories [Yuan et al.,
+2025]. Closer to the inference-time control we study, Sui et al. [2025a] introduce a meta-reasoner that
+monitors a reasoning chain and dispatches strategies (backtrack, restart, switch approach) through a
+contextual bandit, and Sui and Hooi [2026] use multi-agent meta-evaluation to provide reward signal
+in non-verifiable settings where ground-truth rewards do not exist. Sui et al. [2025b] train an LLM
+to act as a proactive world model that simulates how the environment will evolve under candidate
+actions before committing. All three approaches keep the model fixed and intervene at the prompt or
+trajectory level. We share their goal of steering reasoning behavior at inference time but operate one
+level lower, by editing hidden states along a learned direction at every reasoning-action boundary.
+Representation engineering and linear concepts. Many high-level behavioral properties are linearly
+encoded in transformer hidden states and can be steered with simple test-time interventions [Zou
+et al., 2023, Turner et al., 2023, Rimsky et al., 2024, Li et al., 2023, Lee et al., 2024]. The linear
+representation hypothesis formalizes this picture, identifying directions in activation space that
+correspond to interpretable concepts and admit causal interventions [Park et al., 2024, Marks and
+Tegmark, 2024]. Sparse autoencoders extend the toolkit by decomposing activations into thousands
+of monosemantic features that can be ablated or amplified individually [Templeton et al., 2024, Gao
+et al., 2025, Shu et al., 2025, Wang et al., 2025a]. Closest to our setting, Lu et al. [2026] study
+persona drift in Anthropic’s assistant models and show that displacing activations back toward a
+stable assistant subspace stabilizes behavior over long contexts. We share the same diagnosis-and-
+intervention recipe (identify a linear direction tied to a behavioral property, then steer along it) but
+
+
+                                                   18
+target a different kind of drift: the think-act allocation of a tool-using agent over hundreds of steps.
+Prior representation-engineering work focuses on single-turn outputs such as honesty, refusal, and
+persona; we extend the toolkit to behavioral failures that unfold across long agent trajectories, treating
+overthinking and overacting as linearly separable directions at the </think> token and steering them
+during live multi-step rollouts.
+
+E     Agent Configuration
+The three benchmarks are run under two different agent scaffolds. SWE-bench Verified and
+Terminal-Bench 2.0 both use mini-swe-agent, a lightweight scaffold in which every environment
+interaction is routed through a single bash tool, so each step is either a reasoning block or one bash
+command. The two benchmarks share the same scaffold, model adapter, and observation template;
+only the system / instance templates and the submission convention differ. On SWE-bench Verified
+the agent runs against a per-instance repository checkout and submits a git patch; on Terminal-Bench
+2.0 the agent runs inside a Harbor-provisioned Docker container and submits by issuing a sentinel
+command that the harness intercepts. CLAW-Eval uses its upstream OpenClaw scaffold [Ye et al.,
+2026]. Unlike mini-swe-agent, OpenClaw exposes a per-task set of first-class tools (CRM, scheduler,
+web, OCR, knowledge base, document store, . . . ) declared in each task’s task.yaml; the agent’s
+system prompt is composed at task load time from a static intro, the task’s tool list, full JSON schemas,
+behavior rules, available skills, and workspace files (AGENTS.md, SOUL.md, USER.md, TOOLS.md).
+The multi-turn split additionally runs a separate LLM as a simulated user, with its own system prompt
+described below.
+Subsections E.1–E.4 describe the SWE-bench Verified configuration of mini-swe-agent. Subsec-
+tion E.5 describes the Terminal-Bench 2.0 deltas. Subsections E.6–E.7 describe the OpenClaw
+scaffold used on CLAW-Eval.
+
+E.1   Tool Definition
+
+The agent has access to exactly one tool:
+                          Bash Tool (OpenAI Function Calling Schema)
+{
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Execute a bash command",
+      "parameters": {
+        "type": "object",
+        "properties": {
+           "command": {
+             "type": "string",
+             "description": "The bash command to execute"
+           }
+        },
+        "required": ["command"]
+      }
+    }
+}
+
+
+E.2   Agent System Prompt
+                                   System Prompt
+You are a helpful assistant that can interact with a computer
+shell to solve programming tasks.
+
+
+E.3   Agent Instance Prompt
+                 Instance Prompt (sent as the first user message)
+<pr_description>
+Consider the following PR description:
+{task}
+
+
+                                                   19
+</pr_description>
+
+<instructions>
+# Task Instructions
+
+## Overview
+
+You're a software engineer interacting continuously with a
+computer by submitting commands. You'll be helping implement
+necessary changes to meet requirements in the PR description.
+Your task is specifically to make changes to non-test files in
+the current directory in order to fix the issue described in
+the PR description in a way that is general and consistent
+with the codebase.
+<IMPORTANT>This is an interactive process where you will think
+and issue AT LEAST ONE command, see the result, then think and
+issue your next command(s).</important>
+
+For each response:
+
+1. Include a THOUGHT section explaining your reasoning and
+   what you're trying to accomplish
+2. Provide one or more bash tool calls to execute
+
+## Important Boundaries
+
+- MODIFY: Regular source code files in /testbed
+- DO NOT MODIFY: Tests, configuration files
+  (pyproject.toml, setup.cfg, etc.)
+
+## Recommended Workflow
+
+1. Analyze the codebase by finding and reading relevant files
+2. Create a script to reproduce the issue
+3. Edit the source code to resolve the issue
+4. Verify your fix works by running your script again
+5. Test edge cases to ensure your fix is robust
+
+## Command Execution Rules
+
+You are operating in an environment where
+
+1. You issue at least one command
+2. The system executes the command(s) in a subshell
+3. You see the result(s)
+4. You write your next command(s)
+
+Each response should include:
+
+1. **Reasoning text** where you explain your analysis and plan
+2. At least one tool call with your command
+
+**CRITICAL REQUIREMENTS:**
+
+- Your response SHOULD include reasoning text explaining
+  what you're doing
+- Your response MUST include AT LEAST ONE bash tool call.
+  You can make MULTIPLE tool calls in a single response
+  when the commands are independent.
+- Directory or environment variable changes are not
+  persistent. Every action is executed in a new subshell.
+
+## Submission
+
+When you've completed your work, you MUST submit your changes
+as a git patch. Follow these steps IN ORDER, with SEPARATE
+
+
+
+                                        20
+commands:
+
+Step 1: Create the patch file
+Run `git diff -- path/to/file1 path/to/file2 > patch.txt`
+
+Step 2: Verify your patch
+
+Step 3: Submit (EXACT command required)
+You MUST use this EXACT command to submit:
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+</instructions>
+
+
+E.4   Observation Template
+
+Agent observations are rendered from tool outputs via a Jinja2 template. Outputs exceeding 10,000
+characters are truncated, keeping the first and last 5,000 characters:
+                           Observation Template (Jinja2)
+{% if output.exception_info -%}
+<exception>{{output.exception_info}}</exception>
+{% endif -%}
+<returncode>{{output.returncode}}</returncode>
+{% if output.output | length < 10000 -%}
+<output>
+{{ output.output -}}
+</output>
+{%- else -%}
+<warning>
+The output of your last command was too long.
+Please try a different command that produces less output.
+</warning>
+<output_head>
+{{ output.output[:5000] }}
+</output_head>
+<elided_chars>
+{{ elided_chars }} characters elided
+</elided_chars>
+<output_tail>
+{{ output.output[-5000:] }}
+</output_tail>
+{%- endif -%}
+
+
+E.5   Terminal-Bench 2.0: mini-swe-agent reuse
+
+For Terminal-Bench 2.0 we wrap the same mini-swe-agent in the Harbor harness, which provisions
+one Docker container per task and installs the scaffold inside. The bash tool definition (Section E.1)
+and observation template (Section E.4) are unchanged. Only the system / instance templates and the
+submission convention differ: there is no PR description and the agent submits by issuing a sentinel
+command rather than a git patch.
+                                 TB2 System Prompt
+You are a helpful assistant that can interact with a Linux
+shell to solve terminal-based tasks.
+                                 TB2 Instance Prompt (excerpt)
+<task>
+{task}
+</task>
+
+<instructions>
+You are working inside a Linux container. Your job is to
+complete the task above by issuing shell commands. The task
+will be evaluated by automated tests that inspect the state of
+the container's filesystem, any produced output files, or the
+behavior of commands you create.
+
+
+                                                 21
+For each response:
+1. Include a THOUGHT section explaining your reasoning.
+2. Provide one or more bash tool calls to execute.
+
+CRITICAL REQUIREMENTS:
+- Every response MUST include at least one bash tool call.
+- Directory or environment variable changes are NOT persistent
+  between turns; chain related work with `&&` or re-establish
+  state at the start of each command.
+- Use non-interactive flags. Avoid interactive tools like
+  vi/nano; use `cat >`, `sed`, `awk`, `tee`, or heredocs.
+- If a required tool is missing, install it.
+
+When the task is complete, submit with this EXACT command:
+
+      echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+If that command is not issued, the harness keeps prompting.
+After submission you cannot continue working on this task.
+</instructions>
+
+
+E.6   CLAW-Eval: OpenClaw scaffold
+
+OpenClaw exposes a richer per-task action space than mini-swe-agent. Each CLAW task ships with a
+task.yaml that declares the tools the agent may call (drawn from a fixed registry of mock services:
+CRM, scheduler, web, OCR, knowledge base, document store, contacts, notes, . . . ). At task load time
+the scaffold composes a system prompt by concatenating six blocks: (i) a static intro identifying the
+harness; (ii) a tool inventory rendered from the task’s tool list; (iii) full JSON schemas of those tools;
+(iv) behavior rules covering tool-call style and safety; (v) a skills block listing optional SKILL.md
+files the agent may load; and (vi) workspace files (AGENTS.md, SOUL.md, USER.md, TOOLS.md)
+injected verbatim. The first block is fixed across all tasks; the rest are task-conditional. The static
+parts are below.
+                       OpenClaw System Prompt – Static Intro
+You are a personal assistant running inside OpenClaw.
+
+           OpenClaw System Prompt – Tool Inventory and Schemas (template)
+## Tooling
+Tool availability (filtered by policy):
+Tool names are case-sensitive. Call tools exactly as listed.
+- {tool_name}: {tool_description}
+- ...
+When a first-class tool exists for an action, use the tool
+directly.
+
+## Tool Schemas
+Complete JSON Schema for available tools:
+- {tool_name}
+```json
+{json_schema}
+```
+- ...
+
+                      OpenClaw System Prompt – Behavior Rules
+## Tool Call Style
+Default: do not narrate routine, low-risk tool calls (just
+call the tool).
+Narrate only when it helps: multi-step work, complex tasks,
+or sensitive actions. Keep narration brief and value-dense.
+Tool-call protocol is strict: use native API tool/function
+calls only. Never emit tool calls as plain text markup
+(e.g. <tool_call>, <function=...>, <parameter=...>). If a
+tool is needed, issue a real tool call instead of describing
+or simulating it in text.
+
+
+                                                   22
+## Safety
+- Safety: {safety_rule}
+- Tool Call Style: {tool_call_style_rule}
+- Reply Tags: {reply_tags_rule}
+- Silent Reply: {silent_reply_rule}
+- Heartbeat: {heartbeat_rule}
+
+                 OpenClaw System Prompt – Skills Block (template)
+## Skills (mandatory)
+Before replying: scan <available_skills> entries.
+- If exactly one skill clearly applies: read its SKILL.md
+  using the configured read tool, then follow it.
+- If multiple skills could apply: choose the most specific
+  one, then read and follow it.
+- If none clearly apply: do not read any SKILL.md.
+Constraints: never read more than one skill up front; only
+read after selecting.
+
+<available_skills>
+  <skill>
+    <name>{skill_name}</name>
+    <description>{skill_description}</description>
+    <location>{skill_path}</location>
+  </skill>
+  ...
+</available_skills>
+
+
+The four workspace files (AGENTS.md, SOUL.md, USER.md, TOOLS.md) are injected verbatim under
+a ## Workspace Files header. Their contents are task-specific and define the agent’s persona, the
+simulated user’s profile, and any additional tooling the task is meant to follow; we omit them for
+brevity.
+
+E.7   CLAW-Eval: simulated user agent (multi-turn split)
+
+The multi-turn split of CLAW-Eval evaluates dialogue between the agent and a human user. Rather
+than scripting fixed user turns, OpenClaw runs a second LLM as a user agent that produces user
+replies on the fly, conditioned on a per-task persona. We use Claude Opus 4.6 in this role. The
+system prompt below is an English rendering of the upstream prompt (the original is in Chinese in
+the OpenClaw codebase); the verbatim Chinese text is included with the released code.
+                 Simulated User Agent – System Prompt (translated)
+You are a simulated user. Hold a conversation with an AI
+assistant according to the persona below.
+
+## Your persona
+{persona}
+
+## Rules
+1. Stay in character. Reply in natural, spoken-style language;
+   do not reveal that you are an AI.
+2. Answer the assistant's questions truthfully based on your
+   persona.
+3. If the assistant asks for information not in your persona,
+   say something like "I don't really know the exact number"
+   or a similar natural reply.
+4. If the assistant has already given a complete answer or
+   recommendation and you have no further questions, output
+   [DONE].
+5. If you are satisfied with the assistant's reply, or it has
+   fully addressed your question, output [DONE].
+6. Keep replies short and natural, like a real user (1-3
+   sentences).
+
+
+
+                                               23
+At each turn, the user-agent LLM is given (i) the rendered persona, (ii) the running transcript of
+agent↔user messages, and (iii) an instruction to reply or to emit [DONE] if satisfied. A [DONE] reply
+ends the dialogue and triggers grading.
+
+F     Baseline Configurations
+We give the full configuration of the four baselines from Appendix C.
+
+F.1   R EMINDER
+
+At every agent turn, we append the following text to the user message. The wording is fixed across
+all turns and tasks.
+                            Reminder – Per-Turn Suffix
+[Reminder] Don't overthink: if a single tool call would
+settle a question, call the tool instead of deliberating.
+Don't overact: if you just received an observation, reason
+about it before issuing the next command.
+
+
+F.2   AGENT R EFLECT
+
+Every K=10 steps we pause the agent and invoke a reflector LLM (same backbone as the agent) on
+the last 10 steps plus the running context. The reflector emits a fixed three-line template, prepended
+as a system message to the next turn. We set K=10 to match the judge’s chunk size (Section 2.2).
+                      AgentReflect – Reflector System Prompt
+You are a reviewer for a coding agent's recent steps.
+After reading the last 10 steps and the running task
+context, output exactly three lines:
+
+1. Progress: one sentence on the most useful new
+   information the agent obtained in this chunk.
+2. Stuck signals: one sentence flagging any sign of
+   being stuck (e.g., re-reading the same file,
+   repeating a command, circling between the same
+   two hypotheses). Write "none" if nothing stands out.
+3. Next direction: one sentence recommending the single
+   most useful next action.
+
+Keep each line to one sentence. Do not include any other
+text.
+
+
+F.3   R E CAP and AGENT D EBUG
+
+R E CAP [Zhang et al., 2025]: we follow the upstream protocol, re-injecting the parent plan into the
+active prompt at each recursive return. AGENT D EBUG [Zhu et al., 2025]: on failed rollouts, the
+upstream root-cause decomposer locates the first faulty step and emits verbal feedback; we prepend it
+to the prompt for a retry, and report that retry’s resolve rate.
+
+G     LLM-as-Judge Prompt Templates
+Labeling each step requires knowing what the agent has already learned, so the judge must track
+accumulated context across the full trajectory. We provide the full system prompts for the three-stage
+pipeline described in Section 2.2.
+The pipeline works as follows. (1) The State Maintainer reads the raw steps and updates a structured
+rolling state with two components: KnownFacts (observable facts) and Progress (progress assess-
+ment). (2) The State Validator audits the KnownFacts component against the raw steps, flagging
+hallucinations, omissions, and contradictions; if errors are found, the maintainer revises and the
+validator re-audits in a reflection loop (up to 3 iterations). (3) The Annotator labels each step relative
+to the validated rolling state, assigning one of three labels with a confidence level and one-sentence
+justification.
+
+
+                                                   24
+G.1   Stage 1: State Maintainer
+                         State Maintainer – System Prompt
+You are a trajectory state tracker. Your job is to read a
+chunk of coding agent steps and update the rolling state to
+accurately reflect what the agent has learned and done.
+
+You are NOT judging the agent's decisions. You are tracking
+two things so a downstream annotator can decide whether each
+step grows what the agent knows:
+
+1. **KnownFacts** -- observable facts only:
+   - What files were read and what was learned from them
+   - What hypothesis the agent is currently working with
+   - What edits were made
+   - What test results were observed
+   - Critical discoveries
+
+2. **Progress** -- whether KnownFacts is growing:
+   - What phase the agent is in
+   - steps_since_progress: number of steps since
+     KnownFacts last grew
+   - repetition_tracker: signs of effort without growth
+     (files re-read, repeated action patterns, recurring
+     hypothesis cycles)
+
+Be precise and factual. Do not speculate beyond what the
+steps show.
+
+
+The user message includes four sections: (1) Agent’s Task Setup (the GitHub issue description), (2)
+Current Rolling State as formatted JSON through the previous chunk, (3) New Steps for the current
+chunk with per-step thinking, action, and observation fields, and (4) a task instruction requesting only
+valid JSON output matching the rolling state schema.
+
+G.2   Stage 2: State Validator
+                          State Validator – System Prompt
+You are a FACTUAL auditor for a coding-agent trajectory's
+KnownFacts state. You receive a proposed KnownFacts object
+and the raw trajectory steps it was derived from. Your ONLY
+job is to detect factual errors in the KnownFacts that
+contradict the raw steps.
+
+You are NOT auditing phase, progress, or repetition -- only
+the KnownFacts fields (files_read, hypotheses, edits_made,
+test_results, key_findings).
+
+Report ONLY these three error types:
+
+1. HALLUCINATION -- KnownFacts claims something that does NOT
+   appear in the raw steps. Examples:
+     - claims a file was read, but no step reads that file
+     - claims a test passed, but the observation shows failure
+     - claims an edit was made, but no edit action occurred
+
+2. OMISSION -- a concrete, observable fact IS in the raw steps
+   but is missing from KnownFacts. Examples:
+     - an edit was committed but edits_made is empty
+     - a test was run with a clear pass/fail result but
+       test_results does not mention it
+
+3. CONTRADICTION -- KnownFacts directly contradicts text that
+   is verbatim visible in a step's observation.
+
+DO NOT report any of the following as corrections:
+  - Paraphrasing, rewording, or stylistic differences
+
+
+                                                  25
+   - Disagreement over subjective framing (hypothesis wording,
+     whether a finding is "key")
+   - Summaries that are less detailed than you would write
+     -- shorter is fine
+   - Anything that requires guessing what the agent "meant"
+
+If you find none of (1)(2)(3), you MUST return
+"corrections": [] and copy the proposed KnownFacts into
+validated_known_facts unchanged.
+
+
+The validator responds with structured JSON containing a list of corrections (each prefixed with
+the error type) and a validated_known_facts object. When corrections are found, the State
+Maintainer receives the error list and revises the rolling state; the validator re-audits the revision in a
+reflection loop (up to 3 iterations).
+
+G.3   Stage 3: Annotator
+                             Annotator – System Prompt
+You are an expert judge evaluating the epistemic efficiency
+of a coding agent. Each step is one of: OVERTHINKING (OT),
+OVERACTING (OA), CALIBRATED (CAL).
+
+A step s_t = (reasoning r_t, action a_t, observation o_t) is
+judged by what it contributes to the agent's known facts
+BEFORE that step (KnownFacts below).
+
+## Definitions
+
+- **CALIBRATED** -- the step expands KnownFacts. Either r_t
+  derives a new hypothesis or finding from prior facts, or
+  a_t / o_t adds a file, command result, test outcome, or
+  edit not yet in KnownFacts.
+
+- **OVERTHINKING** -- r_t re-derives a conclusion already in
+  KnownFacts, cycles between known hypotheses, restates
+  known information, or deliberates about something a single
+  tool call would settle. Internal tokens are spent, but
+  KnownFacts does not grow.
+
+- **OVERACTING** -- a_t returns an observation already in
+  KnownFacts (e.g. re-reads a file already in files_read,
+  re-runs a test already in test_results without an
+  intervening edit, repeats a prior command), or fires
+  without reasoning over information just received. A tool
+  call is spent, but KnownFacts does not grow.
+
+## Rules
+
+- Judge each step against KnownFacts as it stood BEFORE
+  that step.
+- The rolling state is a compressed REFERENCE for what the
+  agent knew; if it and the raw steps disagree, trust the
+  raw steps.
+- If a step contains more than one failure mode (e.g.,
+  redundant reasoning followed by a redundant tool call),
+  assign the label corresponding to the dominant failure.
+  The dominance order is OT > OA > CAL.
+- When uncertain, mark confidence as "low".
+
+
+The annotator outputs structured JSON with one entry per step, each containing a label
+(OVERTHINKING, OVERACTING, or CALIBRATED), a one-sentence reasoning, and a confidence level
+(high, medium, or low). The OT > OA > CAL priority is motivated by the temporal structure of
+a step: reasoning occurs before action, so once rt is classified as overthinking, the step is already
+non-progressive with respect to expanding Kt , independent of the subsequent action at .
+
+
+                                                    26
+G.4    Rolling State Schema
+
+The rolling state is the central data structure that carries context across chunks. It has two components,
+each serving a distinct role in the pipeline.
+The known_facts component stores observable facts extracted from the trajectory. files_read
+maps each filename to a one-sentence summary of what the agent learned from it. hypotheses
+records the agent’s current working theory about the bug. edits_made and test_results track
+what the agent changed and what feedback it received. key_findings captures critical discoveries
+that shape subsequent decisions. The State Validator (Section G.2) audits only this component,
+checking each field against the raw steps for hallucinations, omissions, and contradictions.
+The progress component tracks the agent’s behavioral trajectory. phase classifies the agent’s current
+activity into one of six stages: understanding_issue, localizing_code, editing, testing,
+verifying, or stuck_looping. progress_trend maintains a per-chunk log of whether the agent
+advanced toward a solution. steps_since_progress counts consecutive steps without meaningful
+progress. repetition_tracker records three types of redundancy: files read more than once,
+repeated action patterns (e.g., running the same grep command), and circular reasoning cycles where
+the agent revisits hypotheses it already explored. The Annotator uses this component to distinguish
+calibrated behavior from overthinking (circular reasoning, stalled progress) and overacting (redundant
+file reads, repeated commands).
+                                     Rolling State JSON Schema
+ {
+     "known_facts": {
+       "files_read": {
+         "<filename>": "<what was learned -- one sentence>"
+       },
+       "hypotheses": "<current working hypothesis>",
+       "edits_made": "<what was changed and where>",
+       "test_results": "<which tests ran and their outcome>",
+       "key_findings": "<critical discoveries>"
+     },
+     "progress": {
+       "phase": "<one of: understanding_issue,
+         localizing_code, editing, testing,
+         verifying, stuck_looping>",
+       "progress_trend": [
+         "<chunk-level progress assessment>"
+       ],
+       "steps_since_progress": <int>,
+       "repetition_tracker": {
+         "files_read_multiple": ["<filenames>"],
+         "repeated_patterns": ["<action patterns>"],
+         "circular_reasoning": ["<hypothesis cycles>"]
+       }
+     }
+ }
+
+
+We show a concrete example below. The state comes from the first chunk (steps 0–9) of a trajectory
+on django-11163, where the agent must fix model_to_dict() treating fields=[] as falsy. By
+step 9, the agent has read the source, identified the root cause, applied a one-line fix, and verified the
+output. The known_facts component captures these facts; the progress component records that
+the agent is in the verifying phase, has re-read models.py multiple times, and has circled back to the
+same explanation of the bug.
+                   Rolling State Example (django-11163, after steps 0–9)
+ {
+     "known_facts": {
+       "files_read": {
+         "django/forms/models.py": "model_to_dict() used
+           `if fields and f.name not in fields:` while
+           construct_instance() already used
+           `if fields is not None and ...`.",
+         "tests/runtests.py": "Django's test settings are
+
+
+                                                   27
+         configured dynamically rather than via a single
+         tests.settings module."
+      },
+      "hypotheses": "The bug is caused by model_to_dict()
+        treating an empty list for `fields` as falsy, so
+        changing the condition to `fields is not None`
+        should fix it.",
+      "edits_made": "Modified model_to_dict() by changing
+        `if fields and f.name not in fields:` to
+        `if fields is not None and f.name not in fields:`.",
+      "test_results": "Reproduction script confirmed
+        model_to_dict(instance, fields=[]) returned all
+        fields before the fix and {} after the fix.",
+      "key_findings": "The same `fields is not None` pattern
+        already existed in construct_instance(); `exclude`
+        checks did not require the same change."
+    },
+    "progress": {
+      "phase": "verifying",
+      "progress_trend": [
+        "Localized the bug in django/forms/models.py.",
+        "Reproduced the issue, applied the fix, and
+          verified the expected outputs."
+      ],
+      "steps_since_progress": 0,
+      "repetition_tracker": {
+        "files_read_multiple": ["django/forms/models.py"],
+        "repeated_patterns": [
+           "Tried multiple environment setups for the
+            reproduction script after import errors."
+        ],
+        "circular_reasoning": [
+           "Repeated the same explanation that falsy
+            fields=[] bypasses the filter."
+        ]
+      }
+    }
+}
+
+
+
+
+                                          28
+

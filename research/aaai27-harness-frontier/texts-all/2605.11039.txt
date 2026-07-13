@@ -1,0 +1,1244 @@
+                                            The Granularity Mismatch in Agent Security:
+                                         Argument-Level Provenance Solves Enforcement and
+                                              Isolates the LLM Reasoning Bottleneck
+
+
+                                             Linfeng Fan1,∗        Ziwei Li2,∗     Yuan Tian1       Yichen Wang1        Rongsheng Li3        Xiong Wang4,†
+                                                         1
+                                                             Gaoling School of Artificial Intelligence, Renmin University of China, Beijing, China
+
+
+
+
+arXiv:2605.11039v1 [cs.CR] 11 May 2026
+                                                          2
+                                                       King Abdullah University of Science and Technology, Thuwal, Saudi Arabia
+                                                            3
+                                                              Dongbei University of Finance and Economics, Dalian, China
+                                                             4
+                                                               University of Science and Technology of China, Hefei, China
+                                                            {2023200424, tianyuan2004, 2024201623}@ruc.edu.cn
+                                             ziwei.li@kaust.edu.sa lirongsheng@stumail.dufe.edu.cn wangxiong@ustc.edu.cn
+                                                                     ∗
+                                                                       Equal contribution. † Corresponding author.
+
+
+
+                                                                                             Abstract
+                                                     Tool-using LLM agents must act on untrusted webpages, emails, files, and API
+                                                     outputs while issuing privileged tool calls. Existing defenses often mediate trust at
+                                                     the granularity of an entire tool invocation, forcing a brittle choice in mixed-trust
+                                                     workflows: allow external content to influence a call and risk hijacked destinations
+                                                     or commands, or quarantine the call and block benign retrieval-then-act behavior.
+                                                     The key observation behind this paper is that indirect prompt injection becomes
+                                                     dangerous not when untrusted content appears in context, but when it determines
+                                                     an authority-bearing argument. We present PACT (Provenance-Aware Capabil-
+                                                     ity Contracts), a runtime monitor that assigns semantic roles to tool arguments,
+                                                     tracks value provenance across replanning steps, and checks whether each argu-
+                                                     ment’s origin satisfies its role-specific trust contract. Under oracle provenance,
+                                                     PACT achieves 100% utility and 100% security on mixed-trust diagnostic suites,
+                                                     while flat invocation-level monitors incur false positives or false negatives. In
+                                                     full AgentDojo deployments across five models, PACT reaches 100% security on
+                                                     the three strongest models while recovering 38.1–46.4% utility, 8–16 percentage
+                                                     points above CaMeL at the same security level. Ablations show that both semantic
+                                                     roles and cross-step provenance are necessary. PACT reframes agent security as
+                                                     authority binding, and isolates the remaining deployment bottleneck to provenance
+                                                     inference and contract synthesis.
+
+
+                                         1     Introduction
+                                         Tool-using language-model agents are increasingly expected to read from untrusted environments
+                                         while taking actions through privileged APIs: retrieving webpages, summarizing emails, editing files,
+                                         scheduling meetings, or sending messages on behalf of a user [17, 18, 30]. This combination creates
+                                         a security problem that is sharper than ordinary prompt following. An attacker does not need to
+                                         compromise the agent runtime; it can place instructions inside content that the agent is supposed to
+                                         process, and those instructions may later influence a side-effecting tool call [6, 15]. The central risk
+                                         is therefore not the mere presence of untrusted text in the context, but whether that text can steer the
+                                         authority exercised by the agent.
+                                         Existing defenses often mediate this risk at the granularity of a whole tool invocation [2, 4, 16, 31].
+                                         This granularity is too coarse for the workflows that make agents useful. Consider a user who asks
+
+                                         Preprint.
+an agent to summarize evil.com and email the summary to boss@company.com. The webpage is
+allowed to determine the email body: that is the task. It should not be allowed to determine the email
+recipient. A flat policy over send_email(recipient, body) cannot express this distinction. If it
+blocks the call whenever any argument depends on the webpage, it destroys the benign workflow; if
+it allows the call, an injected instruction can redirect the recipient to an attacker. Figure 1 illustrates
+this mismatch: the security boundary lies inside the tool call, between arguments with different trust
+semantics.
+
+
+
+
+Figure 1: PACT resolves the granularity mismatch in indirect prompt injection. In a be-
+nign mixed-trust workflow, external webpage content may legitimately fill the body argument of
+send_email, while the recipient remains grounded in the user request. In an attack, the same
+webpage attempts to bind the authority-bearing recipient argument. Whole-call defenses cannot
+distinguish these cases: blocking all external influence kills benign retrieval-then-act workflows,
+while allowing it exposes target arguments. PACT moves enforcement to the argument level, allowing
+external data as content while blocking it as authority.
+
+
+The key observation behind PACT is that indirect prompt injection becomes dangerous when untrusted
+data is allowed to bind an authority-bearing argument. Trust is not a property of a tool invocation
+as a whole; it is a property of what each argument does. Arguments such as recipients, URLs, shell
+commands, database queries, file paths, or credentials can determine where authority is directed or
+what operation is executed. Other arguments, such as summaries or report bodies, may legitimately
+carry external content. The right enforcement question is therefore not “did a tool output influence
+this call?”, but “which argument did it influence, and is that influence permitted for this role?”
+We introduce PACT (Provenance-Aware Capability Contracts), a runtime monitor that enforces this
+authority-binding view. Each tool is equipped with an argument-level contract assigning semantic
+roles such as target, command, credential, and content. During execution, PACT tracks
+provenance across tool-call chains and, before each tool invocation, checks every argument against
+the trust requirement induced by its role. This design permits external information where the task
+semantics require it, while preventing the same information from binding privileged destinations,
+commands, or secrets. PACT is not a detector for malicious strings; it is a structural constraint on
+what untrusted data is allowed to control.
+We validate this claim through three levels of evidence. First, controlled mechanism evaluations show
+that the granularity mismatch is real: under oracle provenance, PACT achieves 100% utility and 100%
+security on mixed-trust diagnostic suites, while flat invocation-level monitors incur false positives,
+false negatives, or both. Second, full AgentDojo [3] deployments across five models test whether this
+advantage survives automatic provenance inference and contract synthesis. On the three strongest
+models, PACT reaches 100% security while recovering 38.1–46.4% utility, 8–16 percentage points
+above CaMeL [4] at the same security level. Third, ablations isolate the mechanisms: removing
+semantic roles collapses benign utility, while removing cross-step provenance creates security failures.
+The remaining deployed errors concentrate in role assignment and provenance inference, identifying
+the next bottleneck rather than leaving failures entangled with the runtime policy.
+This paper makes three contributions.
+
+
+                                                    2
+       • Authority-binding formulation. We identify granularity mismatch as a root cause of
+         the security–utility tradeoff in indirect prompt injection defenses and formalize why flat
+         tool-level monitors cannot separate benign mixed-trust workflows from authority hijacking.
+       • Argument-level runtime enforcement. We present PACT, a provenance-aware contract
+         system that interprets trust through argument roles and enforces role-specific requirements
+         across dynamic tool-call chains.
+       • Mechanism and deployment evidence. We show that PACT removes the mechanism-level
+         tradeoff under oracle provenance, improves utility in the near-perfect-security regime on
+         AgentDojo, and attributes the remaining deployment gap to provenance and contract fidelity.
+
+
+2   Related Work
+
+Tool-level defenses and the granularity assumption. Indirect prompt injection attacks tool-using
+agents by placing adversarial instructions in webpages, emails, retrieved files, or API responses
+that later influence replanning [6, 15, 27]. Benchmarks such as AgentDojo [3] and InjecAgent [31]
+make this threat concrete by measuring both benign task completion and adversarial robustness.
+The closest defenses to PACT make untrusted influence visible to the runtime. FIDES [2] extends
+information-flow control to LLM agents through dynamic labels and integrity policies; CaMeL [4]
+separates privileged planning from quarantined processing of untrusted tool outputs. These systems
+are important because they move beyond relying on the model to ignore hostile text. Their shared
+abstraction, however, is the tool invocation. A whole-call policy over send_email(recipient,
+body) cannot express that body may depend on a webpage while recipient must remain user-
+derived. PACT differs at this boundary: it treats a tool call as a structured action whose arguments
+may carry different trust requirements.
+
+System-level access control and path policies. A parallel line of work secures agents through
+access-control, mandatory-access-control, or system-view policies. SEAgent monitors agent–tool
+interactions through an information-flow graph and enforces policies over entity attributes and
+paths [22]; Ji et al. [9] study mandatory access control for privilege escalation in LLM-agent systems.
+Broader SoK and benchmark efforts such as AGENTPI emphasize evaluation across workflows,
+attacker capabilities, and utility costs [34], while SafeAgent [14] and DRIFT [13] provide runtime
+isolation architectures. PACT is complementary to these systems. Path-level policies restrict which
+entities may communicate or which tool sequences are allowed; PACT restricts what a particular
+value may bind inside an allowed invocation. Thus, ABAC/MAC constraints can limit system-level
+flows, while argument-role contracts mediate authority within each tool call.
+
+Content defenses and semantic classification. Another line attempts to detect, filter, or suppress
+malicious instructions in untrusted content. This includes prompt-injection detectors [16], attribution-
+or intervention-based defenses [29], tool I/O firewalls [23], instruction hierarchies [7, 24, 28], and
+structured protocols that encourage the model to treat untrusted text as data rather than commands [8].
+These methods ask whether content looks malicious, or whether the model can be made to ignore
+it. PACT asks a different question: regardless of whether a string is malicious, what is that string
+allowed to determine? The same webpage may determine a summary, but not a recipient, command,
+file path, or credential. PACT is therefore complementary to content and model-side defenses: it
+constrains authority binding even when malicious text is not perfectly identified.
+
+Provenance, capabilities, and runtime mediation. PACT is related to capability systems, prove-
+nance tracking, taint analysis, and runtime mediation. Capability-oriented approaches classify tools
+by the authority they expose [10], but a single tool often contains both authority-bearing and content-
+bearing arguments. Classical provenance and taint-tracking systems record where values originate [8],
+but origin alone does not specify which argument roles a value may safely fill in an LLM-agent
+action. Recent runtimes such as MELON [33], Progent [21], AgentArmor [26], and AgentSentry [19]
+impose structure on tool use or execution traces, but primarily mediate model decisions, invocations,
+or trace-level behavior. PACT does not claim that tracking provenance is new. Its difference is how
+provenance is interpreted: a source is checked against the semantic role of the argument it is about to
+bind.
+
+
+                                                   3
+Adaptive attacks and browser-specific enforcement. Recent attack work studies adaptive prompt-
+injection payloads, including optimization-based or reinforcement-learning attacks such as AutoIn-
+ject [1], universal adversarial suffixes [35], and adaptive attacks that target IPI defenses [25]. These
+attacks strengthen the case for structural enforcement: if provenance is preserved correctly, changing
+the surface form of an injected string should not allow it to bind a target or command argument.
+At the same time, PACT does not claim robustness to every adaptive strategy. Attacks that exploit
+provenance-inference errors, tool-selection behavior, or harmful content inside permitted content
+fields remain outside its structural guarantee. Browser-specific defenses such as cognitive firewalls
+mediate browser agents through split-compute or origin-level checks [11]. PACT targets a different
+interface: semantic arguments of arbitrary tools rather than browser operations alone.
+
+Gradual contracts as utility recovery. PACT’s contract hierarchy is inspired by gradual typing
+and higher-order contracts, where specifications can be refined without requiring every interface to
+be fully precise from the outset. This is useful for agent security [20] because many tools admit safe
+conservative policies before their complete argument semantics are known. Coarser contracts may
+over-block, but should remain safe; finer contracts can recover benign behavior by exposing more
+structure. In PACT, contract precision moves enforcement from opaque tool-level blocking toward
+role-aware argument checks, recovering utility without relaxing the prohibition on untrusted data
+binding authority-bearing arguments [12].
+
+3     The PACT Framework: Enforcing Authority at the Argument Level
+From tainted calls to authority binding. The failure mode addressed by PACT is not that an
+agent observes untrusted text, but that such text is allowed to bind an authority-bearing argument.
+In a mixed-trust call, the same source can be legitimate for one argument and unsafe for another: a
+webpage may determine an email body, but not the recipient; a retrieved document may inform a
+report, but not a shell command. Existing invocation-level defenses [2, 4] collapse these cases into a
+single allow/block decision. PACT instead enforces the following principle: a value’s provenance
+should be interpreted through the semantic role of the argument it is about to bind. Figure 2
+summarizes the runtime.
+
+
+
+
+Figure 2: PACT runtime: contracts, provenance, and argument-level checking. PACT receives
+user instructions, tool outputs, and runtime state as provenance-tagged values; interprets these values
+through a library of role-aware tool contracts; and checks each argument immediately before tool
+execution. The monitor permits external data where the contract marks an argument as content, but
+blocks the same origin from binding authority-bearing roles such as targets, commands, or credentials.
+L0–L3 contract precision moves from opaque blocking to certified routing, while the trust lattice
+orders sources as TRUSTED > USER > TOOL_OUTPUT > EXTERNAL.
+
+3.1   Threat Model and Scope
+
+We consider an autonomous LLM agent that interacts with its environment through structured
+function-calling APIs [18, 30]. The attacker controls untrusted content returned by these tools, such
+as poisoned webpages, malicious emails, retrieved files, or compromised API responses [6, 31]. The
+attack goal is indirect prompt injection: to manipulate replanning so that untrusted content determines
+an authority-bearing tool argument, enabling data exfiltration, target hijacking, file overwrite, or code
+execution.
+
+
+                                                   4
+PACT provides an enforcement-layer guarantee. Its trusted computing base consists of the runtime
+monitor, tool contracts, the provenance-preserving agent framework, and trusted discharge procedures
+used at L3. We assume conservative provenance propagation and contracts that encode the intended
+authority semantics of each tool argument. Errors in automatic contract synthesis or provenance
+inference are not part of the oracle guarantee; they are measured separately in deployment. PACT
+also does not address tool-selection attacks, where the model invokes a dangerous tool using trusted
+constants, or content-channel attacks, where harmful text appears inside an otherwise permitted
+content argument.
+
+3.2   Argument-Level Contracts
+
+For a tool t with k arguments, PACT defines a contract
+                                         Ct = (ℓ, {ai }ki=1 , o),
+where ℓ ∈ {L0, L1, L2, L3} is the contract precision level and o is an OutputSpec assigning prove-
+nance to tool outputs. Each argument entry is
+                               ai = (namei , rolei , τimin , Fi , Ri , Di ),
+where rolei is the semantic role, τimin is the minimum trust required, Fi is a forbidden-origin set, Ri
+is the set of required obligations, and Di is the set of trusted discharge procedures available at L3.
+
+Roles and trust. PACT uses six roles: target for authority-bearing destinations such as recipi-
+ents, URLs, or endpoints; command for executable commands or queries; credential for secrets;
+content for payload text; selector for object selection; and control for behavior-modifying flags.
+These roles are not a linguistic taxonomy. They are the policy interface that separates arguments that
+bind authority from arguments that primarily carry content. Trust values form the ordered lattice
+                       TRUSTED > USER > TOOL_OUTPUT > EXTERNAL.
+
+Contract precision controls how much argument structure is exposed:
+• L0 (Opaque): treat the tool call as one authority boundary.
+• L1 (Capability): enforce one threshold for all arguments of a capability.
+• L2 (Argument-role): check each argument against its role-specific requirement.
+• L3 (Certified routing): apply L2 checks, but allow explicitly dischargeable violations to pass
+  through trusted procedures in Di .
+Coarser contracts remain safe when argument semantics are unavailable; finer contracts recover
+benign mixed-trust workflows once those semantics are specified.
+
+Trusted discharge. Certified routing is not an unrestricted trust upgrade. A trusted procedure
+returns a scoped certificate
+                                    d = (r, s, ρ, τ max ),
+where r is the failed predicate or obligation being discharged, s is the trusted procedure, ρ is the
+argument-role scope, and τ max bounds the effective trust of the certified value. Applying d to v
+creates a derived value
+                     π(v d ) = ⟨O(v) ∪ {s}, min(τ max , τcert (s)), B(v) \ {r}⟩.
+The original origins are retained, only the scoped obligation is discharged, and the certificate cannot
+be reused for roles outside ρ.
+
+3.3   Provenance and Runtime Checking
+
+Every runtime value v carries a provenance tag
+                                     π(v) = ⟨O(v), τ (v), B(v)⟩,
+where O(v) is the set of contributing sources, τ (v) is the current trust level, and B(v) is the set of
+unresolved obligations. User instructions receive USER, trusted constants receive TRUSTED, and tool
+
+
+                                                    5
+outputs receive the trust specified by their OutputSpec. When values are combined, provenance is
+merged conservatively:
+               merge(⟨O1 , τ1 , B1 ⟩, ⟨O2 , τ2 , B2 ⟩) = ⟨O1 ∪ O2 , min(τ1 , τ2 ), B1 ∪ B2 ⟩.        (1)
+Thus ordinary dataflow never increases trust and never erases origins or obligations. Higher effective
+trust can arise only through an explicit L3 discharge certificate, which creates a bounded, role-scoped
+derived value.
+Before executing t(v1 , . . . , vk ), the monitor checks each argument vi against ai :
+                 τ (vi ) ≥ τimin ,    O(vi ) ∩ Fi = ∅,        B(vi ) ∪ Ri ⊆ Discharged.
+At L3, a failed predicate may be discharged only if some d ∈ Di covers the failed predicate and the
+argument role; otherwise the call is blocked.
+Algorithm 1 PACT checks each argument against its role-specific contract before execution.
+Require: Tool call t(v1 , . . . , vk ), contract Ct = (ℓ, {ai }ki=1 , o), provenance state π
+ 1: for i = 1 to k do
+ 2:     read ai = (namei , rolei , τimin , Fi , Ri , Di )
+ 3:     Vi ← failed trust, origin, or obligation predicates
+ 4:     if Vi ̸= ∅ then
+ 5:         if ℓ = L3 and some valid d ∈ Di covers Vi and rolei then
+ 6:              replace vi by the certified derived value vid
+ 7:         else
+ 8:              return B LOCK
+ 9:         end if
+10:     end if
+11: end for
+12: execute t(v1 , . . . , vk ) and tag outputs according to o
+13: return A LLOW
+
+The online check is linear in the number of arguments plus the size of the origin, obligation, and
+discharge sets. It performs only lattice comparisons, set intersections, and certificate-scope checks at
+execution time.
+
+3.4   Automatic Contract and Provenance Inference
+
+The formal monitor assumes contracts and provenance tags. For deployment, we instantiate them
+with an automatic, fail-closed pipeline; its fidelity explains the oracle-to-deployment gap. Given a
+tool schema, we synthesize a draft contract from the tool name, argument names, type annotations,
+and natural-language descriptions. Deterministic rules assign high-confidence roles: recipients,
+URLs, endpoints, paths, attendees, accounts, and destinations map to target; shell commands,
+executable queries, and mutation requests map to command; API keys, tokens, and passwords map to
+credential; message bodies, summaries, reports, and quoted text map to content. Ambiguous
+fields such as query, selector, or filter are assigned conservatively unless the schema makes
+their authority semantics clear; missing specifications fail closed at L2.
+Each OutputSpec assigns default trust and origin policies to returned values. External retrieval tools
+produce EXTERNAL unless a trusted tool-specific attestation states otherwise; we use fail-low defaults
+for tools that read webpages, files, messages, or external APIs. At runtime, provenance is inferred by
+exact structural matching, role-aware heuristics for high-confidence transformations, and an LLM
+classifier for remaining ambiguous arguments. Low-confidence or authority-bearing cases fall back
+to the more conservative provenance label. In deployment, this pipeline synthesizes 74 contracts
+and achieves 87.1% role accuracy and 77.4% provenance accuracy on 20 real MCP tools. These
+numbers are not assumptions of the formal model; they quantify the upstream fidelity that limits fully
+automatic deployment.
+
+3.5   Formal Properties
+
+The formal role of PACT is to isolate the enforcement layer. The statements below assume conser-
+vative provenance propagation, correctly specified contracts, and scoped non-expansive discharge
+certificates; they do not assume perfect automatic inference.
+
+
+                                                      6
+Definition 1 (Flat tool-level monitor). A flat tool-level monitor assigns each tool t one label λt ∈
+{H IGH, L OW} and makes one allow/block decision for the entire invocation. It blocks t(v1 , . . . , vk )
+iff λt = H IGH and some argument vi has τ (vi ) < τH IGH .
+Definition 2 (Safe contract refinement). A contract C ′ is a safe refinement of C if it exposes finer
+argument roles without allowing any origin to bind an authority-bearing argument that C would
+forbid. At L3, a refinement may admit an execution only through a scoped discharge certificate whose
+derived value preserves original origins and is valid only for roles within its scope.
+Theorem 3 (Separation from flat enforcement). There exist mixed-trust tool environments in which
+role-aware argument contracts achieve full benign utility and perfect argument-provenance integrity,
+whereas any flat tool-level monitor incurs either a false positive or a false negative.
+Theorem 4 (Precision monotonicity under safe refinement). Let C0 , . . . , C3 be contracts ordered
+by safe refinement from L0 to L3, with fixed provenance semantics and non-expansive discharge
+certificates. Then refinement preserves the authority-binding security property while monotonically
+reducing unnecessary blocking:
+           blocked(M0 ) ⊇ · · · ⊇ blocked(M3 ),          allowed(M0 ) ⊆ · · · ⊆ allowed(M3 ).
+Theorem 5 (Prefix-based soundness). For any execution prefix τk = (c1 , . . . , ck ), if the PACT
+monitor allows ck given the provenance state induced by τk−1 , then the provenance invariants for ck
+hold independently of future actions ck+1 , . . . , cn .
+Theorem 3 captures the granularity mismatch: whole-call monitors must over-block benign mixed-
+trust workflows or miss authority hijacking. Theorem 4 states that exposing argument roles can recover
+utility without relaxing the authority-binding constraint. Theorem 5 justifies dynamic replanning:
+each decision depends only on provenance accumulated so far. Full proofs appear in section B.
+The oracle experiments test this enforcement rule; deployment additionally tests contract synthesis,
+OutputSpec assignment, and provenance inference.
+
+4     Experiments
+Our experiments test the authority-binding claim at four levels. First, we isolate the mechanism under
+oracle provenance: does argument-level enforcement remove the false-positive/false-negative tradeoff
+induced by whole-call policies? Second, we evaluate full deployment in AgentDojo, where contracts
+and provenance are inferred automatically and tools execute through the real runtime. Third, we
+ablate the mechanisms that distinguish PACT from ordinary per-argument filtering or taint tracking.
+Finally, we characterize practicality and scope: runtime overhead, external stress tests, and the failure
+modes that remain outside structural provenance enforcement.
+
+4.1   Mechanism: Is Granularity the Right Abstraction?
+
+Setup. We first evaluate the enforcement abstraction       Table 1: Argument-level enforcement re-
+under matched tool interfaces and oracle provenance.       moves the mechanism-level tradeoff. On
+The diagnostic suite contains 17 mixed-trust scenar-       mixed-trust diagnostic scenarios, PACT is
+ios across email, messaging, file I/O, code execution,     the only defense that achieves both full be-
+API calls, and calendar workflows. Each scenario is        nign utility and full security. Invocation-
+constructed to contain both a benign mixed-trust ac-       level defenses either over-block benign
+tion and an attack in which untrusted content attempts     retrieval-then-act workflows or fail to block
+to bind an authority-bearing argument. We compare          authority hijacking.
+PACT against vanilla execution and mechanism-level
+reimplementations of FIDES [2] and CaMeL [4]. These         Defense   Utility Security FP↓ FN↓ Acc.
+reimplementations are used to compare enforcement           Vanilla 100.0        0.0     0    8   52.9
+abstractions, not to reproduce each system’s full agent     FIDES    66.7       37.5     3    5   52.9
+stack.                                                      CaMeL    33.3      100.0     6    0   64.7
+                                                            PACT L2 100.0      100.0     0    0   100.0
+Result. Table 1 shows the central mechanism result.
+PACT L2 achieves 100% utility and 100% security, with no false positives and no false negatives.
+The baselines fail in complementary ways. Vanilla execution preserves benign utility but allows all
+attacks. CaMeL blocks attacks but also blocks benign workflows that require external content to
+fill non-authority arguments. FIDES lies between these extremes, but still both over-blocks benign
+mixed-trust cases and misses attacks where tool-derived values reach authority-bearing arguments.
+
+
+                                                   7
+Interpretation. This result is the empirical counterpart of the separation theorem. The tradeoff
+is not between “using external content” and “being secure”; it is between enforcing trust at the
+wrong granularity and enforcing it at the argument where authority is bound. To check that the
+diagnostic suite is not a small hand-picked set, we further evaluate 50 additional controlled scenarios,
+25 white-box attacks, 30 held-out attacks, and 75 replanning stress tests at 5/10/20 steps. PACT
+remains correct throughout these stress tests; we report the full breakdown in Appendix D.
+
+Contract precision. We next test the monotonicity
+prediction of the contract hierarchy. Under fixed oracle
+provenance, security remains at 100% across L0–L3,
+while utility increases from 8.3% at L0 to 58.3% at
+L1 and 100% at L2/L3. Figure 3 visualizes this trend.
+Finer contracts recover benign behavior by exposing
+argument roles; they do not relax the prohibition on
+untrusted data binding authority-bearing arguments.
+
+4.2 Deployment:
+Does PACT Improve High-Security Utility?
+
+Setup. We next evaluate PACT in the full Agent-
+Dojo v1 runtime [3]. All defenses are integrated as
+BasePipelineElements and tools execute through
+the actual FunctionsRuntime. We use all 97 benign
+user tasks and all 27 injection tasks across banking, Figure 3: Contract precision recovers be-
+workspace, Slack, and travel. We evaluate five models nign utility without relaxing security. Un-
+from three families and use matched denominators for der oracle provenance, security remains at
+every defense. PACT is deployed through a fully auto- 100% across L0–L3, while utility rises as
+matic pipeline that synthesizes 74 tool contracts from contracts move from opaque blocking to
+schemas and infers provenance using exact structural role-aware argument checks.
+matching, role-aware heuristics, and an LLM classifier for ambiguous arguments.
+
+Result. Table 2 shows that PACT is not best understood as maximizing raw utility regardless
+of risk. NoDefense and FIDES sometimes complete more benign tasks, but they operate at lower
+security. The relevant comparison is the high-security regime. On Qwen-turbo and Qwen-plus, PACT
+reaches 96.3% security while preserving substantially more utility than CaMeL. On Qwen-max,
+Qwen2.5-72B, and GPT-4o-mini, PACT reaches 100% security while achieving 38.1–46.4% utility,
+improving over CaMeL by 8–16 percentage points at the same security level.
+
+Interpretation. These results show           Table 2: Full AgentDojo deployment: PACT improves
+that the mechanism survives deployment       utility in the high-security regime. Bold marks the high-
+when the base agent is strong enough to      est utility among defenses reaching at least 96% security
+complete benign workflows. Invocation-       on that model. On the three strongest models, PACT
+level quarantining can reach perfect se-     reaches 100% security while recovering 8–16 percentage
+curity, but it discards many legitimate      points more utility than CaMeL.
+retrieval-then-act actions. Argument-
+level enforcement recovers a substantial     Model         Metric    NoDefense FIDES CaMeL PACT
+fraction of that utility by allowing ex-     Qwen-turbo  Utility        20.6      19.6     11.3   18.6
+ternal data in content roles while block-                Security       92.6      88.9    100.0   100.0
+ing it from authority-bearing roles. The     Qwen-plus   Utility        60.8      59.8     29.9   45.4
+remaining gap between oracle and de-                     Security       88.9      85.2    100.0   100.0
+                                             Qwen-max    Utility        46.4      50.5     29.9   38.1
+ployed results is expected: automatic                    Security       96.3      96.3    100.0   100.0
+role assignment and provenance infer-        Qwen2.5-72B Utility        46.4      48.5     28.9   42.3
+ence introduce errors that do not exist in               Security       96.3      96.3    100.0   100.0
+the oracle mechanism setting.                GPT-4o-mini Utility        59.8      55.7     30.9   46.4
+                                                         Security       88.9      88.9    100.0   100.0
+4.3   Mechanism Ablations: What Matters?
+
+Roles are necessary, not cosmetic. A natural alternative is to check each argument individually
+using a uniform trust threshold, without semantic roles. Table 3 shows that this is insufficient. A
+
+
+                                                     8
+uniform PerArg-USER policy reaches 100% security on AgentDojo but drops utility to 14.4%. A
+uniform PerArg-EXTERNAL policy recovers 18.6% utility but falls to 92.6% security. PACT matches
+the higher utility while improving security to 96.3%. The gain therefore does not come from checking
+arguments individually; it comes from assigning different trust requirements to different argument
+roles.
+
+Cross-step provenance prevents laundering. The con-
+trolled component ablation isolates the other key mechanism.       Table 3: Roles and cross-step
+Removing semantic roles collapses utility by 60 points with no     provenance address distinct fail-
+security benefit. Removing cross-step origin tracking leaves be-   ure modes. Uniform per-argument
+nign utility unchanged but reduces security from 100% to 80%.      thresholds cannot recover both util-
+These failures correspond to different parts of the method:        ity and security. Removing roles
+roles resolve benign mixed-trust workflows, while accumu-          collapses benign utility; removing
+lated origins prevent untrusted content from being laundered       cross-step origin tracking creates se-
+through intermediate tool calls.                                   curity failures.
+
+4.4   Practicality, Stress Tests, and Boundaries                   Configuration         Utility Security
+                                                                   Role-agnostic AgentDojo ablation
+Runtime overhead is not the bottleneck. PACT’s online              PerArg-USER           14.4    100.0
+monitor performs set membership checks and lattice compar-         PerArg-EXTERNAL 18.6           92.6
+isons before tool execution. Across 100K checks, all PACT          PACT with roles       18.6     96.3
+levels have P99 latency below 272 microseconds and through-        Controlled component ablation
+put between 13.6K and 18.0K checks/s. This cost is small           PACT-full            100.0 100.0
+relative to LLM API latency; the observed deployment bottle-       No-roles (L1)         40.0    100.0
+neck is not runtime checking, but the fidelity of contracts and    No-crossstep         100.0     80.0
+provenance tags.                                                   No-policies          100.0 100.0
+
+
+Residual errors are attributable. In the automatic deployment pipeline, contract-role inference
+reaches 87.1% accuracy and provenance inference reaches 77.4% accuracy on 20 real MCP tools. In
+deployed AgentDojo runs, role errors account for false blocks, while provenance errors primarily
+affect web-to-email chains; the most important remaining failure mode is output-trust over-labeling.
+This is a limitation, but also a diagnostic result: once the enforcement rule is fixed, residual failures
+can be attributed to upstream role and provenance fidelity rather than to ambiguity in the runtime
+policy.
+
+External stress tests. We place broader stress tests in the appendix because they characterize
+generality and boundaries rather than the core mechanism. On a five-domain cross-domain benchmark
+covering healthcare, e-commerce, social media, DevOps, and smart home tools, PACT achieves 100%
+utility and 100% security on 25 manually annotated scenarios. In a 7-day deployment study with 280
+calls across 15 tools, PACT blocks all 13 observed attacks with zero false positives on 267 benign
+calls. On InjecAgent [31], PACT and CaMeL both block all 1,598 attack tool calls, while FIDES
+misses a substantial fraction of data-stealing cases. On Agent-SafetyBench [32], PACT blocks 74.7%
+of unsafe cases with 39.3% benign utility; the misses are concentrated in browser UI interactions and
+pure information-retrieval cases, which fall partly outside structural provenance enforcement. These
+results support the scope of PACT without changing the main claim: PACT is a defense for authority
+binding, not a general content-safety filter.
+
+
+5     Conclusion
+
+PACT reframes indirect prompt injection [6, 15] as an authority-binding problem. The central
+question is not whether an agent has encountered untrusted content, but whether that content is
+permitted to determine an authority-bearing argument. By moving enforcement from whole tool
+invocations to role-specific arguments, PACT separates benign use of external information from
+privileged control over targets, commands, and credentials.
+This granularity shift is supported by both mechanism and deployment evidence. Under oracle
+provenance, PACT achieves 100% utility and 100% security on mixed-trust diagnostic suites; in
+full AgentDojo [3] deployment, it reaches 100% security on the strongest models while recovering
+
+
+                                                   9
+higher utility than invocation-level quarantining [2, 4] in the high-security regime. The oracle-to-
+deployment gap is also informative: once the enforcement rule is fixed, the remaining bottleneck
+shifts to provenance inference and contract synthesis. PACT therefore suggests that part of the agent
+security–utility tradeoff is not inherent to using external information, but to enforcing trust at the
+wrong granularity.
+
+Acknowledgments and Disclosure of Funding
+
+
+
+
+                                                 10
+References
+ [1] Xin Chen, Jie Zhang, and Florian Tramer. Learning to inject: Automated prompt injection via
+     reinforcement learning. arXiv preprint arXiv:2602.05746, 2026.
+ [2] Manuel Costa, Boris Köpf, Aashish Kolluri, Andrew Paverd, Mark Russinovich, Ahmed
+     Salem, Shruti Tople, Lukas Wutschitz, and Santiago Zanella-Béguelin. Securing ai agents with
+     information-flow control, 2025. URL https://arxiv.org/abs/2505.23643.
+ [3] Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and
+     Florian Tramèr. Agentdojo: A dynamic environment to evaluate prompt injection attacks and
+     defenses for llm agents. Advances in Neural Information Processing Systems, 37:82895–82920,
+     2024.
+ [4] Edoardo Debenedetti, Ilia Shumailov, Tianqi Fan, Jamie Hayes, Nicholas Carlini, Daniel Fabian,
+     Christoph Kern, Chongyang Shi, Andreas Terzis, and Florian Tramèr. Defeating prompt
+     injections by design. arXiv preprint arXiv:2503.18813, 2025.
+ [5] Ivan Evtimov, Arman Zharmagambetov, Aaron Grattafiori, Chuan Guo, and Kamalika Chaud-
+     huri. Wasp: Benchmarking web agent security against prompt injection attacks. arXiv preprint
+     arXiv:2504.18575, 2025.
+ [6] Kai Greshake, Sahar Abdelnabi, Shailesh Mishra, Christoph Endres, Thorsten Holz, and Mario
+     Fritz. Not what you’ve signed up for: Compromising real-world llm-integrated applications with
+     indirect prompt injection. In Proceedings of the 16th ACM workshop on artificial intelligence
+     and security, pages 79–90, 2023.
+ [7] Chuan Guo, Juan Felipe Ceron Uribe, Sicheng Zhu, Christopher A Choquette-Choo, Steph Lin,
+     Nikhil Kandpal, Milad Nasr, Sam Toyer, Miles Wang, Yaodong Yu, et al. Ih-challenge: A train-
+     ing dataset to improve instruction hierarchy on frontier llms. arXiv preprint arXiv:2603.10521,
+     2026.
+ [8] Junjie He, Shenao Wang, Yanjie Zhao, Xinyi Hou, Zhao Liu, Quanchen Zou, and Haoyu Wang.
+     Taintp2x: Detecting taint-style prompt-to-anything injection vulnerabilities in llm-integrated
+     applications. 2026.
+ [9] Zimo Ji, Daoyuan Wu, Wenyuan Jiang, Pingchuan Ma, Zongjie Li, Yudong Gao, Shuai Wang,
+     and Yingjiu Li. Taming various privilege escalation in llm-based agent systems: A mandatory
+     access control framework. arXiv preprint arXiv:2601.11893, 2026.
+[10] Shutong Jin, Ruiyi Guo, and Ray CC Cheung. Capseal: Capability-sealed secret mediation for
+     secure agent execution. arXiv preprint arXiv:2604.16762, 2026.
+[11] Qianlong Lan and Anuj Kaul. The cognitive firewall: Securing browser based ai agents against
+     indirect prompt injection via hybrid edge cloud defense. arXiv preprint arXiv:2603.23791,
+     2026.
+[12] Donghyun Lee and Mo Tiwari. Prompt infection: Llm-to-llm prompt injection within multi-
+     agent systems. arXiv preprint arXiv:2410.07283, 2024.
+[13] Hao Li, Xiaogeng Liu, Hung-Chun Chiu, Dianqi Li, Ning Zhang, and Chaowei Xiao. Drift:
+     Dynamic rule-based defense with injection isolation for securing llm agents. arXiv preprint
+     arXiv:2506.12104, 2025.
+[14] Hailin Liu, Eugene Ilyushin, Jie Ni, and Min Zhu. Safeagent: A runtime protection architecture
+     for agentic systems. arXiv preprint arXiv:2604.17562, 2026.
+[15] Yi Liu, Gelei Deng, Yuekang Li, Kailong Wang, Zihao Wang, Xiaofeng Wang, Tianwei Zhang,
+     Yepang Liu, Haoyu Wang, Yan Zheng, et al. Prompt injection attack against llm-integrated
+     applications. arXiv preprint arXiv:2306.05499, 2023.
+[16] Yupei Liu, Yuqi Jia, Runpeng Geng, Jinyuan Jia, and Neil Zhenqiang Gong. Formalizing and
+     benchmarking prompt injection attacks and defenses. In 33rd USENIX Security Symposium
+     (USENIX Security 24), pages 1831–1847, 2024.
+
+
+                                                11
+[17] Shishir G Patil, Tianjun Zhang, Xin Wang, and Joseph E Gonzalez. Gorilla: Large language
+     model connected with massive apis. Advances in Neural Information Processing Systems, 37:
+     126544–126565, 2024.
+[18] Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric Hambro,
+     Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models
+     can teach themselves to use tools. Advances in neural information processing systems, 36:
+     68539–68551, 2023.
+[19] Rohan Sequeira, Stavros Damianakis, Umar Iqbal, and Konstantinos Psounis. Agent-sentry:
+     Bounding llm agents via execution provenance. arXiv preprint arXiv:2603.22868, 2026.
+[20] Jiawen Shi, Zenghui Yuan, Guiyao Tie, Pan Zhou, Neil Zhenqiang Gong, and Lichao Sun.
+     Prompt injection attack to tool selection in llm agents. arXiv preprint arXiv:2504.19793, 2025.
+[21] Tianneng Shi, Jingxuan He, Zhun Wang, Hongwei Li, Linyu Wu, Wenbo Guo, and
+     Dawn Song. Progent: Programmable privilege control for llm agents, 2025. URL
+     https://arxiv.org/abs/2504.11703.
+[22] Zeyi Sun, Ziyu Liu, Yuhang Zang, Yuhang Cao, Xiaoyi Dong, Tong Wu, Dahua Lin, and Jiaqi
+     Wang. Seagent: Self-evolving computer use agent with autonomous learning from experience.
+     arXiv preprint arXiv:2508.04700, 2025.
+[23] Trishita Tiwari, Suchin Gururangan, Chuan Guo, Weizhe Hua, Sanjay Kariyappa, Udit Gupta,
+     Wenjie Xiong, Kiwan Maeng, Hsien-Hsin S Lee, and G Edward Suh. Information flow control
+     in machine learning through modular model architecture. In 33rd USENIX Security Symposium
+     (USENIX Security 24), pages 6921–6938, 2024.
+[24] Eric Wallace, Kai Xiao, Reimar Leike, Lilian Weng, Johannes Heidecke, and Alex Beutel.
+     The instruction hierarchy: Training llms to prioritize privileged instructions. arXiv preprint
+     arXiv:2404.13208, 2024.
+[25] Che Wang, Jiaming Zhang, Ziqi Zhang, Zijie Wang, Yinghui Wang, Jianbo Gao, Tao Wei, Zhong
+     Chen, and Wei Yang Bryan Lim. Adaptools: Adaptive tool-based indirect prompt injection
+     attacks on agentic llms. arXiv preprint arXiv:2602.20720, 2026.
+[26] Peiran Wang, Yang Liu, Yunfei Lu, Yifeng Cai, Hongbo Chen, Qingyou Yang, Jie Zhang, Jue
+     Hong, and Ye Wu. Agentarmor: Enforcing program analysis on agent runtime trace to defend
+     against prompt injection. arXiv preprint arXiv:2508.01249, 2025.
+[27] Peiran Wang, Xinfeng Li, Chong Xiang, Jinghuai Zhang, Ying Li, Lixia Zhang, Xiaofeng Wang,
+     and Yuan Tian. The landscape of prompt injection threats in llm agents: From taxonomy to
+     analysis. arXiv preprint arXiv:2602.10453, 2026.
+[28] Tong Wu, Shujian Zhang, Kaiqiang Song, Silei Xu, Sanqiang Zhao, Ravi Agrawal,
+     Sathish Reddy Indurthi, Chong Xiang, Prateek Mittal, and Wenxuan Zhou. Instructional segment
+     embedding: Improving llm safety with instruction hierarchy. arXiv preprint arXiv:2410.09102,
+     2024.
+[29] Zhen Xiang, Linzhi Zheng, Yanjie Li, Junyuan Hong, Qinbin Li, Han Xie, Jiawei Zhang, Zidi
+     Xiong, Chulin Xie, Carl Yang, et al. Guardagent: Safeguard llm agents by a guard agent via
+     knowledge-enabled reasoning. arXiv preprint arXiv:2406.09187, 2024.
+[30] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao.
+     React: Synergizing reasoning and acting in language models. arXiv preprint arXiv:2210.03629,
+     2022.
+[31] Qiusi Zhan, Zhixiang Liang, Zifan Ying, and Daniel Kang. Injecagent: Benchmarking
+     indirect prompt injections in tool-integrated large language model agents, 2024. URL:
+     https://arxiv.org/abs/2403.02691.
+[32] Zhexin Zhang, Shiyao Cui, Yida Lu, Jingzhuo Zhou, Junxiao Yang, Hongning Wang, and
+     Minlie Huang. Agent-safetybench: Evaluating the safety of llm agents. arXiv preprint
+     arXiv:2412.14470, 2024.
+
+
+                                                12
+[33] Kaijie Zhu, Xianjun Yang, Jindong Wang, Wenbo Guo, and William Yang Wang. Melon:
+     Provable defense against indirect prompt injection attacks in ai agents. arXiv preprint
+     arXiv:2502.05174, 2025.
+[34] King Zhu, Hanhao Li, Siwei Wu, Tianshun Xing, Dehua Ma, Xiangru Tang, Minghao Liu, Jian
+     Yang, Jiaheng Liu, Yuchen Eleanor Jiang, et al. Scaling test-time compute for llm agents. arXiv
+     preprint arXiv:2506.12928, 2025.
+[35] Andy Zou, Zifan Wang, Nicholas Carlini, Milad Nasr, J Zico Kolter, and Matt Fredrikson.
+     Universal and transferable adversarial attacks on aligned language models. arXiv preprint
+     arXiv:2307.15043, 2023.
+
+
+
+
+                                                13
+A     Limitations.
+
+PACT gives an enforcement-layer guarantee: assuming conservative provenance propagation and
+correctly specified contracts, the runtime can decide whether a source is permitted to bind a given
+argument role. Its deployed behavior is therefore limited by the fidelity of the contract and provenance
+layer. In our automatic pipeline, role assignment reaches 87.1% accuracy and provenance inference
+reaches 77.4% accuracy; the dominant residual errors arise from these upstream components rather
+than from the runtime rule itself. This is the main practical limitation of the current system, but
+it is also a useful diagnostic separation: after the enforcement principle is fixed, failures become
+attributable to role and provenance fidelity.
+A second limitation is semantic ambiguity at the argument interface. Arguments such as query may
+behave as content in one tool, a selector in another, and a command-like control field in a third.
+PACT resolves such cases conservatively, which preserves the authority-binding constraint but can
+over-block benign workflows and leave utility on the table.
+Finally, PACT is a structural defense, not a general solution to agent safety. It does not address
+content-channel attacks, where harmful content appears inside an otherwise permitted content
+field, nor tool-selection attacks, where the model invokes a dangerous tool using trusted constants.
+Broad safety benchmarks [5, 32] that include browser UI manipulation or pure information-retrieval
+harms therefore measure risks partly outside PACT’s provenance-enforcement scope. Our empirical
+evaluation covers three model families; broader validation on additional proprietary and open-weight
+agents remains important future work.
+
+
+B     Proof Details
+
+This section gives the full proofs for the three formal claims used in the main text. These are
+enforcement-layer statements: they assume the monitor family in theorem 1, the contract hierarchy
+in section 3.2, and the provenance semantics in section 3.3. In particular, the monotonicity result
+compares monitors over the same tool interface and OutputSpec; the monitors differ only in the
+precision of argument checks and in whether trusted routing is available.
+
+Why this matters. The main text uses theorems to isolate the granularity problem. The proofs
+below make explicit that the separation is not a statement about all agent security, but about the
+insufficiency of whole-call enforcement for mixed-trust tool invocations.
+
+B.1   Separation Intuition
+
+Figure 4 visualizes the construction used in theorem 6. We abstract two AgentDojo-derived workflows
+into the same message-sending sink, send_message(recipient, body), to isolate the argument-
+trust structure rather than the benchmark UI. In the benign case, the recipient is user-authorized while
+the body is derived from external content. In the attack case, the external content also determines the
+recipient. A flat invocation-level policy must make one decision for the whole call, so it either blocks
+the benign case or allows the attack.
+This figure corresponds to the two executions used in the proof below: W1 is the benign mixed-trust
+workflow with user-derived recipient and external body, while A1 is the attack workflow where
+the external source determines both. The proof formalizes why any monitor that makes a single
+whole-call decision must fail on one of these executions.
+
+B.2   Discharge Certificates and Non-Escalation
+
+The main text introduces L3 certified routing through scoped discharge certificates
+                                         d = (r, s, ρ, τ max ),
+where r is the failed predicate or obligation being discharged, s is the trusted procedure, ρ is the
+argument-role scope, and τ max bounds the effective trust of the certified value. We make explicit the
+invariant used by the proofs below.
+
+
+                                                  14
+Figure 4: Flat invocation-level policies cannot separate mixed-trust cases. The benign workflow
+and the attack share the same argument structure: a message-sending call with a recipient and a
+body. In the benign AgentDojo-derived case, recipient is user-authorized while body is external
+content; blocking all external influence therefore causes a false positive. In the attack case, external
+content also determines recipient; allowing external influence at the whole-call level therefore
+causes a false negative. No whole-call decision separates both cases. PACT separates them by
+assigning different trust requirements to recipient and body.
+
+
+A certificate d is valid for argument entry ai only if: (i) the failed predicate or obligation is exactly
+the predicate named by r; (ii) rolei ∈ ρ; (iii) the trusted procedure s is authorized by Di ; and (iv) the
+certified value preserves the original origin set and receives trust no higher than min(τ max , τcert (s)).
+Lemma 1 (Scoped discharge is non-expansive). Let v d be the certified derived value produced by
+applying a valid discharge certificate d to v. Then v d cannot erase any origin in O(v), cannot obtain
+effective trust above min(τ max , τcert (s)), and cannot be used to satisfy an argument role outside the
+certificate scope ρ.
+
+Proof. By definition, applying d produces
+                      π(v d ) = ⟨O(v) ∪ {s}, min(τ max , τcert (s)), B(v) \ {r}⟩.
+The origin component is a superset of the original origin set, so certification cannot remove source
+history. The trust component is explicitly upper-bounded by the certificate and the trusted procedure.
+Finally, the monitor accepts the certificate only when the current argument role lies in ρ. Hence the
+same certificate cannot authorize the value for roles outside its declared scope.
+
+B.3   Proof of Separation from Flat Tool-Level Enforcement
+
+Theorem 6 (Separation from flat tool-level enforcement, restated). There exists a mixed-trust tool
+environment E such that role-aware argument contracts achieve full benign utility and perfect
+argument-provenance integrity in E, whereas any flat tool-level monitor must incur either a false
+positive or a false negative.
+
+Proof. We prove the claim by construction. Let E contain a side-effecting tool
+                                   send_email(recipient, body).
+Consider two executions:
+                       W1 :     recipient ← user,          body ← web_fetch,
+and
+                   A1 :    recipient ← web_fetch,              body ← web_fetch.
+In W1 , the recipient is user-derived and the body is externally derived. This is a benign mixed-
+trust workflow: the user determines the destination, while external content fills the payload. In
+
+
+                                                   15
+A1 , the externally derived value determines the recipient, so attacker-controlled content binds an
+authority-bearing argument.
+Now consider any flat tool-level monitor M that makes one allow/block decision for the whole
+invocation. Since M assigns a single security status to send_email, it cannot distinguish the two
+arguments.
+If M blocks send_email whenever any argument depends on an external source, then M blocks W1
+because the body is web-derived. This is a false positive. If M allows such external influence at the
+invocation level, then M allows A1 , where the attacker controls the recipient. This is a false negative.
+Thus every flat tool-level monitor incurs either a false positive or a false negative in E.
+By contrast, a role-aware contract assigns different requirements to the two arguments. The
+recipient is a target argument requiring at least USER, while the body is a content argu-
+ment that may accept EXTERNAL data. Therefore PACT allows W1 and blocks A1 , achieving full
+benign utility and argument-provenance integrity in this environment.
+
+B.4   Proof of Precision Monotonicity
+
+Theorem 7 (Precision monotonicity under safe refinement, restated). Let C0 , . . . , C3 be contracts
+ordered by safe refinement from L0 to L3, with fixed provenance semantics and non-expansive
+discharge certificates. Let Mℓ be the monitor induced by Cℓ . Then refinement preserves the authority-
+binding security property while monotonically reducing unnecessary blocking:
+                   blocked(M0 ) ⊇ blocked(M1 ) ⊇ blocked(M2 ) ⊇ blocked(M3 ),
+and equivalently,
+                   allowed(M0 ) ⊆ allowed(M1 ) ⊆ allowed(M2 ) ⊆ allowed(M3 ).
+
+Proof. We prove the inclusions by following the contract hierarchy. The compared monitors share
+the same tool interface, OutputSpec, and provenance semantics; they differ only in the precision of
+argument checks and whether scoped discharge is available.
+
+Step 1: M0 is at least as restrictive as M1 . At level L0, a call is treated as one opaque authority
+boundary and is blocked if any argument has trust below TRUSTED. At level L1, the monitor applies a
+capability-level threshold. Since L0 requires at least as much trust as L1 for every argument, every
+call blocked by M1 is also blocked by M0 , and possibly more:
+                                   blocked(M0 ) ⊇ blocked(M1 ).
+Step 2: M1 is at least as restrictive as M2 . At level L1, all arguments of a capability share one
+trust threshold. At level L2, the monitor uses role-specific thresholds. Authority-bearing roles such
+as target, command, and credential retain strong requirements, while content arguments may
+admit lower-trust external content when the contract permits it. Therefore L2 can allow benign
+mixed-trust calls that L1 blocks, without allowing an origin to bind an authority-bearing role that the
+refined contract forbids:
+                                   blocked(M1 ) ⊇ blocked(M2 ).
+
+Step 3: M2 is at least as restrictive as M3 . Levels L2 and L3 share the same role-aware checks.
+The only difference is that L3 may admit an execution blocked by L2 when a valid scoped discharge
+certificate covers the failed predicate and argument role. By lemma 1, such a certificate preserves
+original origins, bounds effective trust, and cannot be reused outside its scope. Thus L3 can only
+reduce blocking for dischargeable predicates; it does not authorize an origin to bind an authority-
+bearing role that the refined contract forbids:
+                                    blocked(M2 ) ⊇ blocked(M3 ).
+Combining the three inclusions yields
+                  blocked(M0 ) ⊇ blocked(M1 ) ⊇ blocked(M2 ) ⊇ blocked(M3 ).
+The inclusion for allowed executions follows by set complementation over the same execution space:
+                  allowed(M0 ) ⊆ allowed(M1 ) ⊆ allowed(M2 ) ⊆ allowed(M3 ).
+Since safe refinement does not permit any origin to bind an authority-bearing argument forbidden by
+the coarser contract, the authority-binding security property is preserved.
+
+
+                                                  16
+B.5     Proof of Prefix-Based Soundness
+
+Theorem 8 (Prefix-based soundness, restated). Let τ = (c1 , . . . , cn ) be an execution trace and
+let τk = (c1 , . . . , ck ) be any prefix. If the PACT monitor allows ck given the provenance state
+induced by τk−1 , then the provenance invariants checked for ck hold independently of future actions
+ck+1 , . . . , cn .
+
+
+Proof. Let σk−1 be the provenance state induced by the prefix τk−1 . The monitor’s decision at step
+k is a function only of σk−1 , the current tool call ck , and the contract associated with that tool. It
+does not inspect future calls.
+Suppose the monitor allows ck = t(v1 , . . . , vm ). Then for each argument vi , either the required
+predicates hold directly,
+
+                τ (vi ) ≥ τimin ,      O(vi ) ∩ Fi = ∅,          B(vi ) ∪ Ri ⊆ Discharged,
+
+or, at L3, the failed predicate is covered by a valid scoped discharge certificate. In the latter case, the
+monitor checks the certified derived value vid before execution. By lemma 1, vid has fixed derived
+provenance, preserved origins, bounded effective trust, and a role scope fixed at the time of the
+decision.
+Future actions ck+1 , . . . , cn cannot retroactively change σk−1 , the contract used for ck , or the
+provenance of the values checked at step k. Provenance evolution is monotone: later computation
+may add origins, lower trust, or add obligations to later values, but it cannot remove origins or
+increase trust for a value that has already been checked unless a valid scoped discharge is applied
+before that later use. Therefore the invariants used to allow ck are prefix-local and remain valid
+regardless of the future continuation of the trace.
+
+
+C     Contract and Provenance Inference Details
+
+C.1     Contract synthesis rules table
+
+
+Table 4: Heuristic role assignment rules used for draft contract synthesis. These rules generate
+an initial contract from tool schemas before conservative fallback or LLM-assisted disambiguation.
+ Role            Typical schema cues                                              Default trust policy
+ target          recipient, url, endpoint, path, attendee, account, destination   ≥ USER
+ command         command, query that mutates state, executable request            ≥ TRUSTED or ≥ USER by tool
+ credential      token, password, api_key, secret                                 ≥ TRUSTED
+ content         body, summary, report, message, quoted text                      may accept EXTERNAL
+ selector        id, filter, object selector, search handle                       tool-specific
+ control         flags, mode, overwrite, dry_run                                  conservative default
+
+
+
+C.2     OutputSpec defaults table
+
+
+Table 5: Default OutputSpec policies. PACT uses fail-low defaults for tools that read external state;
+higher trust requires a tool-specific attestation or trusted runtime source.
+ Tool output source                              Default trust             Rationale
+ User instruction / explicit user value          USER                      user-authorized input
+ Trusted runtime constant                        TRUSTED                   generated by trusted framework
+ Webpage, email, retrieved file, external API    EXTERNAL                  attacker-controllable source
+ Structured internal tool result                 TOOL_OUTPUT               produced by tool, but origin retained
+ Sanitized / confirmed derived value             bounded by certificate    scoped discharge only
+
+
+
+
+                                                      17
+C.3    Provenance resolver algorithm
+
+
+Algorithm 2 Automatic provenance resolver used in deployment
+Require: Argument value v, current agent state S, argument role role(v)
+ 1: if v exactly matches a prior user input or trusted constant then
+ 2:      return corresponding provenance tag
+ 3: else if v exactly matches a prior tool output field or object identifier then
+ 4:      return provenance of that field or object
+ 5: else if v is a high-confidence transformation of a known source then
+ 6:      return merged provenance of the contributing source values
+ 7: else if role is authority-bearing and provenance is ambiguous then
+ 8:      return conservative low-trust provenance
+ 9: else
+10:      query LLM classifier; return conservative label if confidence is low
+11: end if
+
+
+
+C.4    Ambiguous arguments examples
+
+
+Table 6: Examples of ambiguous arguments and conservative resolution. The same surface name
+can carry different authority semantics across tools, motivating per-tool contracts rather than a global
+name-based policy.
+    Argument   Possible role                                            Conservative handling
+    query      content for search; command for database mutation        tool-specific, fail closed if mutating
+    filter     selector or content                                      require schema context
+    path       target or content string                                 treat as target for file operations
+    id         selector or trusted handle                               retain origin of producing tool
+
+
+
+D     Extended Mechanism Stress Tests
+
+The main text reports the core diagnostic suite because it most directly tests the granularity hypothesis.
+This section asks whether the same mechanism remains correct beyond those 17 scenarios. These
+results are not intended to replace full deployment benchmarks; they reduce the concern that the main
+mechanism result is hand-picked.
+
+D.1    Additional Controlled Scenarios and Replanning Stress
+
+We extend the controlled evaluation with 50 additional scenarios, 25 white-box attacks, 30 held-out
+attacks generated after the contracts were fixed, and 75 replanning stress tests at 5/10/20 steps. PACT
+remains correct throughout: it achieves 100% accuracy on the benign/attack scenario suites and 0%
+attack success rate on the white-box and replanning stress tests. The relevant point is not that this
+proves completeness; it shows that the separation observed in the main diagnostic suite is stable under
+additional mixed-trust constructions.
+
+Table 7: Extended mechanism stress tests. PACT remains correct beyond the 17 diagnostic scenarios
+in the main text, reducing concern that the granularity result is tied to a small hand-picked suite.
+                        Stress test                              Size   PACT result
+                        Additional controlled scenarios          50     100% correct
+                        White-box mechanism attacks              25       0% ASR
+                        Held-out attacks after contract freeze   30     100% correct
+                        Replanning stress tests                  75       0% ASR
+
+
+
+                                                     18
+D.2    Cross-Step Origin Accumulation
+
+A central claim of PACT is that provenance must accumulate across tool chains rather than be
+recomputed from the current step alone. We isolate this effect using scenarios in which a value
+passes through intermediate tools before reaching a protected sink. For example, a web-derived
+value may be summarized or reformatted before being passed to deploy_config or write_report.
+The transformed value may have TOOL_OUTPUT trust, but its origin set still contains web_fetch.
+PACT blocks these attacks because forbidden-origin checks are evaluated over accumulated origins;
+a per-step snapshot monitor misses them because it sees only the latest transformed value.
+This result supports the component ablation in the main text: cross-step origin tracking is not
+bookkeeping. It is the mechanism that prevents provenance laundering across intermediate tool calls.
+
+E     Confidence Intervals for Binary Outcomes
+For binary utility and security outcomes, we report Wilson 95% confidence intervals over task-level
+successes. These intervals quantify finite benchmark uncertainty rather than stochastic training
+variance, since PACT is a deterministic runtime monitor once contracts and provenance tags are fixed.
+We compute Wilson intervals for the main diagnostic suite, AgentDojo security and utility rates,
+external stress tests, and deployment pass/block rates.
+
+F     Sensitivity to Contract and Provenance Fidelity
+The main deployment gap is driven by automatic role assignment and provenance inference rather
+than by the runtime rule itself. This section studies how PACT degrades when that upstream layer is
+imperfect.
+
+F.1   Common Contract Errors
+
+We evaluate four representative contract failures: role mislabeling, output-trust over-labeling, missing
+argument specifications, and missing obligations. Three of these failures are partially mitigated by
+conservative policies: missing argument specifications fail closed under L2, missing obligations
+are blocked by the obligation check, and some role errors are caught by global sink policies. The
+remaining unmitigated failure is output-trust over-labeling, because it directly weakens the provenance
+abstraction. This matches the deployed error analysis in the main text: the most important residual
+risk is not the monitor rule, but the fidelity of the provenance assigned to values.
+
+F.2   Random Versus Correlated Role Errors
+
+Random role errors produce gradual degradation, while correlated semantic inversion creates sharp
+failures. At a 50% random mislabeling rate, PACT still maintains 88.0% security with defense-in-
+depth policies enabled, although utility drops to 72.0%. By contrast, if all target arguments are
+mislabeled as content, security drops to 40.0%; if all content arguments are mislabeled as target,
+utility drops to 40.0%. The contrast clarifies the deployment assumption: PACT is robust to moderate
+random noise, but it is sensitive to systematic inversion of the authority interface.
+
+G     External Benchmarks and Scope Boundaries
+This section reports external benchmarks that are useful for stress-testing PACT, but should not be
+read as the core evidence for the paper. The main claim concerns authority binding under provenance-
+aware argument contracts. Some external benchmarks include hazards that are broader than this
+scope, such as browser UI manipulation or pure content-safety failures.
+
+G.1    InjecAgent
+
+On InjecAgent, PACT blocks all Direct Harm and Data Stealing attack tool calls, matching CaMeL
+and improving over FIDES on data-stealing cases. This result supports the claim that argument-level
+
+
+                                                  19
+Table 8: Sensitivity to contract errors. Random role noise degrades PACT gradually, while
+adversarial semantic inversion directly attacks the authority interface and causes much sharper
+failures.
+             Setting                    Utility    Security w/ policies    Security w/o policies
+             0% random mislabeling      100.0             100.0                     100.0
+             5% random mislabeling       97.0              97.0                      96.0
+             10% random mislabeling      95.5              94.5                      92.5
+             20% random mislabeling      91.0              90.5                      88.5
+             30% random mislabeling      86.0              88.0                      84.5
+             50% random mislabeling      72.0              88.0                      84.0
+             All target → content       100.0              40.0                      —
+             All content → target        40.0             100.0                      —
+
+
+
+enforcement covers attack patterns missed by some flat integrity policies, but it does not establish
+superiority over CaMeL on this benchmark because both PACT and CaMeL achieve 0% ASR.
+
+
+Table 9: InjecAgent external stress test. PACT and CaMeL both block all attack tool calls; FIDES
+misses a substantial fraction of data-stealing cases. This supports robustness but is not the main
+evidence for PACT’s utility advantage.
+               Defense        DH Block                DS Block          Overall Block       ASR
+               NoDefense     0.0 (0/510)             0.0 (0/1088)            0.0            100.0
+               FIDES       100.0 (510/510)         53.1 (578/1088)           68.1            31.9
+               CaMeL       100.0 (510/510)        100.0 (1088/1088)         100.0             0.0
+               PACT        100.0 (510/510)        100.0 (1088/1088)         100.0            0.0
+
+
+
+G.2   Agent-SafetyBench
+
+Agent-SafetyBench is broader than indirect prompt injection through provenance-bearing tool outputs.
+It includes unsafe browser interactions, pure information-retrieval harms, and content-safety risks.
+PACT blocks 74.7% of unsafe cases while preserving 39.3% benign utility. These results should be
+interpreted as a scope boundary: PACT is competitive with structural defenses on several authority-
+bearing categories, but it is not designed to solve all safety hazards measured by this benchmark.
+
+
+Table 10: Agent-SafetyBench exposes the boundary of structural provenance enforcement.
+PACT handles many authority-bearing risks but does not dominate defenses on broad safety cases
+that include UI manipulation and content-only harms.
+                            Defense        Security (881)         Utility (705)
+                            NoDefense       0.0 (0/881)       100.0 (705/705)
+                            FIDES         72.0 (634/881)       42.1 (297/705)
+                            CaMeL         78.3 (690/881)       28.5 (201/705)
+                            PACT          74.7 (658/881)       39.3 (277/705)
+
+
+
+G.3   Cross-Domain Benchmark
+
+We also evaluate 25 manually annotated scenarios across five domains not included in AgentDojo:
+healthcare, e-commerce, social media, DevOps, and smart home. Contracts are written independently
+of the evaluation scenarios. PACT achieves 100% utility and 100% security, while FIDES and CaMeL
+remain conservative on benign cases. Because the benchmark is small, we use it as generalization
+evidence rather than as the main effectiveness result.
+
+
+                                                     20
+Table 11: PACT performance by Agent-SafetyBench risk category. PACT is strongest on authority-
+bearing or operational risks and weakest on misinformation and pure information-retrieval harms,
+consistent with its structural scope.
+                                   Risk category     Block rate       Cases
+                                   Property loss          90.1         121
+                                   Availability           89.6         125
+                                   Harmful code           88.2          68
+                                   Law/ethics             78.0         186
+                                   Physical harm          70.9         110
+                                   Data leakage           65.4         136
+                                   Misinformation         48.1         135
+
+
+Table 12: Cross-domain generalization when authority roles are clear. On five new domains with
+independently written contracts, PACT preserves both benign utility and security, while invocation-
+level defenses over-block benign cases.
+                         Defense       Utility (14 benign)       Security (11 attacks)
+                         NoDefense        100.0 (14/14)               0.0 (0/11)
+                         FIDES             35.7 (5/14)              100.0 (11/11)
+                         CaMeL             14.3 (2/14)              100.0 (11/11)
+                         PACT             100.0 (14/14)             100.0 (11/11)
+
+
+H     Deployment Beyond AgentDojo
+AgentDojo provides the main full-runtime benchmark. This section adds lightweight deployment
+evidence to test whether PACT remains operationally usable outside that benchmark. These results
+should not be over-interpreted as a comprehensive field trial.
+
+H.1    Seven-Day Deployment Study
+
+We run a 7-day deployment study covering 280 calls across 15 tools. PACT blocks all 13 observed
+attacks and produces zero false positives on the remaining 267 benign calls. Total contract setup time
+is 75 minutes. The study is small, but it supports the practicality claim made in the main text: once
+contracts are in place, runtime monitoring is lightweight and false positives can remain low in routine
+workflows.
+
+Table 13: Seven-day deployment study. PACT blocks all observed attacks with zero false positives
+over 267 benign calls, suggesting that argument-level contracts can remain operationally lightweight
+once configured.
+                              Metric                              Value
+                              Duration                        7 days
+                              Total calls                       280
+                              Tools                              15
+                              Observed attack rate            ∼5%
+                              Security                100.0 (13/13 blocked)
+                              False positives              0.0 (0/267)
+                              Block rate                       4.6%
+                              Contract setup time            75 min
+
+
+
+I     Artifact and Asset Documentation
+This section documents the external assets used in our experiments and the new artifacts released
+with this submission. We use public benchmarks and baseline implementations only for research
+evaluation, cite the corresponding papers or repositories, and do not redistribute third-party model
+
+
+                                                     21
+weights or proprietary API services. The anonymized supplementary artifact contains our PACT
+runtime code, contract examples, controlled diagnostic scenarios, provenance-inference scripts, and
+evaluation scripts, together with usage instructions and responsible-use notes.
+
+
+Table 14: External assets, licenses, and terms of use. We list the benchmarks, baseline imple-
+mentations, and model services used in the paper, together with their role in the evaluation and the
+license or access terms checked at submission time. For hosted models, we do not redistribute model
+weights; use is governed by the corresponding provider terms.
+
+Asset                Type              Use in this paper            License / terms    Redistribution in our
+                                                                                       artifact
+AgentDojo [3]        Public bench- Main full-runtime evalua- MIT license             We provide in-
+                     mark     and tion of benign task utility                        tegration      scripts
+                     runtime       and adversarial robustness                        and        references;
+                                   for tool-using LLM agents.                        any          included
+                                                                                     benchmark-derived
+                                                                                     files retain the origi-
+                                                                                     nal license notice.
+InjecAgent [31]    Public bench- External stress test for MIT-style permis- We provide evalua-
+                   mark              indirect prompt-injection sive license file     tion wrappers or ref-
+                                     attacks and data-stealing                       erences; any reused
+                                     / direct-harm attack tool                       benchmark files re-
+                                     calls.                                          tain the original li-
+                                                                                     cense notice.
+Agent-             Public bench- Broad safety-boundary MIT license                   We provide evalua-
+SafetyBench [32]   mark              evaluation,      including                      tion scripts or ref-
+                                     categories partly outside                       erences; benchmark
+                                     PACT’s structural prove-                        files are not reli-
+                                     nance scope.                                    censed by our arti-
+                                                                                     fact.
+FIDES [2]          Baseline      de- Information-flow-control MIT license            We cite and, where
+                   fense / reference baseline and conceptual                         applicable, provide
+                   implementation comparison for tool-level                          compatible evalua-
+                                     integrity enforcement.                          tion wrappers; origi-
+                                                                                     nal code remains un-
+                                                                                     der its license.
+CaMeL [4]          Baseline      de- Invocation-level quarantin- Apache-2.0      li- We cite and, where
+                   fense / reference ing / control-data separa- cense                applicable, provide
+                   implementation tion baseline in the high-                         compatible evalua-
+                                     security regime.                                tion wrappers; origi-
+                                                                                     nal code remains un-
+                                                                                     der its license.
+Qwen-turbo / Qwen- Hosted LLM AgentDojo deployment Alibaba Cloud / No model weights
+plus / Qwen-max    APIs              evaluation across Qwen- DashScope API or provider code are
+                                     family hosted models.       terms               redistributed. Re-
+                                                                                     production requires
+                                                                                     provider API access.
+Qwen2.5-72B-       Open-weight or Cross-model deployment Qwen / Alibaba No model weights
+Instruct           hosted LLM, de- evaluation with a large Cloud model li- are redistributed in
+                   pending on eval- Qwen-family model.           cense               our artifact; users
+                   uation setup                                                      should obtain the
+                                                                                     model from the offi-
+                                                                                     cial source and com-
+                                                                                     ply with its license.
+GPT-4o-mini        Hosted LLM Cross-provider AgentDojo OpenAI API / ser- No model weights
+                   API               deployment evaluation.      vice terms          or provider code are
+                                                                                     redistributed. Re-
+                                                                                     production requires
+                                                                                     API access under
+                                                                                     provider terms.
+
+
+
+
+                                                    22
+Table 15: New artifacts released with this submission. These artifacts are introduced by this work
+and are provided to support reproducibility. They are released in the anonymized supplementary
+package for research use and should not be used to attack real systems.
+
+ Artifact                Contents               Documentation and intended use             Release terms
+ PACT runtime moni- Contract checker,           Includes instructions for reproducing   Released         in
+ tor                   provenance-state         mechanism-level results and runtime-    anonymized sup-
+                       representation,          overhead measurements. Intended for de- plement under the
+                       lattice checks, and      fensive research on tool-using agents.  license specified
+                       argument-level                                                   in the artifact
+                       enforcement logic.                                               package.
+ Contract    examples Example            tool   Documents how contracts are constructed Released with attri-
+ and synthesis rules   contracts,       role-   from tool schemas and how conservative bution to this work;
+                       assignment rules,        fallback is applied.                    no      third-party
+                       OutputSpec                                                       benchmark license
+                       defaults,         and                                            is changed.
+                       ambiguous-
+                       argument handling
+                       examples.
+ Controlled diagnostic Mixed-trust benign       Intended to reproduce the mechanism-       Released         for
+ scenarios             and attack scenarios     level evaluation and stress tests. These   research       and
+                       used to test sepa-       are synthetic or benchmark-derived ab-     reproducibility;
+                       ration, precision,       stractions [3], not live attack targets.   users must not
+                       and     provenance-                                                 adapt them for
+                       laundering behav-                                                   real-world abuse.
+                       ior.
+ Provenance inference Exact       structural    Includes notes on failure modes such as Released for re-
+ scripts               matching,        role-   output-trust over-labeling and conserva- search use; any
+                       aware       heuristic    tive fallback.                           hosted LLM calls
+                       resolver, and LLM-                                                require      users
+                       classifier interface                                              to comply with
+                       for      ambiguous                                                provider terms.
+                       arguments.
+ Evaluation scripts    Scripts for con-         Documents which experiments are fully Released in the
+                       trolled diagnostics,     reproducible locally and which require anonymized
+                       ablations,       Wil-    external benchmark/model access.       supplement; third-
+                       son       confidence                                            party assets remain
+                       intervals, runtime-                                             governed by their
+                       overhead checks,                                                original licenses.
+                       and      benchmark
+                       wrappers       where
+                       licenses          per-
+                       mit [3, 31, 32].
+
+
+Responsible-use note. The released artifacts are intended to support reproducibility and defensive
+research. We do not include live credentials, real user data, or instructions for attacking deployed
+systems. Attack scenarios are provided only in controlled benchmark or synthetic form, and any
+future public release should preserve this restriction.
+
+J    Notation
+
+
+
+
+                                                      23
+    Table 16: Notation used in the PACT framework.
+Symbol   Meaning
+t        Tool or function invoked by the agent
+vi       The i-th argument value passed to a tool
+Ct       Contract associated with tool t
+ℓ        Contract precision level, ℓ ∈ {L0, L1, L2, L3}
+ai       Contract entry for argument i
+rolei    Semantic role of argument i
+τimin    Minimum trust required for argument i
+Fi       Forbidden-origin set for argument i
+Ri       Obligations required before argument i may execute
+π(v)     Provenance tag of value v
+O(v)     Set of origins contributing to v
+τ (v)    Trust level of v
+B(v)     Unresolved obligations attached to v
+o        Output provenance specification for a tool
+
+
+
+
+                           24
+

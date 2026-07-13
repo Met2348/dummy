@@ -1,0 +1,1268 @@
+                                                LightSpeed, Tencent
+
+
+                                                   LLM Agents Are Latent Context Managers:
+                                        Eliciting Self-Managed Context via a Proprioceptive Dashboard
+                                                                                 Binyan Xu1,2,∗ , Haitao Li2,† , Kehuan Zhang1
+                                                                                     1
+                                                                              The Chinese University of Hong Kong, 2 LIGHTSPEED
+                                                                          {binyxu, khzhang}@ie.cuhk.edu.hk, 729156675@qq.com
+                                                                        ∗
+                                                                          Work done during an internship at Tencent. † Corresponding author.
+                                                                                  Project Page https://vista-agent.github.io/
+                                                                                   Code         https://github.com/binyxu/VISTA/
+
+                                                                                                                          Abstract
+                                                          Long-horizon tool agents are bottlenecked by how their context grows toward the
+
+
+
+
+arXiv:2606.30005v2 [cs.CL] 5 Jul 2026
+                                                          limits of the context window. Recent systems make context management agent- or
+                                                          system-controlled, but they either learn compression policies that discard evidence
+                                                          or manage context in a layer the agent never sees. We argue that both miss a
+                                                          more basic gap: frontier language models are proprioceptively blind to their own
+                                                          context. From the prompt alone they cannot see how large, old, or used each block
+                                                          is, the signals needed for keep-or-drop decisions. We introduce VISTA (Visible
+                                                          Internal State for Tool Agents), a training-free, model-agnostic layer that represents
+                                                          working memory as typed addressable blocks, surfaces a runtime dashboard of
+                                                          token usage, recency, and access history, and archives blocks as recoverable full-
+                                                          fidelity payloads. On LOCA-Bench, BrowseComp-Plus, and GAIA, the same
+                                                          untrained interface transfers across million-, 100K-, and 10K-scale trajectories.
+                                                          On LOCA-Bench it lifts Gemini-3-Flash from 22.7 to 50.7%, reaches 58.0% on
+                                                          BrowseComp-Plus, and remains competitive on GAIA. Gains grow with context
+                                                          pressure and transfer across backbones, while ablations confirm that the dashboard
+                                                          matters beyond archive and recovery tools.
+
+
+                                            A     Context Managed for Agents                           B Self-Managed, No Metadata                                 C      VISTA: Context + Metadata (ours)
+                                                       Task: Email the applicant their portal link              Task: Email the applicant their portal link                    Task: Email the applicant their portal link
+                                            Input: context                                            Input: context                                              Input: context + metadata
+                                                B1 user: Hi, I have a question ...        system:         B1 user: Hi, I have a question ...                                                  budget [ ......] 26% 32.9K / 128K
+                                                                                                                                                                     B1 user: ...
+                                                                                          compact
+                                                B2 admissions:portal link                                 B2 admissions:portal link                                                            ID    ~Tok Age        Type    Status
+                                                                                                                                                                     B2: portal link
+                                                apply.cuhk.edu.hk/s/9f3a2c                                apply.cuhk.edu.hk/s/9f3a2c                              apply.cuhk.edu.hk/s/9f3a2c B1      0.2K     14     user    pinned
+                                                B32inbox export(large)                                    B32inbox export(large)
+                                                                                                                                                                     B32inbox export(large)    B2    0.3K     13    result   visible
+                                                [very long content ... ~20K tokens]                       [very long content ... ~20K tokens]
+                                                                                                                                                                     [-20K tokens ... ]        B32    20K      1    result   visible
+                                             → application portal apply.cuhk.edu.hk/s/9f3a2c               tools: email_get, email_send,
+                                                                                                           compress, prune, summarize                                                                       archive target (20K hog)
+                                                tools: email_get, email_send                                                                                           tools: email_get, email_send,archive, recover
+                                                                                                                       sees: context only
+                                                                 sees: context only                                                                                                    sees: context + metadata
+                                                                                                                                           B2 looks old →
+                                                                                                                                              summarize                                                 B2 is tiny; → the 20K hog
+                                                                                                                                             (guessing)
+                                                                                                                                                                                                        is B32 → archive B32,
+                                                                                                                              Agent (LLM)                                                               keep B2
+                                                                       Agent (LLM)
+                                                                                                                            → summarize
+                                                                                                     apply.cuhk.edu.hk/s/9f3a2c       →     CUHK admission                                    Agent (LLM)
+                                                                                                                                           → application portal
+                                                     Action: email_send→
+                                                      generic apply.cuhk.edu.hk (link broken)               Action: summarize(B2)
+                                                                                                                               → email_send
+                                                                                                                                          → link lost                      Action: archive(B32)→ @G2 (lossless, frees 20K)
+                                                                                                              compression is one-way: exact token gone                                → apply.cuhk.edu.hk/s/9f3a2c
+                                                                                                                                                                             email_send
+                                                         token dropped by auto
+                                                                            -compact;
+                                                         the agent never saw it                               B2 only 0.3K, freed little → still over budget                    exact token kept,                  full mechanism in
+                                                                                                                                                                                budget freed                       the method figure
+                                                ReAct, Stale-Masking, Demand Paging,                  CAT, ContextBudget, Context
+                                                                                                                               -Folding, SLIM,
+                                                 AgentOS, AgentSwing,MemGPT, MemO                               Focus, Letta, MemEx                                    Training-free, Model- agnostic, Agent- Controlled
+
+                                        Figure 1: Who manages context, and on what information. Fixed rules compact context the agent cannot see,
+                                        and blind self-management guesses without state. VISTA surfaces per-block metadata, so the agent archives the
+                                        large block losslessly.
+
+
+                                        1        Introduction
+                                        Language agents operate over stateful tasks such as filling spreadsheets from web and email evidence,
+                                        modifying databases, preparing application materials, debugging code, and coordinating business
+                                        workflows [18, 41]. Their context is working memory. It accumulates tool evidence, stale observa-
+                                        tions, failed attempts, user constraints, hypotheses, file paths, and action contracts that must remain
+
+                                                                                                                                               1
+correct many steps later [23, 25, 29]. As the task runs, working memory grows until it crowds or
+overflows the context window, a pressure also studied in long reasoning systems that summarize or
+carry state across computation [2, 12, 27]. The agent must decide what to keep visible, what to set
+aside, and what to recover. How this growing context is managed determines whether long-horizon
+agents succeed.
+Existing approaches differ in who makes these decisions. One family keeps the decision outside the
+agent. Stale-observation masking hides old tool outputs by rule [42], and OS-style layers page or evict
+context beneath the agent. These layers track statistics such as size, age, and usage, but only inside
+the runtime. The agent cannot inspect them, and a fixed rule cannot know which evidence will matter
+later. A second family moves the decision into the agent and learns it from data. Context-as-a-tool
+fine-tunes a compressor, and budget-aware methods train compression policies with reinforcement
+learning [18, 24, 25, 29]. These methods can improve performance, but they often discard evidence
+through summarization or deletion and are tied to the training setting. Across both families, the agent
+can read block contents but cannot perceive the state needed for a keep-or-archive decision, including
+block size, recency, access history, and remaining budget. Figure 1 contrasts these families with our
+approach on one task.
+We take an elicitation view. We hypothesize that capable models already contain context-management
+competence from pretraining on note-taking, retrieval, and reorganization traces, and that the bottle-
+neck is a missing interface rather than a missing policy. Context management is a meta-tool decision
+over the agent’s own working memory, made under partial observability. The agent must choose
+what to keep or externalize while the prompt omits the runtime state that governs the choice. Learned
+policies can compensate through training, but this entangles what information should be exposed
+with what policy should act on it. VISTA isolates the first question by making the state observable
+without training or model-specific adaptation.
+This proprioceptive view implies three requirements. The interface must expose per-block token
+cost, recency, access history, and remaining budget. It must be reversible, because one-way deletion
+or summarization can remove evidence needed later. It must be model-agnostic, so gains reflect
+elicitation through the interface rather than a policy trained for one backbone or domain.
+We introduce VISTA (Visible Internal State for Tool Agents), a context layer that represents working
+memory as typed, addressable blocks and surfaces a dashboard with per-block token usage, recency,
+access history, and budget. The dashboard is a proprioceptive view of the agent’s context state.
+The agent can archive bulky blocks as external payloads with stable handles and recover exact
+bytes on demand. Archived payloads are exact transcripts, so removing a block from the prompt
+does not destroy it. We show that this losslessness is necessary under budget pressure because a
+method that cannot recover exact content fails on discarded evidence, while recovery closes the gap
+(Proposition 1). VISTA requires no training and wraps any backbone.
+Empirically, Table 1 tests VISTA across million-, 100K-, and 10K-token trajectories in LOCA-Bench,
+BrowseComp-Plus, and GAIA. In LOCA-Bench [41], it solves 38/75 tasks versus 17 for ReAct and
+32 for Claude Code, with lower trajectory cost than Claude Code. On BrowseComp-Plus, it reaches
+58.0% versus 52.0% for the strongest baseline, and remains competitive on GAIA. Pressure sweeps
+show that the advantage grows on long trajectories, where VISTA cuts active-context overhead while
+improving accuracy. The same untrained layer improves all four tested backbones, and ablations
+show that the dashboard matters beyond archive and recovery tools. In transfer, VISTA also reaches
+higher F1 than the specialized AMA-Bench agent without memory tuning.
+This paper makes three contributions.
+
+       • We frame context management as a meta-tool decision under partial observability and
+         identify context proprioception as the missing interface, since LLM agents cannot read their
+         own context state from the prompt.
+       • We introduce VISTA, a training-free context layer whose dashboard exposes per-block
+         metadata and pairs it with lossless archive and recovery. We prove that lossless recovery is
+         necessary under budget pressure.
+       • We show across LOCA-Bench, BrowseComp-Plus, and GAIA that VISTA elicits self-
+         management across trajectory scales and backbones, isolate the dashboard with ablations,
+         and demonstrate transfer on AMA-Bench.
+
+
+                                                       2
+2     Related Work
+We organize prior work by what it gives the agent: context actions, workspace mechanisms, or
+self-state signals.
+
+Context actions and policies. Several systems expose context management as an agent action
+or train a policy to perform it. Context as a Tool, Active Context Compression, ContextBudget,
+Context-Folding, and LongSeeker make compression or deletion part of the agent loop, often through
+learned policies or specialized controllers [18, 19, 24, 25, 29]. HiAgent, ACON, and AdaCoM add
+hierarchy, optimized compression guidance, or an agent-compatible learned manager [9, 11, 39],
+while other work learns memory operations such as store, retrieve, summarize, or discard [40, 44].
+Recent reasoning systems also carry state across long computations through learned or structured
+summaries [2, 12, 27]. These works support our premise that context management is an agent-level
+decision, but they mainly learn or prescribe compression and memory-editing policies. VISTA instead
+asks what runtime state the agent must perceive, and pairs that perception with lossless archive and
+recovery.
+
+Runtime and workspace mechanisms. Other systems manage context outside the agent or give
+the agent a structured place to store information. Stale-observation masking, Demand Paging,
+AgentOS, and AgentSwing hide, page, or route context inside the runtime [8, 14, 20, 42]; such
+systems may track size, age, or usage, but that state is not agent-facing. Structured memory systems
+organize prior experience through virtual context, long-term memory, or retrieval/graph stores
+[5, 10, 17, 21, 23, 37, 43]. Letta exposes named memory blocks, Databricks MemEx provides a
+programmable scratchpad, and Memex(RL) stores full histories behind indexed summaries while
+learning read/write behavior [7, 13, 26]. ReSum, SLIM, and GenericAgent keep compact views
+through summarization or selective detail retrieval [15, 28, 38]. These systems provide memory
+structure, compute surfaces, or learned memory policies, but not a per-block proprioceptive dashboard
+for managing the active context of an ongoing tool trajectory; this also separates working context
+from broader notions of agent memory [33]. VISTA makes runtime context information agent-facing,
+so the agent can weigh what to keep visible, archive, or recover.
+
+Self-state awareness. Work on budget awareness, temporal blindness, and agent externalization
+studies signals that models cannot infer from prompt contents alone [1, 4, 16, 46]. VISTA treats
+context state as such a signal and supplies it externally at inference time. We evaluate this view
+mainly on LOCA-Bench, which stresses online tool agents under controllable context growth [41],
+and use AMA-Bench as a memory-oriented transfer point [45].
+
+3     Methodology
+VISTA treats context management as a meta-tool decision over the agent’s own working memory.
+Figure 2 shows the three-stage loop: a context stream, a refreshed dashboard, and archive/recovery
+tools. The goal is to make context state perceptible to an unmodified model without fine-tuning,
+model-specific changes, or destroyed evidence.
+
+3.1   Problem Setup
+
+At step t, a tool agent has a task goal g, raw interaction history Ht , environment tools Tenv , and a
+context budget B. We write the history as action-observation pairs Ht = (a1 , o1 , . . . , at−1 , ot−1 ).
+A standard ReAct-style harness serializes this append-only history into the next model input. Once
+the serialized history exceeds B, the harness must truncate, clear, mask, or summarize prior content.
+These interventions conflate what remains visible, what is preserved exactly, and what can be
+recovered later.
+VISTA separates these choices through a workspace Wt = (Vt , At , Pt ): visible blocks, archived
+payloads, and blocked large results. The model does not act on the raw transcript directly; it acts on
+the workspace rendering
+                       Ct = render(Vt ) ⊕ handles(At ) ⊕ notices(Pt ) ⊕ Dt ,
+                                                                                                     (1)
+                       at ∼ πθ (· | Ct ),  |Ct | ≤ B.
+
+                                                       3
+ I. Context Stream                                                                       II. LLM Policy                                                    III. Meta Context Tool
+  Task: Compare climate impacts on maize vs. wheat in South Asia                           B3        Input: Context Stream+Dashboard                       A. Full B6-9 bundle                      B. Summary
+                                                                                         search                                                               31.2K tokens                       [Archived: B6-9 L1]
+  Visible Context Stream                                                                  2.1K       Dashboard: refresh each step                            B6 IPCC page        archive(B6-9,       0.1K tokens
+                                                                                                                                                                                  summary)
+     B3          B4            B5                 B6-9             B10        Bt+1         B4                               System:    1.8K Tok                                                   summary:
+  search        result     follow-up           [Archived]          result     append      result                            Context:   6.5K Tok                                                   South Asia crop
+                                                                                slot                    46K / 128K                                                                                impact evidence;
+                                            summary: South                                 1.2K           (36%)             Dashboard: 0.4K Tok
+                                                                                                                                                             B7 FAO Table                         retrieve for exact
+                                            Asia crop impact                               B5        ID     ~Tok Age      Type       Level     Status                                             cita�on
+     search      South      compare         evidence; retrieve    climate                follow-up
+   (“climate      Asia      impacts;        for exact cita�on    datasets
+  impact on     climate        cite                              & analysis                0.3K      B1     0.1K    10    user        L0      pinned                                              path:
+                                            path: .archive/B6-                                                                                                                                    .archive/B6-9.json
+    maize &    overview      sources        9.json                model                   B6-9
+    wheat”)                                                                              summary     B4     1.2K    7    result       L0       visible       B8 source
+                                            level: L1                                                                                                        “, … Heat stress                     level:
+    2.1K        1.2K           0.3K               0.1K             4.5K                    0.1K      B5     0.3K    6 message L0               visible       reduces maize        retrieve(“      L1
+                                                                                                                                                             yield more …”       B6-9.json”)
+                                                                                           B10       B6-9 0.1K      2    result       L1      archived
+                                                                                          result                                                             B9 chart                               C. Stored File
+  Lossless                B3           B4            B5          B10                       4.5K      B10 4.5K       1    result       L0       visible                                           .archive/B6-9.json
+  Hidden              search          result      follow-up      result       space                                                                                                                    sha256: 6f4…2
+  Trajectory           2.1K            1.2K         0.3K         4.5K          left?                                                         con�nue                                                   size: 957KB
+                                                                                                            Agent LLM                        slot append   … + more items                              created: 45m
+   B6-9 (full    B6            B7          B8              B9
+   evidence      IPCC          FAO Table   “, … Heat          Chart            Bt+1                                                                           Hierarchy (progressive archiving)
+   bundle)       AR6 WGII                  stress reduces                      Slot        Overﬂow Mode                  Normal Mode                                        Group: L1                      Group: L2
+                 page                      maize yield                        Added!                                                                          Blocks
+                                           more(20K
+                                                 than hog)                                tool_call / con�nue        tool_call / con�nue                               [G1: B6-7] [G2: B8-9]               [G3: G1-1]
+                                archive target                                  some                                                                       B6 B7 B8 B9
+                                           wheat in                              new
+                                           South Asia …”                       results    archive(Bxx, summary)      archive(Bxx, summary)
+   31.2K                                                                        1K        retrive(path)              retrive(path)
+
+
+
+
+Figure 2: VISTA architecture. Messages and tool outputs become addressable blocks. The dashboard exposes
+budget and handles to the agent, while archived payloads remain recoverable outside the active prompt.
+
+
+
+Here Dt is the dashboard: a factual ledger of block IDs, token estimates, recency, access history,
+archive levels, and remaining budget. The raw transcript is still logged for evaluation, but the agent’s
+working memory is the workspace, not the append-only history.
+Workspace invariants. The harness enforces a budget constraint, |Ct | ≤ B, after preflight and final
+assembly; every actionable unit must have a stable block ID or handle; and archived payload bytes
+remain recoverable unless the agent explicitly deletes them. The dashboard reports the same token
+estimates used by these checks, so the agent sees the state that the harness will enforce.
+
+
+3.2        Context Stream
+
+The left panel of Figure 2 shows how VISTA rewrites the transcript as a block stream. The state space
+is deliberately small and aligned with the three storage regimes:
+ (i) VISIBLE blocks appear in the active prompt with exact content; pinned blocks are a protocol-
+     required subset of this state.
+(ii) ARCHIVED blocks are replaced by compact handles and summaries, while their original bytes
+     are stored externally.
+(iii) BLOCKED blocks are oversized tool results that would exceed the budget if inserted; deleted
+      blocks are intentionally unrecoverable.
+This stream gives the agent an address space for context decisions. When a bundle of evidence
+becomes too large, the stream keeps a compact handle while the exact payload remains in the hidden
+trajectory. New observations enter only if space remains; otherwise, the workspace enters overflow
+mode.
+Structure preservation. The visible stream is the next-call working set, while the hidden trajectory
+stores exact payloads that may be needed later. Tool results remain linked to their assistant tool
+calls, and archived results are rendered in protocol-valid form. If a parent call is also archived, the
+placeholder becomes ordinary context rather than an orphaned tool response.
+
+
+3.3        LLM Policy
+
+Dashboard input. The middle panel shows what the model receives: the visible context stream plus
+a dashboard. The dashboard is regenerated after every tool result is registered, so the agent acts on
+the current workspace state. It is a ledger over blocks rather than a memory oracle: it exposes runtime
+state created by the harness or by the agent’s earlier actions and does not add hidden task evidence.
+
+
+                                                                                                                4
+Algorithm 1 Self-managed context loop
+Require: task block btask , budget B, environment tools Tenv , context tools Tctx
+Ensure: final answer and workspace trajectory W1:T
+Notation: Vt visible stream; At archived byte store; Pt blocked payloads; Dt dashboard; Ctmgmt
+    disables task tools
+ 1: V0 ← {btask }; A0 , P0 ← ∅
+ 2: while the task is unfinished do
+           ▷ Perceive: expose runtime context state
+ 3:    Admit new messages into Vt ; oversized payloads enter Pt with visible stubs
+ 4:    Dt ← Dashboard(Vt , At , Pt , B)
+ 5:    Ct ← Assemble(Vt , At , Pt ) ∪ {Dt }
+           ▷ Make room: preserve bytes while shrinking the prompt
+ 6:    If |Ct | > βB, choose eligible blocks S ⊂ Vt to archive
+ 7:    Replace S by handles h(S, ρ) and store exact payloads in At
+           ▷ Act: management-only under overflow, otherwise normal tool use
+ 8:    Ut ← Tctx if |Ct | > B; else Tenv ∪ Tctx
+ 9:    at ← LLM(Ctmgmt , Ut ) if |Ct | > B; else LLM(Ct , Ut )
+10:    If at = read(h), recover the exact payload and add it to Vt
+11:    If at = archive(S, ρ), update handles and At as above
+12:    If at ∈ Tenv , execute it and admit the result
+13:    If at = answer, return final answer
+14:    Wt+1 ← (Vt , At , Pt )
+15: end while
+
+
+Unified action space. The same model policy chooses ordinary environment actions and context
+actions:
+                       Tctx = {archive(S, ρ), read(h, q), delete(S)},
+                                                                                         (2)
+                         at ∈ Tenv ∪ Tctx .
+Thus context management is not a separate post-hoc controller. It is part of the model’s action space,
+conditioned on the dashboard and task evidence still visible in Ct .
+Mode switch. The dashboard is the proprioceptive channel of the meta-tool. From prompt text alone,
+a model cannot reliably infer how costly a block is, how recent it is, or whether it has been used
+again. These signals determine whether a block should stay visible, be archived, or be recovered.
+In normal mode, the agent may call environment tools, continue the task, archive blocks, or read
+archived payloads. In overflow mode, ordinary tool calls are disabled until the agent reduces the
+visible context. The allowed action set is therefore
+                                        
+                                           Tenv ∪ Tctx , |Ct | ≤ B,
+                                 At =                                                           (3)
+                                           Tctx ,        |Ct | > B.
+The hard budget is enforced by the harness, but the agent chooses what to move. A final preflight
+guard may externalize large raw tool-result blocks near the hard limit to prevent API failure; the
+policy-facing decision remains with the agent.
+Access history. The dashboard also records access history. When an archived payload is read or a
+block handle is used, the corresponding row can be updated in the next dashboard. This gives the
+agent a compact trace of active blocks without keeping the full transcript in the prompt.
+
+3.4   Meta Context Tool
+
+Archive interface. The right panel shows the meta-context tool. Archiving takes a selected block set
+S and a short replacement summary ρ:
+                                           h = archive(S, ρ),
+                                                                                                  (4)
+                                     read(h) ≡ payload(S).
+The first line creates a compact handle in the visible stream; the second is the lossless contract.
+The exact payload moves to the external archive, while h keeps the path, level, size, and checksum
+
+
+                                                      5
+metadata visible. Recovery is performed through ordinary file or terminal access to the stored payload
+path. There is no task-specific retrieval oracle. If the payload is too large, the agent may read bounded
+chunks or rerun the original source tool with narrower arguments.
+The stored payload is a transcript of what the model saw, not a guarantee that the source was complete.
+If a source response was paginated or truncated, the archive preserves that result exactly and leaves
+re-querying to the agent.
+Hierarchical recovery. Archiving is hierarchical. A first archive level may group several raw blocks
+into a bundle, as B6-9 does in the figure. Later, groups can themselves be archived into coarser
+handles when context pressure grows. The visible stream therefore stores a small summary and
+retrieval guide, while the hidden trajectory stores the exact evidence. This is why VISTA differs from
+summarization. Summaries guide navigation, but they are not the only representation of the evidence.
+Recovery follows the hierarchy in reverse. The agent may inspect a coarse handle, recover the
+payload, and then decide whether a narrower piece of evidence should return to active context. It
+need not reload a long transcript when one row or identifier is needed. It can recover the file, search
+or read a bounded part, and continue with a smaller block.
+
+3.5   When Recoverability Is Necessary
+
+Recoverability is necessary under budget pressure. Consider a task family TN,k in which the history
+contains N evidence blocks X1 , . . . , XN , each an independent string of k uniformly random bits.
+These blocks model exact identifiers, table rows, links, or file snippets. The prompt admits at most B
+bits and N k > B, so the blocks cannot all remain visible. At the final step, the task reveals an index
+i⋆ drawn uniformly and independently of the blocks, and requires the agent to emit Xi⋆ exactly.
+A recovering method may move blocks to external storage and reload the required block after i⋆ is
+known. A non-recovering method keeps only an in-prompt representation R of size at most B bits
+and cannot reload discarded content. Deletion, masking, summarization, and skeleton compression
+are non-recovering.
+Proposition 1 (Recoverability is necessary under budget pressure). For any non-recovering method
+whose pre-reveal in-prompt state R satisfies H(R) ≤ B,
+                                                           B      1
+                                  Pr[correct on TN,k ] ≤       + .
+                                                          Nk k
+VISTA is correct with probability 1 whenever the instruction, the handles, and one recovered block fit
+within B. The success gap therefore tends to 1 as N grows.
+The proof is in the appendix. The intuition is that a bounded lossy representation can retain exact
+bits for only about B/k blocks. When the future query is unknown, it must discard evidence it may
+later need. VISTA does not reduce the information in archived blocks. It relocates them and pays the
+recovery cost only for the evidence that matters.
+This is a worst-case statement. Real tasks contain both high- and low-entropy content, so lossy
+baselines can retain partial utility. The result also assumes that the agent recovers the relevant block.
+That decision depends on proprioception. The dashboard shows which blocks exist, what they cost,
+how old they are, and where exact payloads can be recovered. Proposition 1 therefore motivates
+lossless recovery, while the no-dashboard ablation below tests whether recovery remains useful
+without the state interface.
+
+4     Experiments
+4.1   Experiment Setup
+
+Benchmarks. We evaluate across three online regimes with different trajectory scales: LOCA-
+Bench [41] as the primary million-token stress test, BrowseComp-Plus [3] as a 100K-scale deep-
+research retrieval transfer, and GAIA [22] on a fixed 165-question validation subset as a shorter
+general-assistant setting. We additionally use AMA-Bench to test whether the same workspace
+can serve as offline trajectory memory. LOCA-Bench is external to this work; we adopt its public
+75-configuration suite and scoring protocol, counting errors and timeouts as failures. Full benchmark
+protocols, subsets, scoring rules, and budget settings are in the evaluation-details appendix.
+
+
+                                                        6
+                               Mechanism              LOCA-Bench         BrowseComp-Plus          GAIA
+Method                    State   Ctrl   Recov      Acc↑         Traj↓   Acc↑      Traj↓   Acc↑          Traj↓
+                                                 Fixed external policy
+ReAct                      ✗       ✗       ✗         22.7       3.51M     39.3    163K     61.2          23K
+Tool-result Clearing       ✗       ✗       ✗         26.7       2.60M     42.7    161K     65.5          24K
+Stale-obs. Masking         ✗       ✗       ✗         28.0       3.32M     38.0    112K     61.8          24K
+Skeleton Compression       ✗       ✗       ✗         33.3       2.84M     40.0    139K     70.3          28K
+                                               Agent-mediated / lossy
+SLIM (summary)             ✗      ∼        ✗         29.3       3.76M     49.3    162K     67.9          30K
+Active Ctx. Compression    ✗      ✓        ✗         36.0       3.20M     42.7    162K     71.5          39K
+Context-Folding            ✗      ✓        ✗         34.7       3.41M     43.3    166K     64.8          39K
+                                               Lossless external store
+Auto-Archive + Recover     ✗       ✗       ✓         44.0       2.73M     45.3    133K     63.6          20K
+Claude Code                ✗       ✓       ∼         42.7       6.72M     52.0    247K     73.9          44K
+                                                 Ours and ablations
+VISTA w/o dashboard        ✗       ✓       ✓         37.3       5.25M     50.0    423K     68.5          24K
+VISTA w/o recovery         ✓       ✓       ✗         45.3       2.99M     43.3    161K     72.1          28K
+VISTA (full)               ✓       ✓       ✓         50.7       2.86M     58.0    135K     73.3          33K
+
+Table 1: Main results across scales. The three benchmarks span million-, 100K-, and 10K-token trajectories,
+testing whether context management transfers across operating regimes. The pattern supports our central claim:
+long-horizon gains require not just compression or storage, but an agent-visible state interface paired with
+controllable, lossless recovery.
+
+
+
+Baselines and configuration. We compare against fixed external policies, agent-mediated compres-
+sion, and production-agent baselines. The fixed-policy group includes ReAct, Tool-result Clearing,
+and stale-observation masking [42]. The agent-mediated group includes SLIM [38], Active Context
+Compression [25], and a structured Skeleton Compression baseline following context-as-a-tool com-
+pressors [18]. We also include Context-Folding [24], Auto-Archive + Recover, and Claude Code
+(CLI release May 6, 2026). On AMA-Bench, we compare with the benchmark AMA agent and
+retrieval-style memory baselines. Appendix Table 4 and the implementation appendix give the full
+capability matrix, prompts, flags, dashboard format, and tool definitions. Learned context managers
+whose released artifacts do not match this setting are discussed as complementary systems rather than
+treated as direct empirical rankings.
+VISTA is training-free and uses the same strategy across backbones. On LOCA-Bench, the main runs
+use Gemini-3-Flash with a 128K budget. At each turn, the agent sees per-block context metadata and
+may archive or recover exact transcript payloads; the task tools are unchanged.
+
+4.2   Main Results Across Scales
+
+Table 1 compares VISTA across million-token LOCA-Bench trajectories, 100K-scale BrowseComp-
+Plus retrieval, and shorter GAIA trajectories. On LOCA-Bench, VISTA solves 50.7% of tasks, versus
+22.7% for ReAct and 42.7% for Claude Code, while using less trajectory than Claude Code. On
+BrowseComp-Plus it reaches 58.0%, above the strongest baseline at 52.0%. On GAIA it remains
+competitive in the shorter setting, reaching 73.3% versus 73.9% for Claude Code. The mechanism
+columns separate state visibility, decision maker, and recovery; methods missing one of these pieces
+do not match the full interface consistently. The gain is largest in the settings where evidence must
+survive long trajectories: LOCA-Bench stresses repeated tool interaction, while BrowseComp-Plus
+stresses retrieval followed by delayed synthesis. GAIA is shorter, so the interface mainly avoids
+hurting a strong agent rather than opening the larger long-context gap. The LOCA-Bench cost ledger
+also rules out a spend-more explanation: VISTA uses 2.86M tokens and 36.4 steps per task, compared
+with 6.72M tokens and 171.5 steps for Claude Code (Appendix Table 5).
+
+4.3   Pressure Regimes
+
+LOCA-Bench million-token pressure. LOCA-Bench creates the failure mode VISTA targets:
+useful observations arrive early, bulky tool results accumulate, and the agent must still act correctly
+
+
+                                                                7
+                                100
+                                         86.7       84.0                                    VISTA                                                         VISTA
+                                                                                                                                                8
+                                                                                            ReAct                                                         ReAct
+
+
+
+
+                                                                                                                        Avg tokens / task (M)
+                                 80
+                                                    70.7                                    Claude Code                                                   Claude Code
+                                                                                                                                                6
+
+
+   Success (%)
+                                                            61.3                            Active Comp.                                                  Active Comp.
+                                 60                                 57.3
+                                                                           50.7
+                                                                                                                                                4
+                                 40                                                                  32.0
+
+                                 20                                                                                                             2
+
+
+                                     0                                                                                                          0
+                                                8    32      64     96     128                       256                                            8    32          64      96       128                            256
+                                                           LOCA context-growth setting (K)                                                                    LOCA context-growth setting (K)
+                                                     (a) Success vs. context-growth setting                                                             (b) Token cost vs. context-growth setting
+
+Figure 3: Pressure sweep. Across 8K–256K context growth, VISTA degrades more gracefully than ReAct; the
+right panel reports average API tokens per task.
+
+
+
+                                70
+                                                                                                    +8.9                                            ReAct             Claude Code             +28.0 over ReAct
+                                                                                                                                     60
+
+
+
+
+ BrowseComp-Plus accuracy (%)
+                                                                                    +16.2                                                           SLIM              VISTA (ours)
+                                60                                         +18.6                                                                    Active Comp.
+                                                                                                                                                                                                                 50.7
+                                                            +17.9                                                                    50
+
+
+
+
+                                                                                                             LOCA success (%)
+                                50                                                                                                                                                38.7
+                                                                                                                                     40
+                                                                                                                                                              34.7
+                                                                                                                                                                                                    32.0
+                                40       +15.7                                                                                       30
+
+                                30                                                                                                   20
+
+                                                                                                  ReAct                              10
+                                20                                                                VISTA
+                                                                                                                                            0
+                                          6K                8K             12K       16K            32K                                              Claude-              DeepSeek-         GLM-5          Gemini-
+                                                               Active context window W                                                              Sonnet-4.5             V4-Pro                          3-Flash
+
+
+Figure 4: BrowseComp-Plus window sweep. With                                                                Figure 5: Cross-backbone results. The same un-
+task set fixed, VISTA peaks at intermediate windows:                                                        trained VISTA layer is best on all four backbones
+tiny windows make management overhead costly, while                                                         against ReAct, SLIM, Active Context Compression,
+large windows make ReAct truncation less damaging.                                                          and Claude Code.
+
+
+
+many steps later. Figure 3 sweeps 8K to 256K context growth on the full 75-task LOCA-Bench
+suite; exact counts are in Appendix Table 7. The methods are close at low pressure, but the gap
+opens as distractor volume grows: one-way truncation degrades while recoverable externalization
+remains usable. At 8K the methods are essentially tied (82.7 versus 84.0), but by 128K the gap is
+50.7 versus 22.7, and VISTA also spends fewer average tokens (2.86M versus 3.51M). This is the
+expected signature of recoverable working memory.
+
+BrowseComp-Plus retrieval pressure. BrowseComp-Plus tests whether the interface helps outside
+the workflow-heavy LOCA-Bench setting. Here the bottleneck is whether early retrieved evidence
+survives until synthesis. We set W =12K below the median first-retrieval depth of the gold document
+(≈ 17K tokens), so ReAct often loses early evidence while VISTA continues under budget. This is a
+transfer result rather than a leaderboard setting: loose windows usually keep the decisive document
+visible, so the methods are much closer. Figure 4 varies only W : tiny windows make dashboard
+overhead costly, large windows let ReAct retain enough evidence, and the gain peaks in the middle.
+VISTA also uses less active context than ReAct, though more cumulative API tokens, because it
+survives longer and issues more retrieval rounds.
+
+4.4                                  Backbone Robustness
+
+The cross-backbone result asks whether the effect is tied to one model family. It is not: the same
+untrained VISTA layer improves Claude-Sonnet-4.5, DeepSeek-V4-Pro, GLM-5, and Gemini-3-Flash
+at 128K (Figure 5), including stronger backbones. This supports the elicitation view: capable models
+can use a context-management interface when runtime state is visible.
+
+
+                                                                                                                        8
+                                                                                                    arch/read
+
+                     VISTA (full)                                                            50.7      69/105
+                                          Vary interface (capability intact)
+                 Bare placeholder                                                    -1.4 49.3         84/125
+
+                     + status field                                                 -2.7 48.0       238/ 56
+                                          Remove a capability
+                      w/o recover                                               -5.4 45.3           262/ 57
+
+                     Auto-archive                                              -6.7 44.0               --/162
+
+                   w/o dashboard                                       -13.4 37.3                   255/ 57
+
+                      w/o archive                                     -14.7 36.0                        0/   0
+
+                                      0          10        20        30        40       50
+                                                                   LOCA success (%)
+Figure 6: Component ablations. Removing archive, dashboard, recovery, or agent choice hurts more than
+interface variants; archive/read counts appear at right.
+
+4.5   Offline Trajectory-Memory Transfer
+
+AMA-Bench removes online tool interaction
+and gives the model a completed trajectory       Method         F1 Acc. Runtime/ep Tokens/ep
+before question answering. This tests whether    BM25        0.335 0.575            35.5s 303.43K
+VISTA is only an online control interface or     EMem-style 0.363 0.651          166.2s 470.30K
+a more general workspace representation. On      Mem0-style 0.329 0.536          108.0s       30.63K
+the full 208-episode comparison, the special-    AMA         0.368 0.753         176.5s 268.98K
+ized AMA agent remains higher on binary          VISTA       0.382 0.731            43.7s 148.49K
+judge accuracy, but VISTA leads on F1, runs Table 2: AMA generalization. Full 208-episode
+substantially faster per episode, and outper- trajectory-memory evaluation against the specialized AMA
+forms BM25, EMem-style, and Mem0-style agent and memory-style adapters.
+adapters on F1. We therefore treat AMA-
+Bench as transfer to offline trajectory memory; Appendix Table 8 gives the by-domain breakdown.
+
+4.6   Mechanism Ablations
+
+The ablations separate mechanism from surface wording. No-archive removes recoverable external-
+ization, no-dashboard removes the workspace map, no-recover hides payload paths, and auto-archive
+replaces agent choice with a fixed rule; all variants share the same model, task set, token estimator,
+prompt assembly, and context limit. Removing any stage hurts (Figure 6). In particular, tools alone
+are not enough: no-dashboard leaves archive and recovery actions available but removes the state
+needed to use them well. By contrast, archive wording and status-board variants stay close to the
+full method, so the gain tracks the capability pathway: visible state enables context decisions, exact
+archiving preserves evidence, and recovery makes externalization reversible.
+
+5     Analysis
+Does the perception gap actually ex-
+ist? VISTA assumes an agent can-                                                      Total size         Block size      Pairwise
+not read its own context state from the
+                                                        Backbone                    −dash +dash −dash +dash −dash +dash
+prompt, because size, recency, and re-
+maining budget are runtime metadata                     Claude-Sonnet-4.5            0.84       0.00    0.37     0.02   0.67   0.83
+rather than text. We test this at the first             DeepSeek-V4-Pro              0.44       0.00    0.28     0.00   0.75   1.00
+                                                        GLM-5                        0.48       0.00    0.35     0.00   0.73   0.88
+archive moment of real LOCA-Bench                       Gemini-3-Flash               0.43       0.00    0.24     0.00   0.68   1.00
+runs: we strip the dashboard, ask the
+backbone to report its own state, and                  Table 3: The perception gap is real and token-magnitude spe-
+score against exact token counts (Ta-                  cific. Self-estimated context state with the dashboard stripped
+ble 3). Without the dashboard, every                   (−dash) versus present (+dash). Size is median relative error;
+                                                       pairwise is within-2× accuracy.
+backbone misjudges size, with median
+relative error from 0.43 to 0.84 and es-
+
+
+                                                                           9
+ A. Agent action trace                                               B. Context length per step                     C. Context-dashboard snapshots
+                                                                                                                    C1 after G1, one group handle
+ Real tool calls, archives, recovers.                                          no archive: context/step              ## Context Budget
+                                                                               VISTA: context/step                                             26% 32.9K used
+         1      email_get_current_user                          5              no archive: total cost (4.36M tok)    overhead 4.4K   +   conv 25.8K
+                                                                               VISTA: total cost (1.26M tok)         ## Context Blocks
+         6      archive G1: B6, B8, B20, B22                                                                         ID   ~Tok    Age       Type      Status
+                                                                                                                     B1    169       9      user      pinned
+         6      context_workspace_arc...                        10        C1                                         [G1] 18.5K -> PhD application...
+                                                                                                                     ... 23 more visible blocks ...
+       11       archive G2: B32, B34-36                                                                              B29   121       2      result    visible
+                                                                                                                     B30    64       2      result    visible
+                                                                15
+
+                                                   Agent step
+       11       context_workspace_arc...                                                                             B31    15       1      call      visible
+                                                                                                                     B32 20040       1      result    visible
+       16       filesystem_list_direc...                                                                             B33    55       0      call      visible
+
+       21       archive G3: B46-49, B51, B59-...                20
+                                                                                                                    C2 after G1-G4, four group handles
+                                                                                                                     ## Context Budget
+       21       context_workspace_arc...                                                                                                       16% 19.9K used
+                                                                                                                     overhead 4.4K   +   conv 12.9K
+       27       terminal_run_command                            25                                                   ## Context Blocks
+                                                                                                                     ID   ~Tok    Age       Type      Status
+       28       archive G4: B69-70, B79                                                                              B1    169      29      user      pinned
+                                                                         C2                                          [G1] 18.5K -> PhD application...
+                                                                30
+       32       email_send_email                                                                                     [G2] 70.6K -> Inbox pages 1-4...
+                                                                                                                     [G3] 37.9K -> Identified 32 P...
+       34       claim_done                                                                                           [G4] 54.9K -> Archived inbox ...
+                                                                                                                     ... 75 more visible blocks ...
+                                                                     0         50     100       150      200         B96    87       1      result    visible
+      tool                         archive                                                                           B97   575       0      call      visible
+      recover                      done                              Context length per step (K tokens)
+
+Figure 7: Case study trace. In one 128K LOCA-Bench run, VISTA archives large evidence, keeps the live
+context compact relative to a no-archive counterfactual, and recovers payloads when needed.
+
+
+timates uncorrelated with truth. Adding the factual ledger collapses size error to zero and lifts pairwise
+size discrimination. The gap is specific to token magnitude, not transcript memory, and appears on
+open and closed backbones alike; the intervention is therefore a factual interface rather than a stronger
+prompt or larger model.
+
+What does a rescued run look like? Figure 7 shows one 128K LOCA-Bench email-triage run.
+The dashboard marks a large inbox-export block as the biggest item, the agent archives it, keeps the
+live prompt below the no-archive counterfactual, and later reads the exact payload back for the final
+action. A matched baseline summarizes or clears the block and cannot restore the verbatim value.
+Across rescued tasks, this full archive-then-recover loop appears in 8 of the 16 cases where VISTA
+archives at least one block. In 13 other archive-containing runs outside the rescued subset, archiving
+mainly frees space without later recovery. Thus VISTA does not win by discarding old evidence; it
+moves evidence out of view while preserving an addressable recovery path. The advantage is clearest
+on long trajectories, where VISTA lowers active-context overhead while improving accuracy.
+
+6     Conclusion
+We argued that frontier LLMs are proprioceptively blind to their own context: they cannot perceive
+how large, old, or used each piece of working memory is. VISTA addresses this with a runtime
+dashboard plus lossless archive and recovery, giving the agent context-state information it can act
+on without destroying evidence. With no training, the same interface outperforms ReAct, deletion,
+masking, compaction, and Claude Code on LOCA-Bench and transfers across four backbones. The
+result suggests that some agent capabilities are elicited by making hidden runtime state perceptible,
+positioning the interface as complementary to post-training rather than a replacement.
+
+References
+ [1] Christopher Ackerman. Evidence for limited metacognition in LLMs, 2026. URL https:
+     //arxiv.org/abs/2509.21545.
+ [2] Milad Aghajohari, Kamran Chitsaz, Amirhossein Kazemnejad, Sarath Chandar, Alessandro
+     Sordoni, Aaron Courville, and Siva Reddy. The markovian thinker: Architecture-agnostic linear
+     scaling of reasoning. arXiv preprint arXiv:2510.06557, 2025.
+ [3] Zijian Chen, Xueguang Ma, Shengyao Zhuang, Ping Nie, Kai Zou, Andrew Liu, Joshua Green,
+     Kshama Patel, Ruoxi Meng, Mingyi Su, Sahel Sharifymoghaddam, Yanxi Li, Haoran Hong,
+     Xinyu Shi, Xuye Liu, Nandan Thakur, Crystina Zhang, Luyu Gao, Wenhu Chen, and Jimmy
+     Lin. Browsecomp-plus: A more fair and transparent evaluation benchmark of deep-research
+     agent, 2025. URL https://arxiv.org/abs/2508.06600.
+
+
+                                                                                                   10
+ [4] Yize Cheng, Arshia Soltani Moakhar, Chenrui Fan, Parsa Hosseini, Kazem Faghih, Zahra Soda-
+     gar, Wenxiao Wang, and Soheil Feizi. Your LLM agents are temporally blind: The misalignment
+     between tool use decisions and human time perception. arXiv preprint arXiv:2510.23853, 2025.
+ [5] Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and Deshraj Yadav. Mem0:
+     Building production-ready ai agents with scalable long-term memory. arXiv preprint
+     arXiv:2504.19413, 2025.
+ [6] Xilin Dai, Zhijian Xu, Wanxu Cai, and Qiang Xu. From samples to scenarios: A new paradigm
+     for probabilistic forecasting. In The Fourteenth International Conference on Learning Repre-
+     sentations, 2026.
+ [7] Databricks. MemEx: A programmable scratchpad for LLM agents. https://www.
+     databricks.com/blog/memex-programmable-scratchpad-llm-agents, 2026. Ac-
+     cessed 2026.
+ [8] Zhaopeng Feng, Liangcai Su, Zhen Zhang, Xinyu Wang, Xiaotian Zhang, Xiaobin Wang,
+     Runnan Fang, Qi Zhang, Baixuan Li, Shihao Cai, et al. AgentSwing: Adaptive parallel context
+     management routing for long-horizon web agents. arXiv preprint arXiv:2603.27490, 2026.
+ [9] Mengkang Hu, Tianxing Chen, Qiguang Chen, Yao Mu, Wenqi Shao, and Ping Luo. Hiagent:
+     Hierarchical working memory management for solving long-horizon agent tasks with large lan-
+     guage model. In Proceedings of the 63rd Annual Meeting of the Association for Computational
+     Linguistics (Volume 1: Long Papers), pages 32779–32798, 2025.
+[10] Shuo Ji, Yibo Li, and Bryan Hooi. Memory is reconstructed, not retrieved: Graph memory for
+     llm agents, 2026. URL https://arxiv.org/abs/2606.06036.
+[11] Minki Kang, Wei-Ning Chen, Dongge Han, Huseyin A Inan, Lukas Wutschitz, Yanzhi Chen,
+     Robert Sim, and Saravan Rajmohan. Acon: Optimizing context compression for long-horizon
+     llm agents. arXiv preprint arXiv:2510.00615, 2025.
+[12] Vasilis Kontonis, Yuchen Zeng, Shivam Garg, Lingjiao Chen, Hao Tang, Ziyan Wang, Ahmed
+     Awadallah, Eric Horvitz, John Langford, and Dimitris Papailiopoulos. Memento: Teaching llms
+     to manage their own context. arXiv preprint arXiv:2604.09852, 2026.
+[13] Letta. Memory blocks: The key to agentic context management. https://www.letta.com/
+     blog/memory-blocks, 2025. Accessed 2026.
+[14] ChengYou Li, XiaoDong Liu, XiangBao Meng, and XinYu Zhao. Architecting agentos: From
+     token-level context to emergent system-level intelligence, 2026. URL https://arxiv.org/
+     abs/2602.20934.
+[15] Jiaqing Liang, Jinyi Han, Weijia Li, Xinyi Wang, Zhoujia Zhang, Zishang Jiang, Ying Liao,
+     Tingyun Li, Ying Huang, Hao Shen, et al. GenericAgent: A token-efficient self-evolving llm
+     agent via contextual information density maximization. arXiv preprint arXiv:2604.17091, 2026.
+[16] Yuxiang Lin, Zihan Wang, Mengyang Liu, Yuxuan Shan, Longju Bai, Junyao Zhang, Xing Jin,
+     Boshan Chen, Jinyan Su, Xingyao Wang, Jiaxin Pei, and Manling Li. Bagen: Are llm agents
+     budget-aware?, 2026. URL https://arxiv.org/abs/2606.00198.
+[17] Jiaqi Liu, Yaofeng Su, Peng Xia, Siwei Han, Zeyu Zheng, Cihang Xie, Mingyu Ding, and Huaxiu
+     Yao. SimpleMem: Efficient lifelong memory for llm agents. arXiv preprint arXiv:2601.02553,
+     2026.
+[18] Shukai Liu, Jian Yang, Bo Jiang, Yizhi Li, Jinyang Guo, Xianglong Liu, and Bryan Dai. Context
+     as a tool: Context management for long-horizon swe-agents. arXiv preprint arXiv:2512.22087,
+     2025.
+[19] Yijun Lu, Rui Ye, Yuwen Du, Jiajun Wang, Songhua Liu, and Siheng Chen. Longseeker: Elastic
+     context orchestration for long-horizon search agents. arXiv preprint arXiv:2605.05191, 2026.
+[20] Tony Mason. The missing memory hierarchy: Demand paging for llm context windows, 2026.
+     URL https://arxiv.org/abs/2603.09023.
+[21] Qirui Mi, Zhijian Ma, Mengyue Yang, Haoxuan Li, Yisen Wang, Haifeng Zhang, and Jun Wang.
+     Skill-pro: Learning reusable skills from experience via non-parametric ppo for llm agents, 2026.
+     URL https://arxiv.org/abs/2602.01869.
+[22] Grégoire Mialon, Clémentine Fourrier, Craig Swift, Thomas Wolf, Yann LeCun, and Thomas
+     Scialom. GAIA: A benchmark for general ai assistants. In Proceedings of the 12th International
+     Conference on Learning Representations (ICLR), 2024.
+
+
+                                                    11
+[23] Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G Patil, Ion Stoica,
+     and Joseph E Gonzalez. MemGPT: Towards llms as operating systems. arXiv preprint
+     arXiv:2310.08560, 2023.
+[24] Weiwei Sun, Miao Lu, Zhan Ling, Kang Liu, Xuesong Yao, Yiming Yang, and Jiecao Chen.
+     Scaling long-horizon llm agent via context-folding. arXiv preprint arXiv:2510.11967, 2025.
+[25] Nikhil Verma. Active context compression: Autonomous memory management in llm agents.
+     arXiv preprint arXiv:2601.07190, 2026.
+[26] Zhenting Wang, Huancheng Chen, Jiayun Wang, and Wei Wei. Memex (rl): Scaling long-
+     horizon llm agents via indexed experience memory. arXiv preprint arXiv:2603.04257, 2026.
+[27] Ian Wu, Yuxiao Qu, Amrith Setlur, and Aviral Kumar. Reasoning cache: Continual improvement
+     over long horizons via short-horizon rl. arXiv preprint arXiv:2602.03773, 2026.
+[28] Xixi Wu, Kuan Li, Yida Zhao, Liwen Zhang, Litu Ou, Huifeng Yin, Zhongwang Zhang, Xinmiao
+     Yu, Dingchu Zhang, Yong Jiang, et al. Resum: Unlocking long-horizon search intelligence via
+     context summarization. arXiv preprint arXiv:2509.13313, 2025.
+[29] Yong Wu, YanZhao Zheng, TianZe Xu, ZhenTao Zhang, YuanQiang Yu, JiHuai Zhu, Chao
+     Ma, BinBin Lin, BaoHua Dong, HangCheng Zhu, et al. Contextbudget: Budget-aware context
+     management for long-horizon search agents. arXiv preprint arXiv:2604.01664, 2026.
+[30] Binyan Xu, Xilin Dai, Di Tang, and Kehuan Zhang. One surrogate to fool them all: Universal,
+     transferable, and targeted adversarial attacks with clip. In Proceedings of the 2025 ACM SIGSAC
+     Conference on Computer and Communications Security, pages 3087–3101, 2025.
+[31] Binyan Xu, Fan Yang, Xilin Dai, Di Tang, and Kehuan Zhang. Clip-guided backdoor de-
+     fense through entropy-based poisoned dataset separation. In Proceedings of the 33rd ACM
+     International Conference on Multimedia, pages 7415–7423, 2025.
+[32] Binyan Xu, Xilin Dai, Fan Yang, and Kehuan Zhang. When agent automation becomes
+     profitable: Quantifying and insuring autonomous ai risk through trace-economic underwriting.
+     arXiv preprint arXiv:2606.16465, 2026.
+[33] Binyan Xu, Xilin Dai, and Kehuan Zhang. Contextual agentic memory is a memo, not true
+     memory. arXiv preprint arXiv:2604.27707, 2026.
+[34] Binyan Xu, Dong Fang, Haitao Li, and Kehuan Zhang. From multi-agent to single-agent: When
+     is skill distillation beneficial? arXiv preprint arXiv:2604.01608, 2026.
+[35] Binyan Xu, Fan Yang, Xilin Dai, Di Tang, and Kehuan Zhang. From internal diagnosis to
+     external auditing: A vlm-driven paradigm for online test-time backdoor defense. arXiv preprint
+     arXiv:2601.19448, 2026.
+[36] Binyan Xu, Fan Yang, Di Tang, Xilin Dai, and Kehuan Zhang. Breaking the stealth-potency
+     trade-off in clean-image backdoors with generative trigger optimization. In Proceedings of the
+     AAAI Conference on Artificial Intelligence, volume 40, pages 27197–27205, 2026.
+[37] Ke Yang, Zixi Chen, Xuan He, Jize Jiang, Michel Galley, Chenglong Wang, Jianfeng Gao,
+     Jiawei Han, and ChengXiang Zhai. PlugMem: A task-agnostic plugin memory module for llm
+     agents, 2026. URL https://arxiv.org/abs/2603.03296.
+[38] Howard Yen, Ashwin Paranjape, Mengzhou Xia, Thejas Venkatesh, Jack Hessel, Danqi Chen,
+     and Yuhao Zhang. Lost in the maze: Overcoming context limitations in long-horizon agentic
+     search. arXiv preprint arXiv:2510.18939, 2025.
+[39] Lu Yi, Runlin Lei, Liuyi Yao, Yuexiang Xie, Yuyang Li, Wenhao Zhang, Zhewei Wei, Yaliang
+     Li, and Jian-Yun Nie. Learning agent-compatible context management for long-horizon tasks.
+     arXiv preprint arXiv:2605.30785, 2026.
+[40] Yi Yu, Liuyi Yao, Yuexiang Xie, Qingquan Tan, Jiaqi Feng, Yaliang Li, and Libing Wu. Agentic
+     memory: Learning unified long-term and short-term memory management for large language
+     model agents. arXiv preprint arXiv:2601.01885, 2026.
+[41] Weihao Zeng, Yuzhen Huang, and Junxian He. LOCA-bench: Benchmarking language agents
+     under controllable and extreme context growth. In Proceedings of the 43rd International
+     Conference on Machine Learning (ICML), 2026.
+
+
+                                                    12
+[42] Haoxiang Zhang, Qixin Xu, Zhuofeng Li, Lei Zhang, Pengcheng Jiang, Yu Zhang, and Julian
+     McAuley. Masking stale observations helps search agents–until it doesn’t: A regime map and
+     its mechanism. arXiv preprint arXiv:2606.00408, 2026.
+[43] Haozhen Zhang, Haodong Yue, Tao Feng, Quanyu Long, Jianzhu Bao, Bowen Jin, Weizhi Zhang,
+     Xiao Li, Jiaxuan You, Chengwei Qin, and Wenya Wang. Learning query-aware budget-tier
+     routing for runtime agent memory, 2026. URL https://arxiv.org/abs/2602.06025.
+[44] Yuxiang Zhang, Jiangming Shu, Ye Ma, Xueyuan Lin, Shangxi Wu, and Jitao Sang. Memory
+     as action: Autonomous context curation for long-horizon agentic tasks. In Findings of the
+     Association for Computational Linguistics: ACL 2026, pages 19149–19164, 2026.
+[45] Yujie Zhao, Boqin Yuan, Junbo Huang, Haocheng Yuan, Zhongming Yu, Haozhou Xu, Lanxiang
+     Hu, Abhilash Shankarampeta, Zimeng Huang, Wentao Ni, et al. AMA-bench: Evaluating long-
+     horizon memory for agentic applications. In Proceedings of the 43rd International Conference
+     on Machine Learning (ICML), 2026.
+[46] Chenyu Zhou, Huacan Chai, Wenteng Chen, Zihan Guo, Rong Shan, Yuanyi Song, Tianyi Xu,
+     Yingxuan Yang, Aofan Yu, Weiming Zhang, Congming Zheng, Jiachen Zhu, Zeyu Zheng, Zhu-
+     osheng Zhang, Xingyu Lou, Changwang Zhang, Zhihui Fu, Jun Wang, Weiwen Liu, Jianghao
+     Lin, and Weinan Zhang. Externalization in llm agents: A unified review of memory, skills,
+     protocols and harness engineering, 2026. URL https://arxiv.org/abs/2604.08224.
+
+
+
+
+                                                  13
+A    Proof of Proposition 1
+We restate the setting. The history holds N blocks X1 , . . . , XN , each an independent string of k
+uniformly random bits, so H(Xi ) = k and the Xi are mutually independent. A non-recovering
+method holds a pre-reveal in-prompt state R with H(R) ≤ B. The state R is a function of the blocks
+and the method’s internal randomness, formed before the query index i⋆ is revealed, and i⋆ is drawn
+uniformly on {1, . . . , N } independently of everything else. After the reveal the method outputs a
+guess g(R, i⋆ ), and it is correct when g(R, i⋆ ) = Xi⋆ .
+      (i)
+Let Pe    = Pr[g(R, i) ̸= Xi ] and let the reported success probability be 1 − Pe with Pe =
+1
+  PN       (i)                              ⋆
+N    i=1 Pe , the average over the uniform i .
+
+
+Step 1: per-block Fano bound. Fix a block i. Since Xi is uniform on an alphabet of size 2k ,
+Fano’s inequality applied to the estimator g(R, i) gives
+                                           
+                  H(Xi | R) ≤ Hb Pe(i) + Pe(i) log2 (2k − 1) ≤ 1 + Pe(i) k,
+where Hb is the binary entropy function, bounded by 1.
+
+Step 2: independence
+            P        couples the blocks to a budget. Because the Xi are mutually independent,
+                                                                                  P
+H(X1:N ) = i H(Xi ), and subadditivity of conditional entropy gives H(X1:N | R) ≤ i H(Xi |
+R). Hence
+                           N
+                           X                     X                     
+                                 I(Xi ; R) =         H(Xi ) − H(Xi | R)
+                           i=1                   i
+                                            ≤ H(X1:N ) − H(X1:N | R)
+                                            = I(X1:N ; R) ≤ H(R) ≤ B.
+                                                                            (i)
+Step 3: combine.     Using I(Xi ; R) = k − H(Xi | R) ≥ k − 1 − Pe k from Step 1 and summing,
+                               N
+                               X
+                        B≥           I(Xi ; R)
+                               i=1
+                               N
+                               X                                           N
+                                                                           X
+                                      k − 1 − Pe(i) k                            Pe(i) .
+                                                        
+                           ≥                                = Nk − N − k
+                               i=1                                         i=1
+                                             (i)
+Dividing by N k and using Pe = N1
+                                        P
+                                          i Pe ,
+                                                          1   B
+                                                        Pe ≥ 1 −
+                                                            −   ,
+                                                          k Nk
+                                                        B   1
+                                 Pr[correct] = 1 − Pe ≤   + .
+                                                        Nk k
+VISTA attains probability one. VISTA writes each block to external storage as an exact transcript
+and keeps only a compact handle in the prompt. The pre-reveal prompt holds the instruction and N
+handles, whose size is O(N log N ) rather than O(N k). Once i⋆ is revealed, the agent reads payload
+i⋆ and recovers Xi⋆ byte for byte. Whenever the instruction, the handles, and one recovered block fit
+within B, the method emits Xi⋆ exactly, so its success probability is 1. Subtracting the two bounds,
+the success gap is at least 1 − NBk − k1 , which tends to 1 as N → ∞ for fixed B and growing k.
+
+B    Method Capability Comparison
+Table 4 summarizes the evaluated baselines and the learned-compression family against the design
+properties of Section 3. It isolates the two properties that distinguish VISTA: an agent-facing context
+dashboard and byte-exact recovery of externalized evidence. The marks are a coarse capability
+summary rather than a performance claim, and partial marks reflect mechanisms that hold the
+property only in part, such as Claude Code, which keeps files on disk but still summarizes the active
+context.
+
+
+                                                             14
+ Method                        Training-free   Model-agnostic   Agent-controlled   Exact recovery   Context dashboard
+ ReAct (append until trunca-        ✓                ✓                 ✗                 ✗                 ✗
+ tion)
+ Tool-result clearing               ✓                ✓                 ✗                 ✗                 ✗
+ Stale-observation masking          ✓                ✓                 ✗                 ✗                 ✗
+ SLIM                               ✓                ✓                 ∼                 ✗                 ✗
+ Active Context Compression         ✓                ✓                 ✓                 ✗                 ✗
+ Skeleton compression               ✓                ✓                 ✗                 ✗                 ✗
+ Claude Code                        ✓                ∼                 ✓                 ∼                 ✗
+ Learned compression (CAT,          ✗                ✗                 ✓                 ✗                 ✗
+ RL budget)
+ Context-Folding                    ✗                ✗                 ✓                 ✗                 ✗
+ LongSeeker                         ✗                ✗                 ✓                 ✗                 ✗
+ GenericAgent                       ✗                ✗                 ✓                 ✗                 ✗
+ VISTA (ours)                       ✓                ✓                 ✓                 ✓                 ✓
+
+Table 4: Method capability comparison. Capability summary against the design properties of Section 3;
+VISTA uniquely combines agent-facing state with exact recovery.
+
+
+C    Implementation Details
+
+This section reports the exact run configuration, the verbatim prompt the agent receives, the dashboard
+format, and the context tool definitions, so the setting can be reproduced without access to our harness.
+
+Benchmark setting. LOCA-Bench evaluates online tool agents under controllable context growth:
+the agent must continue acting while earlier reasoning, tool calls, and observations remain in or are
+externalized from the working context. We evaluate 75 task configurations; unless otherwise stated,
+accuracy is solved tasks over all 75, with errors and timeouts counted as failures. AMA-Bench is
+used as a secondary generalization benchmark. Its episodes provide a completed trajectory and ask
+questions about past events, causal relations, and state changes. This is not the native setting for
+VISTA; it tests whether the same context-management layer can serve as a memory system when a
+trajectory is fed into it before question answering.
+
+Run configuration. VISTA is integrated into the LOCA-Bench harness and invoked as a strat-
+egy (loca run -s self_managed) with no training and no per-model tuning. The main results
+use gemini-3-flash at a 128K budget (max-context-size = 128,000); the cross-backbone runs
+reuse the same strategy unchanged on claude-sonnet-4-5, deepseek-v4-pro (open-weight), and
+glm-5 (open-weight). Two flags define the full method: SM_STRICT_LONG_CONTEXT=1 enforces a
+hard budget rather than a soft warning, and SM_BETTER_DASHBOARD=1 selects the factual ledger dash-
+board below. The ablations toggle single flags from this base, for example SM_DISABLE_ARCHIVE,
+SM_DISABLE_AGENT_ARCHIVE (fixed archive policy), and SM_ENABLE_STATE_BOARD (status-board
+variant). Per-task timeout is 1800 seconds and reasoning effort is medium across all backbones.
+
+Baseline definitions. We organize the LOCA-Bench baselines by who makes the keep-or-drop
+decision. Fixed external policies include ReAct, which appends until truncation; Tool-result Clearing,
+which removes old tool-result/tool-call pairs after the prompt crosses a threshold; and fixed stale
+masking, which masks old tool observations while preserving the assistant reasoning and tool-
+call skeleton. Agent-mediated baselines still reduce context irreversibly. SLIM [38], reproduced
+from its public release, periodically summarizes older context once the budget is exceeded. Active
+Context Compression [25] asks the agent to write and prune its own knowledge blocks. A structured-
+compression baseline preserves a compact skeleton of prior context, following the design of context-as-
+a-tool compressors [18]. Learned members of this family generally do not release trained checkpoints
+and, in many cases, do not release code, so we reproduce the training-free methods directly and
+follow the published inference-time design for the rest rather than a trained policy. Claude Code is the
+Claude Code command-line agent at the CLI release of May 6, 2026, included as a strong practical
+agent with mature tool-use and context-handling heuristics. These baselines cover deletion, masking,
+summarization, self-compression, and structured compression. None combines agent-facing context-
+state metadata with exact evidence recovery. On AMA-Bench, the EMem-style and Mem0-style rows
+are local adapters implemented for this harness and should be read as engineering baselines rather
+than official reproductions.
+
+
+                                                                15
+Baseline reproduction details. SLIM and Active Context Compression are faithful reproductions
+of training-free published methods, run with the procedure described by their authors and triggered at
+the same 128K budget used for every method. SLIM periodically summarizes older context once
+the budget is exceeded, and Active Context Compression runs the explore, write a knowledge block,
+then prune the raw history loop. The structured-compression baseline is inspired by context-as-a-tool
+compressors rather than a faithful reimplementation, since that method is learned and we run no
+trained policy. Across all baselines we vary only the context-management mechanism and hold the
+agent loop, tools, budget, backbone, and scoring fixed, so accuracy differences reflect the context
+policy rather than the surrounding harness.
+
+Context-management protocol. The agent receives the following instruction block appended to
+the task prompt, together with a budget notice. It is identical across backbones.
+  Context-management protocol (verbatim)
+
+  CONTEXT MANAGEMENT PROTOCOL:
+  A <context_workspace_status> dashboard is shown every turn as a compact map of
+  context blocks. Use context tools only when clearly needed. Do not archive,
+  delete, or offload content solely because it is old, large, or listed in context
+  metadata; leave content visible when the context budget is sufficient. Large
+  payloads may be represented by placeholders; inspect originals only when needed.
+  Use ordinary file/terminal/python tools, source metadata, and any in-context
+  payload placeholders to inspect external evidence when details are needed. For
+  structured data or calculations, use the source file, source tool, or query
+  directly. Do not copy table, CSV, or JSON rows from the conversation into code.
+
+
+
+  You need to complete the task within the following context window size:
+  <budget:token_budget>128000</budget:token_budget>
+
+
+
+Dashboard format. Each turn the harness injects a <context_workspace_status> block. It is
+a budget bar followed by one ledger row per block, with columns ID, approximate tokens, age (root-
+turn distance, where 0r is newest), type, compression level, parent, and status (visible, pinned,
+archived, or offloaded_placeholder). The instance below shows the same compact column
+subset used in Figures 1 and 2; the full renderer additionally prints the compression Level and Parent
+columns described above.
+  Dashboard instance shown to the agent
+
+  ## Context Budget
+  [############--------] 62% (~79,400 / 128,000 tokens)
+    overhead ~6,200 | conversation ~71,900 | dashboard ~1,300
+
+  ## Context Blocks (Age = root-turn distance; 0r newest)
+  ID     ~Tok   Age Type                Status
+  ------------------------------------------------
+  B1       120   8r user_message        pinned
+  B2    18,400   7r tool_call           archived
+  B3     2,150   6r assistant_message visible
+  B5    14,800   3r tool_call           visible
+  B6     9,300   2r tool_call           visible
+  B9     1,070   0r assistant_message visible
+
+
+
+Context tool definitions. The agent acts on the workspace with two tools. Archiving replaces a
+block with a compact handle and returns the payload file path; the agent recovers byte-exact content
+by reading that path with ordinary file or terminal tools, so recovery is a normal read rather than a
+dedicated decompressor.
+  Context tool definitions (docstrings)
+
+  context_workspace_archive(block_id: str, replacement: str = "") -> str
+    Replace one or more blocks with compact indexes. The original content is
+    stored externally as a payload file. Operations are block-level: only listed
+
+
+
+                                                       16
+                    60
+                                                                      +8.0 over                                          175
+                                                                     Claude Code            50.7                                                                              Claude Code
+                    50
+                                                                                    42.7                                 150
+
+
+
+
+ LOCA success (%)                                                                                     Avg steps / task
+                    40                                                   36.0
+                                                              33.3                                                       125
+                                               28.0   29.3
+                    30              26.7                                                                                 100
+                             22.7
+                                                                                                                                                          SLIM
+                    20                                                                                                   75 Tool clear Active Comp.
+                                                                                                                                                    Stale mask
+                                                                                                                                     Skeleton               cheaper
+                    10                                                                                                   50                           ReAct
+
+                                                                                                                         25                     VISTA
+                    0
+                            ReAct   Tool      Stale   SLIM Skeleton Active         Claude VISTA                                  2              3          4          5          6            7
+                                    clear     mask                  Comp.           Code
+                                                                                                                                                      Avg tokens / task (M)
+                                           (a) Accuracy: tasks solved at 128K                                                                    (b) Cost: lower-left is cheaper
+                          Figure 8: Expanded LOCA result at 128K. Tasks solved, tokens, and steps for LOCA-Bench.
+
+   Family                                   Method                              Correct    Acc.    Timeout                     Error      Steps     Tokens                Mgmt. events      Notes
+   No CM                                    ReAct                                   17     22.7                 0                 0        54.6         3.51M                636 trims      full 75
+   Deletion                                 Tool-result Clearing                    20     26.7                 0                 0        72.9         2.60M             1,968 clears      full 75
+   Masking                                  Fixed stale masking                     21     28.0                 –                 –        61.0         3.32M                        –      full 75
+   Summary                                  SLIM                                    22     29.3                 –                 –        77.9         3.76M                        –      full 75
+   Self-compression                         Active Context Compression              27     36.0                 –                 –        65.8         3.20M                        –      full 75
+   Structured compression                   Skeleton compression                    25     33.3                 –                 –        60.5         2.84M                        –      full 75
+   Agent CLI                                Claude Code                             32     42.7                 0                22       171.5         6.72M                        –      full 75
+   Ours                                     VISTA                                   38     50.7                20                 0        36.4         2.86M    69 archive / 105 read      full 75
+
+Table 5: Dense LOCA run ledger. 128K main comparison with execution cost and method-specific context-
+management events.
+
+                                                Comparison                                        Both Base. VISTA Neither
+                      Fixed stale masking         18       3       20        34
+                      SLIM                        17       5       21        32
+                      Active Context Compression  20       7       18        30
+                      Claude Code                 25       7       13        30
+Table 6: Outcome transitions. Pairwise 128K LOCA-Bench split against each baseline: both solve, baseline-
+only, VISTA-only, and neither.
+
+
+                     block IDs are archived. Returns the payload file path for later recovery.
+                       block_id:    Block IDs, ranges, or group IDs, e.g. "B3", "B3,B4",
+                                    "B10-B20", or "G2".
+                       replacement: Short index text for the archived block(s).
+
+                context_workspace_delete(block_id: str, reason: str) -> str
+                  Permanently remove one or more blocks. Deleted content cannot be recovered.
+                    block_id: Block IDs, ranges, or group IDs.
+                    reason:   Short reason why the content has no future task value.
+
+
+Large tool results are stored as external transcript payloads with compact placeholders. These
+payloads record what a tool returned to the model, not a complete source database; if a transcript is
+truncated or paginated, the agent must query the original source tool for complete data.
+
+
+D                        Evaluation Details
+
+For LOCA-Bench, we use the independently released public task suite and evaluation protocol without
+modification. It contains 75 online tool-task configurations with controllable context growth, where
+prior reasoning, tool calls, and observations accumulate until context management becomes central.
+We report task success, count errors and timeouts as incorrect, and compute average steps and tokens
+over task rows present in each run log. These cost values therefore describe observed execution cost
+rather than normalized cost conditional on success. They also do not model downstream economic
+exposure or insurance-style trace risk [32], or probabilistic forecasting settings that turn samples into
+scenarios [6]. We additionally log archive and recover/read events for VISTA variants.
+Figure 8 and Table 5 expand the 128K LOCA-Bench comparison, Table 6 gives the pairwise rescued-
+task split, and Table 7 gives exact counts for the context-growth sweep in Figure 3.
+
+
+                                                                                                    17
+                     Method     Setting      Success   Avg. steps          Avg. tok.    Notes
+                     VISTA      8K              82.7           16.7          0.44M      complete
+                     VISTA      16K             84.0           16.2          0.52M      complete
+                     VISTA      32K             70.7           17.4          0.87M      complete
+                     VISTA      64K             61.3           21.2          1.38M      complete
+                     VISTA      96K             57.3           29.7          2.32M      complete
+                     VISTA      128K            50.7           36.4          2.86M      complete
+                     VISTA      256K            32.0           43.1          3.51M      complete
+                     ReAct      8K              84.0           27.9          0.68M      complete
+                     ReAct      16K             74.7           24.9          0.80M      complete
+                     ReAct      32K             65.3           25.3          1.02M      complete
+                     ReAct      64K             52.0           29.6          1.70M      complete
+                     ReAct      96K             36.0           39.5          2.79M      complete
+                     ReAct      128K            22.7           54.2          3.51M      complete
+                     ReAct      256K            12.0           82.6          5.80M      complete
+        Table 7: Observed pressure sweep. Matched VISTA and ReAct runs over the full 75-task suite.
+
+              Embodied          Game             OpenQA             Software            Text2SQL            Web
+ Method      Acc.     F1      Acc.   F1         Acc.    F1         Acc.      F1        Acc.     F1       Acc.   F1
+ AMA        0.678    0.489   0.814   0.407     0.817   0.249       0.565     0.150     0.838    0.395   0.782   0.272
+ VISTA      0.683    0.525   0.747   0.443     0.731   0.386       0.567     0.238     0.846    0.384   0.763   0.341
+Table 8: AMA domain breakdown. By-domain accuracy and F1 for AMA and VISTA memory adaptation.
+
+ Case                  Baselines failed         VISTA steps     Archive/read         evi-   Evaluation signal
+                                                                dence
+ NHL B2B sched-        ReAct,    Tool-clear,             64     5 archive calls; 17         CSV and Google Sheet
+ ule analysis          SLIM                                     payload reads/uses          correct; HA/AH/HH/AA
+                                                                                            counts verified
+ WooCommerce           ReAct, Claude-style,              38     4 archive calls; 3          Correct products moved;
+ low-selling prod-     Tool-clear, SLIM                         payload reads/uses          subscriber emails sent
+ ucts
+ Canvas final-exam     ReAct, Claude-style,              17     1 archive call for          Final Excel schedule ac-
+ schedule              Tool-clear, SLIM                         course announce-            cepted
+                                                                ments
+ NLP course re-        ReAct, Claude-style,              31     1 archive call for          Correct students emailed;
+ minders               Tool-clear, SLIM                         large roster table          dropped/submitted    stu-
+                                                                                            dents excluded
+Table 9: Rescued-task case studies. Tasks VISTA solves where multiple baselines fail, with archive and
+payload-use counts.
+
+
+For BrowseComp-Plus, we evaluate deep-research retrieval with DeepSeek-V4-Pro on an N =150
+subset and report judged Pass@1 with one sampled answer. The agent searches a fixed corpus, so
+evidence is scattered across retrieved passages and the transcript grows through repeated retrieval. To
+expose context management, we use a deliberately tight active window (W =12K tokens per call)
+and total budget (B=160K), chosen so early evidence can be evicted before synthesis.
+For GAIA, we use a fixed random 165-question subset of the public validation split. We preserve
+the original question text and attached files, require the official FINAL ANSWER: format, and score
+with quasi-exact match. All methods use DeepSeek-V4-Pro, real web/search/file tools, W =12K, and
+B=80K.
+For AMA-Bench, each of the 208 episodes contains 12 open-ended questions, giving 2496 judged
+QA pairs. We report judge accuracy and token-level F1 following the benchmark harness. Runtime
+per episode is measured for generation; judge time is reported separately in the analysis files.
+
+
+E    Limitations
+
+VISTA supplies the missing proprioceptive signals, but it does not guarantee the agent uses them
+well. A model can still misread the dashboard, archive evidence it later needs, or recover a payload
+too late. The elicitation view also predicts a floor: a model with little latent context-management skill
+
+
+                                                              18
+has little for the interface to unlock, and GLM-5 gains least. We test four backbones; mapping the
+low-capability end of this curve remains open.
+VISTA is complementary to post-training rather than an alternative to it. Training improves what an
+agent does with context-state information, while the dashboard supplies information that is absent
+from the prompt. We do not combine VISTA with post-training, richer metadata such as predicted
+relevance, or learned context-management policies such as learned compression managers or memory-
+action policies [39, 40, 44]; nor do we test whether skills distilled from multi-agent systems change
+how a single agent uses the dashboard [34]. Finally, the EMem-style and Mem0-style AMA-Bench
+rows are local adapters rather than official implementations, so they support diagnosis but are not final
+claims against those systems; AMA-Bench remains a transfer test rather than a primary benchmark.
+
+F    Security Non-Goals
+Our experiments do not model malicious documents, malicious tool outputs, or prompt-injection
+attempts that try to manipulate archive and recovery decisions. Those settings concern attack
+and defense objectives rather than the context-state observability studied here. Related security
+directions include transferable adversarial inputs [30], clean-image backdoor attacks [36], poisoned-
+data separation for backdoor defense [31], and online test-time backdoor auditing [35].
+
+G    Proprioceptive-Blindness Diagnostic
+This appendix documents the diagnostic behind Table 3. The goal is to measure directly whether a
+backbone can read its own context state, separating perception from skill.
+
+Data. We anchor on the first archive event of each real LOCA-Bench run, the moment the agent
+itself decided to externalize content. We take the accumulated transcript just before that call as
+the snapshot, treating each message as one block. The runtime dashboard is not persisted in the
+transcript, so the stored messages are already free of the live ledger; we additionally strip the three
+injected artifacts that would leak state, namely the context-management protocol header, the hard-
+limit rejection notices that print token counts, and archived-block placeholders. A scan over all
+anchored snapshots confirms no residual token, budget, or usage strings remain, and there is no
+per-block usage annotation. Twenty-nine runs contain an archive; we cap each snapshot at 100K
+tokens by dropping trailing blocks so it fits every backbone window, and compute ground truth with
+the same tokenizer used by the harness.
+
+Questions and conditions. We ask four quantities,
+each in its own request so the measurements stay in-                                                            Self-estimate vs. truth, no dashboard
+dependent. Total size: estimate the token count of                                                     Gemini-3-Flash
+                                                                                                       Claude-Sonnet-4.5
+the whole transcript. Block size: estimate the token                                                   DeepSeek-V4-Pro                                                      )
+                                                                                             250       GLM-5                                                          y   =x
+count of four sampled blocks. Pairwise: for sam-                                                                                                            fe   ct (
+                                                                                                                                                        per
+
+
+
+
+                                                            model self-estimate (K tokens)
+pled block pairs, say which is larger, reported on                                           200
+the hard subset within 2× in true size. Recency: a
+quoted passage is shown and the model states how                                             150
+many model turns ago it appeared; for this question
+the transcript is rendered without block identifiers                                         100
+so the model is not handed an ordinal index, and
+the passage is verified unique. The −dash condition                                           50
+shows the cleaned transcript only; the +dash con-
+dition prepends the factual ledger (the columns of                                             0
+                                                                                                   0       50          100        150          200      250
+the implementation-details appendix). Size answers                                                                    true context size (K tokens)
+are scored as median relative error and pairwise as        Figure 9: Proprioceptive-blindness diagnostic.
+accuracy against the larger block. We run Gemini-          Without the dashboard, self-estimated context size
+3-Flash, Claude-Sonnet-4.5, DeepSeek-V4-Pro, and           is poorly calibrated; the factual ledger closes the
+GLM-5 with greedy decoding. Claude-Sonnet-4.5              gap.
+returns valid structured output slightly less often than
+the other three, but the qualitative gap and its closure
+with the dashboard hold for every backbone.
+
+
+                                                       19
+
