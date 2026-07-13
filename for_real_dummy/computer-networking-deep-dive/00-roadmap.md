@@ -57,7 +57,7 @@
 | 08 | IV | HTTPS与TLS | [08-https-and-tls.md](08-https-and-tls.md) | 6 | ✅ 已完成(6个`.venv`代码块通过,含[KP2]用MemoryBIO真实测出1.2=2次往返/1.3=1次往返,[KP2/KP6]各附WSL2真实openssl s_client证据) |
 | 09 | IV | DNS域名解析 | [09-dns-resolution.md](09-dns-resolution.md) | 6 | ✅ 已完成(6个`.venv`代码块通过,全部用模拟层级/虚构域名验证,不引入外部网络依赖) |
 | 10 | IV | 现代应用协议与API | [10-modern-app-protocols-and-apis.md](10-modern-app-protocols-and-apis.md) | 7 | ✅ 已完成(7个`.venv`代码块通过,KP7一致性哈希交叉引用dsa-deep-dive 20类不重复推导;板块IV全部完成) |
-| 11 | V 现代网络与工程场景 | 网络编程与IO模型 | [11-network-programming-and-io-models.md](11-network-programming-and-io-models.md) | 7 | ⏳ 未开始 |
+| 11 | V 现代网络与工程场景 | 网络编程与IO模型 | [11-network-programming-and-io-models.md](11-network-programming-and-io-models.md) | 7 | ✅ 已完成(5个`.venv`代码块通过,1点[KP6]为`python-wsl2`标记[Windows loopback无法复现真实背压阻塞,WSL2已单独验证],1点[KP7]为真实tcpdump抓包逐行解读,不含代码块;[KP5]附WSL2 strace真实系统调用证据) |
 | 12 | V | 现代网络专题 | [12-modern-networking-topics.md](12-modern-networking-topics.md) | 6 | ⏳ 未开始 |
 | 13 | 收尾 | 模拟终面capstone | [13-mock-interview-capstone.md](13-mock-interview-capstone.md) | —(不计入合计) | ⏳ 未开始 |
 
