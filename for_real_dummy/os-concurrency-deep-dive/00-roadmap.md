@@ -53,7 +53,7 @@
 | 07 | III | 内存分配与页面置换 | [07-memory-allocation-and-page-replacement.md](07-memory-allocation-and-page-replacement.md) | 7 | ✅ 已完成(7个`.venv`代码块全部通过) |
 | 08 | IV IO模型与进程间通信 | IO模型演进 | [08-io-models.md](08-io-models.md) | 8 | ✅ 已完成(6个`.venv`+3个WSL2真实select/poll/epoll验证,均通过) |
 | 09 | IV | 进程间通信IPC | [09-ipc.md](09-ipc.md) | 7 | ✅ 已完成(3个`.venv`+4个WSL2真实验证,含ctypes直调msgget/msgsnd/msgrcv,均通过) |
-| 10 | V 文件系统与现代系统专题 | 文件系统基础 | [10-filesystem-foundations.md](10-filesystem-foundations.md) | 6 | ⏳ 未开始 |
+| 10 | V 文件系统与现代系统专题 | 文件系统基础 | [10-filesystem-foundations.md](10-filesystem-foundations.md) | 6 | ✅ 已完成(1个`.venv`+4个WSL2真实验证+1点概念性讲解,均通过) |
 | 11 | V | 现代系统专题 | [11-modern-systems-topics.md](11-modern-systems-topics.md) | 7 | ⏳ 未开始 |
 | 12 | 收尾 | 模拟终面capstone | [12-mock-interview-capstone.md](12-mock-interview-capstone.md) | —(不计入合计) | ⏳ 未开始 |
 
