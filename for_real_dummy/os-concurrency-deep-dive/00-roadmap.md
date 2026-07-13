@@ -55,7 +55,7 @@
 | 09 | IV | 进程间通信IPC | [09-ipc.md](09-ipc.md) | 7 | ✅ 已完成(3个`.venv`+4个WSL2真实验证,含ctypes直调msgget/msgsnd/msgrcv,均通过) |
 | 10 | V 文件系统与现代系统专题 | 文件系统基础 | [10-filesystem-foundations.md](10-filesystem-foundations.md) | 6 | ✅ 已完成(1个`.venv`+4个WSL2真实验证+1点概念性讲解,均通过) |
 | 11 | V | 现代系统专题 | [11-modern-systems-topics.md](11-modern-systems-topics.md) | 7 | ✅ 已完成(1个`.venv`+2个WSL2真实验证+4点概念性讲解如实标注环境限制,均通过) |
-| 12 | 收尾 | 模拟终面capstone | [12-mock-interview-capstone.md](12-mock-interview-capstone.md) | —(不计入合计) | ⏳ 未开始 |
+| 12 | 收尾 | 模拟终面capstone | [12-mock-interview-capstone.md](12-mock-interview-capstone.md) | —(不计入合计) | ✅ 已完成(真实生成日志,独立重跑3次场景稳定复现) |
 
 **预计合计:约 80 个知识点(±10~15% 浮动),11 个分类文件 + 1 篇模拟终面 capstone。** 数字标"约",最终以全库自查的精确计数为准(参照 statistics-deep-dive"先估后核"先例)。
 
