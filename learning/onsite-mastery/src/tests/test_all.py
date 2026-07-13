@@ -55,11 +55,21 @@ MODULES = [
     "staff_gauntlet.gate9_domestic_senior_socialhire",
     "staff_gauntlet.gate10_leveling_negotiation",
     "staff_gauntlet.gate11_hpc_cluster_infra",
+    # Social Hire Gauntlet:按国内大厂资深社招面试关卡阶段组织的训练营(8关)
+    "social_hire_gauntlet.gate1_project_deep_dive_impact",
+    "social_hire_gauntlet.gate2_coding_ai_cheating_era",
+    "social_hire_gauntlet.gate3_debugging_round",
+    "social_hire_gauntlet.gate4_system_design_ownership",
+    "social_hire_gauntlet.gate5_cross_review_committee",
+    "social_hire_gauntlet.gate6_leaving_and_negotiation",
+    "social_hire_gauntlet.gate7_background_check_honesty",
+    "social_hire_gauntlet.gate8_reverse_questions_and_onboarding",
     # 聚合汇总校验
     "ai_deep",
     "backend_deep",
     "frontier_deep",
     "staff_gauntlet",
+    "social_hire_gauntlet",
 ]
 
 
