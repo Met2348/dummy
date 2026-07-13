@@ -32,6 +32,10 @@
 | `tier3_social_hire/sc_se_tech_debt_engineering_culture_judgment.py` | 重写vs渐进重构、技术债务优先级、团队规模流程调整、测试文化推动、遗留系统接手 | 14 |
 | `tier3_social_hire/sc_se_delivery_release_judgment.py` | 灰度vs蓝绿vs滚动更新、DORA指标误用、Blameless Postmortem、跨团队依赖协调、数据库迁移顺序 | 14 |
 
+## 新增:本科课件式完整教材
+
+老手进一步反馈:即便加了 `explain` 字段,108个知识点的追问链结构本质上仍然是"直接上面试",对完全没系统学过的人不够。因此新增 `lectures/01-textbook.md`——一份约24万字符、七章的完整教材式讲义,按 SDLC与需求工程→版本控制与CI/CD→测试方法论→架构与模块化→代码质量与重构→技术债务与工程文化判断→交付与发布策略判断的顺序,用连贯的教科书叙述(引言/核心概念展开/场景走查/常见误区/小结)系统教会每个主题,不是知识点罗列或追问链。**建议学习顺序:先读完 `01-textbook.md` 建立系统认知,再回到下面的 DeepPoint/ScenarioPoint 用追问链和场景判断检验"是否真的能被追问住"。**
+
 ## 数据结构:DeepPoint + ScenarioPoint(新增 explain 字段)
 
 ```python

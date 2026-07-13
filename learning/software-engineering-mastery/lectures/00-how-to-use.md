@@ -1,5 +1,7 @@
 # Software Engineering Mastery 使用说明
 
+> **先读 `01-textbook.md`**:那是老手要求补充的本科课件式完整教材(七章、连贯教科书叙述),本页只是DeepPoint/ScenarioPoint追问链的使用说明,建议在读完教材之后再来这里练习追问链。
+
 ## 为什么这次多了一个 `explain` 字段
 
 老手指出用户 EE 转 NLP/LLM 背景,缺少科班 CS 学生默认已掌握的软件工程/设计模式/数据库/网络/操作系统基础知识,特别嘱咐"因为没有系统学过,所以要讲仔细"。这和此前 `foundation-model-mastery`/`federated-learning-mastery`/`diffusion-mastery` 三个专题的性质不同——那三个专题用户本身已有研究生级基础,只需要把已懂的东西整理成"能被追问三层还接得住"的面试话术;这五个 CS 基础专题是**从零学**,所以每个知识点先给一段系统性的 `explain` 讲解,再接追问链或场景判断,练习时**不要跳过 explain 直接看 chain**——追问链的第二三层经常假设你已经理解了 explain 里讲的机制。
