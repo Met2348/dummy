@@ -40,9 +40,9 @@
 | 05 | distributed-inference(分布式推理) | [05-distributed-inference.md](05-distributed-inference.md) | 9 | ✅ 已完成(已验证,9/9 可运行例子干净进程重跑通过;**核心发现**:`pp_demo.py::gpipe_bubble()` 公式只在 `n_stages=2` 时凑巧对,其余 15/18 组测试参数全部系统性低估真实 bubble(用 `schedule_naive()` 自己渲染的调度网格逐格计数验证地面真相,严谨公式 `(n_stages-1)/(n_micro+n_stages-1)` 全部吻合,`n_stages=6,micro=4` 时代码给 29.4% 而真相是 55.6%,几乎差一半);另发现 TP 列/行切分不是逐 bit 精确相等(~1e-6 浮点舍入,BLAS 分块方式随分片数变化);以及"命中率"指标在热门前缀基数小时对所有路由策略(含完全不看内容的 round_robin)都虚高,负载均衡度才是更诚实的策略差异化指标) |
 | 06 | production-serving(生产级部署,含真实部署 bonus) | [06-production-serving.md](06-production-serving.md) | 11(+1 bonus 占位) | ✅ 常规 11 点已完成(已验证,11/11 可运行例子干净进程重跑通过;L06+L07 因均无对应源码且主题强关联,合并成 1 个知识点。**全系列最重要的发现**:`openai_api_server.py` 的 `/v1/chat/completions` 真实起服务后对**任何**请求(含 README 自己文档化的 curl 示例)统一返回 422——根因是 `from __future__ import annotations`(PEP 563 延迟注解求值)+ `Request` 类型仅在函数局部 `make_app()` 内 import 而非模块级,导致 FastAPI 运行时按 `__globals__` 解析字符串注解时找不到 `Request`,静默把该参数当成普通 query 参数处理;用完全独立、不复制原文件的最小 repro 单独复现同一故障模式,验证"仅需把 import 挪到模块级"即可修复;确认 Capstone(知识点 11)因直接 `from openai_api_server import app` 复用同一对象而原样遗传此 bug,并在不改源文件的前提下用其纯函数重新接线出一个可用版本。**知识点 12(真实部署 bonus)仍是占位**——WSL2 环境/vllm 0.25.0/GPU 直通均已就绪,但 `vllm serve` 因镜像缺 FFmpeg(vllm 无条件 `import torchcodec`)阻塞,已请用户手动 `sudo apt-get install -y ffmpeg`;2026-07-14 复查确认仍未安装,按计划既定预案不等待,先提交常规 11 点,bonus 待环境就绪后单独补写) |
 | 07 | serving-graduation 常规专题 | [07-serving-graduation-topics.md](07-serving-graduation-topics.md) | 9 | ✅ 已完成(已验证,9/9 可运行例子干净进程重跑通过;实际合并方式与预案略有调整——L01+L03 合并(两种"agent 场景缓存"),L02(Thinking Budget)内容够厚独立成点,L09+L10 合并(冷启动+容错同属可靠性工程);全模块 4 个知识点(L03/L04/L09/L10)无独立 src,如实标注并分别复用系列内已验证真实代码(01 号文件 `NaiveKvPool`、06 号文件 `cost_calc.cost_for_workload`)或 Python 真实 stdlib(`functools.lru_cache`)做说明,唯一一处从零手写参照实现是 L09+L10 的 circuit breaker/backoff 状态机(标准 CS 确定性算法,非模拟 ML 效果)。**核心发现**:`thinking_budget.py::generate_with_budget()` 触发强制关闭(force-close)后直接 `break` 跳出循环,完整放弃了本该继续吐出的真实 answer 部分——用 3 组完全不同的参数(budget=8/15/3,不同长度 think、不同 answer 内容)独立复现,结论一致;另用 `NaiveKvPool` 验证 GQA 架构(8 KV heads)比无 GQA 假设(32 KV heads)省 4 倍显存,证实 lecture 插图性的"100k×32层×256KB≈800GB"是刻意夸张的教学量级,不对应任何真实架构) |
-| 08 | serving-graduation 毕业顶点(capstone,叙事体) | [08-serving-graduation-capstone.md](08-serving-graduation-capstone.md) | 1 篇(3幕) | ⏳ 待撰写 |
+| 08 | serving-graduation 毕业顶点(capstone,叙事体) | [08-serving-graduation-capstone.md](08-serving-graduation-capstone.md) | 1 篇(3幕) | ✅ 已完成(已验证,6/6 代码块干净进程重跑通过——本文件不用系列自己的 `_verify_md.py` 的"**可运行例子**"标签正则,改用 [dsa-deep-dive](../dsa-deep-dive/_verify_md.py)/[statistics-deep-dive](../statistics-deep-dive/_verify_md.py) 的"提取全部 python 代码块"方式,因为叙事体格式的代码块不带该标签,这和这两篇先例的处理方式一致。体裁上没有直接照抄"模拟终面"框架——源材料 L12+L13+L14 是三段既有产出(部署 demo/综述 lecture/对比报告)而不是一道题的连续追问,改用"Module 5 毕业答辩"框架,委员会对每一幕分别追问,更贴合源材料本身的形状。**幕一核心发现**:`r1_tiny_deploy/serve.py::MockR1Model.stream()` 完全不读自己的 `prompt` 参数,对 5 道完全不同的数学题恒定复读同一段推理轨迹+答案"18";`run_demo()` 自己的验收逻辑只检查 `thinking_present`/`answer` 非空,从未真正核对过真实答案——按真实答案核对是 1/5 正确,远低于该 capstone 自己声明的"≥3/5"退出条件,这条验收条件在代码层面从未被真正检验过。**幕三收尾发现**:把 07 号文件知识点 9 的 `serving_scorecard.py` 真实应用到 `graduation_e2e` 的真实五线对比数据上,严格 SLO 下 `r1_zero`(全场 reasoning 质量最高)因延迟超标 `passes=False`,排名反而是"没那么会想但足够快"的 `lora` 拿到第一——用本系列自己两处真实代码接力跑出的结果,不是假设性讨论) |
 
-**预计合计:约 65-80 个知识点,7 篇正文 + 1 篇 capstone(不单独计入知识点数)。**"进阶深度追加"本次不做,留到以后单独一轮,和其余 11 条系列的做法一致。
+**实际合计:70 个知识点(11+9+10+11+9+11+9,06 号文件另有 1 个仍待 WSL2/FFmpeg 就绪后补写的 bonus 知识点,不计入此数)+ 7 篇正文 + 1 篇 capstone(不单独计入知识点数)。**落在预估的 65-80 区间内。"进阶深度追加"本次不做,留到以后单独一轮,和其余 11 条系列的做法一致。
 
 ## 明细(源码路径,撰写时逐一核实文件路径/行号仍然准确)
 
@@ -132,11 +132,12 @@
 8. 冷启动 + 容错(L09+L10 合并,均无 src)—— 手写 circuit breaker/backoff 参照实现(全系列唯一一处从零手写)
 9. 服务工程 5 原则(L11,`serving_scorecard.py`)—— 呼应 DistServe goodput
 
-### 08 serving-graduation 毕业顶点(叙事体,不拆知识点,源:L12+L13+L14)
-- 幕一:Capstone-1 R1-tiny mock 部署(`r1_tiny_deploy/serve.py`)—— 如实标注这是手写 token 序列生成(`MockR1Model.stream()`)的叙事框架,不是真加载
-- 幕二:五线综合(L13,回顾 Module1/3/4/5 共 25 个 topic)—— 主动链接回本仓库已完成的 [peft-deep-dive](../peft-deep-dive/00-roadmap.md)(对应Module1)和 [alignment-algorithms-deep-dive](../alignment-algorithms-deep-dive/00-roadmap.md)(对应Module4 DPO部分);Module4 的 reasoning-r1 和 Module3 的 phi_tiny 本仓库暂无对应精读系列,如实标注"这里只作为 mock checkpoint 消费,不深入其训练机制"
-- 幕三:Capstone-2 五 mock checkpoint 端到端对比(`graduation_e2e/`,L14)—— 如实标注 5 个 checkpoint 是预烤好的字面量数据,不是真推理
-- 复盘小结
+### 08 serving-graduation 毕业顶点(叙事体,不拆知识点,源:L12+L13+L14;体裁为"Module 5 毕业答辩",非直接照抄 dsa/statistics 的"模拟终面"——源材料是三段既有产出不是一道连续追问题)
+- 开场:答辩场景设定
+- 幕一:Capstone-1 R1-tiny mock 部署(`r1_tiny_deploy/serve.py`)—— **真实发现**:`MockR1Model.stream()` 不读 `prompt` 参数,5 道不同数学题恒定输出同一答案"18";按真实答案核对仅 1/5 正确,capstone 自己的"≥3/5"验收条件从未被代码真正检验过(`run_demo()` 只查 `thinking_present`/`answer` 非空)
+- 幕二:五线综合(L13,回顾 Module1/3/4/5 共 25 个 topic)—— 主动链接回本仓库已完成的 [peft-deep-dive](../peft-deep-dive/00-roadmap.md)(对应Module1)和 [alignment-algorithms-deep-dive](../alignment-algorithms-deep-dive/00-roadmap.md)(对应Module4 DPO部分);Module4 的 reasoning-r1 和 Module3 的 phi_tiny 本仓库暂无对应精读系列,如实标注"这里只作为 mock checkpoint 消费,不深入其训练机制";5 杠杆加速比核实为行业经验区间,不是本系列自实测数字(01-05 号文件各自验证过方向正确,未逐一验证精确倍数)
+- 幕三:Capstone-2 五 mock checkpoint 端到端对比(`graduation_e2e/`,L14)—— 如实标注 5 个 checkpoint 是预烤好的字面量数据,`compare.py`/`report.py` 两层流程代码是真实的;**收尾发现**:把 07 号文件 `serving_scorecard.py` 真实接到这里的真实五线对比数据上,严格 SLO 下 reasoning 质量最高的 `r1_zero` 因延迟超标出局,排名第一的是"够用且最快"的 `lora`
+- 复盘小结:三段产出按"mock 严重程度"排序复盘,呼应全系列(06 号 FastAPI 422、07 号 force-close 丢答案)"能跑不等于跑对"的统一纪律
 
 ## 撰写与验证纪律
 
