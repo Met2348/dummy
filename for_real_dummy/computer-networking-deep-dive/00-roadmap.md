@@ -58,7 +58,7 @@
 | 09 | IV | DNS域名解析 | [09-dns-resolution.md](09-dns-resolution.md) | 6 | ✅ 已完成(6个`.venv`代码块通过,全部用模拟层级/虚构域名验证,不引入外部网络依赖) |
 | 10 | IV | 现代应用协议与API | [10-modern-app-protocols-and-apis.md](10-modern-app-protocols-and-apis.md) | 7 | ✅ 已完成(7个`.venv`代码块通过,KP7一致性哈希交叉引用dsa-deep-dive 20类不重复推导;板块IV全部完成) |
 | 11 | V 现代网络与工程场景 | 网络编程与IO模型 | [11-network-programming-and-io-models.md](11-network-programming-and-io-models.md) | 7 | ✅ 已完成(5个`.venv`代码块通过,1点[KP6]为`python-wsl2`标记[Windows loopback无法复现真实背压阻塞,WSL2已单独验证],1点[KP7]为真实tcpdump抓包逐行解读,不含代码块;[KP5]附WSL2 strace真实系统调用证据) |
-| 12 | V | 现代网络专题 | [12-modern-networking-topics.md](12-modern-networking-topics.md) | 6 | ⏳ 未开始 |
+| 12 | V | 现代网络专题 | [12-modern-networking-topics.md](12-modern-networking-topics.md) | 6 | ✅ 已完成(5个`.venv`代码块通过,1点[KP6]为`python-wsl2`标记[真实network namespace+veth pair隔离与跨namespace TCP通信,WSL2已单独验证];KP2/KP4/KP6均按边界声明交叉引用而非重复推导。板块V全部完成,12个分类文件全部完成) |
 | 13 | 收尾 | 模拟终面capstone | [13-mock-interview-capstone.md](13-mock-interview-capstone.md) | —(不计入合计) | ⏳ 未开始 |
 
 **目标合计:约 80 个知识点,12 个分类文件 + 1 篇模拟终面 capstone。** 精确数字以全库自查阶段的逐文件核对为准。
