@@ -59,7 +59,7 @@
 | 15 | IV | 排位系统 | [15-ranking-systems.md](15-ranking-systems.md) | 5 | ✅ 已完成 |
 | 16 | IV | Scaling law与外推 | [16-scaling-laws-and-extrapolation.md](16-scaling-laws-and-extrapolation.md) | 5 | ✅ 已完成 |
 | 17 | IV | 分布漂移与监控 | [17-distribution-shift-and-monitoring.md](17-distribution-shift-and-monitoring.md) | 5 | ✅ 已完成 |
-| 18 | IV | 标注一致性与分析方法论 | [18-annotator-agreement-and-methodology.md](18-annotator-agreement-and-methodology.md) | 5 | ⬜ 待撰写 |
+| 18 | IV | 标注一致性与分析方法论 | [18-annotator-agreement-and-methodology.md](18-annotator-agreement-and-methodology.md) | 5 | ✅ 已完成 |
 | 19 | V 时间序列基础 | 时间序列基础 | [19-time-series-foundations.md](19-time-series-foundations.md) | 6 | ⬜ 待撰写 |
 | 20 | V | 简单预测方法 | [20-simple-forecasting.md](20-simple-forecasting.md) | 5 | ⬜ 待撰写 |
 | 21 | 收尾 | 模拟终面capstone | [21-mock-interview-capstone.md](21-mock-interview-capstone.md) | — (不计入合计) | ⬜ 待撰写 |
