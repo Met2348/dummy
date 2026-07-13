@@ -61,7 +61,7 @@
 | 17 | IV | 分布漂移与监控 | [17-distribution-shift-and-monitoring.md](17-distribution-shift-and-monitoring.md) | 5 | ✅ 已完成 |
 | 18 | IV | 标注一致性与分析方法论 | [18-annotator-agreement-and-methodology.md](18-annotator-agreement-and-methodology.md) | 5 | ✅ 已完成 |
 | 19 | V 时间序列基础 | 时间序列基础 | [19-time-series-foundations.md](19-time-series-foundations.md) | 6 | ✅ 已完成 |
-| 20 | V | 简单预测方法 | [20-simple-forecasting.md](20-simple-forecasting.md) | 5 | ⬜ 待撰写 |
+| 20 | V | 简单预测方法 | [20-simple-forecasting.md](20-simple-forecasting.md) | 5 | ✅ 已完成 |
 | 21 | 收尾 | 模拟终面capstone | [21-mock-interview-capstone.md](21-mock-interview-capstone.md) | — (不计入合计) | ⬜ 待撰写 |
 
 **预计合计:约 116 个知识点,20 个分类文件 + 1 篇模拟终面 capstone。** 数字标"约",允许 ±10~15% 浮动(某知识点自然拆分/合并),不强行凑整数——沿用 huggingface(101≠整百)、dsa-deep-dive(140≠150)的既有纪律。
