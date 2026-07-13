@@ -38,7 +38,7 @@
 | 03 | speculative-decoding(投机解码全家族) | [03-speculative-decoding.md](03-speculative-decoding.md) | 10 | ✅ 已完成(已验证,10/10 可运行例子干净进程重跑通过;发现 `MedusaHeads.draft()` 在 noise 足够大时会真实 `ZeroDivisionError` 崩溃——独立换 8 类扁平分布+6 头配置复现,noise=0.5 起就有概率触发,证实是 clamp-then-normalize 模式的结构性问题、不是某个分布形状的偶然;另发现 EAGLE 与 Medusa 在同噪声参数下 accept rate 几乎打平(0.486 vs 0.489),lecture 展示的"EAGLE 更强"印象来自两者默认噪声值不同,不是自回归结构本身在这份 mock 里带来的必然优势;L06 EAGLE-3 本仓库无对应源码,如实标注为概念性知识点,只用共享速度公式做方向性合理性检验) |
 | 04 | quantization-deploy(推理期量化部署) | [04-quantization-deploy.md](04-quantization-deploy.md) | 11 | ✅ 已完成(已验证,11/11 可运行例子干净进程重跑通过;核心发现——`gptq_columnwise` 默认 `damp=0.01` 在校准数据列相关性较强/维度较高时数值不稳定,导致 GPTQ 补偿反而比朴素 RTN 更差(20 种子 18/20 复现),调大 `damp` 到 0.1 可稳定修复(10/10);同一根因在 capstone 自己的 toy 层构造上也被复现——"GPTQ<NF4"这条 README 宣称的排位关系在 seed 0-9 稳定成立(10/10)但 seed=99 反过来,两处发现互相印证;另发现 `fp8_demo.py` 的 E4M3 编码表实际最大值是 480 不是 lecture 声称的 448(未实现"最大指数最大尾数保留给NaN"这条真实硬件规范);以及模块自身 lecture 13 文档滞后于已重写的 capstone 源码和 README) |
 | 05 | distributed-inference(分布式推理) | [05-distributed-inference.md](05-distributed-inference.md) | 9 | ✅ 已完成(已验证,9/9 可运行例子干净进程重跑通过;**核心发现**:`pp_demo.py::gpipe_bubble()` 公式只在 `n_stages=2` 时凑巧对,其余 15/18 组测试参数全部系统性低估真实 bubble(用 `schedule_naive()` 自己渲染的调度网格逐格计数验证地面真相,严谨公式 `(n_stages-1)/(n_micro+n_stages-1)` 全部吻合,`n_stages=6,micro=4` 时代码给 29.4% 而真相是 55.6%,几乎差一半);另发现 TP 列/行切分不是逐 bit 精确相等(~1e-6 浮点舍入,BLAS 分块方式随分片数变化);以及"命中率"指标在热门前缀基数小时对所有路由策略(含完全不看内容的 round_robin)都虚高,负载均衡度才是更诚实的策略差异化指标) |
-| 06 | production-serving(生产级部署,含真实部署 bonus) | [06-production-serving.md](06-production-serving.md) | 12-13 | ⏳ 待撰写 |
+| 06 | production-serving(生产级部署,含真实部署 bonus) | [06-production-serving.md](06-production-serving.md) | 11(+1 bonus 占位) | ✅ 常规 11 点已完成(已验证,11/11 可运行例子干净进程重跑通过;L06+L07 因均无对应源码且主题强关联,合并成 1 个知识点。**全系列最重要的发现**:`openai_api_server.py` 的 `/v1/chat/completions` 真实起服务后对**任何**请求(含 README 自己文档化的 curl 示例)统一返回 422——根因是 `from __future__ import annotations`(PEP 563 延迟注解求值)+ `Request` 类型仅在函数局部 `make_app()` 内 import 而非模块级,导致 FastAPI 运行时按 `__globals__` 解析字符串注解时找不到 `Request`,静默把该参数当成普通 query 参数处理;用完全独立、不复制原文件的最小 repro 单独复现同一故障模式,验证"仅需把 import 挪到模块级"即可修复;确认 Capstone(知识点 11)因直接 `from openai_api_server import app` 复用同一对象而原样遗传此 bug,并在不改源文件的前提下用其纯函数重新接线出一个可用版本。**知识点 12(真实部署 bonus)仍是占位**——WSL2 环境/vllm 0.25.0/GPU 直通均已就绪,但 `vllm serve` 因镜像缺 FFmpeg(vllm 无条件 `import torchcodec`)阻塞,已请用户手动 `sudo apt-get install -y ffmpeg`;2026-07-14 复查确认仍未安装,按计划既定预案不等待,先提交常规 11 点,bonus 待环境就绪后单独补写) |
 | 07 | serving-graduation 常规专题 | [07-serving-graduation-topics.md](07-serving-graduation-topics.md) | 8-9 | ⏳ 待撰写 |
 | 08 | serving-graduation 毕业顶点(capstone,叙事体) | [08-serving-graduation-capstone.md](08-serving-graduation-capstone.md) | 1 篇(3幕) | ⏳ 待撰写 |
 
@@ -113,14 +113,13 @@
 3. TRT-LLM build 实战(`trtllm_build.py`,L03)—— Windows 无 trtllm,如实标注 mock 配置
 4. Triton Inference Server(`triton_model_repo/`,L04)
 5. Ollama(`ollama_modelfile/`,L05)
-6. llama.cpp + GGUF(L06)
-7. LM Studio(L07)
-8. OpenAI 兼容 API 规范(`openai_api_server.py`,L08)—— 协议层纯函数与 FastAPI `app` 解耦
-9. FastAPI + SSE 流式包装(`streaming_sse.py`,L09)
-10. 生产监控 Prometheus(`metrics_prometheus.py`,L10)
-11. 成本工程(`cost_calc.py`,L11)
-12. Capstone:生产栈整合(L12,mock,复用 `openai_api_server.py`)
-13. **【真实部署 bonus,见环境声明】**:WSL2 + 真实 vllm serve `Qwen/Qwen2.5-0.5B-Instruct`(`--quantization bitsandbytes`)+ 真实 OpenAI 兼容 API 请求,和知识点 8 的 mock 协议逐项对照(`/v1/models` 真模型名 vs mock 的 `"mock-7b"`;`usage.prompt_tokens` 真 tokenizer vs mock 的 `len(content.split())` 估算;真实 TTFT/TPOT;量化前后显存对比)
+6. llama.cpp + GGUF + LM Studio(L06+L07 合并)—— 均无对应源码,合并为"端侧部署引擎/CLI/GUI 三层关系"1 个知识点
+7. OpenAI 兼容 API 规范(`openai_api_server.py`,L08)—— 协议层纯函数与 FastAPI `app` 解耦;**真实起服务后 `/v1/chat/completions` 对任何请求统一 422**(根因:`from __future__ import annotations` + 函数局部 `Request` import,详见知识点正文)
+8. FastAPI + SSE 流式包装(`streaming_sse.py`,L09)
+9. 生产监控 Prometheus(`metrics_prometheus.py`,L10)
+10. 成本工程(`cost_calc.py`,L11)
+11. Capstone:生产栈整合(L12,mock,复用 `openai_api_server.py`)—— 知识点 7 的 422 bug 原样遗传到此处
+12. **【真实部署 bonus,见环境声明;占位待补】**:WSL2 + 真实 vllm serve `Qwen/Qwen2.5-0.5B-Instruct`(`--quantization bitsandbytes`)+ 真实 OpenAI 兼容 API 请求,和知识点 7 的 mock 协议逐项对照(`/v1/models` 真模型名 vs mock 的 `"mock-7b"`;`usage.prompt_tokens` 真 tokenizer vs mock 的 `len(content.split())` 估算;真实 TTFT/TPOT;量化前后显存对比)。阻塞于 WSL2 镜像缺 FFmpeg,已请用户手动安装,2026-07-14 复查仍未就绪
 
 ### 07 serving-graduation 常规专题(源:`learning/serving-graduation/lectures/01-11.md`)
 1. Agent 推理特化 + Thinking Budget + Reasoning Cache(L01+L02+L03,内容密度低,大概率合并)
