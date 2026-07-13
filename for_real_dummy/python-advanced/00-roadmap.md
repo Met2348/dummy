@@ -25,8 +25,9 @@
 | 02 | 迭代器与生成器 | [02-iterators-and-generators.md](02-iterators-and-generators.md) | 4 | ✅ 已完成(已验证) |
 | 03 | 面向对象进阶 | [03-oop-advanced.md](03-oop-advanced.md) | 5 | ✅ 已完成(已验证) |
 | 04 | 类型注解、上下文管理与并发 | [04-typing-context-and-concurrency.md](04-typing-context-and-concurrency.md) | 5 | ✅ 已完成(已验证) |
+| 05 | 进阶深度追加:5 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 5案例(不计入20) | ✅ 已完成(已验证,10/10代码块独立进程复验全部通过;基于dsa-deep-dive/python-idioms已验证的5条追问轴线撰写——①threading vs multiprocessing任务粒度决定加速还是拖累+GIL前瞻(工程约束递增轴核心;实测细粒度400个任务multiprocessing比顺序慢约5000-6000倍、粗粒度4个600万次循环任务multiprocessing比顺序快约1.5-2倍,并用sys._is_gil_enabled()确认当前venv为GIL启用的常规构建、混合CPU+IO线程实测总耗时明显小于顺序相加证明sleep期间GIL被释放)、②装饰器叠加顺序导致审计日志被缓存吞掉(方案批判迭代轴核心;lru_cache叠外层时3次相同成功调用审计日志只留1条、audit叠外层时留3条,并验证该bug只影响成功重复调用、不影响失败路径这一更隐蔽性质)、③descriptor协议与property底层机制(决策依据追问轴核心;现场复现朴素描述符状态被跨实例覆盖的结构性bug,用weakref.WeakKeyDictionary修复并用weakref.finalize精确验证无内存泄漏)、④类型注解运行时校验器自建到碰壁(真实性验证轴核心;验证FastAPI式运行时校验的真相是库代码自己读__annotations__实现的,自建校验器遇到list[int]参数化泛型isinstance直接崩溃,用get_origin修复后仍暴露只查外壳不查元素类型的真实缺口)、⑤IterableDataset生成器只能用一次陷阱(规模递增轴核心;用真实torch.utils.data.IterableDataset+DataLoader复现第二个epoch静默返回空批次的真实bug,验证两种修法——新建生成器表达式/__iter__自身写成yield from生成器函数——均可正确支持多epoch,呼应02类"这里先点一下不展开"的伏笔)) |
 
-**合计:20 个知识点。**
+**合计:20 个知识点,4 篇 + 1 篇进阶深度追加(5 个案例,不计入 20),全部完成并独立验证。**
 
 ---
 
@@ -62,4 +63,4 @@
 
 ---
 
-*更新:2026-07-07*
+*更新:2026-07-13(新增 05 进阶深度追加)*

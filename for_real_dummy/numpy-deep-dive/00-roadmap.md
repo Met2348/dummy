@@ -30,8 +30,9 @@
 | 08 | 广播与 ufunc 机制 | [08-broadcasting-and-ufunc.md](08-broadcasting-and-ufunc.md) | 6 | ✅ 已完成(已验证) |
 | 09 | 随机数进阶与可复现 | [09-advanced-random.md](09-advanced-random.md) | 6 | ✅ 已完成(已验证) |
 | 10 | IO 与验证工具 | [10-io-and-verification.md](10-io-and-verification.md) | 10 | ✅ 已完成(已验证) |
+| 11 | 进阶深度追加:3 个多级追问链案例 | [11-advanced-interview-depth.md](11-advanced-interview-depth.md) | 3案例(不计入约120) | ✅ 已完成(已验证,6/6代码块独立进程复验全部通过,含timing/GIL/多进程三类环境敏感代码块的重复运行确认;基于dsa-deep-dive/python-idioms已验证的5条追问轴线撰写,诚实收敛到3个案例(numpy系列5步模板没有"底层机制"这一步,材料相对最薄弱)——①np.vectorize假向量化(真实性验证轴+工程约束递增轴核心;跨20万/200万两个数量级验证差距不被摊薄(16-19倍持平),再用threading实测GIL释放情况:纯ufunc链路双线程加速1.5-1.7倍,vectorize链路仅1.1倍,证明它连"被多线程救一下"的退路都没有)、②视图共享内存导致的累积数据腐蚀(规模递增轴核心;cutout数据增强就地改写切片视图,小测试只断言返回值全绿,6个epoch后母数据集被累积清零15%→90%,用shares_memory/.base证明因果,再实测"无脑copy整个数据集"比"只copy当前batch"贵近2倍,揭示拷贝粒度这一决策依据)、③default_rng跨进程种子管理(规模递增轴+工程约束递增轴核心;09类原文从未真正跨进程验证过"独立Generator对象"的假设,这里用真实multiprocessing.Pool实测4个worker同一seed产出完全相同的"随机"数据,再用SeedSequence.spawn()层级展开"2机器x2worker"结构验证4条流互不相同且整体可复现)) |
 
-**合计:约 120 个函数。**
+**合计:约 120 个函数,10 篇 + 1 篇进阶深度追加(3 个案例,不计入约 120),全部完成并独立验证。**
 
 ---
 
@@ -69,4 +70,4 @@
 
 ---
 
-*更新:2026-07-07*
+*更新:2026-07-13(新增 11 进阶深度追加)*
