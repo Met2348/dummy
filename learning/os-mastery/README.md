@@ -24,6 +24,10 @@
 | `tier3_social_hire/sc_os_performance_troubleshooting_judgment.py` | CPU飙升定位、内存泄漏排查、IO瓶颈判断、容器OOMKilled/CPU throttling判断、swap使用判断 | 14 |
 | `tier3_social_hire/sc_os_system_design_os_layer_judgment.py` | 高并发IO模型选型、cgroups多租户隔离、内核参数调优边界、大页内存、CPU亲和性、系统调用开销优化 | 14 |
 
+## 新增:本科课件式完整教材
+
+老手进一步反馈:即便加了 `explain` 字段,108个知识点的追问链结构本质上仍然是"直接上面试",对完全没系统学过的人不够。因此新增 `lectures/01-textbook.md`——一份约20万字符、七章的完整教材式讲义,仿照《操作系统概念》(恐龙书)写法,按进程与线程基础→内存管理基础→调度与同步深水→文件系统与IO深水→虚拟化与容器深水→生产性能问题定位判断→系统设计中的OS层判断的顺序,用连贯的教科书叙述系统教会每个主题,不是知识点罗列或追问链。**建议学习顺序:先读完 `01-textbook.md` 建立系统认知,再回到下面的 DeepPoint/ScenarioPoint 用追问链和场景判断检验"是否真的能被追问住"。**
+
 ## 数据结构
 
 ```python

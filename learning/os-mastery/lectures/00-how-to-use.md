@@ -1,5 +1,7 @@
 # OS Mastery 使用说明
 
+> **先读 `01-textbook.md`**:那是老手要求补充的本科课件式完整教材(七章、连贯教科书叙述),本页只是DeepPoint/ScenarioPoint追问链的使用说明,建议在读完教材之后再来这里练习追问链。
+
 ## 为什么这是五专题队列的收官之作
 
 老手指出用户EE转NLP/LLM背景缺少科班CS学生默认已掌握的软件工程/设计模式/数据库/网络/操作系统基础知识,这是五个专题里的最后一个,组织方式沿用前四个专题(`software-engineering-mastery`/`design-patterns-mastery`/`database-mastery`/`networking-mastery`)已验证的"讲解+追问链"混合格式与"难度分层"轴。
