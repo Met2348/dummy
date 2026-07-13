@@ -47,7 +47,7 @@
 
 | # | 板块 | 分类 | 文件 | 知识点数(约) | 状态 |
 |---|------|------|------|------------|------|
-| 01 | I 分层模型与链路层基础 | 分层模型与链路层 | [01-layering-and-link-basics.md](01-layering-and-link-basics.md) | 6 | ⏳ 未开始 |
+| 01 | I 分层模型与链路层基础 | 分层模型与链路层 | [01-layering-and-link-basics.md](01-layering-and-link-basics.md) | 6 | ✅ 已完成(6个`.venv`代码块全部通过) |
 | 02 | II 网络层:IP与路由 | IP编址与子网划分 | [02-ip-addressing-and-subnetting.md](02-ip-addressing-and-subnetting.md) | 7 | ⏳ 未开始 |
 | 03 | II | 路由与网络层机制 | [03-routing-and-network-layer-mechanisms.md](03-routing-and-network-layer-mechanisms.md) | 7 | ⏳ 未开始 |
 | 04 | III 传输层:TCP/UDP | TCP连接管理 | [04-tcp-connection-management.md](04-tcp-connection-management.md) | 7 | ⏳ 未开始 |
