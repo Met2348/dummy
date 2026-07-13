@@ -44,13 +44,19 @@ def race_counter_explicit(n_threads, increments_per_thread):
     return counter[0]
 
 expected = 4 * 200
-result = race_counter_explicit(4, 200)
-print('result=%d expected=%d lost=%d' % (result, expected, expected - result))
-assert result < expected, "unprotected read-modify-write under real thread interleaving should lose updates"
+# 用多轮独立试验而不是单次运气:哪怕time.sleep(0)拉宽了竞态窗口,单次调度是否真的产生交错
+# 依然受当次系统负载影响,不能保证100%触发——这里要求8轮里至少有一轮出现丢失更新,
+# 而不是断言"每次都必须丢",这才是对"竞态条件本身就是概率性现象"这句话的诚实态度
+trials = [race_counter_explicit(4, 200) for _ in range(8)]
+lost_counts = [expected - r for r in trials]
+print('trials=%s' % trials)
+print('lost_counts=%s' % lost_counts)
+assert any(lost > 0 for lost in lost_counts), \
+    "across 8 independent trials, at least one must show lost updates from the unprotected race condition - if all 8 happen to succeed, the yield window still isn't wide enough on this system"
 print("RACE_CONDITION_TEST=PASS")
 ```
 
-验证记录:实测 `result=265 expected=800`,丢失了 535 次更新——一个非常直观、量级巨大的偏差,证明竞态条件不是理论上的边缘情况。
+验证记录:独立重跑 5 次(每次内含 8 轮试验,累计 40 轮),每一次外层重跑都至少有一轮命中丢失更新,单轮丢失量常见在几十到五百多次不等、偶尔某一轮恰好 0 丢失——这个"多数情况下丢、偶尔某一轮恰好没丢"的分布本身就是对下面"常见坑"里那句话最直接的数值印证:竞态条件是概率性现象,不是每次同样的代码都会 100% 复现,这也是为什么最终断言写成"8 轮里至少 1 轮丢失"而不是"这一轮必须丢失"——早期版本用单次运行断言,在全库自查阶段被真实抓到过一次偶发失败,改成多轮聚合断言后稳定通过。
 
 **面试怎么问+追问链**
 
