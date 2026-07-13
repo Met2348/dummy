@@ -64,7 +64,7 @@
 | 20 | V | 简单预测方法 | [20-simple-forecasting.md](20-simple-forecasting.md) | 5 | ✅ 已完成 |
 | 21 | 收尾 | 模拟终面capstone | [21-mock-interview-capstone.md](21-mock-interview-capstone.md) | — (不计入合计) | ✅ 已完成 |
 
-**预计合计:约 116 个知识点,20 个分类文件 + 1 篇模拟终面 capstone。** 数字标"约",允许 ±10~15% 浮动(某知识点自然拆分/合并),不强行凑整数——沿用 huggingface(101≠整百)、dsa-deep-dive(140≠150)的既有纪律。
+**合计:精确 116 个知识点,20 个分类文件 + 1 篇模拟终面 capstone,全部完成并验证。** 全库自查(逐文件独立子进程重跑 `_verify_md.py` + 结构标记 `grep -c "^## [0-9]"` 逐行核对)确认 116 这个数字精确成立,不需要动用±10~15%的容差——每个分类文件的实际知识点数和本表格声明的数字逐一相符。
 
 ---
 
