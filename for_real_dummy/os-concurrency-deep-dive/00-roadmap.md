@@ -44,7 +44,7 @@
 
 | # | 板块 | 分类 | 文件 | 知识点数(约) | 状态 |
 |---|------|------|------|------------|------|
-| 01 | I 进程、线程与调度 | 进程与线程基础 | [01-processes-and-threads.md](01-processes-and-threads.md) | 8 | ⏳ 未开始 |
+| 01 | I 进程、线程与调度 | 进程与线程基础 | [01-processes-and-threads.md](01-processes-and-threads.md) | 8 | ✅ 已完成(6个`.venv`代码块+3个WSL2真实系统调用验证,均通过) |
 | 02 | I | CPU调度算法 | [02-cpu-scheduling.md](02-cpu-scheduling.md) | 8 | ⏳ 未开始 |
 | 03 | II 并发同步与死锁 | 基础同步原语 | [03-synchronization-primitives.md](03-synchronization-primitives.md) | 8 | ⏳ 未开始 |
 | 04 | II | 高级并发模式与无锁编程 | [04-advanced-concurrency-patterns.md](04-advanced-concurrency-patterns.md) | 6 | ⏳ 未开始 |
