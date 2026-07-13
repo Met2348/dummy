@@ -24,6 +24,10 @@
 | `tier3_social_hire/sc_pat_architecture_selection_judgment.py` | 场景化模式选型、模式组合判断、隐性模式识别、团队沟通成本判断 | 14 |
 | `tier3_social_hire/sc_pat_overengineering_boundary_judgment.py` | YAGNI边界、拒绝引入模式的判断、rule of three重构时机 | 14 |
 
+## 新增:本科课件式完整教材
+
+老手进一步反馈:即便加了 `explain` 字段,108个知识点的追问链结构本质上仍然是"直接上面试",对完全没系统学过的人不够。因此新增 `lectures/01-textbook.md`——一份约21万字符、七章的完整教材式讲义,仿照GoF《设计模式》原书写法,按创建型模式→结构型模式→行为型模式(一)→行为型模式(二)→现代模式与反模式深水→架构选型判断→过度设计边界判断的顺序,用连贯的教科书叙述系统教会每个模式(解决什么问题/结构/伪代码示意/与相邻模式区别),不是知识点罗列或追问链。**建议学习顺序:先读完 `01-textbook.md` 建立系统认知,再回到下面的 DeepPoint/ScenarioPoint 用追问链和场景判断检验"是否真的能被追问住"。**
+
 ## 数据结构
 
 ```python
