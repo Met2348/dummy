@@ -54,7 +54,7 @@
 | 05 | III | TCP可靠传输与流量控制 | [05-tcp-reliability-and-flow-control.md](05-tcp-reliability-and-flow-control.md) | 7 | ✅ 已完成(7个`.venv`代码块通过,6点教学性模拟+1点[KP7]真实TCP socket复现粘包) |
 | 06 | III | TCP拥塞控制与UDP | [06-tcp-congestion-control-and-udp.md](06-tcp-congestion-control-and-udp.md) | 7 | ✅ 已完成(6个`.venv`代码块通过,1点[KP6 TCP vs UDP选型]额外嵌入真实WSL2 `tc netem` 30%丢包注入证据) |
 | 07 | IV 应用层协议 | HTTP演进 | [07-http-evolution.md](07-http-evolution.md) | 7 | ✅ 已完成(6个`.venv`代码块通过,1点[KP6 HTTP/3与QUIC]概念性讲解) |
-| 08 | IV | HTTPS与TLS | [08-https-and-tls.md](08-https-and-tls.md) | 6 | ⏳ 未开始 |
+| 08 | IV | HTTPS与TLS | [08-https-and-tls.md](08-https-and-tls.md) | 6 | ✅ 已完成(6个`.venv`代码块通过,含[KP2]用MemoryBIO真实测出1.2=2次往返/1.3=1次往返,[KP2/KP6]各附WSL2真实openssl s_client证据) |
 | 09 | IV | DNS域名解析 | [09-dns-resolution.md](09-dns-resolution.md) | 6 | ⏳ 未开始 |
 | 10 | IV | 现代应用协议与API | [10-modern-app-protocols-and-apis.md](10-modern-app-protocols-and-apis.md) | 7 | ⏳ 未开始 |
 | 11 | V 现代网络与工程场景 | 网络编程与IO模型 | [11-network-programming-and-io-models.md](11-network-programming-and-io-models.md) | 7 | ⏳ 未开始 |
