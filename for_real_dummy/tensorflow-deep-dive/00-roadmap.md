@@ -55,8 +55,9 @@
 | 11 | 分布式训练基础机制 | [11-distributed-training-basics.md](11-distributed-training-basics.md) | 6 | ✅ 已完成(已验证,9/9代码块) |
 | 12 | 序列化与部署基础 | [12-serialization-and-deployment.md](12-serialization-and-deployment.md) | 8 | ✅ 已完成(已验证,13/13代码块) |
 | 13 | 调试与常见报错精解 | [13-debugging-and-common-errors.md](13-debugging-and-common-errors.md) | 9 | ✅ 已完成(已验证,27/27代码块,含AutoGraph机制修正,系列收尾) |
+| 14 | 进阶深度追加:5 个多级追问链案例 | [14-advanced-interview-depth.md](14-advanced-interview-depth.md) | 5案例(不计入100) | ✅ 已完成(已验证,10/10代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——retracing性能陷阱诊断链(现场证明`reduce_retracing=True`对Python标量退化完全无效、对Tensor shape变化真实有效,并额外隔离出"optimizer首次创建slot变量导致多trace一次"这一独立机制,25步真实训练step量化出5.41倍速度差异)、GPU显存贪婪分配决策依据(双OS进程真实共享一张物理GPU实测,发现"默认贪婪邻居已占84.7%显存"后另一进程申请8-13GB仍能成功这一调研阶段未预料到的真实现象,继而现场定界出"组合占用被收在物理16384MiB容量内、且请求量推高到15000MiB确实会真实OOM"的具体边界)、训练规模递增分布式决策(真实计算量化eager下MirroredStrategy.run比tf.function包裹慢5.28倍;并现场测出2个虚拟副本吞吐反而是单设备的0.48倍,量化验证"虚拟设备不能评估真实多卡收益"这条边界)、部署格式选型方案批判迭代(SavedModel/.h5/.keras/TFLite五种交付形态体积实测对比,以及"isinstance在SavedModel重载后失效"导致fine-tuning脚本静默冻结0层而非1层的真实bug复现)、Keras 2/3环境声明真实性验证边界(现场证明"tf.keras解析正确"不代表裸`import keras`也是Keras 2,且同一根因在Layer混用时报错清晰、在Callback混用时报错高度隐晦,诊断难度不在一个量级)) |
 
-**合计:100 个知识点,13 篇,195 个代码块全部独立验证通过。**
+**合计:100 个知识点,13 篇 + 1 篇进阶深度追加(5 个案例,不计入 100),全部完成并独立验证。**
 
 02(GradientTape)+ 03(tf.function/AutoGraph)合计 20 项,占全系列五分之一,这个权重是有意为之:torch-deep-dive 的"重中之重"是 Autograd 一个类目,但 TF2 相比 PyTorch 最大的心智负担不是自动微分本身(两边概念上很像),而是"eager 代码什么时候会被悄悄 trace 成图、trace 之后哪些 Python 语义会变"——这恰好是 02+03 两个类目共同覆盖的内容。
 
@@ -105,4 +106,4 @@ SavedModel格式 HDF5(`.h5`)格式 新版`.keras`格式 `tf.train.Checkpoint` vs
 
 ---
 
-*更新:2026-07-11(13篇全部完成并独立验证)*
+*更新:2026-07-13(13篇知识点 + 14号进阶深度追加共5案例,全部完成并独立验证)*

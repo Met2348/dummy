@@ -57,8 +57,9 @@
 | 07 | 网络配置 | [07-networking.md](07-networking.md) | 10 | ✅ 已完成(已验证,20个代码块全部通过;涉及改IP/路由的知识点全部在独立dummy虚拟网卡上操作,全程确认真实eth0连接零影响;现场发现NetworkManager默认不接管"外部创建"设备、connection type需匹配设备类型、network.service在RHEL10已不存在) |
 | 08 | 安全:SELinux 与防火墙 | [08-security-selinux-firewall.md](08-security-selinux-firewall.md) | 10 | ✅ 已完成(已验证,19个代码块全部通过;防火墙部分功能完整验证,SELinux部分经三层排查确认WSL2内核限制——内核参数不生效/selinuxfs残缺/auditd被拒,semanage和工具语法已扎实验证,如实标注enforcing强制效果需真实RHEL环境) |
 | 09 | bash 脚本编程本身 | [09-bash-scripting.md](09-bash-scripting.md) | 9 | ✅ 已完成(已验证,27个代码块 Git Bash 下语法检查+实际执行全部通过) |
+| 10 | 进阶深度追加:5 个真实故障排查链案例 | [10-advanced-interview-depth.md](10-advanced-interview-depth.md) | 5案例(不计入100) | ✅ 已完成(已验证,8/8代码块 Rocky Linux 10.2 WSL2 独立通过;格式上刻意不采用"面试官/候选人"对话体,延续本系列"危险操作vs正确操作对比+判分点提示"逻辑,把5条追问轴线翻译成"故障现象→排查动作→发现→根因→修复与验证"的运维排障语序——①LVM连环扩容(`lvextend`未配`resize2fs`"扩了但没生效"→扩容吃光共享VG份额撞见服务B真实被拒、退出码5)②fstab挂错盘(`mount -a`/`mount -fav`均拦不住UUID复制错误这类语义错误,唯有读内容才能发现)③sudo两次收紧(666权限下规则完全不生效且报错不提权限位、`ALL=(ALL) NOPASSWD:ALL`现场验证真能读`/etc/shadow`)④静态IP失联退路设计(veth对真实复现管理会话失联,`systemd-run --on-active`死人开关独立于会话生死)⑤systemctl enable隐藏坑(缺`[Install]`段导致`is-enabled`显示`static`而非`enabled`、`RequiresMountsFor`解决启动顺序竞态);验证过程中如实发现两处与"应该如此"的直觉不符的真实现象(quota硬限制在WSL2内核上记账精确但不真正拦截超额写入、sudoers.d权限拒绝阈值实际是"other是否可写"而非必须精确等于440),均已在案例"常见坑"如实标注不冒充;独立复验阶段额外用完全不同的limit/写入量重新验证quota发现(10MB限额+30MB写入,3x超额同样全部写入成功)、用文件未测试过的7组全新权限位(604/620/646/602/421/706/440)逐一验证"仅other-write位决定拒绝"这一更精确的机制假说(7/7预测精确命中,包括"仅other有写无读会拒绝""仅group有写不影响"等边界情况),并修复一处真实的userdel竞态清理bug(紧跟`su <user> -c`之后立即`userdel`偶发因会话未完全释放而失败,已仿照03类"losetup -d竞态"先例改成轮询重试) |
 
-**合计:100 个知识点,9 篇,100/100 完成(9/9 篇)。🎉 全部完成。**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
+**合计:100 个知识点,9 篇 + 1 篇进阶深度追加(5 个案例,不计入 100),全部完成并独立验证。🎉**(状态如实反映——没有验证过就不标"已完成",参照 qa/03 记录里"不能一度提前标全部完成"的教训)
 
 **撰写顺序(按 root 依赖/风险递增,不是文件编号顺序;2026-07-11 实测修正)**:
 1. 09 bash 脚本本身——**已完成**,不需要 root,纯语言特性,Git Bash 验证足够真实。
