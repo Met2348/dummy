@@ -28,6 +28,10 @@
 | `tier3_social_hire/sc_net_architecture_selection_judgment.py` | Service Mesh vs API Gateway、跨机房网络设计、CDN选型判断 | 14 |
 | `tier3_social_hire/sc_net_production_troubleshooting_judgment.py` | 延迟排查分层思路、抓包分析、连接耗尽、DNS异常排查、脑裂判断 | 14 |
 
+## 新增:本科课件式完整教材
+
+老手进一步反馈:即便加了 `explain` 字段,108个知识点的追问链结构本质上仍然是"直接上面试",对完全没系统学过的人不够。因此新增 `lectures/01-textbook.md`——一份约21万字符、七章的完整教材式讲义,仿照《计算机网络:自顶向下方法》写法,按分层模型与寻址基础→TCP-UDP与HTTP基础→TCP拥塞控制深水→HTTPS与Web安全深水→负载均衡与CDN深水→网络架构选型判断→生产网络故障定位判断的顺序,用连贯的教科书叙述系统教会每个主题,不是知识点罗列或追问链。**建议学习顺序:先读完 `01-textbook.md` 建立系统认知,再回到下面的 DeepPoint/ScenarioPoint 用追问链和场景判断检验"是否真的能被追问住"。**
+
 ## 数据结构
 
 ```python
