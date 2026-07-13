@@ -53,7 +53,7 @@
 | 09 | II | 观察性因果推断方法 | [09-observational-causal-methods.md](09-observational-causal-methods.md) | 6 | ✅ 已完成 |
 | 10 | II | 真实陷阱案例集 | [10-real-world-traps.md](10-real-world-traps.md) | 5 | ✅ 已完成 |
 | 11 | III 贝叶斯方法 | 贝叶斯推断基础 | [11-bayesian-inference-foundations.md](11-bayesian-inference-foundations.md) | 6 | ✅ 已完成 |
-| 12 | III | MCMC基础 | [12-mcmc-foundations.md](12-mcmc-foundations.md) | 5 | ⬜ 待撰写 |
+| 12 | III | MCMC基础 | [12-mcmc-foundations.md](12-mcmc-foundations.md) | 5 | ✅ 已完成 |
 | 13 | III | 贝叶斯应用 | [13-bayesian-applications.md](13-bayesian-applications.md) | 5 | ⬜ 待撰写 |
 | 14 | IV AI/ML场景专属统计 | 模型评测统计 | [14-model-evaluation-statistics.md](14-model-evaluation-statistics.md) | 6 | ⬜ 待撰写 |
 | 15 | IV | 排位系统 | [15-ranking-systems.md](15-ranking-systems.md) | 5 | ⬜ 待撰写 |
