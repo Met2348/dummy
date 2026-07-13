@@ -49,7 +49,7 @@
 | 03 | II 并发同步与死锁 | 基础同步原语 | [03-synchronization-primitives.md](03-synchronization-primitives.md) | 8 | ✅ 已完成(8个`.venv`代码块,竞态类断言独立重跑5次全部稳定通过) |
 | 04 | II | 高级并发模式与无锁编程 | [04-advanced-concurrency-patterns.md](04-advanced-concurrency-patterns.md) | 6 | ✅ 已完成(6个`.venv`代码块,含CAS/ABA/无锁栈/乐观锁,独立重跑3次稳定通过) |
 | 05 | II | 死锁 | [05-deadlock.md](05-deadlock.md) | 6 | ✅ 已完成(6个`.venv`代码块,真实死锁复现独立重跑5次全部稳定,均带超时安全网) |
-| 06 | III 内存管理 | 虚拟内存与地址转换 | [06-virtual-memory-and-address-translation.md](06-virtual-memory-and-address-translation.md) | 8 | ⏳ 未开始 |
+| 06 | III 内存管理 | 虚拟内存与地址转换 | [06-virtual-memory-and-address-translation.md](06-virtual-memory-and-address-translation.md) | 8 | ✅ 已完成(6个`.venv`+2个WSL2真实fork验证,均通过) |
 | 07 | III | 内存分配与页面置换 | [07-memory-allocation-and-page-replacement.md](07-memory-allocation-and-page-replacement.md) | 7 | ⏳ 未开始 |
 | 08 | IV IO模型与进程间通信 | IO模型演进 | [08-io-models.md](08-io-models.md) | 8 | ⏳ 未开始 |
 | 09 | IV | 进程间通信IPC | [09-ipc.md](09-ipc.md) | 7 | ⏳ 未开始 |
