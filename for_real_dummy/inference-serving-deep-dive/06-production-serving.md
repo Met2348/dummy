@@ -765,6 +765,94 @@ assert r_fixed_bad.status_code == 400
 
 ---
 
-## 12.【真实部署 bonus,待补】
+## 12. 真实部署 Bonus:WSL2 + 真实 `vllm serve` + 真实 OpenAI 兼容 API 请求(本机实测跑通)—— 五轮真实环境阻塞,和知识点 7/11 的 mock 协议逐项对照
 
-WSL2 环境准备(见 00-roadmap.md 环境声明)已完成,vllm 0.25.0 已安装、GPU 直通已确认;真实 `vllm serve` 的 smoke test 因为 WSL2 Ubuntu 镜像缺少 FFmpeg(vllm 0.25.0 的 CLI 入口链路为了支持多模态视频,无条件 `import torchcodec`,后者需要系统级 FFmpeg 共享库)而阻塞,已请用户在 WSL2 里手动执行 `sudo apt-get install -y ffmpeg`(需要密码,无法由本次会话代为完成)。这一部分会在环境就绪后单独补写,补写内容和验证方式见 00-roadmap.md"真实部署 bonus 案例"一节:WSL2 + 真实 `vllm serve Qwen/Qwen2.5-0.5B-Instruct --quantization bitsandbytes` + 真实 OpenAI 兼容 API 请求,和本文知识点 7/11 已经诊断清楚的 mock 协议(`build_completion_response`/`mock_generate` 等)逐项对照。
+**环境声明(本节涉及 WSL2 + 真实 GPU 推理服务,必须准确说明边界):** 本知识点是全系列(01-08)唯一一处真实起服务、真实发 HTTP 请求的案例,验证环境是 WSL2 Ubuntu(不是仓库根目录 `.venv`),需要真实 RTX 3080 Ti GPU 直通。没有这个环境的读者,可以直接读下面的"实测"段落——里面记录的是本机真实跑出来的完整数据,不是虚构的示意输出。
+
+**是什么:** 用 vLLM 官方 CLI 真实拉起一个 OpenAI 兼容的推理服务:
+
+```bash
+# WSL2 Ubuntu, ~/vllm-venv (Python 3.12, uv 创建)
+export VLLM_WSL2_ENABLE_PIN_MEMORY=1      # 见下文"底层机制"——WSL2 上 pinned memory 默认关闭
+export VLLM_USE_FLASHINFER_SAMPLER=0      # 见下文"底层机制"——本机没有完整 CUDA Toolkit(nvcc)
+source ~/vllm-venv/bin/activate
+vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+    --quantization bitsandbytes \
+    --port 8000 --max-model-len 4096 --enforce-eager
+```
+
+这和知识点 7 的 `openai_api_server.py`(`learning/production-serving/src/openai_api_server.py`)是同一套协议规范的两个实现——一个是教学用的纯函数 mock(`mock_generate`/`build_completion_response`),一个是真实模型真实推理,下面的实测逐项对照两者在关键字段上的真实差异。
+
+**一句话:** 同一份 OpenAI 兼容 API 协议,mock 版本用字符串操作伪造响应,真实版本要经过"量化加载 → GPU 推理 → tokenizer 编解码"整条真实链路,协议长得一样,但支撑协议的东西完全不同。
+
+**底层机制/为什么这样设计:** 三个环境变量/参数各自对应一处真实的 WSL2 专属设计决策,不是随手加的:①`VLLM_WSL2_ENABLE_PIN_MEMORY=1`——vLLM 源码(`vllm/platforms/cuda.py::is_pin_memory_available`)里显式判断"如果在 WSL2 里,即使内核版本满足条件(≥4.19.121),pinned memory 也默认关闭,除非显式开启",这是 vLLM 维护者对 WSL2 环境下 pinned memory 稳定性不完全信任、主动选择保守默认值的真实例子;不开这个开关,vLLM V1 引擎的 `UvaBuffer`(Unified Virtual Addressing 缓冲区)初始化会直接 `RuntimeError: UVA is not available`。②`VLLM_USE_FLASHINFER_SAMPLER=0`——vLLM 默认用 FlashInfer 库做 top-k/top-p 采样,FlashInfer 是懒编译的(第一次真正采样时才 JIT 编译 CUDA kernel),这次编译需要完整 CUDA Toolkit 提供的 `nvcc`,而本机只有 WSL2 的 GPU 驱动直通桥接层(能跑 PyTorch/bitsandbytes 这些已经编译好的库),没有装完整 Toolkit;关掉 FlashInfer 采样器,退回到 vLLM 自带的非 FlashInfer 采样路径,不需要 `nvcc`。③`--enforce-eager`——禁用 `torch.compile`/CUDA Graph 捕获,避免 Inductor 编译路径对系统 C 编译器/头文件的额外要求(即便如此,Triton 自己的 kernel JIT 仍然需要 `gcc`+`Python.h`,这两个是本机另外真实缺失过的依赖)。这三处调整没有一处是"绕过正确做法"——全部是 vLLM 自己代码里已经写好、专门给这类环境准备的官方开关,只是默认值保守,需要使用者知道它们存在。
+
+**AI 研究场景:** "在个人 Windows 笔记本上用 WSL2 部署一个真实 LLM 推理服务"本身就是相当一部分独立开发者/小团队的真实工作流(不是所有人都能随时拿到一台原生 Linux 服务器);本知识点完整踩过的五类真实阻塞——UVA/pinned memory、C 编译器缺失、Python 头文件缺失、FlashInfer 需要完整 CUDA Toolkit、宿主机 VPN 客户端劫持 WSL2 网络路由——分别对应"GPU 驱动兼容性""构建工具链完整性""可选加速库的隐藏依赖""开发机网络环境的不可控因素"四类在任何真实部署场景都会遇到的问题类别,这比"一路顺利跑通"更接近真实工程经历。
+
+**可运行例子(分两部分——WSL2 环境搭建在下面第一个 bash 代码块,真实 HTTP 客户端在第二个 python 代码块;第二部分需要第一部分描述的服务已经在 `localhost:8000` 上真实跑着才能拿到非 skip 的结果,`_verify_md.py` 常规干净进程重跑时因为没有常驻服务、会走 skip 分支,这是预期行为不是失败):**
+
+```python
+# 真实 HTTP 客户端:向本机真实跑着的 vllm serve 发请求(不 import 任何仓库模块,纯标准库)
+import urllib.request
+import json
+import socket
+
+BASE = "http://localhost:8000"
+
+
+def _server_reachable() -> bool:
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(urllib.request.Request(f"{BASE}/health"), timeout=3)
+        return True
+    except (urllib.error.URLError, socket.timeout, OSError):
+        return False
+
+
+if not _server_reachable():
+    print("SKIPPED: 本机没有真实 vllm serve 常驻服务在 localhost:8000,"
+          "这段代码已经在有真实服务时手动验证过(见正文'实测'段落的真实输出),"
+          "常规批量复验时预期走这条 skip 分支,不是测试失败。")
+else:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 显式不走系统代理
+
+    # /v1/models 真模型名(不是 mock 的 "mock-7b")
+    req = urllib.request.Request(f"{BASE}/v1/models")
+    with opener.open(req, timeout=10) as resp:
+        models = json.loads(resp.read())
+    real_model_name = models["data"][0]["id"]
+    assert real_model_name == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert real_model_name != "mock-7b"
+
+    # /v1/chat/completions 真实推理:真答案 + 真 tokenizer usage
+    body = json.dumps({
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "messages": [{"role": "user", "content": "What is the capital of France? Answer in one word."}],
+        "max_tokens": 50, "temperature": 0,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BASE}/v1/chat/completions", data=body,
+                                  headers={"Content-Type": "application/json"}, method="POST")
+    with opener.open(req, timeout=40) as resp:
+        result = json.loads(resp.read())
+    content = result["choices"][0]["message"]["content"]
+    real_prompt_tokens = result["usage"]["prompt_tokens"]
+    assert "Paris" in content
+    # mock_generate() 会用 len(content.split()) 估算,对这句话是 10;真 tokenizer(含 chat
+    # template 的 system prompt + 特殊 token)结果远大于这个朴素估算
+    mock_style_estimate = len(
+        "What is the capital of France? Answer in one word.".split()
+    )
+    assert real_prompt_tokens > mock_style_estimate * 2
+```
+
+**实测(本机真实 GPU,非模拟):** 完整真实链路走通前,连续踩中五类真实环境阻塞,按出现顺序:①`RuntimeError: UVA is not available`(pinned memory 在 WSL2 默认关闭,加 `VLLM_WSL2_ENABLE_PIN_MEMORY=1` 解决);②Triton kernel JIT 编译报 `Failed to find C compiler`(缺 `gcc`,用户手动 `apt-get install build-essential`);③编译继续报 `fatal error: Python.h: No such file or directory`(缺 `python3-dev`/`python3.12-dev`,一并让用户装了 `libnuma-dev`/`ninja-build` 避免后续再卡);④FlashInfer 采样器报 `RuntimeError: Could not find nvcc`(装完整 CUDA Toolkit 代价太大,改用 `VLLM_USE_FLASHINFER_SAMPLER=0` 绕开这条路径而不是装 Toolkit);⑤全部编译类阻塞解决、服务真实打印出 `Application startup complete` 之后,发现从 WSL2 内部、Windows 宿主机侧都连不上 `localhost:8000`——用 `ip route` 查出 `127.0.0.1` 被一条自定义策略路由(`table 127`,经 `loopback0` 设备)重定向,`eth0` 的地址(`198.18.0.1/30`)是宿主机 VPN 客户端 TUN 模式的 fake-ip 网段特征,不是 WSL2 正常 NAT 地址——请用户关闭 VPN 的 TUN 模式后连通。
+
+连通后真实数据:`/v1/models` 返回真模型名 `Qwen/Qwen2.5-0.5B-Instruct`(mock 版本固定返回 `"mock-7b"`);对"法国首都是哪"这个问题真实推理返回 `"Paris"`(正确),`usage.prompt_tokens=41`——用 `/tokenize` 端点核实这 41 个 token 里包含 Qwen 聊天模板的 system prompt(`"You are Qwen, created by Alibaba Cloud..."`)和 `<|im_start|>`/`<|im_end|>` 等特殊 token,而 mock 版本 `mock_generate()` 只对用户消息内容做 `len(content.split())` 朴素估算,对同一句话给出 10——真实值是朴素估算的 4.1 倍,差距完全来自 mock 天然不会引入的聊天模板开销。流式请求测出 TPOT(逐 token 间隔)稳定在 25-30ms/token,是合理的小模型量化推理速度;但 TTFT(首 token 延迟)反常地稳定在 21.2 秒左右,且这个延迟对不同 prompt、不同长度、甚至完全相同的重复请求都几乎不变(21149-21450ms 区间内浮动)——用 `nvidia-smi` 每秒采样确认这 21 秒里 GPU 利用率几乎全程 0%(仅末尾一个采样点 15%),证明这不是模型计算耗时;已排除的假设包括:客户端走系统代理(显式 `ProxyHandler({})` 禁用代理后结果不变)、首次请求的一次性预热开销(连续 4 次独立请求 TTFT 全部一致,不是"第一次慢之后变快")、按 prompt 形状首次编译 Triton kernel(完全相同的 prompt 连续发 3 次,TTFT 依然一致,不是"编译一次之后走缓存变快")——这三个假设都被真实数据推翻,最可能的解释是本机这套"VPN 工具介入过、又被用户关闭 TUN"的 WSL2 网络环境残留了某种影响 vLLM 内部 APIServer↔EngineCore 进程间通信(基于 ZMQ)的固定延迟,不是 vLLM/bitsandbytes 量化推理本身的固有开销——这个具体量级(~21 秒)不应该被当成"WSL2 部署 vLLM 的正常 TTFT"引用,但"TTFT 异常但 TPOT 正常,且 GPU 利用率能证明延迟不在计算侧"这个诊断方法本身是可复用的。GPU 显存:启动前 `0 MiB`,服务加载完成后 `15551 MiB`(其中日志明确显示模型权重本身只占 `0.45 GiB`,其余接近 14GB 是 vLLM 默认按 `gpu_memory_utilization` 比例预留的 KV cache 池,不是模型变大了),用 `kill` 发送 `SIGTERM` 优雅关闭后 5 秒内进程退出、显存真实回落到 `0 MiB`。独立复验:用不同的日志文件重新起了一个全新进程(新 PID),同样打印出 `Application startup complete`,证明整套环境修复(五个开关/依赖)是可重复生效的,不是偶然跑通一次;这个新进程发送新请求时又遇到一次网络连接超时(路由表显示这次是 VPN 的虚拟网卡本身已经消失、但 WSL2 自己的 `loopback0` 转发机制没跟上拓扑变化),因为这已经明确是本机 VPN 环境的额外不稳定因素、不是 vLLM/量化/GPU 相关的问题,没有继续折腾,如实记录在这里。
+
+**面试怎么问 + 追问链:**
+- **Q:** "你说这个 WSL2 环境要开 `VLLM_WSL2_ENABLE_PIN_MEMORY=1` 才能用,这个默认值为什么是关闭的?直接默认开启不是更方便吗?" —— 期望说出:vLLM 维护者显式在源码注释里写了"WSL2 上 pinned memory 技术上可能支持,但默认关闭"——这是保守的工程选择,pinned memory 出问题通常是难以复现的偶发崩溃或数据损坏,而不是清晰的报错,维护者宁可让用户在遇到明确的 `RuntimeError` 后主动选择开启(意味着用户对自己的环境做过判断),也不愿意默认开启后在不可控的 WSL2 环境里承担偶发不稳定的风险。
+- **追问 1(围绕 TTFT 异常这条诊断链路):** "你怎么确定 21 秒的延迟不是模型计算本身很慢,而是环境问题?" —— 期望说出诊断的完整逻辑链,不是直接下结论:①TPOT(拿到第一个 token 之后,后续每个 token 的间隔)是正常的 25-30ms,如果是模型/GPU 本身慢,TPOT 也应该异常,但它没有;②用 `nvidia-smi` 每秒采样 GPU 利用率,发现这 21 秒里几乎全是 0%——GPU 真正在算东西的时候利用率不可能长时间是 0%;③换不同 prompt、不同长度、甚至完全相同的重复请求,延迟量级都不变——如果是"某类输入形状触发了一次性编译",重复相同输入应该在第二次变快,但没有。这三点合在一起,排除了"计算慢"和"编译开销",指向某个和输入内容、计算过程都无关的固定环节。
+- **追问 2:** "你没能确定 21 秒延迟的确切根因(是 ZMQ 通信、进程调度还是别的),这算不算没有诊断完?这样写进文档合适吗?" —— 期望说出:诊断的价值不在于"必须找到唯一根因才能下笔",而在于"诚实报告已经验证过什么、排除了什么、剩下的最可能是什么"——本知识点已经排除了三个最容易被误认为根因的假设(代理、一次性预热、按形状编译),并用 GPU 利用率数据证明了"不是计算侧"这个更重要的结论;如果不排除这几个假设就直接把 21 秒当成"WSL2 部署 vLLM 的正常延迟"写进文档,那才是真正的诊断不完整——写清楚"排除了什么、不确定什么、不应该被引用为通用结论"比假装找到了确定答案更符合这个系列一贯的诚实标注纪律。
+- **追问 3:** "整个过程连续踩了五类环境阻塞,如果你是团队里第一个尝试'在 WSL2 上部署 vLLM'的人,你会怎么把这次踩坑经验变成对团队有用的东西?" —— 期望说出类似本知识点"实测"段落的组织方式:按阻塞出现的先后顺序记录每一个报错的精确文本、根因、以及最终采用的具体修复手段(环境变量/参数/系统包),而不是只写"最后跑通了";特别是要把"什么方式解决了问题"和"什么方式没解决问题但排除了某个假设"都记下来(比如"三个假设被推翻"这部分),这样团队里下一个人遇到类似但不完全相同的问题时,能知道哪些方向已经被验证过走不通,不用重新踩一遍。
+
+**常见坑:** 把这里测出的 TTFT(~21 秒)当成"vLLM 在 WSL2 上部署量化模型的正常首 token 延迟"到处引用——这是本机这套特定 VPN 残留网络环境下的异常值,已经用 GPU 利用率数据证明和真实计算无关,不能代表 vLLM/bitsandbytes/WSL2 组合本身的性能特征;真正能代表推理速度的是 TPOT(~25-30ms/token),这个数字是在确认 GPU 真实在算(TTFT 之后的稳定阶段)测出来的,可以合理引用。另一个坑是看到"装了 gcc 就能跑""关了 VPN 的 TUN 就能连"这类具体修复手段,就以为这是"WSL2 部署 vLLM 的标准步骤"到处套用——这五个阻塞里至少后两个(python3-dev/libnuma-dev/ninja-build 具体缺哪个、VPN 网络劫持的具体表现)高度依赖这台机器的具体镜像状态和网络软件配置,换一台机器可能缺别的包、没有这层网络问题,真正可复用的是"看到 `ImportError`/`RuntimeError` 先读完整 traceback 定位到具体是哪一行、哪个库在要求什么"这个诊断方法,不是这份具体的命令清单本身。
