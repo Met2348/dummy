@@ -51,7 +51,7 @@
 | 02 | II 网络层:IP与路由 | IP编址与子网划分 | [02-ip-addressing-and-subnetting.md](02-ip-addressing-and-subnetting.md) | 7 | ✅ 已完成(6个`.venv`代码块通过,1点[KP6 IPv6过渡技术]概念性讲解) |
 | 03 | II | 路由与网络层机制 | [03-routing-and-network-layer-mechanisms.md](03-routing-and-network-layer-mechanisms.md) | 7 | ✅ 已完成(6个`.venv`代码块通过,1点[KP4 IGP vs BGP]概念性讲解) |
 | 04 | III 传输层:TCP/UDP | TCP连接管理 | [04-tcp-connection-management.md](04-tcp-connection-management.md) | 7 | ✅ 已完成(6个`.venv`代码块通过,3点[KP2/3/4]额外用WSL2真实tcpdump+ss验证,1点[KP6]真实跨平台backlog差异对比) |
-| 05 | III | TCP可靠传输与流量控制 | [05-tcp-reliability-and-flow-control.md](05-tcp-reliability-and-flow-control.md) | 7 | ⏳ 未开始 |
+| 05 | III | TCP可靠传输与流量控制 | [05-tcp-reliability-and-flow-control.md](05-tcp-reliability-and-flow-control.md) | 7 | ✅ 已完成(7个`.venv`代码块通过,6点教学性模拟+1点[KP7]真实TCP socket复现粘包) |
 | 06 | III | TCP拥塞控制与UDP | [06-tcp-congestion-control-and-udp.md](06-tcp-congestion-control-and-udp.md) | 7 | ⏳ 未开始 |
 | 07 | IV 应用层协议 | HTTP演进 | [07-http-evolution.md](07-http-evolution.md) | 7 | ⏳ 未开始 |
 | 08 | IV | HTTPS与TLS | [08-https-and-tls.md](08-https-and-tls.md) | 6 | ⏳ 未开始 |
