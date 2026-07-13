@@ -34,8 +34,9 @@
 | 01 | DPO 基础与推导 | [01-dpo-foundations.md](01-dpo-foundations.md) | 5 | ✅ 已完成(已验证,含 `dpo_minimal.py` 真实训练复现字符级一致 + `resp_mask_c` 全文本掩码诚实标注 + `lectures/01-dpo.md` Slide 25 引用不存在的 `dpo_trl.py` 文档漂移发现) |
 | 02 | PO 变体家族 | [02-po-variant-family.md](02-po-variant-family.md) | 7 | ✅ 已完成(已验证,含 `inspect.signature` 澄清"KTO 仍需要 ref model,只省了配对"的常见误解 + DPOP 反例位级复现) |
 | 03 | RainbowPO 统一视角与 Capstone | [03-rainbowpo-and-capstone.md](03-rainbowpo-and-capstone.md) | 3 | ✅ 已完成(已验证,发现 `rainbowpo.py::unified_po_loss` 仅精确复现 `dpo` 一个配置——`dpop`/`kto` 配置字段和 `dpo` 逐字段相同、静默退化成纯 DPO,`ipo`/`orpo`/`cpo`/`simpo` 均与各自独立实现存在结构性数值偏差,capstone 50 步 benchmark 里 `dpop` 行与 `dpo` 行逐步位级相同) |
+| 04 | 进阶深度追加:4 个多级追问链案例 | [04-advanced-interview-depth.md](04-advanced-interview-depth.md) | 4案例(不计入15) | ✅ 已完成(已验证,8/8代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——①RainbowPO"一个函数统一7个变体"真实性验证(核心案例,03类发现的延伸;独立复验阶段用结构化字段比对证明dpop/kto与dpo配置逐字段相同是与随机种子无关的事实,用cpo_minimal.py源码逐行推导出"unified_cpo恒等于2×real_cpo"这条代数恒等式而非数值巧合,并用第4组全新种子77777/B=11/T=13复现全部匹配模式)、②DPO→IPO→KTO→ORPO/SimPO/CPO→DPOP方案批判迭代链(核心案例;独立复验阶段用不同学习率0.02+2000步复现DPO持续上涨/IPO精确收敛的动态,并从源码推导出DPO梯度`-β·sigmoid(-βh)`永不为零、IPO梯度`2(h-target)`恰为零的解析证明,期间发现并纠正了自己"IPO与DPO共享beta缩放约定"的错误假设——ipo_minimal.py的h是原始log-ratio差、未被beta预先缩放,和dpo_minimal.py的margin=beta·h是不同的约定)、③给定约束选算法决策依据追问(核心案例)、④真实训练vs纯数值demo规模递增(核心案例,含真实GPT-2逐条vs批量forward耗时实测+真实hh-rlhf数据集多轮对话mask稀释统计)) |
 
-**预计合计:约 15 个知识点。**
+**预计合计:约 15 个知识点,3 篇 + 1 篇进阶深度追加(4 个案例,不计入 15),全部完成并独立验证。**
 
 ---
 

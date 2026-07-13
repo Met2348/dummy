@@ -38,8 +38,9 @@
 | 02 | 量化 + LoRA | [02-quantized-lora.md](02-quantized-lora.md) | 6 | ✅ 已完成(已验证,本机真实 RTX 3080 Ti GPU 跑通知识点 3 的真 bitsandbytes 4bit 路径;含 NF4 网格 7负+1零+8正非对称 + 手写 NF4 与真 bitsandbytes 位级一致 + DoRA 与量化实为零关联三处发现) |
 | 03 | Adapter 家族核心 | [03-adapter-core.md](03-adapter-core.md) | 6 | ✅ 已完成(已验证,含 Compacter `main()` 打印语句除数错误(漏乘 n=4)+ IA3 手写/peft 两条路径参数总量相等系巧合、缩放张量结构完全不同(经 peft 源码直接核实)两处发现) |
 | 04 | Adapter 进阶与统一视角 | [04-adapter-advanced.md](04-adapter-advanced.md) | 5 | ✅ 已完成(已验证,含 MAD-X 的 `InvertibleAdapter` 完全未接入前向图 + MAM 的 `P_k` 参数梯度近零(真实 LM loss 反传复现约 7e-10 量级)两处发现) |
+| 05 | 进阶深度追加:5 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 5案例(不计入24) | ✅ 已完成(已验证,10/10代码块独立通过;基于 dsa-deep-dive/alignment-algorithms-deep-dive 已验证的 5 条追问轴线撰写——①LoRA→QLoRA→LoftQ→DoRA 方案批判迭代链(核心案例;独立复验发现 02 号文件"交替最小化每一步不会变差"这条 assert 通过的结论并非全称成立,40 个新种子里 34 个(85%)在同样配置下就会出现局部残差回升,02 号文件恰好用的种子 0 只是因为 n_iter=5 停得早、放宽到 15 轮同样违反,并溯源到 absmax=max(abs(·)) 不是 L2 误差最优缩放这一根因;另外现场手写 QDoRA 最小原型验证量化轴与 magnitude/direction 轴确实正交可组合)、②Houlsby→Pfeiffer→Compacter→(IA)³ 压缩谱系决策依据追问(核心案例;约束求解器验证"<60K 参数+需要非线性"在默认超参下无解,进一步验证这只是默认超参 r=16/n=4 下的结论,调大 Compacter 的 n 到 8 或调小 r 到 8 都能重新打开这个约束,区分"当前配置无解"与"方法家族无解"两种不同强度的结论)、③LoRA 多租户并发服务工程约束递增(核心案例;用 threading.Event 精确复现共享 base 权重被并发合并时的更新丢失,加锁后正确;批处理不合并方案 N=20 租户实测存储节省 15.7 倍)、④`merge_weights()`"删除"承诺真实性验证(核心案例;01 号文件已发现的 minimal 双重计数 bug,对照真实 peft 库验证出两层防御——`merge_adapter()` 靠 `merged` 运行时标志防御(`lora_A` 仍占显存但 forward 不再双重计数,可逆)、`merge_and_unload()` 做结构级卸载(模块类型从 `Linear` 变 `Conv1D`,`lora_A` 属性彻底消失,不可逆))、⑤QLoRA 4bit 训练边界+规模外推(真实性验证+规模递增双轴;本机真实 RTX 3080 Ti 测出干净的 0.5159 bytes/param 边际比例,用 02 号文件已实测的 TinyLlama 1049.3MB 做交叉检验发现 naive 外推低估 1.85 倍,修正后 7B 权重估算 6.68GB;并用 `torch.cuda.device_count()==1` 如实确认这台机器验证不到任何多卡行为)) |
 
-**预计合计:约 24 个知识点。**
+**预计合计:约 24 个知识点,4 篇 + 1 篇进阶深度追加(5 个案例,不计入 24)。**
 
 ---
 

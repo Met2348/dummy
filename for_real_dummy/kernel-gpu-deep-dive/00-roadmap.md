@@ -36,8 +36,9 @@
 | 02 | Roofline 性能建模 | [02-roofline-model.md](02-roofline-model.md) | 4 | ✅ 已完成(已验证,ridge point 反直觉发现 + A100/H100 翻转案例) |
 | 03 | Kernel 设计语言:Triton & CUTLASS | [03-kernel-design-triton-cutlass.md](03-kernel-design-triton-cutlass.md) | 5 | ✅ 已完成(已验证,发现 128×256/256×128 打分完全平局、纯靠列表顺序决出) |
 | 04 | FlashAttention 与 Kernel Fusion | [04-flashattention-and-fusion.md](04-flashattention-and-fusion.md) | 5 | ✅ 已完成(已验证,发现 rmsnorm 数值差异根源是 Python 3.12+ `sum()` 补偿求和 vs 手写循环) |
+| 05 | 进阶深度追加:4 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 4案例(不计入19) | ✅ 已完成(已验证,8/8代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——①Triton autotune 打分平局真实性验证(独立发现平局不是"n_tiles<132"单一条件决定,而是"两候选n_tiles都≥132 或 二者n_tiles恰好相等"这一更完整的充分条件,穷举扫描 M=64..4096 共4033个整数值零反例验证)、②FlashAttention HBM 节省曲线外推到100万/400万token+KV cache容量算式(100万token需137.44GB,单卡H100/H200装不下、B200装得下、2×H100张量并行也装得下)、③Ridge Point 非单调第二证据(FP8精度下30.2083%降幅与BF16位级相等+全新`tdp_w`字段发现GB200单位功耗算力反比B200低,已用`fractions.Fraction`精确有理数运算独立复验替代原文件的浮点除法,并证明这个比值在bf16/fp8/fp4三个精度通道恒为27/25的结构性原因)、④Fused MLP 存储层选型决策依据+方案批判迭代(寄存器方案超编译预算32倍、SMEM tile size从1行到8行occupancy从0.5跌到0);独立复验阶段额外修复一处西里尔字符残留(案例4"常见坑"段落里的"показ",已核实修复后全文再无非常规字符) |
 
-**合计:19 个知识点,4 篇全部完成并独立验证。**
+**合计:19 个知识点,4 篇 + 1 篇进阶深度追加(4 个案例,不计入 19),全部完成并独立验证。**
 
 ---
 
