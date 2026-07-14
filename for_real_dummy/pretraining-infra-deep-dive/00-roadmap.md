@@ -48,7 +48,7 @@
 | 06 | 集群网络 | [06-cluster-networking.md](06-cluster-networking.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现SHARP相对ring的加速比精确收敛到n_gpus-1(跨16/128/256-GPU×1MB/10GB共6组合验证),以及Fat-Tree oversubscription对bisection带宽的折算是精确线性关系(跨1.5/3.0/4.0验证)) |
 | 07 | 存储与数据管线 | [07-storage-dataops.md](07-storage-dataops.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现Lustre在200KB小样本读场景下延迟占比(99.92%)反而比S3(99.60%)更高——带宽越高的存储,小消息场景下延迟项占比反而越逼近100%;独立发现range sharding在3段聚簇/线性递增两种新模式下不均衡度分别达469%/85.8%) |
 | 08 | 训练编排 | [08-training-orchestration.md](08-training-orchestration.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现gang_assign对GPU物理拓扑完全无感知(极端碎片化vs高度集中给出完全相同结果),starvation_check的简单容量检查与gang_assign自身资源模型一致;独立发现Ray bottom-up scheduler的本地性决策存在精确带宽交叉点(bandwidth=5.0MB/ms);独立验证Young's Formula的T_opt是浪费率的精确最小值(12点扫描)) |
-| 09 | Module 8 毕业(端到端系统设计) | [09-infra-graduation.md](09-infra-graduation.md) | 叙事体capstone | ⬜ 待撰写(链kernel-gpu-deep-dive) |
+| 09 | Module 8 毕业(端到端系统设计) | [09-infra-graduation.md](09-infra-graduation.md) | 叙事体capstone | ✅ 已完成(已验证,10/10代码块通过;链kernel-gpu-deep-dive+综合05-08号文件;独立发现B200/H100 speedup精确等于bf16_tflops比值2250/989=2.275025(全新128GPU+1B模型配置验证到1e-9精度)、小集群(8GPU)固定storage capex占3年TCO高达76.9%而4096GPU集群仅0.7%、B200相对H100显存带宽提升幅度(2.39x)反而比算力提升幅度(2.28x)更大) |
 
 **预计合计:约 60-70 个知识点,8 篇正文 + 2 篇叙事体 capstone。**
 
