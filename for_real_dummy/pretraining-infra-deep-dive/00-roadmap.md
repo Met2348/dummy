@@ -1,6 +1,6 @@
 # 预训练规模化基建深挖 —— 路线图与进度表
 
-> 目标:约 60-70 个知识点,覆盖"从数据到千卡集群"的预训练规模化基建全链路——数据处理(data-curation)→ 训练规模化(scaling-infra)→ 预训练配方(pretraining-recipe)→ Module 3 毕业(small-model-graduation)→ CUDA 执行模型(cuda-essentials)→ 集群网络(cluster-networking)→ 存储与数据管线(storage-dataops)→ 训练编排(training-orchestration)→ Module 8 毕业(infra-graduation)。
+> **状态:✅ 全部完成(2026-07-14)**。实际规模:62 个知识点 + 2 篇叙事体 capstone(04/09 号文件),8 篇正文 + 1 篇 roadmap,140 个代码块全部验证通过,覆盖"从数据到千卡集群"的预训练规模化基建全链路——数据处理(data-curation)→ 训练规模化(scaling-infra)→ 预训练配方(pretraining-recipe)→ Module 3 毕业(small-model-graduation)→ CUDA 执行模型(cuda-essentials)→ 集群网络(cluster-networking)→ 存储与数据管线(storage-dataops)→ 训练编排(training-orchestration)→ Module 8 毕业(infra-graduation)。
 > 定位:仓库"专题精读系列"第 6 条,直接对应 `learning/` 下 9 个专题模块——Module 3《造大模型》剩余 4 站 + Module 8《系统与Infra》剩余 5 站。这 9 个模块本身已有详尽 README(专题概览/横向对比/cheatsheet/自测题/坑注记一应俱全),本系列直接复用其中已核实的实测数字,但换成面试导向的追问链讲法。
 
 ---
@@ -50,7 +50,7 @@
 | 08 | 训练编排 | [08-training-orchestration.md](08-training-orchestration.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现gang_assign对GPU物理拓扑完全无感知(极端碎片化vs高度集中给出完全相同结果),starvation_check的简单容量检查与gang_assign自身资源模型一致;独立发现Ray bottom-up scheduler的本地性决策存在精确带宽交叉点(bandwidth=5.0MB/ms);独立验证Young's Formula的T_opt是浪费率的精确最小值(12点扫描)) |
 | 09 | Module 8 毕业(端到端系统设计) | [09-infra-graduation.md](09-infra-graduation.md) | 叙事体capstone | ✅ 已完成(已验证,10/10代码块通过;链kernel-gpu-deep-dive+综合05-08号文件;独立发现B200/H100 speedup精确等于bf16_tflops比值2250/989=2.275025(全新128GPU+1B模型配置验证到1e-9精度)、小集群(8GPU)固定storage capex占3年TCO高达76.9%而4096GPU集群仅0.7%、B200相对H100显存带宽提升幅度(2.39x)反而比算力提升幅度(2.28x)更大) |
 
-**预计合计:约 60-70 个知识点,8 篇正文 + 2 篇叙事体 capstone。**
+**实际合计:62 个知识点(12+10+11+8+7+7+7)+ 2 篇叙事体 capstone(04/09),140 个代码块全部验证通过,零回归。**
 
 ---
 
