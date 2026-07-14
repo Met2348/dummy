@@ -54,3 +54,7 @@ python learning/computer-architecture-mastery/src/tests/test_all.py
 内容全部是经典计算机体系结构教材共识(Patterson-Hennessy《计算机组成与设计》/Hennessy-Patterson《计算机体系结构:量化研究方法》体系里的标准表述),不需要追赶前沿论文,但仍要求核实具体术语和机制描述的准确性。`real_world_link` 字段全部留空。
 
 至此,老师要求的六个CS科班理论专题第四个完成,后续两个(编译原理/安全密码学基础)陆续推进。
+
+## 补充:直接问答自测
+
+`qa-practice.md`——一份轻量级补充练习(24题,不含追问链评分逻辑),每题一个问题配一个完整参考答案,和上面108点的3层追问链形式不同,提问角度也刻意避开了源码里的trigger原文,适合刷完追问链之后做最后一遍考前快速过关。
