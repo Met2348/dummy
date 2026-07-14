@@ -60,9 +60,9 @@
 | 06 | IV 存储引擎内部机制 | 存储引擎内部机制 | [06-storage-engine-internals.md](06-storage-engine-internals.md) | 9 | .venv+WSL2 | ✅ 已完成(7个`.venv`代码块+2个`python-wsl2`代码块,板块IV完成。亮点:真实`kill -9`崩溃PostgreSQL主进程再重启,真实捕获"database system was not properly shut down"+"redo starts/redo done"恢复日志,验证已提交数据完整存活;ARIES三阶段/LSM-tree结构与compaction/脏页LRU用`.venv`模拟;SQLite WAL模式与PG WAL理念对比) |
 | 07 | V 分布式数据库与复制 | 复制与分布式基础 | [07-replication-and-distributed-basics.md](07-replication-and-distributed-basics.md) | 7 | WSL2 MariaDB主从(二选一,理由见文件头) | ✅ 已完成(4个`python-wsl2`代码块+3个`.venv`代码块,板块V完成。亮点:WSL2内真实搭建MariaDB一主一从[独立datadir/端口3307/GTID复制],真实测量复制延迟[亚毫秒级],真实模拟异步复制滞后窗口[STOP/START SLAVE SQL_THREAD],真实模拟网络分区演示CAP的AP/CP权衡[STOP/START SLAVE IO_THREAD];垂直分片/水平分片痛点[朴素取模82.9%迁移率]/2PC状态机用`.venv`) |
 | 08 | VI NoSQL与现代工程场景 | NoSQL与缓存模式 | [08-nosql-and-caching-patterns.md](08-nosql-and-caching-patterns.md) | 9 | WSL2 Valkey | ✅ 已完成(9个`python-wsl2`代码块,板块VI完成,8个分类文件全部完成。亮点:真实RDB/AOF持久化文件验证[含现代多部分AOF格式发现];用`threading.Event`精确构造真实的缓存双写不一致竞态;缓存击穿[20→1]/雪崩[1→30个过期时间点]/穿透[10→1]三种场景+真实缓解手段;数据库连接池会话状态泄漏真实复现) |
-| 09 | 收尾 | 模拟终面capstone | [09-mock-interview-capstone.md](09-mock-interview-capstone.md) | —(不计入合计) | 混合 | ⏳ 未开始 |
+| 09 | 收尾 | 模拟终面capstone | [09-mock-interview-capstone.md](09-mock-interview-capstone.md) | —(不计入合计) | WSL2 MariaDB | ✅ 已完成(1个综合`python-wsl2`代码块,双线索——索引最左前缀违反导致的慢查询雪崩[03类知识点3] + REPEATABLE READ误用导致的优惠券超发[04类知识点7]——同一份代码里独立验证,覆盖5轴追问链中4条轴线,cross-reference 5个不同分类文件。**验证阶段真实踩坑**:超发demo最初5个线程各自独立`connect→SELECT→UPDATE`没有显式同步点,连接建立耗时不均导致偶发`got 3`而非预期`5`[后面的线程慢到看见前面线程已提交的新值]——本质是用"起5个线程"冒充"5个人同时查询",时序噪声掩盖了真实bug。用`threading.Barrier(5)`强制全部5个连接都完成SELECT建立好REPEATABLE READ快照后才放行到UPDATE阶段,修复后连续5次重跑稳定复现5/5超发、修复后1/5正确。) |
 
-**目标合计:约 65 个知识点,8 个分类文件 + 1 篇模拟终面 capstone。** 精确数字以全库自查阶段的逐文件核对为准。
+**最终合计:65 个知识点(7+7+10+8+8+9+7+9),8 个分类文件 + 1 篇模拟终面 capstone。** 精确数字以全库自查阶段的逐文件核对为准(见 Task 11)。
 
 ---
 
