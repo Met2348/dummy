@@ -54,7 +54,7 @@
 |---|------|------|------|------------|------|------|
 | 01 | I 关系模型与SQL基础 | 关系模型与基础SQL | [01-relational-model-and-sql-basics.md](01-relational-model-and-sql-basics.md) | 7 | .venv | ✅ 已完成(7个`.venv`代码块全部通过) |
 | 02 | I | 范式与进阶SQL | [02-normalization-and-advanced-sql.md](02-normalization-and-advanced-sql.md) | 7 | .venv | ✅ 已完成(7个`.venv`代码块全部通过,板块I完成) |
-| 03 | II 索引与查询优化 | 索引结构与查询优化器 | [03-indexing-and-query-optimization.md](03-indexing-and-query-optimization.md) | 10 | .venv+WSL2双引擎 | ⏳ 未开始 |
+| 03 | II 索引与查询优化 | 索引结构与查询优化器 | [03-indexing-and-query-optimization.md](03-indexing-and-query-optimization.md) | 10 | .venv+WSL2双引擎 | ✅ 已完成(1个`.venv`代码块+9个`python-wsl2`代码块,双引擎真实EXPLAIN对比,板块II完成。真实发现:①`Index Only Scan`需要`VACUUM`更新可见性图,只`ANALYZE`不够;②C.UTF-8 collation下默认操作符类依然不支持前缀LIKE索引,需显式`text_pattern_ops`;③PG和MariaDB放弃索引改用全表扫描的选择性交叉点不同[PG约20~50%,MariaDB约5~20%]) |
 | 04 | III 事务与并发控制 | 事务与隔离级别 | [04-transactions-and-isolation-levels.md](04-transactions-and-isolation-levels.md) | 8 | WSL2双引擎 | ⏳ 未开始 |
 | 05 | III | MVCC与锁机制 | [05-mvcc-and-locking.md](05-mvcc-and-locking.md) | 8 | WSL2双引擎 | ⏳ 未开始 |
 | 06 | IV 存储引擎内部机制 | 存储引擎内部机制 | [06-storage-engine-internals.md](06-storage-engine-internals.md) | 9 | .venv+WSL2 | ⏳ 未开始 |
