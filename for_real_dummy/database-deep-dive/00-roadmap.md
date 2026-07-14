@@ -59,7 +59,7 @@
 | 05 | III | MVCC与锁机制 | [05-mvcc-and-locking.md](05-mvcc-and-locking.md) | 8 | WSL2双引擎 | ✅ 已完成(8个`python-wsl2`代码块,双引擎真实验证,板块III完成。核心发现:①PG的xmin真实随UPDATE前进,InnoDB原地改+undo log重建旧版本;②行锁粒度真实验证[不同行不阻塞,同一行阻塞~1s];③next-key lock真实锁定范围比教科书定义更宽[目标值前后两侧间隙都被锁]；④真实死锁复现,双引擎victim选择不固定;⑤固定顺序加锁真实避免死锁;⑥乐观锁CAS真实防丢失更新;⑦锁等待超时双引擎真实触发) |
 | 06 | IV 存储引擎内部机制 | 存储引擎内部机制 | [06-storage-engine-internals.md](06-storage-engine-internals.md) | 9 | .venv+WSL2 | ✅ 已完成(7个`.venv`代码块+2个`python-wsl2`代码块,板块IV完成。亮点:真实`kill -9`崩溃PostgreSQL主进程再重启,真实捕获"database system was not properly shut down"+"redo starts/redo done"恢复日志,验证已提交数据完整存活;ARIES三阶段/LSM-tree结构与compaction/脏页LRU用`.venv`模拟;SQLite WAL模式与PG WAL理念对比) |
 | 07 | V 分布式数据库与复制 | 复制与分布式基础 | [07-replication-and-distributed-basics.md](07-replication-and-distributed-basics.md) | 7 | WSL2 MariaDB主从(二选一,理由见文件头) | ✅ 已完成(4个`python-wsl2`代码块+3个`.venv`代码块,板块V完成。亮点:WSL2内真实搭建MariaDB一主一从[独立datadir/端口3307/GTID复制],真实测量复制延迟[亚毫秒级],真实模拟异步复制滞后窗口[STOP/START SLAVE SQL_THREAD],真实模拟网络分区演示CAP的AP/CP权衡[STOP/START SLAVE IO_THREAD];垂直分片/水平分片痛点[朴素取模82.9%迁移率]/2PC状态机用`.venv`) |
-| 08 | VI NoSQL与现代工程场景 | NoSQL与缓存模式 | [08-nosql-and-caching-patterns.md](08-nosql-and-caching-patterns.md) | 9 | WSL2 Valkey | ⏳ 未开始 |
+| 08 | VI NoSQL与现代工程场景 | NoSQL与缓存模式 | [08-nosql-and-caching-patterns.md](08-nosql-and-caching-patterns.md) | 9 | WSL2 Valkey | ✅ 已完成(9个`python-wsl2`代码块,板块VI完成,8个分类文件全部完成。亮点:真实RDB/AOF持久化文件验证[含现代多部分AOF格式发现];用`threading.Event`精确构造真实的缓存双写不一致竞态;缓存击穿[20→1]/雪崩[1→30个过期时间点]/穿透[10→1]三种场景+真实缓解手段;数据库连接池会话状态泄漏真实复现) |
 | 09 | 收尾 | 模拟终面capstone | [09-mock-interview-capstone.md](09-mock-interview-capstone.md) | —(不计入合计) | 混合 | ⏳ 未开始 |
 
 **目标合计:约 65 个知识点,8 个分类文件 + 1 篇模拟终面 capstone。** 精确数字以全库自查阶段的逐文件核对为准。
