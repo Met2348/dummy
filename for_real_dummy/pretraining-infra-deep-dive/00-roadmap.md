@@ -46,8 +46,8 @@
 | 04 | Module 3 毕业(五部曲) | [04-small-model-graduation.md](04-small-model-graduation.md) | 叙事体capstone | ✅ 已完成(已验证,5/5代码块通过,含真实GPU训练bonus;独立发现VanillaGPT2 vs PhiTiny在mock训练y=x.clone()标签下初始化loss差一个数量级(≈1.0 vs ≈9.6,3种子验证),以及ablation_breakdown的"curriculum(C→E)"标签归因错位) |
 | 05 | CUDA 执行模型 | [05-cuda-essentials.md](05-cuda-essentials.md) | 8 | ✅ 已完成(已验证,17/17代码块通过;独立发现shared memory bank conflict冲突度公式为gcd(stride,32)的推广、tiled GEMM的HBM流量加速比精确等于tile size(跨tile=8/16/32/64验证,非近似)) |
 | 06 | 集群网络 | [06-cluster-networking.md](06-cluster-networking.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现SHARP相对ring的加速比精确收敛到n_gpus-1(跨16/128/256-GPU×1MB/10GB共6组合验证),以及Fat-Tree oversubscription对bisection带宽的折算是精确线性关系(跨1.5/3.0/4.0验证)) |
-| 07 | 存储与数据管线 | [07-storage-dataops.md](07-storage-dataops.md) | 7 | ⬜ 待撰写 |
-| 08 | 训练编排 | [08-training-orchestration.md](08-training-orchestration.md) | 7-8 | ⬜ 待撰写 |
+| 07 | 存储与数据管线 | [07-storage-dataops.md](07-storage-dataops.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现Lustre在200KB小样本读场景下延迟占比(99.92%)反而比S3(99.60%)更高——带宽越高的存储,小消息场景下延迟项占比反而越逼近100%;独立发现range sharding在3段聚簇/线性递增两种新模式下不均衡度分别达469%/85.8%) |
+| 08 | 训练编排 | [08-training-orchestration.md](08-training-orchestration.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现gang_assign对GPU物理拓扑完全无感知(极端碎片化vs高度集中给出完全相同结果),starvation_check的简单容量检查与gang_assign自身资源模型一致;独立发现Ray bottom-up scheduler的本地性决策存在精确带宽交叉点(bandwidth=5.0MB/ms);独立验证Young's Formula的T_opt是浪费率的精确最小值(12点扫描)) |
 | 09 | Module 8 毕业(端到端系统设计) | [09-infra-graduation.md](09-infra-graduation.md) | 叙事体capstone | ⬜ 待撰写(链kernel-gpu-deep-dive) |
 
 **预计合计:约 60-70 个知识点,8 篇正文 + 2 篇叙事体 capstone。**
