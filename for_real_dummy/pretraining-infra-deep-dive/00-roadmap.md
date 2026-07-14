@@ -44,8 +44,8 @@
 | 02 | 训练规模化 | [02-scaling-infra.md](02-scaling-infra.md) | 10 | ✅ 已完成(已验证,19/19代码块通过,含L08-L11去重交叉引用处理;独立发现Chinchilla"最优比例"实际随算力预算漂移、不是固定20) |
 | 03 | 预训练配方 | [03-pretraining-recipe.md](03-pretraining-recipe.md) | 11 | ✅ 已完成(已验证,22/22代码块通过,含真实GPU训练bonus两次独立复现;独立发现cosine/wsd在step=warmup处精确重合是cos(0)=1的数学必然、Windows下np.memmap+tempfile清理冲突、synth_data_prompt的filter_quality对重复内容无防御) |
 | 04 | Module 3 毕业(五部曲) | [04-small-model-graduation.md](04-small-model-graduation.md) | 叙事体capstone | ✅ 已完成(已验证,5/5代码块通过,含真实GPU训练bonus;独立发现VanillaGPT2 vs PhiTiny在mock训练y=x.clone()标签下初始化loss差一个数量级(≈1.0 vs ≈9.6,3种子验证),以及ablation_breakdown的"curriculum(C→E)"标签归因错位) |
-| 05 | CUDA 执行模型 | [05-cuda-essentials.md](05-cuda-essentials.md) | 8-9 | ⬜ 待撰写 |
-| 06 | 集群网络 | [06-cluster-networking.md](06-cluster-networking.md) | 7 | ⬜ 待撰写 |
+| 05 | CUDA 执行模型 | [05-cuda-essentials.md](05-cuda-essentials.md) | 8 | ✅ 已完成(已验证,17/17代码块通过;独立发现shared memory bank conflict冲突度公式为gcd(stride,32)的推广、tiled GEMM的HBM流量加速比精确等于tile size(跨tile=8/16/32/64验证,非近似)) |
+| 06 | 集群网络 | [06-cluster-networking.md](06-cluster-networking.md) | 7 | ✅ 已完成(已验证,14/14代码块通过;独立发现SHARP相对ring的加速比精确收敛到n_gpus-1(跨16/128/256-GPU×1MB/10GB共6组合验证),以及Fat-Tree oversubscription对bisection带宽的折算是精确线性关系(跨1.5/3.0/4.0验证)) |
 | 07 | 存储与数据管线 | [07-storage-dataops.md](07-storage-dataops.md) | 7 | ⬜ 待撰写 |
 | 08 | 训练编排 | [08-training-orchestration.md](08-training-orchestration.md) | 7-8 | ⬜ 待撰写 |
 | 09 | Module 8 毕业(端到端系统设计) | [09-infra-graduation.md](09-infra-graduation.md) | 叙事体capstone | ⬜ 待撰写(链kernel-gpu-deep-dive) |
