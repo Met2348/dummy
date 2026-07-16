@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-for name in TRACEH_PROJECT_ROOT TRACEH_BLOCK_MANIFEST TRACEH_BLOCK_RUNNER TRACEH_OUTPUT_ROOT; do
+for name in TRACEH_PROJECT_ROOT TRACEH_BLOCK_MANIFEST TRACEH_OUTPUT_ROOT TRACEH_PYTHON; do
   if [[ -z "${!name:-}" ]]; then
     echo "ERROR: required environment variable is unset: $name" >&2
     exit 2
@@ -28,8 +28,15 @@ case "$TRACEH_OUTPUT_ROOT" in
   *) echo "ERROR: TRACEH_OUTPUT_ROOT must be under /blue" >&2; exit 2 ;;
 esac
 
+TRACEH_BLOCK_RUNNER="${TRACEH_BLOCK_RUNNER:-$TRACEH_PROJECT_ROOT/experiments/scripts/run_cluster_block.py}"
+CUDA_MODULE="${TRACEH_CUDA_MODULE:-cuda/12.9.1}"
 test -f "$TRACEH_BLOCK_MANIFEST"
-test -x "$TRACEH_BLOCK_RUNNER"
+test -f "$TRACEH_BLOCK_RUNNER"
+test -x "$TRACEH_PYTHON"
+
+if command -v module >/dev/null 2>&1; then
+  module load "$CUDA_MODULE"
+fi
 
 BLOCK_INDEX="$SLURM_ARRAY_TASK_ID"
 ATTEMPT_ID="${SLURM_ARRAY_JOB_ID}_${BLOCK_INDEX}_${SLURM_JOB_ID}"
@@ -52,9 +59,11 @@ fi
 
 nvidia-smi --query-gpu=name,uuid,memory.total,driver_version --format=csv
 date --iso-8601=seconds
-srun "$TRACEH_BLOCK_RUNNER" \
+cd "$TRACEH_PROJECT_ROOT"
+srun "$TRACEH_PYTHON" "$TRACEH_BLOCK_RUNNER" \
   --manifest "$TRACEH_BLOCK_MANIFEST" \
   --block-index "$BLOCK_INDEX" \
-  --output-dir "$OUTPUT_DIR"
+  --output-dir "$OUTPUT_DIR" \
+  --project-root "$TRACEH_PROJECT_ROOT" \
+  --python "$TRACEH_PYTHON"
 date --iso-8601=seconds
-

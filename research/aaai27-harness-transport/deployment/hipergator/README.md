@@ -1,8 +1,9 @@
 # TRACE-H 在 UF HiPerGator 上的运行说明
 
-本目录只提供 scheduler、资源和 runner 接口模板。TRACE-H episode runner 尚未在本目录伪造实现；`TRACEH_BLOCK_RUNNER` 必须指向项目中经过本地 smoke 的可执行 block runner。
+**2026-07-16 状态：** GPU preflight、GitHub sparse clone、`uv.lock` 环境、Slurm array 与 ALFWorld `NONE` baseline block runner 已可迁移。当前 runner 只允许 `qwen_alfworld_baseline`，尚未接入 TRACE-H Ours 和完整 paper baselines，因此 H0/H1 可开始，sealed target-final 不可开始。
 
 总资源决策见[本地与 HiPerGator 分阶段方案](../local-vs-hipergator-execution-plan-zh.md)。
+完整迁移边界与发布门见[GitHub 到 HiPerGator 迁移验收](../github-hipergator-handoff-20260716-zh.md)。
 
 ## 1. 登录后先查 allocation
 
@@ -26,15 +27,42 @@ sinfo -p hpg-b200
 export HPG_ACCOUNT=<group>
 export TRACEH_ROOT=/blue/$HPG_ACCOUNT/$USER/trace-h
 mkdir -p "$TRACEH_ROOT"/{repo,envs,containers,models,data,manifests,artifacts,runs,logs}
-cd "$TRACEH_ROOT"
+cd "$TRACEH_ROOT/repo"
 ```
 
-Python/uv/conda cache 也放 Blue，不占 40GB Home：
+使用独立 private repository；不要把待投稿增量推送到当前公开的 `Met2348/dummy`：
 
 ```bash
-export UV_CACHE_DIR="$TRACEH_ROOT/.cache/uv"
-export HF_HOME="$TRACEH_ROOT/.cache/huggingface"
+export TRACEH_REPO_URL=<private-repository-url>
+git clone --depth 1 --branch main "$TRACEH_REPO_URL" traceh
+cd traceh
+
+export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo/traceh"
+python3 "$TRACEH_PROJECT_ROOT/deployment/hipergator/validate_release.py"
 ```
+
+Python/uv cache 也放 Blue，不占 40GB Home。环境按冻结 lock 创建：
+
+```bash
+cd "$TRACEH_PROJECT_ROOT/deployment/hipergator"
+bash bootstrap-env.sh
+export TRACEH_PYTHON="$TRACEH_ROOT/envs/traceh/bin/python"
+```
+
+H1 smoke 可下载 Qwen3-4B 与 ALFWorld，并生成内容哈希 manifest：
+
+```bash
+export TRACEH_MODEL_REPO=Qwen/Qwen3-4B
+export TRACEH_MODEL_NAME=Qwen3-4B
+export TRACEH_MODEL_REVISION=main  # H1 smoke；正式实验替换为 immutable commit
+bash prepare-assets.sh
+
+export TRACEH_MODEL_PATH="$TRACEH_ROOT/models/Qwen3-4B"
+export TRACEH_CHECKPOINT_MANIFEST="$TRACEH_ROOT/manifests/assets/Qwen3-4B.manifest.json"
+export TRACEH_ALFWORLD_DATA="$TRACEH_ROOT/data/alfworld"
+```
+
+若模型和数据已通过 Globus 放入 `/blue`，跳过下载，直接运行 `make_asset_manifest.py`。不要把 Hugging Face token 写进脚本或 manifest；`hf` 使用用户已有 credential。
 
 若使用 Apptainer：
 
@@ -53,7 +81,7 @@ apptainer exec --nv "$TRACEH_ROOT/containers/traceh.sif" python -c 'import torch
 脚本请求 1 GPU、4 CPU、32GB RAM；不写 partition 时，当前 UF 规则会把普通 GPU request 调度到带 L4 的 `hpg-turin`。
 
 ```bash
-export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo"
+export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo/traceh"
 export TRACEH_PYTHON="$TRACEH_ROOT/envs/traceh/bin/python"
 sbatch --account="$HPG_ACCOUNT" slurm/gpu-preflight.sbatch
 ```
@@ -75,38 +103,56 @@ preflight 必须报告 `torch.cuda.is_available() == True`，并显示预期 GPU
 
 ## 4. Block runner 接口
 
-Slurm array 不直接理解 TRACE-H schema。它只约定 runner 接口：
+Slurm array 通过 `experiments/scripts/run_cluster_block.py` 执行一个 TSV block：
 
 ```text
-TRACEH_BLOCK_RUNNER \
+python run_cluster_block.py \
   --manifest <absolute path> \
   --block-index <zero-based array index> \
   --output-dir <new directory>
 ```
 
-runner 必须：
+runner 当前保证：
 
 - 一个 block 内只加载一次模型；
-- 从 manifest 的一行读取 phase/model/tasks/policy/seed；
+- 只允许登记过的 Python entrypoint，不接受任意 shell command；
+- 校验 phase、information class、policy、precision、seed 与 action budget；
 - append-only 写 episode records；
-- 已存在同 `run_id` 时拒绝覆盖；
+- output directory 非空时拒绝覆盖；
 - 失败时非零退出；
 - 记录 git/model/env/GPU/Slurm metadata；
-- target phase 遵守 `policy-transport-seal.md`。
+- 冻结 SHA-256 必须与 job spec 指向的 checkpoint/task/prompt/freeze artifact 内容一致；
+- target-final 还必须通过显式 freeze acknowledgement。
 
-[示例 block manifest](block-manifest.example.tsv) 只定义最小列，正式 manifest 还应有 checkpoint hash、task hash、prompt hash、action budget 和 target information class。
+[示例 block manifest](block-manifest.example.tsv)和[示例 job spec](specs/alfworld-baseline.example.json)用于 30-episode baseline block。将它们复制到 `/blue/.../manifests` 后填写环境变量；正式 manifest 禁止保留 `AUTO`。
+
+提交前先做不加载模型的命令构造检查：
+
+```bash
+DRY_RUN_DIR="$TRACEH_ROOT/runs/dry-run-$(date +%s)"
+mkdir -p "$DRY_RUN_DIR"
+"$TRACEH_PYTHON" "$TRACEH_PROJECT_ROOT/experiments/scripts/run_cluster_block.py" \
+  --manifest "$TRACEH_BLOCK_MANIFEST" \
+  --block-index 0 \
+  --output-dir "$DRY_RUN_DIR" \
+  --project-root "$TRACEH_PROJECT_ROOT" \
+  --dry-run
+```
 
 ## 5. L4 rollout array
 
 ```bash
-export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo"
+export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo/traceh"
 export TRACEH_BLOCK_MANIFEST="$TRACEH_ROOT/manifests/source-l4.tsv"
-export TRACEH_BLOCK_RUNNER="$TRACEH_ROOT/repo/bin/traceh-run-block"
 export TRACEH_OUTPUT_ROOT="$TRACEH_ROOT/runs/source_branch"
 export TRACEH_PYTHON="$TRACEH_ROOT/envs/traceh/bin/python"
 
 # 12 blocks，最多同时使用 2 GPU；按 slurmInfo 修改 %2。
-sbatch --account="$HPG_ACCOUNT" --array=0-11%2 slurm/rollout-block-array-l4.sbatch
+sbatch \
+  --account="$HPG_ACCOUNT" \
+  --array=0-11%2 \
+  --output="$TRACEH_ROOT/logs/l4-%A_%a.out" \
+  slurm/rollout-block-array-l4.sbatch
 ```
 
 若要把 checkpoint stage 到 node-local flash：
@@ -120,17 +166,25 @@ export TRACEH_MODEL_SOURCE="$TRACEH_ROOT/models/Qwen3-8B"
 ## 6. B200 rollout array
 
 ```bash
-export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo"
+export TRACEH_PROJECT_ROOT="$TRACEH_ROOT/repo/traceh"
 export TRACEH_BLOCK_MANIFEST="$TRACEH_ROOT/manifests/target-b200.tsv"
-export TRACEH_BLOCK_RUNNER="$TRACEH_ROOT/repo/bin/traceh-run-block"
 export TRACEH_OUTPUT_ROOT="$TRACEH_ROOT/runs/target_final_blind"
 export TRACEH_PYTHON="$TRACEH_ROOT/envs/traceh/bin/python"
 
 sbatch \
   --account="$HPG_ACCOUNT" \
   --array=0-7%2 \
+  --output="$TRACEH_ROOT/logs/b200-%A_%a.out" \
   slurm/rollout-block-array-b200.sbatch
 ```
+
+正式 `target_final` 还必须设置：
+
+```bash
+export TRACEH_FROZEN_POLICY_SHA256=<manifest 中的 freeze_hash>
+```
+
+不匹配时 runner 会在加载模型前拒绝运行。
 
 不要把 `--array` 并发写死为 8。B200 需求高，且 group allocation 可能只有 2 NGU。多 GPU tensor parallel 必须另写并审查脚本；不要用 CLI 把单卡模板临时改成 8 卡后直接提交。
 
@@ -173,4 +227,3 @@ jobnvtop <jobid>
 - [CUDA Usage](https://docs.rc.ufl.edu/software/apps/cuda/usage/)
 - [Apptainer Usage](https://docs.rc.ufl.edu/software/apps/apptainer/usage/)
 - [Globus](https://docs.rc.ufl.edu/data_transfer/globus/)
-

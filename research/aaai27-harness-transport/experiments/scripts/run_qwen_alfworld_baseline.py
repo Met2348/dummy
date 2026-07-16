@@ -67,22 +67,23 @@ def load_generator(
     max_input_tokens: int,
     max_new_tokens: int,
     decoder: str,
+    precision: str,
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     tokenizer.truncation_side = "left"
-    quantization = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        local_files_only=True,
-        quantization_config=quantization,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
+    model_kwargs: dict[str, Any] = {
+        "local_files_only": True,
+        "device_map": "auto",
+        "dtype": torch.bfloat16,
+    }
+    if precision == "nf4":
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
     model.eval()
 
     label_token_ids = [
@@ -220,6 +221,7 @@ def main() -> None:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--run-label", required=True)
     parser.add_argument("--episodes", type=int, default=3)
+    parser.add_argument("--offset-start", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--max-input-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=32)
@@ -239,10 +241,25 @@ def main() -> None:
         default="generate",
     )
     parser.add_argument("--seed", type=int, default=20260712)
+    parser.add_argument("--precision", choices=["bf16", "nf4"], default="nf4")
+    parser.add_argument(
+        "--information-class",
+        choices=[
+            "DEV_SOURCE_BRANCH",
+            "SOURCE_BRANCH",
+            "SOURCE_VALIDATION",
+            "TARGET_BASELINE_CALIBRATION",
+            "TARGET_FINAL_TEST",
+        ],
+        default="DEV_SOURCE_BRANCH",
+    )
+    parser.add_argument("--policy-id", default="NONE")
     args = parser.parse_args()
 
-    if args.episodes <= 0 or args.max_steps <= 0:
-        raise ValueError("episodes and max_steps must be positive")
+    if args.episodes <= 0 or args.max_steps <= 0 or args.offset_start < 0:
+        raise ValueError("episodes/max_steps must be positive and offset_start non-negative")
+    if args.policy_id != "NONE":
+        raise ValueError("the baseline runner only implements policy_id=NONE")
     if (args.action_protocol == "label-logit-v1") != (args.decoder == "label-logit-v1"):
         raise ValueError("label-logit-v1 protocol and decoder must be selected together")
     if args.decoder == "command-trie-v1" and args.action_protocol != "exact-text-v1":
@@ -256,11 +273,12 @@ def main() -> None:
         "run_label": args.run_label,
         "model_id": args.model_id,
         "checkpoint_hash": checkpoint_hash,
-        "precision": "nf4-double-quant-bf16-compute",
-        "information_class": "DEV_SOURCE_BRANCH",
-        "policy_id": "NONE",
+        "precision": args.precision,
+        "information_class": args.information_class,
+        "policy_id": args.policy_id,
         "seed": args.seed,
         "episodes": args.episodes,
+        "offset_start": args.offset_start,
         "max_steps": args.max_steps,
         "max_input_tokens": args.max_input_tokens,
         "max_new_tokens": args.max_new_tokens,
@@ -284,12 +302,13 @@ def main() -> None:
         args.max_input_tokens,
         args.max_new_tokens,
         args.decoder,
+        args.precision,
     )
     torch.cuda.synchronize()
     model_load_seconds = time.perf_counter() - load_started
 
     summaries = []
-    for offset in range(args.episodes):
+    for offset in range(args.offset_start, args.offset_start + args.episodes):
         run_id = f"{args.run_label}-o{offset:03d}-s{args.seed}"
         started_at = datetime.now(timezone.utc).isoformat()
         episode_started = time.perf_counter()
@@ -319,12 +338,12 @@ def main() -> None:
         trace_path = trace_store.append(trace_record)
         summary = {
             "run_id": run_id,
-            "information_class": "DEV_SOURCE_BRANCH",
+            "information_class": args.information_class,
             "task_id": result["task_id"],
             "model_id": args.model_id,
             "checkpoint_hash": checkpoint_hash,
-            "precision": "nf4-double-quant-bf16-compute",
-            "policy_id": "NONE",
+            "precision": args.precision,
+            "policy_id": args.policy_id,
             "seed": args.seed,
             "success": result["success"],
             "utility": result["score"],

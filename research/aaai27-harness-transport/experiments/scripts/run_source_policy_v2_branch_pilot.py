@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-manifest", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--baseline-offset", type=int, required=True)
+    parser.add_argument("--candidate-id", action="append")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, required=True)
@@ -59,7 +60,16 @@ def main() -> None:
         for candidate in candidate_report["candidates"]
         if offset_marker in candidate["baseline_run_id"]
     ]
-    if len(candidates) != 2:
+    if args.candidate_id:
+        candidate_ids = set(args.candidate_id)
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate["candidate_id"] in candidate_ids
+        ]
+    if args.candidate_id and not candidates:
+        raise ValueError("no selected candidates")
+    if not args.candidate_id and len(candidates) != 2:
         raise ValueError(f"expected two failure-prefix candidates, found {len(candidates)}")
 
     checkpoint_hash = hashlib.sha256(args.checkpoint_manifest.read_bytes()).hexdigest()
@@ -405,8 +415,8 @@ def main() -> None:
         "pairs": pair_rows,
         "decision": decision,
         "ok": integrity_report["ok"]
-        and len(pair_rows) == 6
-        and branch_store.count() == 12,
+        and len(pair_rows) == len(candidates) * 3
+        and branch_store.count() == len(candidates) * 6,
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(

@@ -63,6 +63,28 @@ def sample_labels(rng: np.random.Generator, probabilities: list[float], count: i
     return rng.choice(len(probabilities), size=count, p=probabilities)
 
 
+def sample_labels_stratified(
+    rng: np.random.Generator,
+    probabilities: list[float],
+    count: int,
+) -> np.ndarray:
+    """Sample labels with exact rounded class priors for stable stress tests."""
+    expected = np.asarray(probabilities, dtype=np.float64) * count
+    class_counts = np.floor(expected).astype(np.int64)
+    remainder = count - int(np.sum(class_counts))
+    if remainder > 0:
+        order = np.argsort(-(expected - class_counts))
+        class_counts[order[:remainder]] += 1
+    labels = np.concatenate(
+        [
+            np.full(int(class_count), class_index, dtype=np.int64)
+            for class_index, class_count in enumerate(class_counts)
+        ]
+    )
+    rng.shuffle(labels)
+    return labels
+
+
 def sample_features(
     rng: np.random.Generator,
     labels: np.ndarray,
@@ -145,8 +167,8 @@ def run_scenario(seed: int, name: str) -> dict[str, dict[str, float]]:
     else:
         raise ValueError(name)
 
-    source_labels = sample_labels(rng, source_probs, 96)
-    target_labels = sample_labels(rng, target_probs, 96)
+    source_labels = sample_labels_stratified(rng, source_probs, 96)
+    target_labels = sample_labels_stratified(rng, target_probs, 96)
     source = sample_features(rng, source_labels)
     target = sample_features(rng, target_labels, semantic_flip=semantic_flip)
 
@@ -196,8 +218,18 @@ def main() -> None:
         "source_skew_loop_rare",
         "semantic_conflict",
     )
+    scenario_seed_rows = {
+        name: [
+            {
+                "seed": seed,
+                "methods": run_scenario(seed, name),
+            }
+            for seed in range(args.seeds)
+        ]
+        for name in scenario_names
+    }
     scenarios = {
-        name: aggregate([run_scenario(seed, name) for seed in range(args.seeds)])
+        name: aggregate([row["methods"] for row in scenario_seed_rows[name]])
         for name in scenario_names
     }
     assertions = {
@@ -223,12 +255,25 @@ def main() -> None:
         "class_names": CLASS_NAMES,
         "seed_count": args.seeds,
         "scenarios": scenarios,
+        "seed_summaries": scenario_seed_rows,
         "assertions": assertions,
         "ok": all(assertions.values()),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "experiment_id": report["experiment_id"],
+                "seed_count": report["seed_count"],
+                "scenario_names": scenario_names,
+                "assertions": assertions,
+                "ok": report["ok"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     if not report["ok"]:
         raise SystemExit(1)
 

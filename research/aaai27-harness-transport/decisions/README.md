@@ -13,5 +13,7 @@
 | [0003C](0003c-local-hipergator-compute-boundary-zh.md) | 本地与 HiPerGator 算力边界 | Accepted for execution；待 HPG 实测复核 | 2026-07-11 |
 | [0003D](0003d-local-source-policy-pivot-zh.md) | 4B/8B source branch 全零后的停止与修复 | Accepted for execution；方法主线 conditional-go | 2026-07-13 |
 | [0003F](0003f-ledgered-source-first-macro-pivot-zh.md) | 从单步 action scorer 转向 ledgered source-first macro | Accepted for next local branch runner | 2026-07-13 |
+| [0003G](0003g-expanded-source-first-evidence-and-next-mechanism-zh.md) | 29-case mixed evidence 后升级为 affordance-aware state repair | Accepted for next mechanism iteration | 2026-07-13 |
+| [0003H](0003h-sample-size-escalation-zh.md) | 29 个 candidates 不足后的论文级样本量升级方案 | Accepted for experiment planning | 2026-07-14 |
 
 后续记录使用 [中文模板](TEMPLATE.md)。详细规则见 [研究决策文档规范](../protocol/decision-documentation-policy.md)。

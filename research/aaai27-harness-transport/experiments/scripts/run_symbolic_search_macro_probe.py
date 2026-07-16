@@ -51,6 +51,10 @@ KITCHEN_SOURCE_FIRST_WORDS = (
     "drawer",
 )
 
+ALL_SEARCH_WORDS = tuple(
+    sorted({*CONTAINER_WORDS, *SOURCE_FIRST_WORDS, *KITCHEN_SOURCE_FIRST_WORDS})
+)
+
 TRANSFORM_APPLIANCES = {
     "clean": "sinkbasin",
     "cool": "fridge",
@@ -120,6 +124,7 @@ def object_instance_from_action(normalized_action: str, target_object: str | Non
         match = re.search(rf"\b{re.escape(target_object)}\s+\d+\b", normalized_action)
         if match:
             return match.group(0)
+        return None
     match = re.search(r"\b(?:clean|cool|heat|take|move|put)\s+([a-z][a-z0-9_]*\s+\d+)\b", normalized_action)
     return match.group(1) if match else None
 
@@ -127,6 +132,63 @@ def object_instance_from_action(normalized_action: str, target_object: str | Non
 def delivery_target_from_action(normalized_action: str) -> str | None:
     match = re.search(r"\b(?:to|in|on)\s+([a-z][a-z0-9_]*\s+\d+)\b", normalized_action)
     return match.group(1) if match else None
+
+
+def infer_carried_object(commands: list[str], target_object: str | None) -> str | None:
+    if not target_object:
+        return None
+    for command in commands:
+        normalized = normalize_text(command)
+        if normalized.startswith(("move ", "put ", "clean ", "cool ", "heat ")):
+            instance = object_instance_from_action(normalized, target_object)
+            if instance:
+                return instance
+    return None
+
+
+def object_visible_in_text(text: str, target_object: str | None) -> bool:
+    if not target_object:
+        return False
+    normalized = normalize_text(text)
+    return bool(re.search(rf"\b{re.escape(target_object)}\s+\d+\b", normalized))
+
+
+def target_actionable_commands(commands: list[str], target_object: str | None) -> list[str]:
+    if not target_object:
+        return []
+    actionable: list[str] = []
+    for command in commands:
+        normalized = normalize_text(command)
+        if object_instance_from_action(normalized, target_object):
+            actionable.append(command)
+    return actionable
+
+
+def initial_ledgers(
+    history: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    target_object: str | None,
+    target_receptacle: str | None,
+) -> tuple[set[str], set[str], str | None]:
+    delivered_objects: set[str] = set()
+    transformed_objects: set[str] = set()
+    deposit_target: str | None = None
+    for action, _observation in history:
+        normalized = normalize_text(action)
+        if normalized.startswith(("clean ", "cool ", "heat ")):
+            transformed = object_instance_from_action(normalized, target_object)
+            if transformed:
+                transformed_objects.add(transformed)
+        if normalized.startswith(("move ", "put ")):
+            delivered = object_instance_from_action(normalized, target_object)
+            target = delivery_target_from_action(normalized)
+            if delivered and target_receptacle and target and target_receptacle in target:
+                delivered_objects.add(delivered)
+                deposit_target = deposit_target or target
+        if normalized.startswith("take "):
+            taken = object_instance_from_action(normalized, target_object)
+            if taken and taken in delivered_objects:
+                delivered_objects.remove(taken)
+    return delivered_objects, transformed_objects, deposit_target
 
 
 def target_place_commands(commands: list[tuple[str, str]], target_receptacle: str) -> list[tuple[str, str, str]]:
@@ -144,11 +206,29 @@ def ordered_search_words(
     target_receptacle: str | None,
     transform: str | None,
     search_order: str,
+    global_step_index: int,
+    horizon_switch_step: int,
 ) -> list[str]:
-    if search_order == "source_first" and (transform or target_object in FOOD_OBJECTS):
+    effective_order = search_order
+    if search_order == "source_horizon_aware" and global_step_index >= horizon_switch_step:
+        effective_order = "reverse_container"
+    elif search_order == "source_horizon_aware":
+        effective_order = "source_first"
+
+    if effective_order == "source_first" and (transform or target_object in FOOD_OBJECTS):
         raw_words = (*KITCHEN_SOURCE_FIRST_WORDS, target_receptacle)
-    elif search_order == "source_first":
+    elif effective_order == "source_first":
         raw_words = (*SOURCE_FIRST_WORDS, target_receptacle)
+    elif effective_order == "container_first":
+        raw_words = (*CONTAINER_WORDS, target_receptacle)
+    elif effective_order == "reverse_container":
+        raw_words = (*reversed(CONTAINER_WORDS), target_receptacle)
+    elif effective_order == "kitchen_first":
+        raw_words = (*KITCHEN_SOURCE_FIRST_WORDS, target_receptacle)
+    elif effective_order == "furniture_first":
+        raw_words = (*SOURCE_FIRST_WORDS, target_receptacle)
+    elif effective_order == "alphabetical":
+        raw_words = (*ALL_SEARCH_WORDS, target_receptacle)
     else:
         raw_words = (target_receptacle, *CONTAINER_WORDS)
     words: list[str] = []
@@ -169,6 +249,8 @@ def choose_action(
     transformed_objects: set[str],
     deposit_target: str | None,
     search_order: str,
+    global_step_index: int,
+    horizon_switch_step: int,
 ) -> tuple[str | None, str]:
     goal = parse_goal(task)
     target_object = goal["object"]
@@ -195,6 +277,18 @@ def choose_action(
                 and (instance is None or instance not in delivered_objects)
             ):
                 return command, "take_visible_target_object"
+
+    if not inventory and target_object and transform and transformed_objects:
+        appliance = TRANSFORM_APPLIANCES.get(transform)
+        if appliance:
+            for command, normalized in normalized_commands:
+                place = action_place(normalized)
+                if normalized.startswith("open ") and place and appliance in place and place in current_places:
+                    return command, f"open_{appliance}_to_recover_transformed_object"
+            for command, normalized in normalized_commands:
+                place = action_place(normalized)
+                if normalized.startswith("go to ") and place and appliance in place:
+                    return command, f"return_to_{appliance}_to_recover_transformed_object"
 
     if inventory and target_object and transform:
         carried_instance = object_instance_from_action(normalize_text(inventory[-1]), target_object)
@@ -250,6 +344,8 @@ def choose_action(
         target_receptacle=target_receptacle,
         transform=transform,
         search_order=search_order,
+        global_step_index=global_step_index,
+        horizon_switch_step=horizon_switch_step,
     )
     for word in prioritized_words:
         for command, normalized in normalized_commands:
@@ -258,6 +354,14 @@ def choose_action(
             place = action_place(normalized) or ""
             if word in place and place not in visited:
                 return command, f"go_to_unvisited_{word}"
+
+    if search_order == "source_exhaustive":
+        for command, normalized in normalized_commands:
+            if not normalized.startswith("go to "):
+                continue
+            place = action_place(normalized)
+            if place and place not in visited:
+                return command, "go_to_any_unvisited_place_after_source_priority"
 
     for command, normalized in normalized_commands:
         if normalized.startswith("look"):
@@ -274,6 +378,8 @@ def run_macro(
     env_seed: int,
     max_macro_steps: int,
     search_order: str,
+    policy_variant: str,
+    horizon_switch_step: int,
 ) -> dict[str, Any]:
     env, task, observation, info, history, score, replayed_hash = restore_prefix(
         candidate,
@@ -285,24 +391,46 @@ def run_macro(
     goal = parse_goal(task)
     visited: set[str] = set()
     inventory: list[str] = []
-    delivered_objects: set[str] = set()
-    transformed_objects: set[str] = set()
-    deposit_target: str | None = None
+    delivered_objects, transformed_objects, deposit_target = initial_ledgers(
+        history,
+        goal["object"],
+        goal["target_receptacle"],
+    )
+    if policy_variant == "no_history_ledger":
+        delivered_objects = set()
+        transformed_objects = set()
+        deposit_target = None
     trace = []
     success = bool(info.get("won", score > 0.0))
     try:
         for local_step in range(max_macro_steps):
+            global_step_index = int(candidate["step_index"]) + local_step
             commands = sorted(str(command) for command in info.get("admissible_commands", []))
+            target_visible_before = object_visible_in_text(observation, goal["object"])
+            target_actionable_before = target_actionable_commands(commands, goal["object"])
+            inventory_before = list(inventory)
+            delivered_before = sorted(delivered_objects)
+            transformed_before = sorted(transformed_objects)
+            deposit_target_before = deposit_target
+            if policy_variant != "no_inventory_inference":
+                inferred_inventory = infer_carried_object(commands, goal["object"])
+                if inferred_inventory and not inventory and inferred_inventory not in delivered_objects:
+                    inventory.append(inferred_inventory)
+            choice_delivered = set() if policy_variant == "no_instance_ledger" else delivered_objects
+            choice_transformed = set() if policy_variant == "no_instance_ledger" else transformed_objects
+            choice_deposit_target = None if policy_variant == "no_deposit_lock" else deposit_target
             action, reason = choose_action(
                 task=task,
                 observation=observation,
                 commands=commands,
                 visited=visited,
                 inventory=inventory,
-                delivered_objects=delivered_objects,
-                transformed_objects=transformed_objects,
-                deposit_target=deposit_target,
+                delivered_objects=choice_delivered,
+                transformed_objects=choice_transformed,
+                deposit_target=choice_deposit_target,
                 search_order=search_order,
+                global_step_index=global_step_index,
+                horizon_switch_step=horizon_switch_step,
             )
             if action is None:
                 break
@@ -320,13 +448,14 @@ def run_macro(
                 inventory.append(action)
             if normalized.startswith(("clean ", "cool ", "heat ")):
                 transformed = object_instance_from_action(normalized, goal["object"])
-                if transformed:
+                if transformed and policy_variant != "no_instance_ledger":
                     transformed_objects.add(transformed)
             if normalized.startswith(("move ", "put ")):
                 delivered = object_instance_from_action(normalized, goal["object"])
-                if delivered:
+                if delivered and policy_variant != "no_instance_ledger":
                     delivered_objects.add(delivered)
-                deposit_target = deposit_target or delivery_target_from_action(normalized)
+                if policy_variant != "no_deposit_lock":
+                    deposit_target = deposit_target or delivery_target_from_action(normalized)
                 if inventory:
                     inventory.pop()
             trace.append(
@@ -334,9 +463,17 @@ def run_macro(
                     "global_step_index": int(candidate["step_index"]) + local_step,
                     "action": action,
                     "reason": reason,
+                    "horizon_switch_active": search_order == "source_horizon_aware"
+                    and global_step_index >= horizon_switch_step,
                     "score": score,
-                "done": done,
-                "success": success,
+                    "done": done,
+                    "success": success,
+                    "target_visible_before": target_visible_before,
+                    "target_actionable_commands_before": target_actionable_before,
+                    "inventory_before": inventory_before,
+                    "delivered_before": delivered_before,
+                    "transformed_before": transformed_before,
+                    "deposit_target_before": deposit_target_before,
                     "observation": observation,
                 }
             )
@@ -353,6 +490,8 @@ def run_macro(
         "goal": goal,
         "max_macro_steps": max_macro_steps,
         "search_order": search_order,
+        "policy_variant": policy_variant,
+        "horizon_switch_step": horizon_switch_step,
         "macro_steps": len(trace),
         "terminal_score": score,
         "success": success,
@@ -377,8 +516,30 @@ def main() -> None:
     parser.add_argument("--max-macro-steps", type=int, default=30)
     parser.add_argument(
         "--search-order",
-        choices=("target_first", "source_first"),
+        choices=(
+            "target_first",
+            "source_first",
+            "source_exhaustive",
+            "source_horizon_aware",
+            "container_first",
+            "reverse_container",
+            "kitchen_first",
+            "furniture_first",
+            "alphabetical",
+        ),
         default="target_first",
+    )
+    parser.add_argument("--horizon-switch-step", type=int, default=40)
+    parser.add_argument(
+        "--policy-variant",
+        choices=(
+            "full",
+            "no_history_ledger",
+            "no_deposit_lock",
+            "no_inventory_inference",
+            "no_instance_ledger",
+        ),
+        default="full",
     )
     args = parser.parse_args()
 
@@ -406,6 +567,8 @@ def main() -> None:
             env_seed=args.env_seed,
             max_macro_steps=args.max_macro_steps,
             search_order=args.search_order,
+            policy_variant=args.policy_variant,
+            horizon_switch_step=args.horizon_switch_step,
         )
         rows.append(row)
         print(json.dumps({"completed": {k: row[k] for k in ("candidate_id", "macro_steps", "terminal_score", "success")}}, ensure_ascii=False), flush=True)
@@ -414,6 +577,8 @@ def main() -> None:
         "experiment_id": "L3-SYMBOLIC-SEARCH-MACRO-PROBE",
         "max_macro_steps": args.max_macro_steps,
         "search_order": args.search_order,
+        "policy_variant": args.policy_variant,
+        "horizon_switch_step": args.horizon_switch_step,
         "candidate_count": len(rows),
         "success_count": sum(row["success"] for row in rows),
         "positive_score_count": sum(float(row["terminal_score"]) > 0.0 for row in rows),
@@ -422,7 +587,23 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "experiment_id": result["experiment_id"],
+                "candidate_count": result["candidate_count"],
+                "success_count": result["success_count"],
+                "positive_score_count": result["positive_score_count"],
+                "search_order": result["search_order"],
+                "policy_variant": result["policy_variant"],
+                "horizon_switch_step": result["horizon_switch_step"],
+                "max_macro_steps": result["max_macro_steps"],
+                "ok": result["ok"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ set -euo pipefail
 
 PROJECT_ROOT="${TRACEH_PROJECT_ROOT:-$PWD}"
 PYTHON_BIN="${TRACEH_PYTHON:-python}"
+CUDA_MODULE="${TRACEH_CUDA_MODULE:-cuda/12.9.1}"
 
 case "$PROJECT_ROOT" in
   /blue/*) ;;
@@ -26,12 +27,17 @@ test -d "$PROJECT_ROOT"
 command -v nvidia-smi >/dev/null
 command -v "$PYTHON_BIN" >/dev/null
 
+if command -v module >/dev/null 2>&1; then
+  module load "$CUDA_MODULE"
+fi
+
 echo "job_id=$SLURM_JOB_ID"
 echo "job_account=${SLURM_JOB_ACCOUNT:-unknown}"
 echo "node=$(hostname)"
 echo "project_root=$PROJECT_ROOT"
 echo "slurm_tmpdir=${SLURM_TMPDIR:-unset}"
 echo "python=$PYTHON_BIN"
+echo "cuda_module=$CUDA_MODULE"
 date --iso-8601=seconds
 module list 2>&1 || true
 nvidia-smi
@@ -62,4 +68,3 @@ print(f"peak_allocated_bytes={torch.cuda.max_memory_allocated()}")
 PY
 
 date --iso-8601=seconds
-

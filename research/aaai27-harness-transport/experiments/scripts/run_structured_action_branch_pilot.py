@@ -449,7 +449,21 @@ def main() -> None:
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "experiment_id": report["experiment_id"],
+                "candidate_count": len(candidates),
+                "row_count": len(rows),
+                "summary": summary,
+                "decision": decision,
+                "report": str(args.report),
+                "ok": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def append_records(

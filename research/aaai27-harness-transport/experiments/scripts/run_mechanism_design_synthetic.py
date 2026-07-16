@@ -248,6 +248,18 @@ def main() -> None:
         MechanismVariant.SUBGOAL_LEDGER,
         MechanismVariant.BUNDLE_CONSERVATIVE,
     )
+    seed_summaries = []
+    for seed in range(args.seeds):
+        seed_cases = build_cases(seed)
+        seed_rows = [score_case(case, variant) for case in seed_cases for variant in variants]
+        seed_summary = aggregate(seed_rows)
+        seed_summaries.append(
+            {
+                "seed": seed,
+                "case_count": len(seed_cases),
+                "summary": seed_summary,
+            }
+        )
     cases = [case for seed in range(args.seeds) for case in build_cases(seed)]
     rows = [score_case(case, variant) for case in cases for variant in variants]
     summary = aggregate(rows)
@@ -277,13 +289,28 @@ def main() -> None:
         "case_count": len(cases),
         "row_count": len(rows),
         "summary": summary,
+        "seed_summaries": seed_summaries,
         "assertions": assertions,
         "ok": all(assertions.values()),
         "sample_rows": rows[:10],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "experiment_id": report["experiment_id"],
+                "seed_count": report["seed_count"],
+                "case_count": report["case_count"],
+                "row_count": report["row_count"],
+                "ranking_by_mean_utility": summary["ranking_by_mean_utility"],
+                "assertions": assertions,
+                "ok": report["ok"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     if not report["ok"]:
         raise SystemExit(1)
 
