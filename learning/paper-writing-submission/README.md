@@ -23,7 +23,7 @@
 
 ---
 
-## 学习路径 (4 讲)
+## 学习路径 (10 讲)
 
 | 讲 | 文件 | 一句话 | 产出物 |
 |---|---|---|---|
@@ -31,8 +31,15 @@
 | L2 | `lectures/L2-submission-process.md` | 投稿全流程: venue / 时间线 / 格式匿名 / 提交机制 | 投稿 checklist |
 | L3 | `lectures/L3-peer-review-rebuttal.md` | 同行评审 + **rebuttal 写作** (决定生死的下半场) | rebuttal 骨架 |
 | L4 | `lectures/L4-after-decision.md` | camera-ready / 改投 / arxiv / 学术诚信 | 改投复盘 |
+| L5 | `lectures/L5-negative-results.md` | file drawer problem + 负结果何时值得单独发表 + 诚实报告失败分支 | 负结果分级判断 |
+| L6 | `lectures/L6-paper-series-strategy.md` | 一个大项目怎么切成几篇论文: 切太碎 (salami slicing) vs 攒太久两种反模式 | 论文切分判断线 |
+| L7 | `lectures/L7-venue-selection.md` | 会议 vs 期刊 (TACL/TMLR) 深层选择 + dual submission 红线与误解 | venue 选择备忘 |
+| L8 | `lectures/L8-camera-ready-and-artifacts.md` | camera-ready 按天时间表 + artifact evaluation + 代码/数据发布时点 | camera-ready checklist |
+| L9 | `lectures/L9-building-long-term-impact.md` | 真实传播 vs 灌水引用 + follow-up 工作的规划来源 | follow-up 候选清单 |
+| L10 | `lectures/L10-writing-as-non-native-speaker.md` | 中式学术英语三类系统性陷阱 + 写作辅助工具的正确用法 | 逐句自检清单 |
 
 > **写每一节的细则** (标题/摘要/引言/方法/...)请打开 `how_to_write_a_paper` 技能包 —— 本专题不重复它。
+> **L5-L10 补充说明**: L1-L4 是投稿循环主干 (装配→投稿→评审rebuttal→录用拒稿后); L5-L10 是贯穿论文全生命周期、但 L1-L4 未展开的现实议题——负结果处理、多篇论文的项目级规划、venue 的深层机制、录用后的运营细节、发表之后的长期经营、以及非母语写作本身的策略。
 
 ## 动手 (2 个 notebook — 真实科研动作)
 
