@@ -24,7 +24,7 @@
 
 ---
 
-## 学习路径 (4 讲)
+## 学习路径 (5 讲)
 
 | 讲 | 文件 | 一句话 | 产出物 |
 |---|---|---|---|
@@ -32,6 +32,7 @@
 | L2 | `lectures/L2-snowballing.md` | 滚雪球检索: 后向找奠基、前向找前沿 + 引用网拓扑读法 | 一张引用网 |
 | L3 | `lectures/L3-building-the-map.md` | 从文献网到领域地图: 建 taxonomy + 排 SOTA 演进线 | 领域地图 (流派+时间线) |
 | L4 | `lectures/L4-two-week-sop.md` | 2 周摸清子领域的 day-by-day SOP + mini-survey 产出 | 一份 mini-survey |
+| L5 | `lectures/L5-systematic-review-methodology.md` | 系统性综述/meta-analysis 方法论: PICO(C) 拆问题 + PRISMA 检索预注册/双人筛选 + fixed vs random-effects 效应量合并 | (进阶/可选) 理解"综述本身可发表"这条重路的方法学骨架 |
 
 ## 动手 (2 个 notebook — 真实科研动作)
 
