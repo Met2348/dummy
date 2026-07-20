@@ -26,7 +26,7 @@ CV管理         一份CV到处投,或多个版本互相打架            按受
 
 | 讲 | 文件 | 一句话 | 产出物 |
 |---|---|---|---|
-| L1 | `lectures/L1-building-research-visibility.md` | 个人科研品牌: 学术社群可见度经营(不是运营网红号), 区别于9.16(计划中)`academic-community-engagement`的共同体角色参与 | 可见度输出习惯清单 |
+| L1 | `lectures/L1-building-research-visibility.md` | 个人科研品牌: 学术社群可见度经营(不是运营网红号), 区别于9.16`academic-community-engagement`的共同体角色参与 | 可见度输出习惯清单 |
 | L2 | `lectures/L2-recommendation-letter-strategy.md` | 推荐信策略: 怎么请、提前给推荐人什么素材、怎么维护长期关系, 避免"临时抱佛脚" | 推荐人素材包 |
 | L3 | `lectures/L3-designing-a-job-talk.md` | job talk设计与演练, 区别于`research-presentation` L1-L3的常规会议报告 | job talk大纲 |
 | L4 | `lectures/L4-negotiation-for-researchers.md` | 谈判技巧: offer谈判/startup package/合作条件的锚定/底线/BATNA框架 | 谈判准备清单 |
@@ -86,7 +86,12 @@ Module 9 科研技能 (现12个专题, 两套并列体系)
   科研生活 9.9 research-life (审稿/导师沟通/署名伦理/可持续 —— 贯穿全程的通用软技能)
   职业路径 9.10 career-pathways (求职/转换/博后/教职早期 —— 关键节点的路径选择)
   品牌谈判 9.11 research-visibility-negotiation (可见度/推荐信/job talk/谈判/CV管理 —— 支撑求职流程的具体硬技能)  ◄── 你在这里(新增)
-  (9.12-9.17 计划中: 团队带教与向下管理/团队运营实务/经费与资源规划/科研诚信与合规深水/学术共同体参与/开放科学与科学传播, 尚未建成)
+  带教管理 9.12 team-leadership-for-researchers (指导新手/向下反馈/组会主持/冲突处理/团队健康诊断)
+  运营实务 9.13 research-team-operations (时间管理/招募筛选/异步协作/onboarding/跨专业协作)
+  经费资源 9.14 research-funding-and-resources (经费申请/算力规划/数据管理/多机构合作/供应商合规)
+  诚信合规 9.15 research-integrity-and-compliance (不端调查/authorship仲裁/IRB伦理/IP成果转化/国际合作合规/负责任披露)
+  共同体参与 9.16 academic-community-engagement (审稿之外的学术服务/组织workshop/会议社交/长期合作/跨机构评审网络)
+  开放传播 9.17 open-science-and-communication (跨学科合作/公众沟通/预注册与开源发布/竞赛组织参与/社交媒体边界)
 ```
 > 两套体系的区别不变: 体系①回答"这一个项目该怎么做", 体系②回答"我的科研生涯接下来往哪走"。9.10和9.11的关系: 9.10画出求职这条路径上各阶段"该做什么、按什么规则"的宏观地图, 9.11把地图上每个阶段里最容易被假设"自然而然会做好"、实际上需要单独练习的具体技能(可见度/推荐信/job talk/谈判/CV管理)拎出来精修——9.10不重复讲这些技能的具体操作, 9.11也不重复讲9.10已经讲过的阶段划分逻辑, 两者互补。
 >
