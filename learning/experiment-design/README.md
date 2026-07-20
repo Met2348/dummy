@@ -26,7 +26,7 @@
 
 ---
 
-## 学习路径 (5 讲)
+## 学习路径 (8 讲)
 
 | 讲 | 文件 | 一句话 | 产出物 |
 |---|---|---|---|
@@ -35,6 +35,9 @@
 | L3 | `lectures/L3-baselines-and-controls.md` | 公平 baseline + 控混淆变量, 让差距经得起追问 | 对照设计 |
 | L4 | `lectures/L4-ablation-matrix.md` | 消融矩阵 (全因子) + **交互效应** (新手盲区) | 消融矩阵 |
 | L5 | `lectures/L5-variance-and-significance.md` | 多种子/误差棒/置信区间/p 值/效应量, 戳穿单种子自欺 | 带统计的结论 |
+| L6 | `lectures/L6-bayesian-vs-frequentist.md` | 贝叶斯 vs 频率派: 先验/后验/贝叶斯因子, 什么场景该换范式 | 范式选择判断 |
+| L7 | `lectures/L7-compute-budget-planning.md` | 大规模实验的算力预算规划: FLOPs→GPU-hours、排队现实倒逼矩阵设计 | 算力预算表 |
+| L8 | `lectures/L8-systematic-ablation-design.md` | Ablation 系统化方法论深水: 五类消融枚举 + 完备性检查表 | 消融完备性检查表 |
 
 ## 动手 (2 个 notebook — 在确定性模拟器上把实验设计循环走通)
 
