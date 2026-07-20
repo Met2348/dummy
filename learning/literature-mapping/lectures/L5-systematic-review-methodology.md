@@ -13,7 +13,7 @@
 
 **场景 B**: 你的合作者是医学/公共卫生/教育学背景的博士生, 她所在的领域有一个惯例——想知道「某种干预措施到底有没有用」这类问题, 不会满足于一篇「我读了 20 篇论文, 感觉大概是有用的」narrative review, 而是要求你交出一篇 systematic review + meta-analysis: 检索策略必须写清楚到「在 PubMed 用了哪几个关键词布尔组合、检索日期是哪天」, 纳入排除标准必须写清楚到「谁都能拿着这份标准去把同一批论文重新筛一遍, 筛出来的结果和你差不多」, 如果多篇论文都报告了同一个效应 (比如「某种教学干预让考试分数提高了多少」), 你还要用统计方法把这些数字**合并**成一个综合估计值, 而不是简单地数「几篇说有效、几篇说无效」。
 
-> **本讲要建立的核心区分就是**: L1-L4 的产出 (mini-survey/领域地图) 是**给你自己用的导航图**, 允许主观、允许不完整、允许只有一个人做; systematic review 的产出**本身就是投稿的对象**, 它的每一步都要经得起一个素不相识的审稿人/复现者按你写下的方法学重新走一遍。这和 9.9-L3 讲开放科学时讲的"可核验性"是同一种精神在文献综述这个具体场景下的落地——只是 9.9-L3 讲的是实验数据/代码的可核验, 本讲讲的是"你读了哪些文献、为什么读这些、怎么把它们的结论合并成一个数字"的可核验。
+> **本讲要建立的核心区分就是**: L1-L4 的产出 (mini-survey/领域地图) 是**给你自己用的导航图**, 允许主观、允许不完整、允许只有一个人做; systematic review 的产出**本身就是投稿的对象**, 它的每一步都要经得起一个素不相识的审稿人/复现者按你写下的方法学重新走一遍。这和 9.17-L3 讲开放科学时讲的"可核验性"是同一种精神在文献综述这个具体场景下的落地——只是 9.17-L3 讲的是实验数据/代码的可核验, 本讲讲的是"你读了哪些文献、为什么读这些、怎么把它们的结论合并成一个数字"的可核验。
 
 ```
    scoping review (L1-L4 已学)              systematic review (本讲)
@@ -61,7 +61,7 @@ PICO(C) 每个字段还决定了你后面的**纳入/排除标准** (下一节):
 
 ### 2.1 检索策略预注册
 
-在正式开始检索之前, 你要把 PICO(C) 拆解出的检索式、准备检索的数据库 (如 PubMed / ACM Digital Library / IEEE Xplore / Semantic Scholar)、检索的起止日期, 全部写下来并**预先登记**——常用的登记平台是 **PROSPERO** (由英国约克大学 Centre for Reviews and Dissemination 运营的国际前瞻性系统综述注册库), 这和你在 9.9-L3「开放科学实践」学过的 OSF 预注册假设是同一种逻辑, 只是登记的对象从"实验假设"换成了"检索策略"——**目的都是把"我打算怎么找证据"这句话的时间戳钉在你看到检索结果之前**, 防止你事后为了凑出想要的结论而悄悄调整检索式或筛选标准 (这是系统综述里的"HARKing 变体": 事后调整方法学去迎合已经看到的结果)。
+在正式开始检索之前, 你要把 PICO(C) 拆解出的检索式、准备检索的数据库 (如 PubMed / ACM Digital Library / IEEE Xplore / Semantic Scholar)、检索的起止日期, 全部写下来并**预先登记**——常用的登记平台是 **PROSPERO** (由英国约克大学 Centre for Reviews and Dissemination 运营的国际前瞻性系统综述注册库), 这和你在 9.17-L3「开放科学实践」学过的 OSF 预注册假设是同一种逻辑, 只是登记的对象从"实验假设"换成了"检索策略"——**目的都是把"我打算怎么找证据"这句话的时间戳钉在你看到检索结果之前**, 防止你事后为了凑出想要的结论而悄悄调整检索式或筛选标准 (这是系统综述里的"HARKing 变体": 事后调整方法学去迎合已经看到的结果)。
 
 ### 2.2 PRISMA 流程图: identification → screening → eligibility → included
 
@@ -208,9 +208,9 @@ Meta-analysis:
 - **Kitchenham, B., Charters, S., "Guidelines for performing Systematic Literature Reviews in Software Engineering", 2007** —— 把系统综述方法论移植进软件工程/CS 领域的奠基指南, PICOC 框架 (在 PICO 基础上加 Context) 的来源, 和 L2 已用过的 Wohlin (2014) 滚雪球方法论同属软件工程实证研究方法论谱系。
 - **Viechtbauer, W., "Conducting Meta-Analyses in R with the metafor Package", *Journal of Statistical Software*, 2010** —— meta-analysis 事实上的标准 R 工具, 本讲第 3.3 节 fixed/random-effects 计算的实践参考。
 - **Ouzzani, M., Hammady, H., Fedorowicz, Z., Elmagarmid, A., "Rayyan—a web and mobile app for systematic reviews", *Systematic Reviews*, 2016** —— 支持双人盲筛的开源筛选管理工具, 本讲第 2.3 节双人独立筛选的实践参考。
-- **PROSPERO** (英国约克大学 Centre for Reviews and Dissemination 运营的国际前瞻性系统综述注册库) —— 检索策略预注册的实践平台, 和 9.9-L3 已讲过的 OSF 假设预注册是同一逻辑在文献综述场景下的对应物。
+- **PROSPERO** (英国约克大学 Centre for Reviews and Dissemination 运营的国际前瞻性系统综述注册库) —— 检索策略预注册的实践平台, 和 9.17-L3 已讲过的 OSF 假设预注册是同一逻辑在文献综述场景下的对应物。
 - 也见本专题 L1「三类综述」表格——本讲展开的是其中被暂时略过的 systematic 一行; L1-L4 教的 scoping review + mini-survey workflow 仍然是你日常摸方向的默认工具, 本讲只在场景 B (综述本身要发表/要给可核验结论) 时才需要。
-- 也见本仓库 `open-science-and-communication`(9.9 附近) 专题 L3「开放科学实践」——预注册的通用逻辑 (把承诺的时间戳钉在看到结果之前) 已在那一讲详细展开, 本讲第 2.1 节只是把它对应到"检索策略"这个具体对象上, 不重复展开预注册机制本身。
+- 也见本仓库 `open-science-and-communication`(9.17) 专题 L3「开放科学实践」——预注册的通用逻辑 (把承诺的时间戳钉在看到结果之前) 已在那一讲详细展开, 本讲第 2.1 节只是把它对应到"检索策略"这个具体对象上, 不重复展开预注册机制本身。
 
 ---
 
