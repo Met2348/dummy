@@ -13,7 +13,7 @@
 ## 数据管理规划 DMP (L3)
 - **Wilkinson et al., "The FAIR Guiding Principles for scientific data management and stewardship"**(*Scientific Data* 3, 160018, 2016): FAIR(可发现/可访问/可互操作/可复用)四原则的原始出处, 本讲第1节直接引用。
 - **DMPTool**(dmptool.org): 由加州大学Curation中心(University of California Curation Center)运营、多所大学共同参与的公开在线DMP撰写辅助工具, 整合NSF/NIH等主要资助机构对DMP的具体格式要求, 提供对应模板辅助生成DMP草稿。
-- **NSF, "Preparing Your Data Management and Sharing Plan"**(NSF官网关于DMSP的官方说明页面)与**NIH Data Management and Sharing Policy**(2023年起生效): 两大资助机构关于DMP强制要求的官方政策来源。
+- **NSF, "Preparing Your Data Management Plan"**(NSF官网关于DMP的官方说明页面, 2011年起强制要求)与**NIH Data Management and Sharing Policy**(要求提交DMSP, 2023年起生效): 两大资助机构名称不同、生效年份不同——NSF的是"Data Management Plan (DMP)", NIH的才是"Data Management and Sharing Plan (DMSP)", 不能混用。
 
 ## 大型多机构合作项目管理 (L4)
 - **2 CFR Part 200("Uniform Guidance")**——美国联邦政府(由白宫管理与预算办公室OMB发布)关于统一行政要求、成本原则和联邦资助审计要求的官方规定, 其中对主承担机构监督子机构(subrecipient)经费使用的责任有明确条款, 是理解多机构经费监管制度背景的权威来源。
