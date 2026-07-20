@@ -9,7 +9,7 @@
 
 新手写DMP时最常见的反应是"这不就是走个流程"——于是随手写一句"数据将按需共享", 或者干脆复制上一份申请里的模板段落。这句"按需共享"看似四平八稳, 实际上什么都没说清楚: 按谁的需? 什么条件下共享? 含隐私信息的数据怎么处理? 结果就是申请提交后, 资助机构的形式审查环节直接因为DMP不合格把整份材料退回——**注意DMP的审查通常发生在同行评审之前**, 这意味着一份研究内容写得再好的申请, 也可能因为DMP这一节写得敷衍而根本没有机会被同行评审看到。
 
-以美国两大资助机构为例(具体细则以当年官网公布版本为准, 这里只说明制度设计本身): NSF自2011年起要求所有申请附一份不超过两页的"Data Management and Sharing Plan"(DMSP), 缺失该文档的申请会被直接退回不予评审; NIH自2023年起全面实施"Data Management and Sharing Policy", 要求几乎所有资助申请都提交数据管理与共享计划。**这不是某个学科的特殊要求, 而是主要资助机构的通用制度**, 意味着不管你的研究方向是什么, DMP都是绕不开的一节。
+以美国两大资助机构为例(具体细则以当年官网公布版本为准, 这里只说明制度设计本身): NSF自2011年起要求所有申请附一份不超过两页的"Data Management Plan"(DMP), 缺失该文档的申请会被直接退回不予评审; NIH自2023年起全面实施"Data Management and Sharing Policy", 要求几乎所有资助申请都提交一份"Data Management and Sharing Plan"(DMSP)。**注意这是两个不同机构、不同年份、不同名称的要求, 不要混为一谈**: NSF的DMP是2011年起生效的两页式文档, "DMP"里没有"and Sharing"这个词; NIH的DMSP是2023年起才生效、名称里明确带"Data Management **and Sharing**"的独立政策, 比NSF晚了十余年。**这不是某个学科的特殊要求, 而是主要资助机构的通用制度**, 意味着不管你的研究方向是什么, 数据管理规划都是绕不开的一节。
 
 ---
 
@@ -102,7 +102,7 @@ DMP里的承诺                     必须对应到
 
 - **Wilkinson et al., "The FAIR Guiding Principles for scientific data management and stewardship"**(*Scientific Data* 3, 160018, 2016)——FAIR四原则的原始出处, 本讲第1节直接引用。
 - **DMPTool**(dmptool.org)——加州大学Curation中心运营的公开DMP撰写辅助工具, 整合NSF/NIH等主要资助机构的模板要求。
-- **NSF, "Preparing Your Data Management and Sharing Plan"**(NSF官网关于DMSP的官方说明页面)与**NIH Data Management and Sharing Policy**(2023年起生效)——两大资助机构关于DMP强制要求的官方政策来源。
+- **NSF, "Preparing Your Data Management Plan"**(NSF官网关于DMP的官方说明页面, 2011年起要求)与**NIH Data Management and Sharing Policy**(要求提交DMSP, 2023年起生效)——两大资助机构关于数据管理规划强制要求的官方政策来源, 注意两者名称(DMP vs. DMSP)、生效年份和所属机构都不同, 见第0节的辨析。
 
 ---
 

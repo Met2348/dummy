@@ -92,7 +92,7 @@
 
 ## 5. 经典参考
 
-- **Roelofs, R., Fridovich-Keil, S., Miller, J., Shankar, V., Hardt, M., Recht, B., & Schmidt, L., "A Meta-Analysis of Overfitting in Machine Learning", *NeurIPS*, 2019**——系统分析大量真实Kaggle竞赛公开/私有测试集的名次差距, 发现"排行榜过拟合"的实际严重程度比民间直觉更微妙, 是本讲第0节"shake-up"讨论的核心方法论出处。
+- **Roelofs, R., Shankar, V., Recht, B., Fridovich-Keil, S., Hardt, M., Miller, J., & Schmidt, L., "A Meta-Analysis of Overfitting in Machine Learning", *NeurIPS*, 2019**——系统分析大量真实Kaggle竞赛公开/私有测试集的名次差距, 发现"排行榜过拟合"的实际严重程度比民间直觉更微妙, 是本讲第0节"shake-up"讨论的核心方法论出处。
 - **Narayanan, A. & Shmatikov, V., "Robust De-anonymization of Large Sparse Datasets", *IEEE Symposium on Security and Privacy*, 2008**——证明Netflix Prize"匿名化"数据集可被交叉比对重新识别真实用户身份, 是本讲第1.2节数据隐私讨论的具体出处, 也是数据发布领域被反复引用的经典教训。
 - **NeurIPS官方Competition Track**的历年Call for Competitions说明——公开的竞赛提案评审流程和时间线要求, 是本讲第1.4节"组织流程"一节的具体参照样本, 具体要求逐年可能调整, 请以当年官网发布版本为准。
 - 也见本仓库`eval-foundations`专题——该专题教评测方法论本身的技术原理(benchmark/metric怎么设计、contamination怎么检测), 本讲教的是把这样的评测机制包装成一场公开竞赛之后额外冒出的组织与参赛问题, 两者互补不重复, 见本讲开篇的关键区分。

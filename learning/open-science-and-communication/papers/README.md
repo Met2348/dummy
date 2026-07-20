@@ -16,7 +16,7 @@
 - Registered Report这一出版形式由Chris Chambers于2013年在期刊《Cortex》正式引入, 此后被多个期刊/会议采纳。
 
 ## 竞赛的组织与参与策略 (L4)
-- **Roelofs, R., Fridovich-Keil, S., Miller, J., Shankar, V., Hardt, M., Recht, B., & Schmidt, L., "A Meta-Analysis of Overfitting in Machine Learning", *NeurIPS*, 2019**——系统分析大量真实Kaggle竞赛公开/私有测试集的名次差距, 发现"排行榜过拟合"的实际严重程度比民间直觉更微妙(多数shake-up更多来自方差而非系统性过拟合), 是本讲"公开/私有测试集划分"一节的核心方法论出处。
+- **Roelofs, R., Shankar, V., Recht, B., Fridovich-Keil, S., Hardt, M., Miller, J., & Schmidt, L., "A Meta-Analysis of Overfitting in Machine Learning", *NeurIPS*, 2019**——系统分析大量真实Kaggle竞赛公开/私有测试集的名次差距, 发现"排行榜过拟合"的实际严重程度比民间直觉更微妙(多数shake-up更多来自方差而非系统性过拟合), 是本讲"公开/私有测试集划分"一节的核心方法论出处。
 - **Narayanan, A. & Shmatikov, V., "Robust De-anonymization of Large Sparse Datasets", *IEEE Symposium on Security and Privacy*, 2008**——证明Netflix Prize"匿名化"竞赛数据集可被交叉比对重新识别真实用户身份, 是本讲数据隐私一节的具体出处, 也是数据发布领域被反复引用的经典教训。
 - **NeurIPS官方Competition Track**的历年Call for Competitions说明——公开的竞赛提案评审流程和时间线要求, 是本讲组织流程一节的具体参照样本, 具体要求逐年可能调整, 请以当年官网发布版本为准。
 
