@@ -57,9 +57,14 @@ Budget 扫描:固定 K=5 扫 H∈{1,2,3,5,8};固定 H=3 扫 K∈{1,3,5,10}。每
 - 环境是 6x6 合成格子世界,不是 Atari/DMControl/真实机器人——目的是验证测量方法论、拿第一批方向性信号,
   不是产出可以直接放进论文的最终结果。
 - 只有 32 个状态、5 个随机种子,统计功效有限,尤其是"不确定性关联"那部分分组样本量小,结论要谨慎。
-- world model 是纯频次估计的表格模型,不是神经网络/扩散模型,不能直接类比视频生成的想象。
+- world model 最初是纯频次估计的表格模型,不是神经网络/扩散模型,不能直接类比视频生成的想象——
+  **已用 [`neural_ensemble_model.py`](neural_ensemble_model.py) 换成小型神经网络 ensemble 做过
+  一次扩展验证,结果见 [`RESULTS-neural-ensemble.md`](RESULTS-neural-ensemble.md):发现一的定性
+  结论(同源想象大多数时候在做无用功)复现,但具体数字量级和"H越深命中率越低"这个单调模式没有
+  完全复现;顺带测了"让想象看到集成分歧"这种最廉价的打破同源结构方式,没有带来预期改善,是一条
+  对方法设计有约束力的负结果。仍然不是真实 DreamerV3/TD-MPC2 规模的网络。**
 - 下一步如果方向选定,需要把同一套测量协议(决策改变率/命中率/预算扫描/不确定性关联)搬到真实 world model
   checkpoint(如 DreamerV3、TD-MPC2)和真实任务(DMControl/Atari)上重新做一遍,这套代码是可复用的骨架,
   不是终点。
 
-结果见 [`RESULTS.md`](RESULTS.md)。
+结果见 [`RESULTS.md`](RESULTS.md)(表格模型版)和 [`RESULTS-neural-ensemble.md`](RESULTS-neural-ensemble.md)(神经网络集成扩展版)。
