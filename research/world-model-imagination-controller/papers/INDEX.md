@@ -23,13 +23,13 @@
 | [MuZero](https://arxiv.org/abs/1911.08265) (1911.08265) | 2019/2020(Nature) | 学隐动力学模型后用 MCTS 树搜索,每步固定模拟次数(如50/800次) | MCTS 按 PUCT 分数把固定总模拟预算不均匀分给不同分支,是"总预算固定、候选间自适应分配"的早期部分先例,但从不决定要不要减少总预算本身 |
 | [EfficientZero](https://arxiv.org/abs/2111.00210) (2111.00210) | 2021 NeurIPS | 自监督一致性损失+值预测修正,固定模拟次数 MCTS 大幅提升样本效率 | 样本效率提升来自模型质量而非搜索预算分配方式改变,是"改模型不改预算分配"的对照组 |
 | [TD-MPC](https://arxiv.org/abs/2203.04955) (2203.04955) | 2022 ICML | 隐空间任务导向动力学模型+MPPI/CEM 短 horizon 轨迹优化,可学习终值函数弥补截断 | 用可学习终值函数补偿"horizon 不够长",但候选轨迹数和 horizon 仍是训练前固定超参数 |
-| [TD-MPC2](https://arxiv.org/abs/2310.16828) (2310.16828) | 2024 ICLR | scale 到 317M 参数、80+ 任务单一配置,MPPI 用固定数量(如512条)候选轨迹迭代重加权 | 当前最强隐空间 MPC 基线之一,候选轨迹数训练前定死,不随任务/状态不确定性调整 |
+| [TD-MPC2](https://arxiv.org/abs/2310.16828) (2310.16828) | 2024 ICLR | scale 到 317M 参数、80 个任务(50 Meta-World+30 DMControl)单一配置,MPPI 用固定数量(512条)候选轨迹迭代重加权 | 当前最强隐空间 MPC 基线之一,候选轨迹数训练前定死,不随任务/状态不确定性调整 |
 | [Genie](https://arxiv.org/abs/2402.15391) (2402.15391) | 2024 ICML(最佳论文) | 无标注视频学出 11B 参数时空视频 tokenizer+自回归动力学模型+隐动作模型,逐帧交互生成 | 生成式想象的算力开销随模型规模显著上升,预算分配问题只会更迫切;逐帧自回归结构天然对应"每步是否继续"的停止决策点(交叉关联 Track B/D) |
 | [GameNGen](https://arxiv.org/abs/2408.14837) (2408.14837) | 2024(ICLR 2025) | 扩散模型逐帧生成 DOOM 画面,推理时把去噪步数从常规几十步压到 4 步以维持实时帧率 | "为满足固定实时预算而砍生成质量"的典型例子,去噪步数是人工定死常数,不是按当前帧对最终结果的重要性动态决定的(交叉关联 Track B) |
 | [IRIS](https://arxiv.org/abs/2209.00588) (2209.00588) | 2022(ICLR 2023) | 离散自编码器把图像转 token,自回归 Transformer 在 token 空间建模动力学 | 又一个"想象 horizon 写死在训练配置里"的高样本效率范例,验证缺口在 RNN 和 Transformer 两类架构上同样存在 |
 | [MBPO](https://arxiv.org/abs/1906.08253) (1906.08253) | 2019 NeurIPS | 短分支 rollout(1-15步),理论论证模型误差累积决定该用多长 rollout,按训练进度线性增长 | "rollout 长度怎么定"最早被系统研究的论文之一,但只按全局训练进度做调度,不区分任务/状态/候选,是"预算分配=人工调度表"传统的源头 |
 | [MACURA](https://arxiv.org/abs/2405.19014) (2405.19014) | 2024 ICML | 用集成模型不确定性估计,把 rollout 长度按"每个具体状态"自适应截断 | 较强的"按不确定性自适应 rollout 长度"先例,证明自适应分配优于 MBPO 式固定/线性调度;但只调"该想多长"一个维度,未处理"该不该想/该采纳哪个候选" |
-| [AVIC: When and How Much to Imagine](https://arxiv.org/abs/2602.08236) (2602.08236) | 2026 | 用 RL(GRPO)训练门控策略,先判断证据是否够用、不够再决定生成多少想象视角,奖励=正确率-想象开销 | **结构上离我们的 controller 最近的现有工作**:显式把"要不要想象"和"想多少"都变成可学习决策,但只用于视觉空间推理 QA 而非序贯决策/控制,也没有多候选比较机制(交叉关联 Track D,已 WebFetch 核验) |
+| [AVIC: When and How Much to Imagine](https://arxiv.org/abs/2602.08236) (2602.08236) | 2026 | 用 RL(GRPO)训练门控策略,先判断证据是否够用、不够再决定生成多少想象视角,奖励=正确率-想象开销 | **结构上离我们的 controller 最近的现有工作**:显式把"要不要想象"和"想多少"都变成可学习决策,主战场是视觉空间推理 QA;R2R 导航实验里也验证了序贯场景下逐步应用门控,但每步决策彼此独立、没有跨步骤预算调度,也没有多候选比较机制(交叉关联 Track D,已 WebFetch 二轮核验) |
 | [AHEAD](https://arxiv.org/abs/2606.02486) (2606.02486) | 2026 | 冻结 VLA 策略接轻量世界模型,前向预测未来视觉特征直到预测不确定性越过阈值才停 | 提供"不确定性阈值触发提前停止想象"的具体机制,但这里是单条轨迹的延迟补偿,不是多候选未来的比较择优(已 WebFetch 核验) |
 | 无 arXiv,见 DeepMind 博客(2024.12) | Genie 2 | 技术博客 | 把 Genie 扩展到 3D 一致可玩环境,官方明确区分"未蒸馏基座"与"可实时运行蒸馏版",直接佐证想象存在可调的质量-速度前沿 |
 
@@ -51,7 +51,7 @@
 | [Diffusion Forcing](https://arxiv.org/abs/2407.01392) (2407.01392) | 2024 NeurIPS | 每 token/帧可独立设定噪声水平,统一因果 next-token 预测与全序列扩散 | 提供让想象按需变长、按需插入 guidance 的架构基础,天然适合把"何时停止生成"的控制器直接接到采样过程里 |
 | [iVideoGPT](https://arxiv.org/abs/2405.15223) (2405.15223) | 2024 NeurIPS | 可扩展自回归 transformer 统一压缩视觉观测/动作/奖励为 token 序列 | 明确以"让交互式视频世界模型可扩展、计算更省"为卖点,是生成效率工程改进在架构层面的代表 |
 | [Video-T1](https://arxiv.org/abs/2503.18942) (2503.18942) | 2025 | 把视频生成 test-time scaling 重述为搜索问题,Tree-of-Frames 自适应扩展/剪枝候选视频分支 | **与我们要做的 controller 机制几乎同构**,是最直接的同期相关工作,写作时需正面对比 |
-| [EvoSearch](https://arxiv.org/abs/2505.17618) (2505.17618) | 2025 | test-time scaling 重述为进化搜索(选择+变异),作用于扩散/流式生成模型去噪过程 | 给出具体预算-质量 scaling 数字(约100倍推理算力换 best-of-N 约23%-33%提升),为"生成多少候选才够用"提供量化基线 |
+| [EvoSearch](https://arxiv.org/abs/2505.17618) (2505.17618) | 2025 | test-time scaling 重述为进化搜索(选择+变异),作用于扩散/流式生成模型去噪过程 | 相比 best-of-N 有约23%-33%的具体提升数字(因生成模型不同而异),另有一组约100倍算力量级的独立scaling曲线观察——二次核验发现两者是原文两个不同实验维度,不是同一组"花100倍换23-33%"的因果配对,为"生成多少候选才够用"提供量化基线 |
 | 无 arXiv,见 OpenAI 技术报告(2024) | Sora: Video generation models as world simulators | 技术报告 | "视频生成即世界模拟器"论述的公众认知源头,为本 track 确立核心叙事前提,但未公开算力细节(第三方估算单条10秒视频约需40GPU分钟) |
 
 ---
@@ -74,7 +74,7 @@
 | [Large Language Monkeys](https://arxiv.org/abs/2407.21787) (2407.21787) | 2024 | 重复采样 N 个候选解,覆盖率随采样数近似幂律增长,但选择机制数百样本后即饱和 | 提醒预算分配之外必须同时设计好候选筛选器,否则想象预算增加未必转化为决策收益 |
 | [Tree of Thoughts](https://arxiv.org/abs/2305.10601) (2305.10601) | 2023 NeurIPS | 生成过程组织成候选思考节点树,每步 self-evaluation 打分后决定扩展/剪枝/回溯 | "生成后先自评分再决定是否继续展开该分支"可直接类比:每个候选未来先打分,分低分支直接剪掉不再想象 |
 | [RAP](https://arxiv.org/abs/2305.14992) (2305.14992) | 2023 EMNLP | LLM 同时充当 world model 和推理 agent,MCTS 在候选未来推理路径间搜索 | "world model+MCTS 搜索控制器"结构的直接先例,explore/exploit 回传机制可用于决定该展开哪个候选未来、给多少预算 |
-| [Adaptive Rollout Length for Model-Based RL](https://arxiv.org/abs/2206.02380) (2206.02380) | 2022 | 把"该把 rollout 做多长"重新定义为元级决策问题,用 model-free RL agent 学习何时终止 | 与"想象预算控制器"训练范式几乎同构:训练一个元策略,依据当前 rollout 已产生的信号决定是否继续展开 |
+| [Adaptive Rollout Length for Model-Based RL Using Model-Free Deep RL](https://arxiv.org/abs/2206.02380) (2206.02380) | 2022 | 把"该把 rollout 做多长"重新定义为元级决策问题,用 model-free RL agent 周期性调整一个跨批次共享的 rollout 长度超参数(不是逐条 rollout 单独决定何时停,二次核验订正了这个粒度描述) | 与"想象预算控制器"训练范式部分同构:元策略学习粒度是"批量共享超参数",比我们要的"每个候选未来独立决策"更粗,这个粒度差异需要注意 |
 | [Infoprop](https://arxiv.org/abs/2501.16918) (2501.16918) | 2025 | 显式拆分 rollout 预测的 aleatoric 与 epistemic 不确定性,追踪累积 epistemic 误差作为终止准则 | 与导师所提"uncertainty aware imagination"直接对应,可将"累积不确定性触发停止"机制搬到视频 world model 想象过程 |
 | [REFRAIN](https://arxiv.org/abs/2510.10103) (2510.10103) | 2025 | 训练free的两阶段停止判别器+滑动窗口 UCB 多臂老虎机,依"继续想的边际收益"动态调整停止阈值 | UCB 式"停止阈值随难度自适应调节"的控制器结构,可迁移为按候选未来不确定性调节"是否继续生成下一帧"的阈值,且无需重训 world model |
 
@@ -112,13 +112,13 @@
 | 无 arXiv,经典引用:Russell & Wefald (1991), *Artificial Intelligence* 49(1-3):361-395 | 1991 | 提出 Value of Computation(VOC)框架:理性 agent 应执行"期望效用增益减去计算成本"最大的计算,不为正时停止 | **全项目最核心的数学锚点**,可直接把三个决策点写成 VOC(c) 的具体形式 |
 | [Selecting Computations](https://arxiv.org/abs/1207.5879) (1207.5879) | 2012 UAI | "该模拟哪些候选动作序列"形式化为 Bayesian selection problem,给出有限样本下最优/近似最优选择策略及理论界 | 把候选想象未来集合当作待评估的 candidate simulations,直接套用其 selection-problem 框架决定每步该展开哪一个、何时停止 |
 | 无 arXiv,经典引用:Howard (1966), *IEEE Trans. Systems Science and Cybernetics* 2:22-26 | 1966 | 首次形式化"信息的价值"=拥有该信息后最优决策期望值减去没有该信息时的期望值 | VOI 理论源头,给出 VOI(c) 最原始的定义模板,可直接映射为"生成候选未来 c"这条信息带来的边际提升量 |
-| [VOIMCP](https://arxiv.org/abs/2604.01434) (2604.01434) | 2026 | POMDP 的 MCTS 规划中显式建模"是否值得针对某观测/分支继续推理",VOI 低的分支直接跳过,给出 regret 界与收敛性证明 | 把"是否要对每个候选未来展开想象 rollout"当作树搜索中"是否要展开某观测分支"的 meta 决策,可直接复用其剪枝算法与理论保证(已 WebFetch 核验) |
+| [VOIMCP](https://arxiv.org/abs/2604.01434) (2604.01434) | 2026 | POMDP 的 MCTS 规划中显式建模"是否值得针对某观测/分支继续推理",VOI 低的分支直接跳过,给出近似值函数与真实最优值的误差界(原文称"bounded regret",但约束对象是这个误差,不是经典bandit意义上随决策轮次累积的regret,二次核验后订正术语)+ MCTS 收敛速率证明 | 把"是否要对每个候选未来展开想象 rollout"当作树搜索中"是否要展开某观测分支"的 meta 决策,可直接复用其剪枝算法与理论保证(已 WebFetch 二轮核验) |
 | 无 arXiv,经典引用:Chow, Robbins & Siegmund (1971), *Great Expectations: The Theory of Optimal Stopping* | 1971 | 一般化序贯最优停止理论:用鞅论证明存在最优停止时刻 τ* 使期望回报最大 | 把"该在哪一步停止对某条想象轨迹继续推演"直接写成停止时刻问题,是"何时停"子问题最直接的数学骨架 |
 | [Deep Optimal Stopping](https://arxiv.org/abs/1804.05394) (1804.05394) | 2018(JMLR 2019) | 用神经网络直接参数化"停/继续"这一停止决策本身,在高维无解析解问题上学到接近最优停止规则 | 给"该不该继续想象/该在哪一步停"提供可直接套用的训练配方:网络参数化 stop/continue 决策,用蒙特卡洛采样的想象 rollout 序列训练 |
 | [BALD](https://arxiv.org/abs/1112.5745) (1112.5745) | 2011 | 预测熵减去期望后验熵得到互信息,挑选"模型整体不确定但一旦观测就会变确定"的点 | 把 BALD 互信息打分改造成"生成这个候选未来是否会改变最终决策"的信息增益打分,即想象预算分配的核心 acquisition function(交叉关联 Track D) |
 | [Adaptive Submodularity](https://arxiv.org/abs/1003.3967) (1003.3967) | 2011 JAIR | 定义 adaptive submodularity 性质,满足时贪心自适应策略有 (1−1/e) 近似保证 | 把"预算 k 以内该依次生成哪些候选未来"写成 adaptive stochastic optimization,贪心选边际收益最大的候选生成即有理论保证 |
 | 无 arXiv,经典引用:Zilberstein (1996), *AI Magazine* 17(3):73-83 | 1996 | 用 performance profile 刻画每个 anytime 模块的"质量-时间"权衡,给出多模块组合时的 meta-level control 方法 | 把每个候选未来的想象 rollout 看作 anytime computation,performance profile 为"想象步数→决策改进量",controller 任务就是在总预算下调度 |
-| [Rational Metareasoning for LLMs](https://arxiv.org/abs/2410.05563) (2410.05563) | 2024-2025 | 直接把 Russell & Wefald 的 VOC 搬进 LLM 训练:Expert Iteration + VOC 惩罚项,使模型学会少生成无用思考步骤 | reward=决策收益−λ×计算量的训练目标可原样搬到想象 controller,是 VOC 理论到本项目最直接可操作的模板 |
+| [Rational Metareasoning for Large Language Models](https://arxiv.org/abs/2410.05563) (2410.05563) | 2024-2025 | 直接把 Russell & Wefald 的 VOC 搬进 LLM 训练:Expert Iteration + VOC 惩罚项,使模型学会少生成无用思考步骤 | reward=决策收益−λ×计算量的训练目标可原样搬到想象 controller,是 VOC 理论到本项目最直接可操作的模板 |
 | [Scaling LLM Test-Time Compute Optimally](https://arxiv.org/abs/2408.03314) (2408.03314) | 2024(ICLR 2025) | 测试时计算量该怎么分配高度依赖 prompt 难度,先估计难度再自适应选策略 | budget(s)=总预算约束下使期望决策收益最大化的分配函数,依赖对 state 当前难度/不确定性的估计(交叉关联 Track C) |
 | [Certaindex](https://arxiv.org/abs/2412.20993) (2412.20993) | 2024-2025(NeurIPS 2025) | training-free 统计代理指标衡量推理过程"候选答案是否已收敛稳定",serving 系统据此决定算多久 | 把"该不该继续/终止对某候选未来的想象"表述为监测随想象步数演化的"未来预测收敛度"代理指标,是"何时停"的 training-free 可落地信号设计范式 |
 
