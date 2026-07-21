@@ -10,46 +10,51 @@ from __future__ import annotations
 
 import random
 
-from gridworld_env import ACTIONS, GAMMA, is_terminal, reward
+from gridworld_env import ACTIONS, GAMMA, GOAL, is_terminal, reward
 from world_model import LearnedWorldModel
 
 
-def no_imagination_action(model: LearnedWorldModel, Vhat: list[float], s: int) -> str:
-    """H=0 基线:只做一步精确期望展开(用 Vhat 当 bootstrap),不做决策时的多步 Monte Carlo 搜索。"""
+def no_imagination_action(model: LearnedWorldModel, Vhat: list[float], s: int, goal: tuple = GOAL) -> str:
+    """H=0 基线:只做一步精确期望展开(用 Vhat 当 bootstrap),不做决策时的多步 Monte Carlo 搜索。
+
+    goal 参数(默认 GOAL,向后兼容)只影响这一步的**即时奖励**怎么算——即时奖励假设总是可观测的
+    (符合大多数真实RL设定),"过时"的只可能是 Vhat 本身(调用方决定传入哪个 goal 算出来的 Vhat)。
+    """
     best_a, best_val = None, float("-inf")
     for a in ACTIONS:
         dist = model.transition_dist(s, a)
-        q = sum(p * (reward(ns) + GAMMA * Vhat[ns]) for ns, p in dist.items())
+        q = sum(p * (reward(ns, goal) + GAMMA * Vhat[ns]) for ns, p in dist.items())
         if q > best_val:
             best_val, best_a = q, a
     return best_a
 
 
 def _simulate_rollout(
-    model: LearnedWorldModel, Vhat: list[float], s: int, first_action: str, horizon: int, rng: random.Random
+    model: LearnedWorldModel, Vhat: list[float], s: int, first_action: str, horizon: int, rng: random.Random,
+    goal: tuple = GOAL,
 ) -> float:
     """从 s 执行 first_action,续跑策略=信任 Vhat 的贪心策略,跑满 horizon 步后用 Vhat 做 bootstrap(仿 TD-MPC 短rollout+终值)。"""
     total, disc = 0.0, 1.0
     cur, a = s, first_action
     for _ in range(horizon):
         ns = model.sample_next(cur, a, rng)  # 真·Monte Carlo 采样,不是精确期望
-        total += disc * reward(ns)
+        total += disc * reward(ns, goal)
         disc *= GAMMA
         cur = ns
-        if is_terminal(cur):
+        if is_terminal(cur, goal):
             return total
-        a = no_imagination_action(model, Vhat, cur)
+        a = no_imagination_action(model, Vhat, cur, goal)
     total += disc * Vhat[cur]
     return total
 
 
 def imagine_action(
-    model: LearnedWorldModel, Vhat: list[float], s: int, K: int, H: int, rng: random.Random
+    model: LearnedWorldModel, Vhat: list[float], s: int, K: int, H: int, rng: random.Random, goal: tuple = GOAL,
 ) -> str:
     """固定预算 (K,H):每个候选首动作跑 K 条深度 H 的想象 rollout,取均值回报最高的动作。"""
     best_a, best_val = None, float("-inf")
     for a in ACTIONS:
-        vals = [_simulate_rollout(model, Vhat, s, a, H, rng) for _ in range(K)]
+        vals = [_simulate_rollout(model, Vhat, s, a, H, rng, goal) for _ in range(K)]
         v = sum(vals) / len(vals)
         if v > best_val:
             best_val, best_a = v, a

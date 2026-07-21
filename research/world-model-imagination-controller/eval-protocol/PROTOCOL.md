@@ -66,5 +66,13 @@ Budget 扫描:固定 K=5 扫 H∈{1,2,3,5,8};固定 H=3 扫 K∈{1,3,5,10}。每
 - 下一步如果方向选定,需要把同一套测量协议(决策改变率/命中率/预算扫描/不确定性关联)搬到真实 world model
   checkpoint(如 DreamerV3、TD-MPC2)和真实任务(DMControl/Atari)上重新做一遍,这套代码是可复用的骨架,
   不是终点。
+- 前两轮只测了"同源想象"(想象和基线共享完全相同的信息)。**已用
+  [`task_conditioning_pilot.py`](task_conditioning_pilot.py) 测了 Weikai 提示里另一半——
+  task-conditioning:结果见 [`RESULTS-task-conditioning.md`](RESULTS-task-conditioning.md)——给想象
+  一个真正决策相关的信息优势(知道这一局真实任务目标,baseline 不知道),三个候选目标上想象命中率都
+  稳定超过 unconditioned 想象(汇总 82.0% vs 63.7%),是三轮 pilot 里第一次观察到"想象有稳定正向价值"。
+  意外发现:即使只让"即时奖励"这一个通道感知真实任务(不改 bootstrap),想象也能捡到部分真实信号——
+  信息优势的渗透程度是连续的,不是开关式的。严格的"零信息泄露"三方对照组还没做,是明确留白。**
 
-结果见 [`RESULTS.md`](RESULTS.md)(表格模型版)和 [`RESULTS-neural-ensemble.md`](RESULTS-neural-ensemble.md)(神经网络集成扩展版)。
+结果见 [`RESULTS.md`](RESULTS.md)(表格模型版)、[`RESULTS-neural-ensemble.md`](RESULTS-neural-ensemble.md)
+(神经网络集成扩展版)、[`RESULTS-task-conditioning.md`](RESULTS-task-conditioning.md)(task-conditioning扩展版)。
