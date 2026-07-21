@@ -10,6 +10,8 @@
 - C. 自适应测试时计算分配的技术工具箱（别的领域怎么解决同构问题）
 - D. 不确定性量化（决策收益怎么估计）
 - E. 元推理 / 信息价值 / 最优停止理论（问题的数学锚点）
+- F. 2026-07 二次深挖：直接竞争格局扫描 + VOC/最优停止理论补强（详见
+  ../02-deep-gap-analysis.md，这一组是"找对研究问题"专项调研的产物）
 
 - 可复现：clone 后 `python download_papers.py` 一键重下（幂等，已存在则跳过）。
 - 对 arXiv 友好：浏览器 UA + 每篇之间 sleep（默认 3s）+ 429 退避重试。
@@ -104,6 +106,31 @@ PAPERS: list[tuple] = [
     #   D PlanCP (NeurIPS 2023 proceedings) · E Russell & Wefald 1991 (AIJ) ·
     #   E Howard 1966 (IEEE Trans SSC) · E Chow/Robbins/Siegmund 1971 (book) ·
     #   E Zilberstein 1996 (AI Magazine)
+
+    # ===== F. 2026-07 二次深挖：直接竞争格局 + VOC/最优停止理论补强（20）=====
+    # 老师要求"找对研究问题"专项调研新增，全部经 WebFetch 逐篇核验（非二手转述）。
+    # F1 组：2026年直接竞争/邻近论文（世界模型想象门控赛道，越来越拥挤）
+    ("F", "2606.06476", "astra-thinking-with-imagination"),
+    ("F", "2601.08955", "imagine-then-plan-adaptive-lookahead"),
+    ("F", "2606.31132", "elastic-adaptive-test-time-compute-gcp"),
+    ("F", "2606.26463", "finding-time-to-think-planning-budgets"),
+    ("F", "2601.03822", "roi-reasoning-knapsack-inference"),
+    ("F", "2510.18135", "world-in-world-closed-loop"),
+    ("F", "2509.24387", "adanav-uncertainty-vln"),
+    ("F", "2603.16673", "rarrl-when-should-robot-think"),
+    ("F", "2601.03905", "agents-fail-leverage-world-model-foresight"),
+    ("F", "2606.22813", "active-inference-test-time-scaling-law"),
+    # F2 组：VOC / 最优停止 / model-based 规划理论补强（本次挖出的"理论盲区"证据）
+    ("F", "2603.30031", "cognitive-friction-bounded-deliberation"),
+    ("F", "2002.04335", "sezener-dayan-voc-in-mcts"),
+    ("F", "2011.03506", "value-equivalence-principle-model-based-rl"),
+    ("F", "1802.03654", "beyond-one-step-greedy-rl"),
+    ("F", "1805.07956", "multiple-step-greedy-policies-rl"),
+    ("F", "2011.04021", "hamrick-role-of-planning-model-based-drl"),
+    ("F", "2506.17124", "when-can-model-free-rl-be-enough-for-thinking"),
+    ("F", "1705.02670", "metacontrol-adaptive-imagination-based-optimization"),
+    ("F", "2307.14993", "thinker-learning-to-plan-and-act"),
+    ("F", "2310.01798", "llms-cannot-self-correct-reasoning-yet"),
 ]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

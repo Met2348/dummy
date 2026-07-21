@@ -124,9 +124,68 @@
 
 ---
 
+## F. 2026-07 二次深挖:直接竞争格局 + VOC/最优停止理论补强(20 篇)
+
+> 老师要求"找对研究问题是最关键的一步,要头脑风暴,千万不能偷懒"后新增的专项调研。全部经 WebFetch
+> 逐篇核验(标题/作者/机制均对照原文,非二手转述),核验方法与结果详见
+> [`../03-novelty-competitive-landscape.md`](../03-novelty-competitive-landscape.md)。分两组:
+> F1 是 2026 年出现的直接竞争/邻近工作(world model 想象门控赛道),F2 是这次挖出的理论补强文献
+> (揭示我们 pilot 的"发现一/二"其实是经典 VOC 理论推论,不是新发现)。
+
+### F1. 2026 年直接竞争 / 邻近工作(10 篇)
+
+| 论文 | 年份 | 核心机制 | 与我们问题的相关性 |
+|---|---|---|---|
+| [Astra: Thinking with Imagination](https://arxiv.org/abs/2606.06476) (2606.06476) | 2026.6 | Astra-VL(RL训练VLM策略)+Astra-WM(基于Bagel的世界模拟器),两阶段RL课程学习训练"何时调用模拟器" | **AVIC最直接的同期竞争者**,框架高度相似(视觉推理+门控何时想象),但资源背景更强;仍是纯RL经验式训练,未涉及理论保证或跨步预算调度——这两点仍是空当 |
+| [Imagine-then-Plan (ITP)](https://arxiv.org/abs/2601.08955) (2601.08955) | 2026.3 | POIMDP形式化,RL训练K-head predictor每步自适应选想象深度K_t,代价函数log p(a\*\|s,τ̂)−λ_K·k,ALFWorld/WebShop/ScienceWorld/StableToolBench四个benchmark验证 | **idea 7"该不该想、想多深"这条叙事的框架级实现**(已用WebFetch逐条核对全部技术细节属实)。世界模型是微调LLM(文本生成式,非隐空间动力学),horizon一次性预先选定、无中途止损机制,且没有跨episode步骤的预算结转——这两点是我们仍可差异化的具体缺口 |
+| [ELASTIC](https://arxiv.org/abs/2606.31132) (2606.31132) | 2026.6 | CMU(Andrew Zou Li/Gokul Swamy/Yonatan Bisk/Andrea Bajcsy),元RL学习扩散/流式策略的测试时算力调度(去噪步数+并行采样),meta-MDP形式化 | 同属"自适应测试时算力"家族,但**不涉及世界模型/想象rollout**,是对冻结策略的纯推理资源调度,和我们的问题结构不同,风险较低 |
+| [Finding the Time to Think](https://arxiv.org/abs/2606.26463) (2606.26463) | 2026.6 | SMDP框架下用轻量gating policy逐决策点选择规划预算(real-time RL,agent自己选延迟),PacMan/Tetris/Snake/SpeedHex/SpeedGo环境验证 | idea 7的最近邻:同样是"每个决策点自适应选投入多少"，但用完美模拟器/MCTS而非学到的生成式world model,且预算基本不跨步结转(除个别子环境例外) |
+| [ROI-Reasoning](https://arxiv.org/abs/2601.03822) (2601.03822) | 2026.1 | 把预算受限的序贯推理表述为Ordered Stochastic Multiple-Choice Knapsack Problem(OS-MCKP),两阶段(元认知微调+RL)学长程token分配策略 | idea 7"跨步预算调度"这个机制目前**最接近的匹配**,但应用于LLM多任务批量数学推理,不是具身智能体单episode序贯决策——领域不同,机制同构,必须在differentiation里正面回应 |
+| [World-in-World](https://arxiv.org/abs/2510.18135) (2510.18135) | 2025.10 | 多候选动作生成+world model逐一rollout+revision policy打分选优的closed-loop在线规划;经查证提交于cs.CV分类,ICLR接收/Oral状态**未能在摘要页确认**,引用前需单独核实 | idea 1"多候选比较"表层机制目前**最强的既有工作**,但没有"要不要想象"的门控(每步必然想象)、候选是"选哪个动作"而非"该不该信这个想象"、无VOC式差值化打分——差异化必须落在VOC(c)这个反事实统一货币上 |
+| [AdaNav](https://arxiv.org/abs/2509.24387) (2509.24387) | 2025.9 | Action Entropy作策略先验触发额外推理,heuristics-to-RL训练难度感知推理策略,视觉语言导航(VLN)场景 | 仅表面相似(不确定性触发推理这个大类里的一个具体实例),无跨步预算结转,风险低 |
+| [RARRL: When Should a Robot Think?](https://arxiv.org/abs/2603.16673) (2603.16673) | 2026.3 | 分层orchestration policy(非底层控制)依据观测/执行历史/剩余资源决定是否/用哪种推理角色/分配多少算力,ALFRED基准真实延迟数据验证 | 资源感知调度框架和我们高度同构,但**不涉及世界模型/想象机制**,是通用推理调度而非想象门控,可作为"该不该多算"这一大类问题的方法论参照 |
+| [Current Agents Fail to Leverage World Model as Tool for Foresight](https://arxiv.org/abs/2601.03905) (2601.03905) | 2026.1 | 诊断性研究:agent模拟触发率<1%、误用预测结果约15%、强制使用时性能反降最多5%,归因于"何时模拟/如何解读/如何整合"三方面能力缺失 | **极佳的motivation引用**,和AVIC自己的54/14/9/23%诊断数字互相印证,不构成方法竞争,应作为引言开篇证据 |
+| [Active Inference as the Test-Time Scaling Law for Physical AI Agents](https://arxiv.org/abs/2606.22813) (2606.22813) | 2026.6 | 主动推断/自由能最小化框架,策略更新建模为软贝叶斯推断,scaling law的自变量是"连续现实世界经验"而非token/模型规模 | 提供的是"想多深"的连续调节机制(软性,非二元门控),和idea 3的VOC路线是**不同的理论传统**(active inference vs 决策论VOC),但同样证明"理论驱动而非RL/GRPO"这条路已经有人在邻近问题上摸索 |
+
+### F2. VOC / 最优停止 / model-based 规划理论补强(10 篇)
+
+> **关键发现**:我们pilot"发现一"(想象与基线同源时,多算期望上不改变决策,只注入方差,已用鞅的全方差公式加强证明)
+> **不是新发现**——它是 Russell & Wefald(1991)Value of Computation 停止法则的直接推论,已被下面
+> Hay et al.(UAI 2012,已在我们自己 E 组文献库里)形式化到 Bayesian selection 问题层级。"发现二"
+> (无关随机性不能翻正)同样是 VOC 的直接推论。这两条应该被重新定位成"用严谨证明把 30 年前的理论
+> 在'测试时想象+世界模型'这个具体现代场景钉实",而不是"我们发现了什么新东西"。
+
+| 论文 | 年份 | 核心机制 | 与我们问题的相关性 |
+|---|---|---|---|
+| [Cognitive Friction](https://arxiv.org/abs/2603.30031) (2603.30031) | 2026.3 | 三元认知架构(TCA),把审议过程建模为belief-congestion联合状态上的随机控制,rollout近似计算信息价值,HJB启发的停止边界决定何时停止查询、采取行动 | **理论驱动(非RL/GRPO)门控**目前唯一命中的2026年工作,但应用于通用工具调用agent,不是world model想象——这正是竞争格局扫描独立指出的"所有8+篇竞品共享的方法论盲区"里,唯一已经有人开始碰但还没碰到我们具体场景的例子 |
+| [Sezener & Dayan: Static and Dynamic Values of Computation in MCTS](https://arxiv.org/abs/2002.04335) (2002.04335) | 2020 UAI | 直接量化每次MCTS模拟对最终决策质量的预期影响(含非即时/未来模拟的影响),特定假设下贪婪优化计算价值即最优 | **和我们的Monte Carlo想象rollout设定几乎是同一数学对象**,是VOC理论应用到"该模拟哪个候选、模拟多少次"这个具体问题的现成先例,idea 1/8如果要做理论保证可直接站在这篇肩膀上 |
+| [Value Equivalence Principle](https://arxiv.org/abs/2011.03506) (2011.03506) | 2020 NeurIPS | 模型不需要精确复现真实转移,只要在给定策略/价值函数集合下"value-equivalent"即可支撑规划,可用更简单的模型不损失性能 | 从另一个角度支撑我们pilot"想象和基线同源模型下无益"这条结论——如果想象用的模型和基线在value-equivalence意义上就是同一个模型,自然不会带来新信息,这是发现一的一个更一般的理论视角 |
+| [Beyond the One-Step Greedy Approach](https://arxiv.org/abs/1802.03654) (1802.03654) | 2018 ICML | 首次系统分析h-step贪婪策略改进(此前无人仔细分析过),推导新算法并证明收敛性,指出多篇著名RL算法是其框架特例 | 我们pilot里"H越深、噪声越多"这个观测和h-step贪婪的理论分析同源,可用于把 Bellman telescoping 论证放进更大的经典理论脉络里 |
+| [Multiple-Step Greedy Policies in Online and Approximate RL](https://arxiv.org/abs/1805.07956) (1805.07956) | 2018 NeurIPS | 同一批作者对h-step贪婪的在线/近似RL版本扩展分析(未逐字核验,建立在1802.03654同一脉络) | 与上一条同一脉络的后续工作,补充多步贪婪理论谱系 |
+| [Hamrick et al.: On the role of planning in model-based deep RL](https://arxiv.org/abs/2011.04021) (2011.04021) | 2020 | 实证发现planning主要收益在训练/学习阶段而非部署阶段,"planning本身不保证泛化"(未逐字核验,agent二手转述) | 从实证角度呼应"想象要有用,必须真的带来训练时没有的新信息",而不是部署时白算 |
+| [When Can Model-Free RL be Enough for Thinking?](https://arxiv.org/abs/2506.17124) (2506.17124) | 2025 | 把"thinking"形式化为"执行一步policy improvement",证明其涌现依赖policy初始化是否已编码未被利用的知识(未逐字核验,agent二手转述) | 提供"何时额外计算有用"的一个形式化视角,和我们"信息优势"框架呼应,可作为idea 3理论部分的候选支撑 |
+| [Metacontrol for Adaptive Imagination-Based Optimization](https://arxiv.org/abs/1705.02670) (1705.02670) | 2017 DeepMind | "每个决策点学习投入多少想象"这条脉络的早期鼻祖之一(未逐字核验,agent二手转述,但PDF已下载确认真实存在) | Finding the Time to Think论文自己引用的最近邻之一,写related work时补上这条历史脉络显得调研扎实 |
+| [Thinker: Learning to Plan and Act](https://arxiv.org/abs/2307.14993) (2307.14993) | 2023 NeurIPS | 同一条"元控制学习何时/怎么想象"脉络的另一个节点(未逐字核验,agent二手转述,PDF已下载确认真实存在) | 同上,历史脉络补全 |
+| [LLMs Cannot Self-Correct Reasoning Yet](https://arxiv.org/abs/2310.01798) (2310.01798) | 2023(ICLR 2024) | 实证证明无外部反馈时intrinsic self-correction不可靠、甚至降低表现(未逐字核验,agent二手转述,PDF已下载确认真实存在) | 跨领域(LLM推理而非MDP决策)呼应发现一"没有新信息,多算不会变好",可作related work里的跨学科佐证 |
+
+**F 组核验状态说明**:F1 全部10篇 + F2 前4篇(Cognitive Friction/Sezener-Dayan/Value Equivalence/
+Beyond-One-Step-Greedy)已用 WebFetch 逐篇核对标题、作者、核心机制原文;F2 后6篇(Multiple-Step-Greedy/
+Hamrick/Hanna-Corrado/Metacontrol/Thinker/LLMs-Cannot-Self-Correct)来自子agent调研报告、未逐篇二次
+核验,但全部已实际下载 PDF 并通过 %PDF magic bytes + 大小校验(见 `download_papers.py` 输出,20/20 成功,
+排除了 arXiv ID 完全不存在这种最严重的错误)——**正式写进论文前仍需对这6篇做一次逐字核验**,已在
+[`03-novelty-competitive-landscape.md`](../03-novelty-competitive-landscape.md)里明确标注这个待办。
+
+---
+
 ## 跨 track 交叉关联小结
 
 - **Genie / GameNGen**(A↔B):既是 world model 又是视频生成架构,是"想象"这一生成动作本身成本和能力上限的共同参照。
 - **AVIC**(A↔D):唯一同时出现在两组的 2026 年工作,是目前结构上离本项目 controller 最近的现有系统,写作时是最重要的正面对比对象。
 - **BALD**(D↔E):互信息 acquisition function 既是不确定性量化工具也是元推理框架下"信息价值"的具体计算方式,是连接 D 组工具箱和 E 组理论锚点的桥梁。
 - **Scaling LLM Test-Time Compute Optimally**(C↔E):C 组里最贴近"按难度自适应分配预算"目标的工程范式,同时也是 E 组 compute-optimal 分配理论最直接的实证案例。
+- **F 组与 A/D/E 组**:F1(2026年直接竞品)是 A 组"AVIC 是结构上最近的现有工作"这条判断的最新延伸——
+  AVIC 已经不是孤例,而是一个正在快速拥挤的赛道(Astra/ITP/ELASTIC/Finding-the-Time-to-Think/
+  RARRL 等);F2(理论补强)直接指向 E 组的核心论断需要收紧——我们 pilot 的"发现一/二"是 E 组
+  Russell & Wefald VOC 理论(尤其 [Selecting Computations](https://arxiv.org/abs/1207.5879),已在
+  E 组)的推论而非新发现,但"所有 F1 竞品都用 RL/GRPO 经验式门控、没有一篇用有理论保证的 VOC/最优停止
+  框架"这一条,是竞争格局扫描独立确认的方法论空当,详见 [`../02-deep-gap-analysis.md`](../02-deep-gap-analysis.md)。
