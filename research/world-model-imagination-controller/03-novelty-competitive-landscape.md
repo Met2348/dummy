@@ -32,7 +32,7 @@
 | ELASTIC | 2606.31132 | 我方WebFetch摘要页 | 确认标题/作者/机制,非world model |
 | Finding the Time to Think | 2606.26463 | 我方WebFetch摘要页(x2轮,agent+我) | 确认标题/作者/日期/摘要机制;SMDP/MCTS/预算结转等细节摘要未明确写出,无法证伪也无法证实 |
 | ROI-Reasoning | 2601.03822 | 我方WebFetch摘要页(x2轮) | 确认标题/作者/knapsack形式化;"不可逆限制后续预算"是我方推断措辞,原文未逐字使用 |
-| World-in-World | 2510.18135 | 我方WebFetch摘要页(x2轮) | 确认标题/作者/提交日期(2025-10-20)/代码仓库;**ICLR接收状态/Oral未能在摘要页确认**,需人工二次核实 |
+| World-in-World | 2510.18135 | 我方WebFetch摘要页(x2轮)+2026-07-23 OpenReview/ICLR官方日程交叉核实 | 确认标题/作者/提交日期(2025-10-20)/代码仓库;**ICLR接收状态已确认为ICLR 2026 Oral**(详见`07-baseline-reproducibility-audit.md`) |
 | AdaNav | 2509.24387 | 我方WebFetch摘要页(x2轮) | 确认标题/作者/机制 |
 | RARRL (When Should a Robot Think) | 2603.16673 | 我方WebFetch摘要页 | 确认标题(15位作者)/机制/ALFRED基准 |
 | Current Agents Fail to Leverage World Model | 2601.03905 | 我方WebFetch摘要页 | 确认标题/具体数字(<1%触发率/~15%误用/最多5%性能下降) |
@@ -104,8 +104,9 @@
 
 ## 5. 本次调研没有解决的问题(明确留白,不要假装查清楚了)
 
-1. World-in-World是否真的是ICLR 2026 Oral——摘要页没有会议信息,需要去OpenReview或ICLR官网
-   核实,不能仅凭子agent的转述就写进正式文档。
+1. ~~World-in-World是否真的是ICLR 2026 Oral~~ ——**已于2026-07-23解决**:OpenReview页面
+   ([openreview.net/forum?id=yDmb7xAfeb](https://openreview.net/forum?id=yDmb7xAfeb))与ICLR
+   官方日程交叉核实,确认是ICLR 2026 Oral,详见`07-baseline-reproducibility-audit.md`。
 2. F2组后6篇论文的具体机制描述(尤其"是否证明了无单调改进保证"这类精确的理论claim)只做了
    PDF存在性验证,没有逐字核对论文正文,写作前必须补做。
 3. "Inference-Time Scaling Laws for Embodied Agents"这篇论文的真实身份完全没有确认清楚,不应
