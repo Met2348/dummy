@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""把 05-full-technical-briefing.md 转成 PDF:先把全部 mermaid 代码块预渲染成 PNG,
+"""把本目录下任意一份 md 讲义转成 PDF:先把全部 mermaid 代码块预渲染成 PNG,
 再用 pandoc + xelatex(中文字体 Microsoft YaHei)生成最终 PDF。
 
-用法: python _build_pdf.py
+用法: python _build_pdf.py [源文件名,默认 05-full-technical-briefing.md]
+例如: python _build_pdf.py 06-world-model-primer.md
 """
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SRC = HERE / "05-full-technical-briefing.md"
-BUILD_DIR = HERE / "_pdf_build"
-OUT_MD = BUILD_DIR / "briefing_rendered.md"
-OUT_PDF = HERE / "05-full-technical-briefing.pdf"
+SRC_NAME = sys.argv[1] if len(sys.argv) > 1 else "05-full-technical-briefing.md"
+SRC = HERE / SRC_NAME
+STEM = SRC.stem
+BUILD_DIR = HERE / "_pdf_build" / STEM
+OUT_MD = BUILD_DIR / f"{STEM}_rendered.md"
+OUT_PDF = HERE / f"{STEM}.pdf"
 
 MERMAID_RE = re.compile(r"```mermaid\n(.*?)\n```", re.DOTALL)
 SLASH_IN_WORD_RE = re.compile(r"(?<=[^\s/])/(?=[^\s/])")
@@ -43,8 +47,8 @@ def render_mermaid_blocks(text: str) -> str:
         mmd_path = BUILD_DIR / f"diagram_{counter}.mmd"
         png_path = BUILD_DIR / f"diagram_{counter}.png"
         mmd_path.write_text(m.group(1), encoding="utf-8")
-        cmd = [
-            "npx", "--yes", "@mermaid-js/mermaid-cli",
+        mmdc = shutil.which("mmdc")
+        cmd = ([mmdc] if mmdc else ["npx", "--yes", "@mermaid-js/mermaid-cli"]) + [
             "-i", str(mmd_path), "-o", str(png_path),
             "-w", "1100", "-b", "white",
         ]
