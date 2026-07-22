@@ -20,6 +20,13 @@
 
 ## 1. 从 RLHF 闭式解到 Bradley-Terry 代换 —— DPO 怎么"干掉"reward model
 
+**预备知识(从零理解,建议先看这一段再看下面的公式推导):** 下面这几步推导会连续用到 4 个没有展开解释就会看不懂的概念,这里先各用 1-2 句话把它们立起来:
+
+- **KL 散度 `KL(π‖π_ref)`:** 完整定义、"错误分布假设要付出多少代价"这个类比、以及非负性的 Jensen 不等式证明,见 [`statistics-deep-dive/17-distribution-shift-and-monitoring.md` 知识点 1](../statistics-deep-dive/17-distribution-shift-and-monitoring.md)——那边已经写得很完整,这里不重新推导一遍,只给最简版直觉:KL 散度衡量"如果真实分布是 P,但你却按 Q 来做决策/编码,平均要多付出多少代价";数值越大代价越大,等于 0 代表 P、Q 完全相同。放到这里的场景:P 是"正在训练、会变化的 policy `π`",Q 是"训练前固定不动的 reference policy `π_ref`",`KL(π‖π_ref)` 衡量 `π` 相对 `π_ref` 挪动了多远,数值越大说明模型"跑得越远"。它在目标函数里前面带一个减号,所以是一个**惩罚项**——挪得越远,目标值被扣得越多;β 是这个惩罚力度的旋钮(第 3 节会专门展开)。
+- **Bradley-Terry 偏好模型:** 一个经典的统计模型,思路很朴素——"给定两个选项各自的一个潜在分数(强度/能力值),分数高的那个被偏好/获胜的概率就更大,具体概率由两个分数的差值经过 sigmoid 映射得到"(历史上最早用来给运动员/棋手排名:A 和 B 比赛,A 获胜的概率取决于两人分数之差,分数差越大、强者获胜的概率越接近 1)。下面第四步出现的 `P(y_w≻y_l｜x) = sigmoid(r(x,y_w) - r(x,y_l))` 就是这个模型套在"回答 y_w 被偏好于 y_l"这个场景下的具体形式:reward 差越大,chosen 被偏好的概率越接近 1。
+- **配分函数 `Z(x)`(partition function):** 下面第二步公式里 `π_ref(y|x)·exp(r(x,y)/β)` 只是一个"未归一化的分数"——对所有可能的 y 求和不一定等于 1,不能直接当概率分布用。`Z(x)` 就是为了把它重新变成一个"加起来等于 1"的合法概率分布,而除以的那个归一化常数(`Z(x) = Σ_y π_ref(y|x)·exp(r(x,y)/β)`)。这个求和之所以通常"难算",是因为真实场景里 y 是所有可能的 token 序列,数量随长度指数爆炸,没法真的枚举出来再求和。
+- **"拉格朗日"这个词(下面"底层机制"段落会提到):** 这是解一类"在某个约束条件下求最优"的问题时的标准数学工具(这里的约束是"`π(·|x)` 必须是一个合法的概率分布,所有 y 上的概率加起来必须等于 1")。本文不展开拉格朗日乘子法的具体推导过程,只诚实标注"这是一个标准的约束优化求解技巧,论文附录有完整证明,这里直接用结论"。
+
 **是什么:**
 ```text
 第一步 · RLHF 的优化目标(PPO 求解的就是这个目标,PPO 本身怎么求解见 rl-foundations/04-ppo-core.md,这里不重复):
@@ -52,6 +59,33 @@
 于是,"训练一个 reward model,再用 PPO 去优化这个 reward model 打的分"这件事,被替换成了"直接假设 reward 长成 `β·log(π_θ/π_ref)` 这个形式,把它代进 Bradley-Terry 的负对数似然里,对 π_θ 的参数做梯度下降"。**Reward 这个数学概念完全没有消失**,消失的只是"用一个独立神经网络头去表示 reward"这件事——reward 被重新参数化成了 policy 自己相对 reference 的对数比值,这也是论文标题"Your Language Model is Secretly a Reward Model"的字面意思。
 
 对照 `learning/rlhf-classic/lectures/01-instructgpt.md` 里的三段管线(Stage 1 SFT → Stage 2 RM 训练 → Stage 3 PPO + KL),DPO 绕开的是 **Stage 2**(不再需要单独收集偏好数据去训练一个 reward model)和 **Stage 3 里"用 RL 算法在线求解"这部分**(不需要从当前 policy 采样、不需要 PPO 的 clip/GAE 这套机制)。Stage 3 要优化的 **目标本身**(`max E[r] - β·KL(π‖π_ref)`)DPO 完全保留,只是把"用 RL 迭代求解"换成了"直接在离线偏好对上做一次监督式的梯度下降"。Stage 1(SFT)在 DPO 里也还在,只是换了个身份:SFT 之后的模型通常就是这里的 `π_ref`,同时也是 actor 的初始化起点。PPO 的 clip/重要性采样比率这些"怎么用 RL 算法求解在线目标"的细节,属于 `learning/rl-foundations/04-ppo-core.md` 和 `learning/rlhf-classic/04-ppo-for-llm-deep.md` 的内容,这里不重复。
+
+上面这段文字信息量比较密,涉及 5 个模型身份(SFT 模型/reward model/actor/critic/reference)在 3 个阶段里出生、改名、换角色——画成图会直观得多,不需要真的跳去 `learning/rlhf-classic/lectures/01-instructgpt.md` 也能看懂这条时间线:
+
+```text
+Stage 1 · SFT
+  预训练模型 --(在人类示范数据上做监督微调)--> SFT 模型 ★在这里出生
+
+Stage 2 · RM 训练(DPO 会绕开这一步)
+  SFT 模型复制一份 --(在偏好对 y_w/y_l 上训练)--> reward model ★在这里出生(全新的独立打分网络)
+  reward model 训练完就冻结,后面只负责给别的模型生成的回答打分,自己不再更新
+
+Stage 3 · PPO + KL(标准 RLHF 路径;DPO 会绕开"用 RL 在线求解"这部分,但下面这个目标本身被完整保留)
+  SFT 模型再复制两份,改名换姓,分饰两角:
+    复制品 A → "actor"      本阶段会被 PPO 不断更新的策略,初始化 = SFT 模型
+    复制品 B → "reference"  冻结、只当 KL 惩罚项里的锚点,初始化 = SFT 模型,永远不参与更新
+  另有 critic ★在这里出生(估计 value baseline,常从 reward model 或 actor 初始化,PPO 需要它降方差)
+  Stage 2 训练好的 reward model 给 actor 当前采样出的回答打分,得到 r(x,y)
+  PPO 用 "r(x,y) - β·KL(actor‖reference)" 这个信号,反复在线采样 + 更新 actor
+
+DPO 的身份表(同样从 SFT 模型出发,但绕开 Stage 2、绕开 Stage 3 的"在线 RL 求解"这部分):
+  SFT 模型复制两份,改名换姓:
+    复制品 A → "actor"   会被梯度下降更新,初始化 = SFT 模型(和标准路径完全一样)
+    复制品 B → "π_ref"   冻结、只当 KL 锚点,初始化 = SFT 模型,永不更新(和标准路径完全一样)
+  reward model:不再单独出生 —— 本该在 Stage 2 训练出来的这个模型,被知识点 1 上面的代换直接
+               "重新参数化"成 β·log(actor(y|x)/π_ref(y|x)) 这个量,reward 的概念保留,只是不再是一份独立网络权重
+  critic:      不出生 —— 没有在线 RL 采样,不需要 value baseline,训练循环因此长得几乎和普通 SFT 一样
+```
 
 **AI 研究场景:** 标准 PPO-RLHF 训练要同时维护多个模型(policy/actor、value/critic、reward model、reference model),`learning/dpo-family/lectures/01-dpo.md` Slide 1 把这个现象总结成"4 模型协同 → 显存 4×";DPO 因为把 reward 重新参数化进了 policy 自身,只需要 actor + reference 两份模型权重,不需要 critic,也不需要单独的 reward model,训练循环长得几乎和普通 SFT 一样(forward → loss → backward → step),不需要在线采样/rollout 基础设施。这就是为什么很多资源有限的团队优先选 DPO 类方法而不是完整 PPO-RLHF 做对齐。
 

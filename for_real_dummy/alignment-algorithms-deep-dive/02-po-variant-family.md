@@ -31,7 +31,21 @@ def ipo_loss(
 
 **一句话:** DPO 的 loss 是"h(相对 margin)越大越好"的 sigmoid 形状,IPO 把它换成"h 距离某个目标值 `1/(2β)` 越近越好"的平方损失——从"多多益善"变成"刚刚好最好"。
 
-**底层机制/为什么这样设计:** DPO loss `= -log sigmoid(β·h)`,对 h 求导 `dL/dh = -β·sigmoid(-β·h)`。这个导数对任意有限的 h **恒为负**——不管 h 已经多大,优化器永远收到"h 还要更大"的信号,只是随着 h 增大,`sigmoid(-β·h)→0`,导数的绝对值按指数衰减、趋近 0 但永远不等于 0。这正是 docstring 里"DPO 在 chosen/rejected margin 太大时仍然推优化方向,导致 over-fit"这句话的精确数学含义:DPO 没有"够了"这个概念。IPO 把 loss 换成 `(h - target)²`,`dL/dh = 2(h - target)`,在 `h = target` 处**精确为 0**(真正的极小值,不是"趋近于 0"),一旦 h 超过 target,导数变正,loss 反而重新增大——优化器会被主动推回来,而不是继续放任 margin 无限扩大。`target = 1/(2β)` 和 β 成反比,呼应 01 号文件里"β 控制离 ref 多远算合适"这个角色:β 越大(越不希望 actor 离 ref 太远),target 反而越小(margin 到一个更保守的值就算达标)。
+**底层机制/为什么这样设计:**
+
+*先补一步推导——`dL/dh = -β·sigmoid(-β·h)` 具体是怎么求出来的:* DPO loss 是 `L = -log(sigmoid(β·h))`,把 h 看成自变量,这是一个"外面套 log、中间套 sigmoid、里面是线性函数 β·h"的复合函数,用链式法则拆成三层求导,每层都是标准结果:
+
+1. 记 `u = β·h`,`s = sigmoid(u)`,则 `L = -log(s)`。第一层:`dL/ds = -1/s`(`-log(s)` 求导的标准结果)。
+2. 第二层要用到 sigmoid 的导数性质 `sigmoid'(u) = sigmoid(u)·(1-sigmoid(u))`——这条性质 `torch-deep-dive/05-loss-functions-and-numerical-stability.md`(`BCEWithLogitsLoss` 一节)已经用过,但那边是直接拿来用、没有从头推导,这里补一次:`sigmoid(u) = 1/(1+e^{-u})`,对 u 求导用商法则(或写成 `(1+e^{-u})^{-1}` 用幂法则+链式法则),`d/du[(1+e^{-u})^{-1}] = -1·(1+e^{-u})^{-2}·(-e^{-u}) = e^{-u}/(1+e^{-u})^2`,把它拆成两个因子相乘:`= [1/(1+e^{-u})]·[e^{-u}/(1+e^{-u})] = sigmoid(u)·[e^{-u}/(1+e^{-u})]`,而 `e^{-u}/(1+e^{-u}) = 1 - 1/(1+e^{-u}) = 1-sigmoid(u)`,所以 `sigmoid'(u) = sigmoid(u)·(1-sigmoid(u))`——这就是 `ds/du = s(1-s)`。
+3. 第三层 `du/dh = β`(`u = β·h` 对 h 求导,β 是常数)。
+
+三层用链式法则相乘:`dL/dh = (dL/ds)·(ds/du)·(du/dh) = (-1/s)·s(1-s)·β = -β(1-s) = -β·(1-sigmoid(β·h))`。最后用恒等式 `1-sigmoid(x) = sigmoid(-x)`(把 `sigmoid` 的定义代入两秒就能验证:`1-1/(1+e^{-x}) = e^{-x}/(1+e^{-x}) = 1/(1+e^{x}) = sigmoid(-x)`)化简,就得到 `dL/dh = -β·sigmoid(-β·h)`——和下面"可运行例子"直接给出的结果一致;这一节新增的验证代码用 `torch.autograd` 反传和中心差分数值微分两种独立方法,交叉核对过这个解析结果是对的,不是手推完就默认它对。
+
+这个导数对任意有限的 h **恒为负**——不管 h 已经多大,优化器永远收到"h 还要更大"的信号,只是随着 h 增大,`sigmoid(-β·h)→0`,导数的绝对值按指数衰减、趋近 0 但永远不等于 0。这正是 docstring 里"DPO 在 chosen/rejected margin 太大时仍然推优化方向,导致 over-fit"这句话的精确数学含义:DPO 没有"够了"这个概念。
+
+IPO 把 loss 换成 `(h - target)²`,求导用的是更简单的幂函数链式法则(不需要 sigmoid 那一层):`dL/dh = 2·(h - target)·d(h-target)/dh = 2(h - target)`,在 `h = target` 处**精确为 0**(真正的极小值,不是"趋近于 0"),一旦 h 超过 target,导数变正,loss 反而重新增大——优化器会被主动推回来,而不是继续放任 margin 无限扩大。
+
+*`target = 1/(2β)` 这个具体数值从哪来:* 诚实说明——这不是本文能现场推出来的结果,是 IPO 论文(Azar et al., 2023,"A General Theoretical Paradigm to Understand Learning from Human Preferences")自己一套更一般的偏好优化理论框架推导出的结论,论文用一个变换函数 Ψ 统一描述整类"从偏好学习"的目标(DPO 相当于 Ψ 取 logit 函数,IPO 相当于 Ψ 取恒等函数,选恒等函数正是为了避免 logit 在偏好接近确定性时趋于无穷、把 DPO 推向 over-fit 这个问题),完整推导过程本文不重新证明。可以说清楚的是推导的方向性结论,不是空口说"论文这么说":一般形式下,最优解要求 h 逼近的目标值是 `(1/β)·(p*(y_w≻y_l|x) - 1/2)`,其中 `p*` 是"真实偏好概率";把离线偏好数据集里每一对 `(y_w,y_l)` 当成"确定性偏好"处理(即认为 `p*=1`,chosen 100% 被偏好,这是构造训练数据时的隐含假设),代入就得到 `(1/β)·(1-1/2) = 1/(2β)`——这也是为什么下面的验证代码专门跑了多个不同的 β,数值上确认"target 和 β 严格成反比、乘积恒为 0.5"这个关系,而不是只验证 β=0.1 这一个特例。
 
 **AI 研究场景:** reward over-optimization(奖励过度优化)是 DPO 类方法训练时间拉长后的经典失败模式——policy 在 chosen/rejected 这一个具体维度上无止境地加大优势,可能以牺牲没被这批数据覆盖到的能力为代价(类比过拟合)。在担心这种"训过头"的场景(数据集小、担心 reward hacking),IPO 这种"设定目标值、越界倒扣"的设计比 DPO 更保守稳妥。
 
@@ -68,7 +82,37 @@ assert h1.grad.item() < 0                          # margin 已经 200 了，DPO
 h2 = torch.tensor([target], requires_grad=True)
 ipo_loss(h2, torch.zeros(1), torch.zeros(1), torch.zeros(1), beta).backward()
 assert abs(h2.grad.item()) < 1e-6                   # IPO 在 target 处梯度精确为 0（真正的极小值）
+
+# --- 补充验证:上面"底层机制"里手推的 dL/dh = -β·sigmoid(-β·h) 到底对不对 ---
+# 三方交叉核对:(1) autograd 反传  (2) 手推的解析公式  (3) 中心差分数值微分，三者必须互相印证
+def dpo_loss_of_h(h_tensor, beta):
+    zero = torch.zeros_like(h_tensor)
+    return dpo_loss(h_tensor, zero, zero, zero, beta)
+
+for h_val in [-5.0, -0.7, 0.0, 1.3, 4.0, 20.0]:
+    h = torch.tensor([h_val], requires_grad=True)
+    dpo_loss_of_h(h, beta).backward()
+    autograd_g = h.grad.item()
+
+    analytic_g = (-beta * torch.sigmoid(torch.tensor([-beta * h_val]))).item()
+
+    eps = 1e-4
+    numeric_g = (dpo_loss_of_h(torch.tensor([h_val + eps]), beta).item()
+                 - dpo_loss_of_h(torch.tensor([h_val - eps]), beta).item()) / (2 * eps)
+
+    assert abs(autograd_g - analytic_g) < 1e-6      # autograd 和手推解析式：精确一致
+    assert abs(numeric_g - analytic_g) < 1e-3        # 数值微分和手推解析式：近似一致(有限差分本身的误差)
+
+# --- 补充验证:target = 1/(2β) 是否真的和 β 成反比(乘积恒为 0.5) ---
+for b in [0.02, 0.05, 0.1, 0.2, 0.5, 1.0]:
+    t = 1.0 / (2 * b)
+    h_t = torch.tensor([t], requires_grad=True)
+    ipo_loss(h_t, torch.zeros(1), torch.zeros(1), torch.zeros(1), beta=b).backward()
+    assert abs(t * b - 0.5) < 1e-9                   # target * beta 恒为 0.5 —— 反比关系的直接数值证据
+    assert abs(h_t.grad.item()) < 1e-6                # 换了 beta，target 处梯度依然精确为 0
 ```
+
+实测(`.venv` 真跑):`sigmoid'(x)` 的 autograd 结果和手推的 `sigmoid(x)(1-sigmoid(x))` 在 x=-3/-0.5/0/0.7/2 五个点上全部精确一致(误差 `0.00e+00`);DPO 梯度三方交叉核对里,以 h=1.3、β=0.1 为例,autograd `-0.04675457`,手推解析式 `-0.04675457`,精确一致,数值微分给出 `-0.04649162`(和解析值差在 `3×10⁻⁴` 量级,属于有限差分方法本身的截断误差,不是公式错了);β 取遍 `[0.02, 0.05, 0.1, 0.2, 0.5, 1.0]` 时,`target = 1/(2β)` 依次是 `25.0/10.0/5.0/2.5/1.0/0.5`,`target × β` 六次全部精确等于 `0.5`,且每个 β 下 `target` 处的梯度都精确为 `0`——这就是"target 和 β 成反比"这句话背后真正被验证过的数值证据,不是只看一个 β=0.1 的特例就下的结论。
 
 实测数字(`.venv` 真跑,节选;完整 11 个点见上面代码里的 `raw_margins`):
 
@@ -109,7 +153,7 @@ def kto_loss(
 
 **一句话:** KTO 把"同一个 prompt 必须准备一对 chosen/rejected"这个数据假设整个拆掉,只要求每条 `(response, 好/坏标签)` 独立标注,loss 是拿每条样本的 log-ratio 去和一个"batch 内参照水位"比较,而不是拿两条样本互相比较。
 
-**底层机制/为什么这样设计:** 先纠正一个读代码之前很容易先入为主的误解——**KTO 不是"不需要 reference model"的方法**。它的函数签名里明明白白有一个 `log_p_ref` 参数,内部用 `log_ratio = log_p_actor - log_p_ref` 算出和 DPO 同源的"隐式 reward"。KTO 真正砍掉的是"pairing"(成对比较),不是 ref model,这是两件完全独立的事,只是在本系列后面 ORPO/SimPO/CPO 三个方法里恰好被一起砍掉了,容易被混为一谈。有了 `log_ratio` 之后,KTO 不是拿 chosen 的 log_ratio 减 rejected 的 log_ratio(DPO 的做法,需要同一个 prompt 下两条样本),而是让每条样本的 `log_ratio` 单独去和一个参照值 `z_ref` 比较:desired 样本希望 `log_ratio > z_ref`(用 `1 - sigmoid(β·(log_ratio - z_ref))` 作为 loss),undesired 样本希望 `log_ratio < z_ref`(用 `1 - sigmoid(β·(z_ref - log_ratio))`)。这份实现里 `z_ref` 是当前 batch 内 `log_ratio` 的均值(并 clamp 到非负)——是论文里"用一批（通常是打乱配对的）样本估计 `KL(π‖π_ref)`"这个思路的简化版,但核心机制一致:需要一个"整体参照水位"作为好坏的分界线,而不是每条样本各自为战。desired/undesired 两支分别用 `λ_d`/`λ_u` 加权,来自 Kahneman-Tversky 前景理论"人对损失比对等量收益更敏感"的直觉,这也是 KTO 名字的来源。
+**底层机制/为什么这样设计:** 先纠正一个读代码之前很容易先入为主的误解——**KTO 不是"不需要 reference model"的方法**。它的函数签名里明明白白有一个 `log_p_ref` 参数,内部用 `log_ratio = log_p_actor - log_p_ref` 算出和 DPO 同源的"隐式 reward"。KTO 真正砍掉的是"pairing"(成对比较),不是 ref model,这是两件完全独立的事,只是在本系列后面 ORPO/SimPO/CPO 三个方法里恰好被一起砍掉了,容易被混为一谈。有了 `log_ratio` 之后,KTO 不是拿 chosen 的 log_ratio 减 rejected 的 log_ratio(DPO 的做法,需要同一个 prompt 下两条样本),而是让每条样本的 `log_ratio` 单独去和一个参照值 `z_ref` 比较:desired 样本希望 `log_ratio > z_ref`(用 `1 - sigmoid(β·(log_ratio - z_ref))` 作为 loss),undesired 样本希望 `log_ratio < z_ref`(用 `1 - sigmoid(β·(z_ref - log_ratio))`)。这份实现里 `z_ref` 是当前 batch 内 `log_ratio` 的均值(并 clamp 到非负)——是论文里"用一批(通常是打乱配对的)样本估计 `KL(π‖π_ref)`"(KL 散度这个词在本系列第二次出现,定义、"用错误分布假设要付出多少代价"这个类比,见 [01-dpo-foundations.md 知识点 1 开头的预备知识](01-dpo-foundations.md),不在这里重复)这个思路的简化版,但核心机制一致:需要一个"整体参照水位"作为好坏的分界线,而不是每条样本各自为战。desired/undesired 两支分别用 `λ_d`/`λ_u` 加权,来自 Kahneman-Tversky 前景理论"人对损失比对等量收益更敏感"的直觉,这也是 KTO 名字的来源。
 
 **AI 研究场景:** 真实产品里最容易大规模、低成本收集到的反馈通常是单边的——用户点了"踩"、审核标记"违规"、客服标注"这条回复不合格",这些都是"这一条 response 好还是不好"的独立标签,不会天然配对出"同一个 prompt 下另一条更好/更差的回复"。要凑出 DPO/IPO 需要的 pair,往往得额外生成第二条回复、再找人或模型比较,是明显更贵的数据构造步骤。KTO 允许直接用现成的单边反馈日志训练,是数据收集成本上的实质性降低,而不只是"少写一点代码"这种表面差异。
 

@@ -267,7 +267,7 @@ def is_coalesced(layout: Layout, axis: int = -1) -> bool:
 
 **底层机制/为什么这样设计:** 从最笨的想法讲起——GPU 的一个 warp(32 个线程)在同一个时钟周期发出 32 次内存请求。如果这 32 个地址恰好落在同一段连续(且对齐)的内存区间里,内存控制器可以把这 32 次请求合并成一次(或很少几次)宽内存事务搬回来,这就是 coalescing;如果这 32 个地址在物理内存上东一榔头西一棒子(比如跨行访问一个大矩阵的某一列),硬件就得发起多达 32 次独立的内存事务,等效带宽直接大打折扣。
 
-回到 `Layout` 的 `(shape,stride)` 语言:如果 32 个连续线程被安排去访问某一维上连续变化的下标(比如 `threadIdx.x` 对应 `idx[axis]` 从 0 到 31),这些线程实际访问的物理地址是 `base + idx[axis]*stride[axis] + 常数项`——这串地址是否连续,只取决于 `stride[axis]` 是不是 1。`stride==1` 意味着下标每加 1,物理地址正好加 1 个元素,32 个线程的地址天然首尾相接;`stride!=1`(比如等于 `cols` 或 `rows`)意味着每次都要跳过一大截,变成 strided access。
+回到 `Layout` 的 `(shape,stride)` 语言:如果 32 个连续线程被安排去访问某一维上连续变化的下标(比如 `threadIdx.x`——01 篇第 4 节讲过,是线程在其所属 block 内的编号,同一个 warp 里 32 个线程的 `threadIdx.x` 依次是 0 到 31——对应 `idx[axis]` 从 0 到 31),这些线程实际访问的物理地址是 `base + idx[axis]*stride[axis] + 常数项`——这串地址是否连续,只取决于 `stride[axis]` 是不是 1。`stride==1` 意味着下标每加 1,物理地址正好加 1 个元素,32 个线程的地址天然首尾相接;`stride!=1`(比如等于 `cols` 或 `rows`)意味着每次都要跳过一大截,变成 strided access。
 
 结合知识点 3 的两种布局:row-major 是 `stride=(cols,1)`,col-major 是 `stride=(1,rows)`——
 - **row-major**:沿**最后一维**(列,`axis=1`)访问是 coalesced(`stride[1]=1`);沿**第一维**(行,`axis=0`)访问是 strided(`stride[0]=cols`,通常远大于 1)。
@@ -340,7 +340,27 @@ def swizzle_32b(rows: int, cols: int) -> Layout:
 
 **底层机制/为什么这样设计(这是本节真正的核心——"怎么读代码判断真假实现"的方法论):**
 
-**第一步,先弄清楚"真 swizzle"该长什么样,以及为什么这份代码装不下它。** 从最笨的想法讲起:GPU 的共享内存(SMEM)物理上被切成固定数量的"bank"(常见是 32 个),同一个 warp 里的 32 个线程如果在同一个时钟周期访问的地址恰好落进同一个 bank 的不同位置,这些访问会被硬件串行化处理(bank conflict),拖慢整个 warp。如果访问模式恰好是"stride 是 bank 数的整数倍",最朴素的 row-major 存储在特定访问模式下会持续踩中同一个 bank。Swizzle 的思路是:不改变数据的逻辑 `shape`,而是让物理地址额外叠加一个和"行号"相关的 XOR 扰动(docstring 写的 `row*cols + (col XOR (row*cols % 32))`),把原本会集中落到同一个 bank 的访问,重新打散到不同 bank——这是 CUTLASS 真实代码(`learning/kernel-engineering/lectures/03-cutlass.md` 里提到的 `Swizzle<3,3,3>` 模板)会做的事,不是凭空编的公式。
+**第一步,先弄清楚"真 swizzle"该长什么样,以及为什么这份代码装不下它。** 从最笨的想法讲起:GPU 的共享内存(SMEM)物理上被切成固定数量的"bank"(常见是 32 个),同一个 warp 里的 32 个线程如果在同一个时钟周期访问的地址恰好落进同一个 bank 的不同位置,这些访问会被硬件串行化处理(bank conflict),拖慢整个 warp。如果访问模式恰好是"stride 是 bank 数的整数倍",最朴素的 row-major 存储在特定访问模式下会持续踩中同一个 bank。画成图更直观——`thread` 是 warp 里第几个线程,`addr` 是它要访问的 SMEM 地址(按 4 字节一个 word 计数),`bank = addr % 32` 是这个地址落进哪个 bank:
+
+```
+情形 A —— 无 bank conflict(stride = 1,对应知识点 4 的 coalesced 访问):
+
+thread            t0    t1    t2    t3    t4   ...   t31
+addr (word)       0     1     2     3     4    ...    31
+bank (addr%32)    0     1     2     3     4    ...    31
+-> 32 个线程落进 32 个不同的 bank,一次事务并行完成,无冲突
+
+情形 B —— 32 路 bank conflict(stride = 32,恰好是 bank 数的整数倍):
+
+thread            t0    t1    t2    t3    t4   ...   t31
+addr (word)       0     32    64    96   128   ...   992
+bank (addr%32)    0     0     0     0     0    ...   0
+-> 32 个线程全部挤进 bank 0,硬件必须串行处理 32 次,等效延迟 x32
+```
+
+情形 A 是 stride=1 的连续访问(呼应上一节知识点 4 讲的 coalesced 访问模式),32 个地址依次落进 32 个不同的 bank,SM 一个周期就能把这批请求全部服务完,无冲突;情形 B 是 stride 恰好等于 32(bank 数)的访问,32 个地址算出来的 `addr % 32` 全部是 0,32 个线程排队挤在同一个 bank 上,硬件只能串行处理这 32 次访问,等效延迟变成单次访问的 32 倍——这正是"stride 是 bank 数的整数倍会持续踩中同一个 bank"这句话具体是怎么发生的(上面两组数字已经用 `.venv` 实测核对过,`addr(word) % 32` 分别算出 0..31 全不同、和恒为 0)。
+
+Swizzle 的思路是:不改变数据的逻辑 `shape`,而是让物理地址额外叠加一个和"行号"相关的 XOR 扰动(docstring 写的 `row*cols + (col XOR (row*cols % 32))`),把原本会集中落到同一个 bank 的访问,重新打散到不同 bank——这是 CUTLASS 真实代码(`learning/kernel-engineering/lectures/03-cutlass.md` 里提到的 `Swizzle<3,3,3>` 模板)会做的事,不是凭空编的公式。
 
 回到知识点 3 的代数:这份代码的 `Layout` 只有 `(shape, stride)` 两个字段,`offset(idx)` 的实现是 `Σ idx_d × stride_d`——这是一个**线性(仿射)函数**:给定固定的 `stride`,`offset` 对每个下标都是线性的,不同下标之间不会互相耦合、影响对方的系数。而 swizzle 公式里的 `col XOR (row*cols % 32)`,这个 XOR 操作让"col 这一项的贡献"**依赖于 row 的具体取值**(行不同,同一个 `col` 算出来的偏移量不是简单加一个固定的行偏移,而是整个 XOR 之后变成完全不同的结果)——这是一个**非线性(非仿射)**映射,不可能用"每一维乘一个固定 stride 再相加"的形式表达。所以 `swizzle_32b()` 想要真正实现,当前 `Layout` 这个 dataclass 的表示能力本身就不够,需要一个全新的机制(比如给 `Layout` 加一个可选的"swizzle 变换钩子"),这已经超出这个教学脚本"用 `(shape,stride)` 代数模拟 CuTe layout"的设计范围。
 

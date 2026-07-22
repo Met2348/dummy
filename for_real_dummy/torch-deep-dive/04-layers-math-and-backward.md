@@ -674,7 +674,83 @@ nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
 
 **一句话:** 多头注意力不是"真的有多个独立的小模型并行跑"——它是把**同一个** `embed_dim` 维的向量,沿特征维**切成** `num_heads` 份,每一份独立算一次标准的 scaled dot-product attention,算完再**拼回**原来的 `embed_dim` 维,全程只是 reshape/transpose 的形状游戏,没有任何"真正的并行子网络"。
 
-**底层机制/为什么这样设计:**
+**在讲拆分之前:"标准的 scaled dot-product attention" 本身是什么、为什么这样设计(从零建立)**
+
+> 这一段是本仓库多个系列(`long-context-deep-dive`、`kernel-gpu-deep-dive`、`alignment-algorithms-deep-dive` 等)反复依赖、但此前从未真正从零建立过的地基——2026-07-23 一次全仓库新手可读性排查发现这个缺口后补写于此,后续系列统一交叉引用这里,不再各自重复讲一遍。
+
+**为什么需要这样一种机制。** 一个句子/序列里,某个 token 的含义经常要靠其他 token 才能确定(比如"它"到底指代前面哪个名词,取决于上下文)。我们想要一种机制:让每个 token 在计算自己的新表示时,能够"参考"序列里其他 token 的信息,而且**参考谁、参考多少,应该是模型学出来的,而不是提前写死的规则**(比如"只看前一个词"这种写死的规则,表达能力显然不够)。self-attention 就是解决这个问题的具体设计。
+
+**类比:把它想成一次"模糊版"的字典查询。** Python 字典 `d[key]` 要求 `key` 和字典里存的键**精确匹配**,一旦找到就返回**唯一**对应的 value。Attention 做的是这件事的"模糊版本"——不要求精确匹配,而是:
+1. 拿你手上的 **Query**(你想找什么),去和序列里**每一个** token 提供的 **Key**(它能提供什么线索)分别算一个"相似度分数"(不是 0/1 的匹不匹配,是一个连续的数字)。
+2. 把这一串相似度分数变成一组**权重**(全部非负、加起来等于 1)。
+3. 不是只取"最相似"的那一个,而是按这组权重,对每个 token 提供的 **Value**(它实际携带的内容)做**加权平均**,得到最终结果。
+
+也就是说,普通字典查询是"精确匹配、只取一个";attention 是"按相似度打分、软性地融合所有人的贡献"。**Q(Query)、K(Key)、V(Value) 这三个名字就是直接照搬字典查询的术语来的**,只是从"精确匹配"换成了"可学习的相似度加权"。
+
+**为什么用点积衡量"相似度"。** Q 和 K 都是向量,线性代数里两个向量的点积(`Σ q_i·k_i`)在向量长度固定的情况下,方向越接近点积越大、方向正交点积趋于 0、方向相反点积为负——点积本身就是一种现成的"对齐程度"度量,不需要发明新的相似度函数,这也是为什么这套机制被称为 **dot-product** attention(还存在用一个小型神经网络算相似度的"additive attention"等变体,但点积版本因为能直接用矩阵乘法批量算、在 GPU 上极快,是当前的主流选择)。
+
+**为什么要 softmax,而不是直接用相似度分数加权。** 相似度分数(点积原始结果)可以是任意实数,直接拿来加权平均没有意义(权重可能是负的,或者加起来不等于 1)。`softmax` 把一组任意实数变成一组"非负、加起来等于 1"的权重,而且保留了"分数越大权重越大"的相对顺序——这正是"加权平均"这个操作需要的输入形式。
+
+**为什么要除以 `sqrt(维度)`(这里先建立直觉,数值稳定性话题详见 [05-loss-functions-and-numerical-stability.md](05-loss-functions-and-numerical-stability.md)):** 点积是多个乘积项相加,参与求和的维度越高,点积结果的数值量级往往越大;数值量级一旦过大,`softmax` 会趋于"赢者通吃"(几乎所有权重都挤到分数最大的那一项,其余全部接近 0),模型会失去"软性地综合多个来源"这个本来想要的效果,梯度也会跟着变得很小、难以训练。除以 `sqrt(维度)` 是一个简单有效的缩放,把点积的数值量级重新拉回一个 `softmax` 表现良好的范围。
+
+**一个具体到能验证的最小例子(3 个 token,先不引入投影矩阵,直接看"点积衡量相似度"这件事本身):**
+
+```python
+import torch, torch.nn.functional as F, math
+torch.manual_seed(0)
+
+# 3 个 token 的玩具序列,每个 token 用一个 4 维向量表示(手工构造,便于验证直觉,不是真实embedding)
+x = torch.tensor([
+    [1.0, 1.0, 0.0, 0.0],    # token 0
+    [0.0, 0.0, 1.0, 1.0],    # token 1 —— 方向和 token 0 正交("不相关")
+    [0.9, 1.1, 0.1, -0.1],   # token 2 —— 方向和 token 0 接近("相关")
+])
+
+# 先看最朴素的情形:Q=K=V=token自己(相当于 Wq=Wk=Wv=单位矩阵这个特例),
+# 只为了纯粹展示"点积大小 -> 相似度 -> attention权重大小"这条因果链
+scores = x @ x.transpose(0, 1)          # scores[i,j] = token i 的 query 和 token j 的 key 的点积
+weights = F.softmax(scores, dim=-1)
+
+# 验证直觉:token0 对"和自己方向接近"的 token2 的权重,应该明显高于对"正交"的 token1 的权重
+assert weights[0, 2].item() > weights[0, 1].item()
+assert abs(weights[0].sum().item() - 1.0) < 1e-6      # 权重确实加起来等于1
+
+# 加上可学习的投影矩阵 Wq/Wk/Wv 和 1/sqrt(d) 缩放的完整版本,验证权重依然合法(非负、和为1)
+d = 4
+Wq, Wk, Wv = torch.randn(4, d) * 0.5, torch.randn(4, d) * 0.5, torch.randn(4, d) * 0.5
+Q, K, V = x @ Wq, x @ Wk, x @ Wv
+scores_full = (Q @ K.transpose(0, 1)) / math.sqrt(d)
+weights_full = F.softmax(scores_full, dim=-1)
+assert torch.allclose(weights_full.sum(dim=-1), torch.ones(3), atol=1e-6)
+
+output = weights @ x     # 用权重对 V(这里 V=x)做加权平均,得到每个token的新表示
+```
+实测 `weights[0] = [0.468, 0.063, 0.468]`——token0 给自己和 token2 的权重接近且明显更大,给 token1 的权重最小,和"点积大小反映方向相似度"这条直觉完全吻合。
+
+**用图示把这条链路串起来(以 token 0 为例):**
+```
+token 0 embedding   token 1 embedding   token 2 embedding
+       │                    │                    │
+       ▼                    ▼                    ▼
+   [Q0 K0 V0]           [Q1 K1 V1]           [Q2 K2 V2]     ← 每个 token 各自生成一份 Q/K/V
+
+token 0 的 Query 去和每一个 token 的 Key 算点积(相似度):
+
+   Q0·K0        Q0·K1        Q0·K2
+     │            │            │
+     ▼            ▼            ▼
+  [ 2.00         0.00         2.00 ]              ← scores(还没归一化)
+     │
+     ▼  softmax(转成"非负、加起来=1"的权重)
+  [ 0.47         0.06         0.47 ]              ← weights:更关注自己和token2,几乎不理token1
+     │
+     ▼  按这组权重对 V0,V1,V2 做加权平均
+  output_0 = 0.47·V0 + 0.06·V1 + 0.47·V2
+```
+
+有了这条从零建立的地基,下面第 8 节剩余部分(拆分成多个 head、再合并回去)要处理的问题就变成了:上面这一整套"标准 scaled dot-product attention"计算,`nn.MultiheadAttention` 在工程实现上是怎么被拆到多个更小的子空间里**并行**算多份、再合并回来的——这是一个纯粹的形状/工程问题,和"attention 本身为什么这样设计"是两个不同层次的问题。
+
+**底层机制/为什么这样设计(拆分与合并的工程细节):**
 
 设 `embed_dim=E`,`num_heads=h`,`head_dim=E/h`(要求整除,`nn.MultiheadAttention` 在构造时就会检查,除不尽直接报 `AssertionError`)。
 

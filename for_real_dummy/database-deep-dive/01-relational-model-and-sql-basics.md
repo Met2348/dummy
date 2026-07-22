@@ -30,6 +30,11 @@ import sqlite3
 
 conn = sqlite3.connect(":memory:")
 cur = conn.cursor()
+# 游标(cursor):可以理解成"在这个数据库连接(conn)上打开的一个操作窗口"——
+# 通过它发送SQL命令(cur.execute(...)),再通过它取回结果(cur.fetchone()/cur.fetchall());
+# 一个连接上可以开多个互不干扰的游标(比如同时进行多个独立的查询)。这是Python DB-API
+# 标准(sqlite3/psycopg2/pymysql等库都遵循同一套接口规范)的通用用法,后续所有知识点的
+# 可运行例子都会用到这个"先拿连接、再拿游标"的模式,不再重复解释。
 cur.execute("""
 CREATE TABLE students (
     id INTEGER PRIMARY KEY,

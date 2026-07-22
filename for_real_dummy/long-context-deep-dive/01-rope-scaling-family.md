@@ -30,6 +30,42 @@ apply_rope_interleaved(x, cos, sin)                              # 真正把 Q/K
 
 **一句话:** RoPE 不是"给每个位置分配一个独立的向量加到 Q/K 上"(那是绝对位置编码的思路),而是"把 Q/K 的每一对相邻维度看成一个 2D 平面上的点,按位置对应的角度把这个点**旋转**一下"——这个设计直接决定了后面 PI/NTK/YaRN 全部在改的东西只有两个自由度:**转多快**(inv_freq/base)和**转到哪**(position)。
 
+**在讲"底层机制"之前:为什么"位置"信息需要额外注入,不能指望 attention 自己感知顺序**
+
+上面这句话里"给 Q/K 注入位置信息"这件事,前提是 Q/K 本身**不会自动携带位置信息**——这不是随口一说,而是 self-attention 这个计算本身的性质决定的。如果还不知道 Q/K/V 到底是什么、attention 为什么要这样算,先看 [torch-deep-dive/04-layers-math-and-backward.md](../torch-deep-dive/04-layers-math-and-backward.md) 第 8 节"在讲拆分之前"那一段从零建立的内容——这里直接假设你已经知道 attention 在算什么,只讲"顺序"这一个维度。
+
+self-attention 的计算——`Q·K` 算相似度、`softmax` 转成权重、再对 `V` 做加权平均——从头到尾只用到每个 token 的**内容**(具体的向量数值),没有任何一步用到"这个 token 排第几个"这个信息。后果是:把一句话的 token **顺序打乱**,只要每个 token 的内容本身不变,attention 给每个 token 算出来的输出也只是跟着**同步打乱**,每个 token 单独拿到的数值完全不变——这个性质叫**置换等变(permutation equivariant)**,可以现场验证:
+
+```python
+import torch, torch.nn.functional as F, math
+
+torch.manual_seed(0)
+
+def attn(x):                                   # 最朴素的 self-attention(不含位置编码,Q=K=V=x 这个特例)
+    d = x.shape[-1]
+    scores = (x @ x.transpose(-2, -1)) / math.sqrt(d)
+    weights = F.softmax(scores, dim=-1)
+    return weights @ x
+
+x = torch.randn(4, 6)               # 4 个 token,每个 6 维,计算过程没有用到任何位置信息
+out = attn(x)
+
+x2 = x.clone()
+x2[[0, 2]] = x2[[2, 0]]              # 只交换 token0 和 token2 的顺序,token1/token3 位置不动
+out2 = attn(x2)
+
+# 顺序没动过的 token1,它的 attention 输出应该一模一样(bit-exact,不是"差不多")——
+# 因为 attn() 的计算里根本没有用到"谁排第几",只要"谁和谁在一起"这个集合不变,每个 token 算出来的内容就不变
+assert torch.equal(out2[1], out[1])                          # 实测 diff 精确为 0.0
+
+# 更一般的性质:整体打乱顺序,attention 的输出也只是跟着同步打乱(不是变成别的东西)
+perm = torch.tensor([2, 0, 3, 1])
+out_shuffled = attn(x[perm])
+assert torch.allclose(out_shuffled, out[perm], atol=1e-6)    # 实测 max diff ≈ 2.4e-7(float32 噪声)
+```
+
+这正是问题所在:"猫追狗"和"狗追猫"用到的 token 集合相同、顺序相反,含义完全不同,但如果 attention 的计算本身对顺序不敏感,模型没法**只靠 attention 这一步**分辨这两句话的差异——必须有一种机制把"谁排第几"**额外**注入 Q/K,attention 的相似度计算才有机会感知到顺序。位置编码(不管是绝对位置编码,还是 RoPE 这种相对位置编码)存在的全部理由,就是补上这个缺口——下面的"底层机制"讲的正是 RoPE 具体怎么补。
+
 **底层机制/为什么这样设计:**
 
 先看 `inv_freq`:`1/base^(2i/dim)`,`i` 从 0 到 `dim/2-1`。这是一个随 `i` 指数衰减的数列——`i=0` 那个"频率通道"转得最快(每挪 1 个位置转 1 弧度),`i` 越大转得越慢。`build_cos_sin` 把"位置 `t`"和"每个通道的转速 `inv_freq`"相乘得到角度 `angle = pos * inv_freq`,再取 cos/sin。`apply_rope_interleaved` 则是标准的 2D 旋转矩阵作用在每一对维度 `(x[2k], x[2k+1])` 上:
@@ -39,7 +75,71 @@ apply_rope_interleaved(x, cos, sin)                              # 真正把 Q/K
 [rot_2k+1] = [sin   cos] [x_2k+1]
 ```
 
+**用图示把"旋转"这件事本身画出来**(以其中一对维度 `(x_2k, x_2k+1)` 为例,把它看成 2D 平面上的一个点/向量 `v`):
+
+旋转前:`v` 画在 `x_2k` 轴正方向,坐标 `(r, 0)`,方便量角度:
+```
+        x_2k+1
+          │
+          │
+          │
+          │
+          └───────────●──────────  x_2k
+        (0,0)      v = (r, 0)
+```
+
+旋转后:绕原点转了角度 `θ = pos·inv_freq[k]`,坐标变成 `(r·cosθ, r·sinθ)`:
+```
+        x_2k+1
+          │      v' = (r·cosθ, r·sinθ)
+          │     ╱
+          │   ╱
+          │ ╱
+          │╱  θ
+          └──────────────────  x_2k
+        (0,0)
+```
+
+`|v| = |v'| = r`——长度完全不变,只有方向转了角度 `θ`(对应第 1 节可运行例子里 `assert x.norm(dim=-1)==x_rot.norm(dim=-1)` 验证的正是这件事)。
+
+`pos` 越大,`θ = pos·inv_freq[k]` 转得越多;`inv_freq[k]` 越大(`k` 越小,越高频),同样 `pos` 下也转得越多——这两条自由度就是上面"一句话"提到的"转多快"和"转到哪"。
+
 这个设计最核心的性质是:**Q 在位置 i、K 在位置 j 的点积,只取决于 i-j,不取决于 i、j 各自的绝对值**——因为两个旋转矩阵的乘积满足 `R(i)^T R(j) = R(j-i)`,旋转矩阵天然满足这种"角度可加性"。这就是为什么 RoPE 属于"相对位置编码":模型学到的不是"第 5 个 token 该怎么被 attend",而是"隔 3 个 token 的关系该怎么被 attend"。后面 PI/NTK/YaRN 所有的修改,本质上都是在动"`pos` 和 `inv_freq` 这两个自由度怎么映射成角度",不会破坏"点积只依赖相对位置"这条根本性质。
+
+**这个恒等式不是凭空断言,推导只需要两条旋转矩阵的基本性质:**
+
+**性质①(正交性):** 2D 旋转矩阵 `R(θ) = [[cosθ, -sinθ], [sinθ, cosθ]]` 是正交矩阵(`R(θ) @ R(θ)^T = I`),而正交矩阵的转置就是它的逆。"旋转 θ 角度"这个操作的逆操作,直觉上就是"反过来转 -θ 角度转回原地"——代数上确实如此:`R(θ)^T = R(-θ)`。
+
+**性质②(角度可加性):** 先转 θ1、再转 θ2,和一次性转 `θ1+θ2` 是同一个操作:`R(θ1) @ R(θ2) = R(θ1+θ2)`(旋转的复合就是角度相加,这是"旋转"这个几何操作最基本的直觉)。
+
+**组合这两条性质:** `R(i)^T @ R(j) = R(-i) @ R(j) = R(j-i)`——第一步用性质①把转置换成"转 -i",第二步用性质②把两次旋转的复合合并成一次转 `j+(-i)=j-i`。这就是"Q 在位置 i、K 在位置 j 的点积只取决于 i-j"这句话背后完整的代数依据,不是照抄论文的断言:
+
+```python
+import torch, math
+
+def R(theta):
+    c, s = math.cos(theta), math.sin(theta)
+    return torch.tensor([[c, -s], [s, c]])
+
+theta1, theta2 = 0.7, 1.3
+
+# 性质①:正交矩阵,转置 = 逆 = "转回去"(旋转 -θ)
+R1 = R(theta1)
+assert torch.allclose(R1 @ R1.T, torch.eye(2), atol=1e-6)      # R R^T = I
+assert torch.allclose(R1.T, R(-theta1), atol=1e-6)              # 实测 R(θ)^T 和 R(-θ) 最大误差 = 0.0
+
+# 性质②:旋转的复合 = 角度相加
+R2 = R(theta2)
+assert torch.allclose(R1 @ R2, R(theta1 + theta2), atol=1e-6)   # 实测最大误差 ≈ 6e-8(float32 噪声)
+
+# 组合①②,验证 R(i)^T @ R(j) == R(j-i) 对具体的"位置" i=5, j=12 成立
+i, j = 5, 12
+Ri, Rj = R(float(i)), R(float(j))
+lhs = Ri.T @ Rj
+rhs = R(float(j - i))
+assert torch.allclose(lhs, rhs, atol=1e-6)   # 实测两个 2x2 矩阵逐元素精确相等,最大误差 = 0.0
+```
+实测:`R(θ)^T` 和 `R(-θ)` 逐元素精确相等(最大误差 `0.0`);`R(θ1)@R(θ2)` 和 `R(θ1+θ2)` 最大误差 `≈5.96e-08`(float32 舍入噪声);组合出的 `R(i)^T @ R(j)` 和 `R(j-i)` 两个矩阵逐元素精确相等,最大误差同样是 `0.0`。(真实 RoPE 里 `θ` 不是位置本身,而是 `pos * inv_freq[k]`——换成这个真实角度重新跑一遍上面同样三步验证,结论不变,这里不重复展开。)
 
 还有一个和"长上下文"这个主题直接相关、容易被忽略的细节:`build_cos_sin` 里 `pos = torch.arange(t, ..., dtype=torch.float32)` 强制用 float32 算位置和角度,即使模型主体在用 bf16/fp16 跑,也只在最后 `.to(dtype)` 才转换精度。这不是随手写的,而是因为**大整数在低精度浮点数里根本存不下**——见下面可运行例子,这是训练精度为 fp16/bf16 的长上下文模型里必须知道的一个坑。
 
@@ -302,7 +402,30 @@ ImportError: cannot import name 'get_mscale' from 'transformers.modeling_rope_ut
 
 生产库直接用 `A`,两份教学代码分别用 `sqrt(A)` 和 `sqrt(1/A)`——教学代码内部是自洽的(互为倒数,大概率是两个文件的作者分别选择了"当除数(temperature)"和"当乘数(scale)"两种不同但等价的表达习惯),但都不是生产库真正在用的数字。
 
-再深一层:这个数字在真实模型里到底是怎么被用上的,值得继续追。`transformers` 的 `LlamaRotaryEmbedding`(`modeling_llama.py` 第 87、132-133 行)把 `attention_factor` 直接乘到 `cos`/`sin` 上:`cos = emb.cos() * self.attention_scaling`。而 `apply_rotary_pos_emb`(同文件第 146-168 行)对 Q、K **分别**用这组 cos/sin 做旋转:`q_embed = q*cos + rotate_half(q)*sin`,`k_embed` 同理。这意味着 `attention_factor` 会同时施加在 Q 和 K 上,两者点积 `q_embed·k_embed` 实际被放大的倍数是 `attention_factor²`,不是 `attention_factor` 本身。而本仓库 `learning/long-context/lectures/04-yarn.md` 描述的教学版用法是 `scores = (q@k^T)/sqrt(d) × attn_scale`——**只在最终 score 上乘一次**。现场用 `common.py::apply_rope_interleaved` 验证了这个差异到底有多大(见下面例子):生产库的实际效果相当于把原始点积放大约 **1.2965 倍**(`1.1386294²`),教学版则是把点积缩小到约 **0.9371 倍**——一个在放大分数(让 softmax 更尖锐),一个在缩小分数(让 softmax 更平滑),连方向都不一样。这已经超出"差一个 sqrt"的范畴,是应用方式本身的差异,值得作为"读代码不能只对一个数字,还要对它被用在哪里"的示范。
+再深一层:这个数字在真实模型里到底是怎么被用上的,值得继续追,拆成三步看:
+
+**第一步,生产库把 `attention_factor` 乘进 cos/sin,Q 和 K 各乘一次。** `transformers` 的 `LlamaRotaryEmbedding`(`modeling_llama.py` 第 87、132-133 行)把 `attention_factor` 直接乘到 `cos`/`sin` 上:`cos = emb.cos() * self.attention_scaling`。而 `apply_rotary_pos_emb`(同文件第 146-168 行)对 Q、K **分别**用这组 cos/sin 做旋转:`q_embed = q*cos + rotate_half(q)*sin`,`k_embed` 同理。这意味着 `attention_factor` 会同时施加在 Q 和 K 上,两者点积 `q_embed·k_embed` 实际被放大的倍数是 `attention_factor²`,不是 `attention_factor` 本身。
+
+**第二步,教学代码只在最终 score 上乘一次。** 本仓库 `learning/long-context/lectures/04-yarn.md` 描述的教学版用法是 `scores = (q@k^T)/sqrt(d) × attn_scale`——只在最终 score 上乘一次,不经过 cos/sin,自然也就没有"平方"这一层效果。
+
+**第三步,现场量化这个差异到底有多大。** 用 `common.py::apply_rope_interleaved` 验证(见下面例子):生产库的实际效果相当于把原始点积放大约 **1.2965 倍**(`1.1386294²`),教学版则是把点积缩小到约 **0.9371 倍**——一个在放大分数,一个在缩小分数,连方向都不一样。
+
+**"放大/缩小分数"具体会怎么影响 softmax,这里展开说清楚,不留一个模糊的形容词:** softmax 是对输入做指数放大再归一化(`softmax(x)_i = exp(x_i) / Σ_j exp(x_j)`)——输入项之间的**差距**越大,指数放大的效果越悬殊,最大的那一项在归一化后占比就越接近 1,其余项占比越接近 0,这就是"softmax **更尖锐**(sharper)"的具体含义:输出的概率分布更集中在少数几项上。反过来,把所有分数按同一个倍数缩小,项与项之间的差距被压缩得更小,归一化后各项概率会更接近均匀分布(几个候选项"旗鼓相当"),这就是"**更平滑**(smoother)"。用一组具体分数现场验证这个方向性:
+
+```python
+import torch
+
+scores = torch.tensor([1.0, 2.0, 3.0])
+base = torch.softmax(scores, dim=-1)
+sharper = torch.softmax(scores * 1.2965, dim=-1)     # 用上面生产库实测的放大倍数
+smoother = torch.softmax(scores * 0.9371, dim=-1)     # 用上面教学代码实测的缩小倍数
+
+assert sharper.max().item() > base.max().item() > smoother.max().item()   # 放大后最大概率更突出
+assert sharper.min().item() < base.min().item() < smoother.min().item()   # 放大后最小概率更接近0;缩小后更接近均匀
+```
+实测:`base=[0.0900, 0.2447, 0.6652]`,`sharper=[0.0555, 0.2028, 0.7417]`(最大项从 0.665 涨到 0.742,最小项从 0.090 跌到 0.055——分布更集中),`smoother=[0.0993, 0.2535, 0.6471]`(最大项跌到 0.647,最小项涨到 0.099——分布更接近均匀的 1/3≈0.333)。
+
+回到 YaRN 这个具体场景:生产库这条路径让长序列下的 attention 分布**更尖锐**(更集中关注少数 token),教学代码则让分布**更平滑**(更均匀地看所有 token)——这已经超出"差一个 sqrt"的范畴,是应用方式本身的差异,值得作为"读代码不能只对一个数字,还要对它被用在哪里、怎么影响下游"的示范。
 
 **AI 研究/工程场景:** 如果要手写一个"从 HuggingFace `config.json` 的 `rope_scaling` 字段还原/复现模型 RoPE 行为"的工具(比如模型转换、量化、或者自定义推理引擎适配),这种教学简化和生产实现的偏差是真实会咬人的地方。`_compute_yarn_parameters` 其实还支持一套更复杂的双参数版本(`mscale`/`mscale_all_dim` 分别作为分子分母各算一次 `get_mscale` 再相除,详见 `modeling_rope_utils.py` 第 358-365 行文档字符串),这是社区里一些模型常见的 config 写法(例如 DeepSeek 系列的 rope_scaling 配置据了解会用到这两个字段,这一点是通用背景知识,本文没有在 `.venv` 里加载 DeepSeek 的真实 config 核实,不作为验证结论)。本文验证的 factor=4 例子没传这两个参数,走的是简单分支;真要接手这类 config,必须照着生产源码走一遍,不能默认"论文公式"或者"教学代码"就是唯一实现。
 
