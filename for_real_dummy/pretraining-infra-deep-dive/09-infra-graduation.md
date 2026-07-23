@@ -177,7 +177,7 @@ def total_cost_3y(bp: ClusterBlueprint) -> dict:
     }
 ```
 
-**TCO(总拥有成本)由 GPU capex + fabric capex(06 号文件的网络硬件)+ storage capex(07 号文件的存储硬件)+ 3 年电费(opex)四部分组成**,`power_kw` 用"GPU TDP × 1.3(CPU/NIC/散热等非 GPU 功耗)× PUE(数据中心整体能效比)"这个经验公式估算整机功耗——这三个系数(1.3、PUE=1.3、$0.10/kWh 电价)都是行业经验值,不是从某个具体数据中心的真实账单反推出来的精确数字。`storage_capex = cap_pb × $50k` 这一行看起来平平无奇,但藏着一个容易被忽视的建模选择:**它只取决于 `storage.cap_pb`(选中的存储档位容量),完全不取决于 `n_nodes`(集群规模)**——不管集群是 8 张卡还是 4096 张卡,只要都选择了同一个存储档位(比如默认的 Lustre 20PB 档),storage capex 都是同一个固定数字 $1M。
+**TCO(总拥有成本,Total Cost of Ownership)由 GPU capex(capital expenditure,一次性硬件采购支出)+ fabric capex(06 号文件的网络硬件)+ storage capex(07 号文件的存储硬件)+ 3 年电费(opex,operating expenditure,按年持续产生的运营支出)四部分组成**,`power_kw` 用"GPU TDP × 1.3(CPU/NIC/散热等非 GPU 功耗)× PUE(数据中心整体能效比)"这个经验公式估算整机功耗——这三个系数(1.3、PUE=1.3、$0.10/kWh 电价)都是行业经验值,不是从某个具体数据中心的真实账单反推出来的精确数字。`storage_capex = cap_pb × $50k` 这一行看起来平平无奇,但藏着一个容易被忽视的建模选择:**它只取决于 `storage.cap_pb`(选中的存储档位容量),完全不取决于 `n_nodes`(集群规模)**——不管集群是 8 张卡还是 4096 张卡,只要都选择了同一个存储档位(比如默认的 Lustre 20PB 档),storage capex 都是同一个固定数字 $1M。
 
 **可运行例子:**
 ```python
@@ -304,7 +304,7 @@ def run() -> list[dict]:
     return rows
 ```
 
-`sim/capstone_1.py` 是知识点 1-3(积木、时间公式、成本公式)的真实串联,3 个模型规模 × 6 个集群配置 = 18 个场景一次性算完,是"给定要训的模型,不同硬件配置各自要多久、多少钱"这个核心问题的完整答案表。`eval/mlperf_mock.py`(Capstone-2)换了一个角度问同一类问题:固定两个 512-GPU 集群(H100 vs B200),跑 5 个 MLPerf 风格的任务(不同规模的预训练/微调),分别报告 `speedup = h100_days/b200_days`。
+`sim/capstone_1.py` 是知识点 1-3(积木、时间公式、成本公式)的真实串联,3 个模型规模 × 6 个集群配置 = 18 个场景一次性算完,是"给定要训的模型,不同硬件配置各自要多久、多少钱"这个核心问题的完整答案表。`eval/mlperf_mock.py`(Capstone-2)换了一个角度问同一类问题:固定两个 512-GPU 集群(H100 vs B200),跑 5 个 MLPerf(业界公认的标准化 ML 硬件基准测试套件,不同厂商的芯片经常用它的成绩互相比较)风格的任务(不同规模的预训练/微调),分别报告 `speedup = h100_days/b200_days`。
 
 **独立验证的核心发现(README 已提出这个结论,本次用一个完全独立于原 18+5 个场景之外的全新配置重新验证):** B200 相对 H100 的 speedup 在两个 capstone 的所有场景里都稳定落在 2.27-2.28× 附近——这不是巧合。`time_to_train_days` 公式里,`pure_compute_s = flops_total/(peak×util_pct)`,只要比较的两个配置 `total_gpus()` 相同(比如都是 512 卡)、`util_pct`/`overhead_factor` 也相同(公式里这两个是全局默认值,不随 GPU 型号变化),`flops_total` 这一项会在比值计算中被约掉,只剩下 `peak` 之比,而 `peak = total_gpus × bf16_tflops`,`total_gpus` 也被约掉,最终比值精确等于 `bf16_tflops(B200)/bf16_tflops(H100) = 2250/989 ≈ 2.275`。
 

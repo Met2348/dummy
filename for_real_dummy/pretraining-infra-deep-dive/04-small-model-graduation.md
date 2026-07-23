@@ -89,7 +89,53 @@ for seed, lg, lp in results:
     print(f"seed={seed}: VanillaGPT2={lg:.3f}  PhiTiny={lp:.3f}")
 ```
 
-3 个种子全部确认:**VanillaGPT2 稳定在 0.99-1.03,PhiTiny 稳定在 9.55-9.65**,差距不是噪声。进一步做对照实验(同样两个模型,把标签换成真实 next-token 位移 `y=roll(x,-1)` 而不是 `y=x.clone()`):VanillaGPT2 的 loss 立刻从 ≈1.0 跳回 **11.39**(比理论基线还高,符合"随机模型+随机数据"预期),PhiTiny 从 9.6 变为 11.05。这说明**只有在"标签=输入本身、不做位移"这个特定 mock 设定下,VanillaGPT2 才会出现异常低的 loss**,原因大概率是架构差异:VanillaGPT2 是 Post-LayerNorm + 学习的绝对位置编码,残差流在小初始化尺度(std=0.02)下多层累积后仍然强烈保留着"当前位置 token 的 embedding"这个分量,再加上 tied embedding(`lm_head.weight = tok_embed.weight`)让"表征越接近自己的 embedding,预测自己原样的分数就越高"这条捷径在数学上直接成立;PhiTiny 是 Pre-RMSNorm + RoPE(不把位置编码加进输入,而是在 attention 内部旋转 Q/K),这种架构下"残差流保留输入 token 自身信息"的直接程度显著更弱,所以不会出现这种初始化阶段的"伪装学习"。
+3 个种子全部确认:**VanillaGPT2 稳定在 0.99-1.03,PhiTiny 稳定在 9.55-9.65**,差距不是噪声。进一步做对照实验(同样两个模型,把标签换成真实 next-token 位移 `y=roll(x,-1)` 而不是 `y=x.clone()`):VanillaGPT2 的 loss 立刻从 ≈1.0 跳回 **11.39**(比理论基线还高,符合"随机模型+随机数据"预期),PhiTiny 从 9.6 变为 11.05。这说明**只有在"标签=输入本身、不做位移"这个特定 mock 设定下,VanillaGPT2 才会出现异常低的 loss**,原因指向架构差异,但这个差异具体怎么起作用值得拆开验证,不能只停留在"架构不同"这一句猜测上。
+
+先解释两个新概念:**残差流(residual stream)** 指 transformer 内部贯穿所有层的那条加法直通通道——每一层不是把输入"替换"成自己的输出,而是"加"回去(`x = x + 子层输出(x)`,VanillaGPT2 和 PhiTiny 的每个 block 都是这个模式),所以浅层写入的信息有机会原样传到很深的层,不会被中途整个抹掉。**tied embedding** 指"输出层和输入 embedding 共用同一份权重"(`lm_head.weight = tok_embed.weight`)——这一点**两个模型都有**(03 号文件知识点 5 已经提到 PhiTiny 的 `lm_head.weight = embed.weight` 省了 51.5M 参数,VanillaGPT2 的写法完全一样),所以"是不是 tied"不是两者的差异点。tied 意味着最终 logit 的计算是 `hidden @ E^T`(`E` 就是 embedding 矩阵本身)——如果 `hidden` 恰好和某个 token 的 embedding 向量方向接近,这个 token 的 logit 就会格外突出,"当前位置输入 token 自己"也不例外。真正的差异点是:两个模型的残差流,谁的最终 `hidden` 更接近"当前位置输入 token 自己的 embedding"?这一点不需要靠猜测,可以直接测出来:
+
+```python
+import sys, torch, torch.nn.functional as F
+sys.path.insert(0, "learning/pretraining-recipe/src")
+sys.path.insert(0, "learning/small-model-graduation/src")
+from phi_tiny_model import PhiTinyConfig, PhiTiny
+from vanilla_gpt2 import VanillaGPT2, GPT2Config
+
+torch.manual_seed(0)
+gpt2 = VanillaGPT2(GPT2Config())
+torch.manual_seed(0)
+phi = PhiTiny(PhiTinyConfig())
+x = torch.randint(0, 50257, (2, 64))
+
+def gpt2_final_hidden(m, x):
+    B, T = x.shape
+    pos = torch.arange(T, device=x.device).unsqueeze(0)
+    h = m.tok_embed(x) + m.pos_embed(pos)
+    for b in m.blocks:
+        h = b(h)
+    return m.ln_f(h), m.tok_embed(x)      # 送进lm_head之前的最终隐状态, 自己的输入embedding
+
+def phi_final_hidden(m, x):
+    h = m.embed(x)
+    for b in m.blocks:
+        h = b(h, m.rope_cos, m.rope_sin)
+    return m.final_ln(h), m.embed(x)
+
+h_gpt2, e_gpt2 = gpt2_final_hidden(gpt2, x)
+h_phi, e_phi = phi_final_hidden(phi, x)
+
+cos_gpt2 = F.cosine_similarity(h_gpt2, e_gpt2, dim=-1).mean().item()
+cos_phi = F.cosine_similarity(h_phi, e_phi, dim=-1).mean().item()
+assert cos_gpt2 > 0.5 and cos_phi < 0.15   # GPT2的最终隐状态和自己的输入embedding高度同向, Phi几乎无关
+
+top1_gpt2 = gpt2.lm_head(h_gpt2).argmax(-1)
+top1_phi = phi.lm_head(h_phi).argmax(-1)
+frac_self_gpt2 = (top1_gpt2 == x).float().mean().item()   # top-1预测精确等于输入token自己的位置占比
+frac_self_phi = (top1_phi == x).float().mean().item()
+assert frac_self_gpt2 > 0.99
+assert frac_self_phi < 0.05
+```
+
+**实测(`.venv` 真跑):** `cos(最终隐状态, 自己的输入 embedding)` 均值,VanillaGPT2 是 **0.682**,PhiTiny 只有 **0.066**(接近正交、基本无关联)——两个模型的残差流对"自己输入 embedding"的保留程度差了一个数量级。接到 tied 的 `lm_head` 上看最终后果:全部 128 个测试位置(batch=2×seq_len=64)里,VanillaGPT2 的 top-1 预测 **100%** 精确等于输入 token 自己;PhiTiny 只有 **1.56%**(仍然比 1/50257≈0.002% 的随机基线高出约784倍、接近三个数量级,说明这条"捷径"对 PhiTiny 也有微弱作用,只是远没有到"每次命中"的程度)。这条独立验证把"原因大概率是"这句猜测,换成了两个模型真实前向结果量出来的因果链条:**残差流保留输入 embedding 的程度 → 决定 tied lm_head 会不会把这个 embedding 自己顶到 top-1 → 决定 `y=x.clone()` 这种标签方案下 loss 是否异常偏低**。VanillaGPT2 的 Post-LayerNorm + 学习的绝对位置编码这套组合,残差流恰好更容易保留这个分量;PhiTiny 的 Pre-RMSNorm + RoPE(不在输入端加位置编码,而是在 attention 内部旋转 Q/K)这套组合则没有这个效应——这和两者 cosine 相似度的实测差异方向完全一致,但"Post-LN 具体通过什么机制让残差流更容易保留输入信息"本身是一个更深的架构理论问题,本文只验证到"确实存在这个差异、且方向和后果都对得上",不展开证明背后的数学必然性。
 
 **这条发现的价值不在于"哪个数字更好看"**,而在于:如果不做这个交叉模型对照实验,单看 VanillaGPT2 的 loss 从 10+ 掉到 1 附近,很容易误判成"模型训练得很好、收敛很快"——但这只是两个架构在同一个有缺陷的 mock 标签方案下表现出的不同初始化偏置,和"模型学到了语言能力"毫无关系(数据本身是随机整数,不携带任何语言结构)。这是"5-10 步真实反向传播 smoke test 该看什么、不该看什么"的一个具体反面教材:loss 数字本身在跨架构比较时可能存在系统性偏置,必须先搞清楚 mock 数据/标签方案和被测架构之间是否存在这类交互效应,才能正确解读。
 
@@ -111,13 +157,13 @@ ckpt C 把模型从 VanillaGPT2(124M)换成 Phi-tiny(270M,GQA+RoPE+SwiGLU+RMSNor
 
 ## 幕四:ckpt D —— 长上下文扩展(链接 long-context-deep-dive)
 
-ckpt D 从 C 的 checkpoint resume,应用 YaRN scale=4(把有效上下文窗口从训练时的长度外推到 4 倍)+ LoRA r=16(只用低秩适配器做这次短暂的 100 step 扩展训练,不动主干权重)。YaRN 的完整数学原理(为什么要分频段插值、为什么纯 PI 会破坏高频信息)已经在 [long-context-deep-dive/01-rope-scaling-family.md](../long-context-deep-dive/01-rope-scaling-family.md) 讲透,本系列不重复。`EXPECTED` 表格显示 D 相对 C 的变化极具指向性:6 个 benchmark 里 5 个(val_loss/hellaswag/piqa/tinymmlu/gsm8k)**完全不变**,只有 `niah_8k` 从 0.05 跳到 0.80(+75pp)——这份参考数据本身就在演示 YaRN 的一个核心特性:**长上下文扩展是一种"追加能力",不是"整体能力提升"**,不应该期待它连带改善其他所有 benchmark 的分数,如果扩展后某个短上下文 benchmark 分数下降了,反而说明扩展过程带来了不该有的能力损伤(这是 YaRN/PI 等方法真实评测时需要专门检查的回归项)。
+ckpt D 从 C 的 checkpoint resume,应用 YaRN scale=4(把有效上下文窗口从训练时的长度外推到 4 倍)+ LoRA r=16(只用低秩适配器做这次短暂的 100 step 扩展训练,不动主干权重;`r` 是适配器内部"降维再升维"那一步先降到的维度——数值越大,适配器能表达的变换越丰富,但新增参数也越多,完整原理见 [peft-deep-dive/01-lora-core.md](../peft-deep-dive/01-lora-core.md),本系列不重复展开)。YaRN 的完整数学原理(为什么要分频段插值、为什么纯 PI 会破坏高频信息)已经在 [long-context-deep-dive/01-rope-scaling-family.md](../long-context-deep-dive/01-rope-scaling-family.md) 讲透,本系列不重复。`EXPECTED` 表格显示 D 相对 C 的变化极具指向性:6 个 benchmark 里 5 个(val_loss/hellaswag/piqa/tinymmlu/gsm8k)**完全不变**,只有 `niah_8k` 从 0.05 跳到 0.80(+75pp)——这份参考数据本身就在演示 YaRN 的一个核心特性:**长上下文扩展是一种"追加能力",不是"整体能力提升"**,不应该期待它连带改善其他所有 benchmark 的分数,如果扩展后某个短上下文 benchmark 分数下降了,反而说明扩展过程带来了不该有的能力损伤(这是 YaRN/PI 等方法真实评测时需要专门检查的回归项)。
 
 ---
 
 ## 幕五:ckpt E —— 课程学习综合,以及一处容易被误读的标签
 
-ckpt E 是"全部合一"(C 的架构 + curriculum 数据课程 + 长上下文能力),`common.py::variant_desc("E")` 的描述是"全部(= Topic 7 final)"。`EXPECTED` 表格把 E 相对 C 的变化标注为 `ablation_breakdown` 函数里的 `"curriculum (C->E)"` 这个 key,但真实运行这个函数后独立核对发现一处**容易被字面误读的地方**:
+ckpt E 是"全部合一"(C 的架构 + curriculum 数据课程 + 长上下文能力),`common.py::variant_desc("E")` 的描述是"全部(= Topic 7 final)"。"课程学习"(curriculum learning,训练不同阶段喂给模型不同难度/质量的数据,而不是全程用同一个固定配比)已经在 [03-pretraining-recipe.md](03-pretraining-recipe.md) 讲过具体机制:知识点 2(`data_mixture.py`)展示了 Phi 系列训练最后 20% 阶段切换到更高质量数据子集这个具体做法,这里不重复,只看它在五部曲里的定位和一处容易被误读的归因。`EXPECTED` 表格把 E 相对 C 的变化标注为 `ablation_breakdown` 函数里的 `"curriculum (C->E)"` 这个 key,但真实运行这个函数后独立核对发现一处**容易被字面误读的地方**:
 
 ```python
 import sys

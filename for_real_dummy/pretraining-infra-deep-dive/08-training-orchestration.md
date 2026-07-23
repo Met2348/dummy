@@ -52,6 +52,30 @@ def fifo_with_backfill(queue: list[Job], nodes: list[Node], now: float = 0.0) ->
 ```
 (`slurm_scheduler.py:1-54`,节选)
 
+**画出来看:下方"可运行例子"里 32-GPU 集群(4 节点×8 GPU)的具体状态,backfill 生效的关键在于"中间发生了一次 release、调度器被重新调用了一遍",不是同一次调用内部的什么特殊逻辑:**
+
+```
+t=0 提交顺序: alice(24) -> bob(8) -> carol(4)          32-GPU 集群(4 节点 × 8 GPU/节点)
+
+第一轮遍历(fifo_with_backfill 内部按提交顺序逐个 try_assign)结束后:
+
+  node0 [AAAAAAAA]  \
+  node1 [AAAAAAAA]   ├─ alice 占满 24 GPU(4 个节点当时都空闲 8 卡,贪心按顺序取前 3 个节点)
+  node2 [AAAAAAAA]  /
+  node3 [BBBBBBBB]  ── bob 占满 8 GPU(唯一还剩空位的 node3)
+  空闲: 0/32          carol(4) try_assign 失败 -> 进 blocked 队列——不是"排不上号",是真的装不下
+
+------------------ 一段时间后,alice 训练结束,release(alice, cluster) ------------------
+
+单独重新调用一次 fifo_with_backfill([carol], cluster)(这是外层重新发起了一次调度,
+不是同一次调用内部那个"在静态调用里等价于 no-op"的第二遍遍历):
+
+  node0 [CCCC....]  ── carol 占 4 GPU(alice 释放出的 8 个坑位里,占 4 个、空 4 个)
+  node1 [........]  \
+  node2 [........]   ├─ 这 20 个空坑位都是 alice 释放出来的,carol 之外全部空闲
+  node3 [BBBBBBBB]  ── bob 完全没受影响,从头到尾都在跑
+```
+
 **一句话:** `try_assign` 用"先算完整方案、确认够了才真正扣减资源"的两阶段模式保证了单个 job 分配的原子性(不会出现分配一半失败的情况);`fifo_with_backfill` 里"排在队头但装不下的大 job 不会挡住后面能塞进剩余空间的小 job"这个 backfill 效果,不是靠某种特殊的调度算法实现的,而是简单地"先按提交顺序试一遍、把装不下的记下来、再对装不下的单独重试一遍"这个朴素的两遍遍历。
 
 **底层机制/为什么这样设计:** `try_assign` 内部用 `sorted(nodes, key=lambda x: -x.n_gpus_free)`(空闲卡数从多到少排序,贪心优先占用最空闲的节点),遍历过程中只往本地变量 `chosen` 列表里记录"打算怎么分配",不直接修改 `nodes` 的状态,只有在确认 `remaining<=0`(即需求已经被完全满足)之后才真正执行扣减——这个"先规划、再提交"的模式是保证原子性的关键,避免了"分配了一部分节点后才发现总量不够,但已经修改了部分节点状态"这种需要回滚的糟糕情况。`fifo_with_backfill` 的第二次遍历(`for j in blocked`)在**单次静态调用内**其实是无效的(nodes 的容量在两次遍历之间没有发生任何变化,如果第一轮 `try_assign` 已经失败,第二轮用同样的 nodes 状态重试必然还是失败)——真正的 backfill 效果体现在 `capstone_cluster_run.py` 注释提到的"真实 Slurm 是持续轮询重新调度"这个更大的时间尺度上:某个大 job 释放资源后,下一次调度循环里 `fifo_with_backfill` 重新被调用,这时候 nodes 状态已经变化,原本装不下的小 job 就可能成功了。
@@ -403,11 +427,46 @@ def choose_node_bottom_up(task, local_node_id, nodes, gcs,
 
 **AI 研究场景:** 这类"排队延迟 vs 数据搬运成本"的权衡决策,在训练+推理混合的复杂 pipeline(比如 RLHF 里生成、打分、训练三个阶段可能分布在不同节点上)里非常常见——如果盲目追求"哪个节点最空闲就调度到哪里",可能导致大量时间花在跨节点搬运中间结果(比如生成阶段产出的大批量 rollout 数据)上;如果盲目追求"数据在哪就在哪跑",又可能让数据所在的节点持续过载、其他空闲节点资源被浪费,Ray 的 bottom-up scheduler 用一个统一的打分函数把两者放在同一个天平上比较,这是"任务调度"和"数据放置"这两个经常被分开研究的问题在实际系统里被合并处理的一个具体范例。
 
+**顺带一提(本节标题承诺的第三块拼图):** 同一个源文件里还有一个和调度器完全独立的机制——`reconstruct_lineage`。"lineage"直译"世系/血统",这里指"一个 object 是被哪个 task、用了哪些输入 object 生产出来的"这条依赖链:
+
+```python
+from __future__ import annotations
+
+def reconstruct_lineage(ref: ObjectRef, gcs: GlobalControlStore) -> list[str]:
+    """Return the tasks that must be replayed to reconstruct an object."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit_task(task_id: str) -> None:
+        if task_id in seen:
+            return
+        task = gcs.tasks[task_id]
+        if task.stateful_dep is not None:
+            visit_task(task.stateful_dep)          # actor 上一次调用也要重放
+        for input_ref in task.input_refs:
+            rec = gcs.objects[input_ref.object_id]
+            if rec.creator_task is not None:
+                visit_task(rec.creator_task)          # 递归:先重放"生产我的输入"的task
+        seen.add(task_id)
+        ordered.append(task_id)
+
+    rec = gcs.objects[ref.object_id]
+    if rec.creator_task is not None:
+        visit_task(rec.creator_task)
+    return ordered
+```
+(`ray_original_minimal.py:184-206`)
+
+如果某个节点故障、它持有的 object 丢失了,Ray 不需要从头重跑整个程序——顺着 lineage 往上游回溯:先看这个丢失的 object 是哪个 task(`creator_task`)生产的,再看那个 task 自己依赖哪些更早的 object(递归下去),把这条链上涉及的 task 按正确顺序重新执行一遍(replay),就能重建出丢失的 object。`visit_task` 同时沿着两条依赖边回溯:`creator_task`(数据依赖——这个 object 是谁生产的)和 `stateful_dep`(状态依赖——如果生产者是个 actor 方法调用,还要先重放这个 actor**上一次**被调用的 task,因为 actor 方法的输出不仅取决于这次调用的输入,还取决于调用前的内部状态,知识点 4 已经展开过这一点);`seen` 集合避免同一个 task 在依赖图有分支交汇时被重复排进重放顺序里两次。这样,"Ray 系统架构"这个标题承诺的三块拼图就齐了:GCS(元数据存储)负责"知道东西在哪",bottom-up scheduler 负责"决定新任务去哪跑",lineage 负责"东西丢了怎么在不重跑全部程序的前提下补回来"。
+
 **可运行例子:**
 ```python
 import sys
 sys.path.insert(0, "learning/training-orchestration/src")
-from ray_original_minimal import GlobalControlStore, NodeState, TaskSpec, choose_node_bottom_up
+from ray_original_minimal import (
+    GlobalControlStore, NodeState, TaskSpec, choose_node_bottom_up,
+    submit_task, reconstruct_lineage,
+)
 
 gcs = GlobalControlStore()
 big = gcs.put_object("big-image-batch", size_mb=1000.0, locations={"B"})
@@ -435,9 +494,20 @@ assert results[1.0] == "A"
 # 理论交叉点: transfer_ms(1000MB/bw) == queued_ms(200) => bw=5.0
 print(f"数据在忙节点A: 带宽100/10 -> 选{results[100.0]}/{results[10.0]}(远程搬运便宜)  带宽4/1 -> 选{results[4.0]}/{results[1.0]}(远程搬运太贵,宁可排队)")
 print("交叉点精确在 bandwidth=5.0 MB/ms(1000MB数据/5.0=200ms,恰好等于A的排队时间200ms)")
+
+# lineage 验证: t1生产out1 -> t2消费out1生产out2,重放顺序必须是先t1后t2
+out1 = submit_task(TaskSpec("t1", "make"), "B", nodes, gcs, output_size_mb=2.0)
+out2 = submit_task(TaskSpec("t2", "consume", input_refs=[out1]), "A", nodes, gcs)
+assert reconstruct_lineage(out2, gcs) == ["t1", "t2"]
+
+# 独立验证: 延长到三跳依赖链(t1->t2->t3),重放顺序应该依然精确保持依赖顺序,不会因为链变长而错乱
+out3 = submit_task(TaskSpec("t3", "consume2", input_refs=[out2]), "B", nodes, gcs)
+assert reconstruct_lineage(out3, gcs) == ["t1", "t2", "t3"]
+print(f"两跳lineage重放顺序: {reconstruct_lineage(out2, gcs)}")
+print(f"三跳lineage重放顺序(独立验证,链变长仍保持依赖顺序): {reconstruct_lineage(out3, gcs)}")
 ```
 
-**实测(`.venv` 真跑):** 自测里两个场景(A 排队 10ms 走本地、A 排队 200ms 过载后选中已有数据的空闲节点 B)全部确认。独立验证构造了"数据在繁忙节点 A、空闲节点 B 没有数据"这个反向场景,扫描带宽从 100.0 降到 1.0(100 倍),发现调度决策存在一个**精确的反转点**:带宽 ≥10.0 时选择空闲但要跨节点搬运数据的 B(比如带宽 100 时,搬 1000MB 只需要 10ms,远小于 A 的 200ms 排队);带宽 ≤4.0 时反而选择数据本地但排队更久的 A(带宽 4.0 时搬运成本要 250ms,已经超过 A 的 200ms 排队成本)——交叉点精确落在 `bandwidth=5.0 MB/ms`(此时搬运成本恰好等于 200ms,和 A 的排队时间打平,`min()` 在打分相等时返回候选列表里第一个出现的节点,本例里 nodes 字典按 `{"A":..., "B":...}` 顺序构造,所以打平时选中 A)。这条独立验证把"数据本地性和负载均衡该怎么取舍"这个定性权衡,转化成了一个可以被精确复现的数字:**带宽的临界值 = 数据量 / 排队时间差**,这正是 `score()` 打分公式的数学结构决定的。
+**实测(`.venv` 真跑):** 自测里两个场景(A 排队 10ms 走本地、A 排队 200ms 过载后选中已有数据的空闲节点 B)全部确认。独立验证构造了"数据在繁忙节点 A、空闲节点 B 没有数据"这个反向场景,扫描带宽从 100.0 降到 1.0(100 倍),发现调度决策存在一个**精确的反转点**:带宽 ≥10.0 时选择空闲但要跨节点搬运数据的 B(比如带宽 100 时,搬 1000MB 只需要 10ms,远小于 A 的 200ms 排队);带宽 ≤4.0 时反而选择数据本地但排队更久的 A(带宽 4.0 时搬运成本要 250ms,已经超过 A 的 200ms 排队成本)——交叉点精确落在 `bandwidth=5.0 MB/ms`(此时搬运成本恰好等于 200ms,和 A 的排队时间打平,`min()` 在打分相等时返回候选列表里第一个出现的节点,本例里 nodes 字典按 `{"A":..., "B":...}` 顺序构造,所以打平时选中 A)。这条独立验证把"数据本地性和负载均衡该怎么取舍"这个定性权衡,转化成了一个可以被精确复现的数字:**带宽的临界值 = 数据量 / 排队时间差**,这正是 `score()` 打分公式的数学结构决定的。`reconstruct_lineage` 的验证同样确认了预期行为:两跳依赖链(t1 生产 `out1` → t2 消费 `out1` 生产 `out2`)重放顺序精确是 `["t1", "t2"]`;独立验证延长到三跳(再加一个 t3 消费 `out2`),重放顺序依然精确保持依赖发生的先后次序 `["t1", "t2", "t3"]`,不会因为依赖链变长、递归深度增加而错乱——这确认了 `visit_task` 的"先递归回溯到最早的依赖、再把自己追加到 `ordered` 末尾"这个后序遍历结构,天然保证重放顺序和真实的生产先后顺序一致。
 
 **面试怎么问 + 追问链:**
 - **Q:** "`choose_node_bottom_up` 的候选节点打分公式 `node.queued_ms + transfer_ms` 把两个不同性质的开销(排队等待 vs 网络传输)直接相加比较,这个简单加总在什么情况下会失真?"—— 期望:这个加总假设"排队时间"和"传输时间"是完全可替代的同一种资源(都用毫秒计量,数值上可以直接比较),但两者的**不确定性**性质不同——`queued_ms` 通常是对当前队列状态的一个瞬时快照(实际执行时,队列前面的任务可能提前完成或者又有新任务插队,真实等待时间会漂移),而 `transfer_ms` 基于固定的 `bandwidth_mb_per_ms` 参数计算,在网络拥塞、多任务共享带宽的场景下同样会有波动——这份简化模型把两者都当作确定性数值处理,没有对不确定性/方差建模,真实调度器通常需要更保守地对待"排队时间"这类容易随时间变化的估计值。
