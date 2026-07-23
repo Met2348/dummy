@@ -41,11 +41,11 @@
 
 | # | 分类 | 文件 | 知识点数(约) | 状态 |
 |---|------|------|-----------|------|
-| 01 | RoPE 外推家族 | [01-rope-scaling-family.md](01-rope-scaling-family.md) | 6 | ✅ 已完成(已验证,含"YaRN 教学代码 vs 生产库"深挖 + 发现 `rope_yarn.py` 死代码) |
-| 02 | 长上下文 Attention 架构 | [02-long-context-attention.md](02-long-context-attention.md) | 4 | ✅ 已完成(已验证) |
-| 03 | 长上下文评测方法论 | [03-long-context-eval.md](03-long-context-eval.md) | 3 | ✅ 已完成(已验证,发现 `niah_grid` 类型注解错误 + `ruler_eval.py` 死变量) |
-| 04 | 数据工程与 Capstone | [04-long-context-capstone.md](04-long-context-capstone.md) | 4 | ✅ 已完成(已验证,含 `make_doc_mask` padding 边界发现) |
-| 05 | 进阶深度追加:4 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 4案例(不计入17) | ✅ 已完成(已验证,8/8代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——①RoPE外推方案批判迭代链(vanilla→PI→NTK→YaRN,每一步换方案的代价都现场算出具体弧度/百分比,不是"效果不好"空话)、②YaRN教学代码vs生产库真实性验证(多个factor取值排除单点巧合,证明差距随factor增大而扩大)、③KV-cache显存规模递增(上下文长度轴+并发数轴独立都能推爆单卡,两轴相乘不相加)、④Ring/Striped/Infini-Attention选型决策依据追问(GPU数量容量规划从"应该够用"变成现算数字);独立复验阶段额外用非2的幂次factor([3,6,12,24,48])+完全不同的hidden_size/heads组合重新验证案例2的"生产库无sqrt"结论(0/5不匹配,且证明attention_factor与hidden_size/heads完全无关,只是factor的函数),以及用70B级GQA架构+经典MHA架构(无GQA)重新验证案例3的KV-cache结论(70B权重本身就吃满H200预算;MHA因kv_heads是GQA的4倍,在128k就已超预算,而文档的8B GQA配置在128k还有余量——证明GQA的kv-head缩减是"128k装得下"这个结论成立的关键前提,不是巧合)) |
+| 01 | RoPE 外推家族 | [01-rope-scaling-family.md](01-rope-scaling-family.md) | 6 | ✅ 已完成(已验证,含"YaRN 教学代码 vs 生产库"深挖 + 发现 `rope_yarn.py` 死代码;P/T/L/V/D 逐文件复核追加 M-RoPE head_dim 切分示意表格——原文只有文字描述,缺可视化) |
+| 02 | 长上下文 Attention 架构 | [02-long-context-attention.md](02-long-context-attention.md) | 4 | ✅ 已完成(已验证;P/T/L/V/D 逐文件复核未发现需要改动之处) |
+| 03 | 长上下文评测方法论 | [03-long-context-eval.md](03-long-context-eval.md) | 3 | ✅ 已完成(已验证,发现 `niah_grid` 类型注解错误 + `ruler_eval.py` 死变量;P/T/L/V/D 逐文件复核未发现需要改动之处) |
+| 04 | 数据工程与 Capstone | [04-long-context-capstone.md](04-long-context-capstone.md) | 4 | ✅ 已完成(已验证,含 `make_doc_mask` padding 边界发现;P/T/L/V/D 逐文件复核追加 KV-cache"是什么/为什么需要"前置说明——原文直接给显存公式未解释概念本身 + LoRA r/alpha 最小释义与 peft-deep-dive 交叉引用) |
+| 05 | 进阶深度追加:4 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 4案例(不计入17) | ✅ 已完成(已验证,8/8代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——①RoPE外推方案批判迭代链(vanilla→PI→NTK→YaRN,每一步换方案的代价都现场算出具体弧度/百分比,不是"效果不好"空话)、②YaRN教学代码vs生产库真实性验证(多个factor取值排除单点巧合,证明差距随factor增大而扩大)、③KV-cache显存规模递增(上下文长度轴+并发数轴独立都能推爆单卡,两轴相乘不相加)、④Ring/Striped/Infini-Attention选型决策依据追问(GPU数量容量规划从"应该够用"变成现算数字);独立复验阶段额外用非2的幂次factor([3,6,12,24,48])+完全不同的hidden_size/heads组合重新验证案例2的"生产库无sqrt"结论(0/5不匹配,且证明attention_factor与hidden_size/heads完全无关,只是factor的函数),以及用70B级GQA架构+经典MHA架构(无GQA)重新验证案例3的KV-cache结论(70B权重本身就吃满H200预算;MHA因kv_heads是GQA的4倍,在128k就已超预算,而文档的8B GQA配置在128k还有余量——证明GQA的kv-head缩减是"128k装得下"这个结论成立的关键前提,不是巧合);P/T/L/V/D 逐文件复核未发现需要改动之处) |
 
 **合计:17 个知识点,4 篇 + 1 篇进阶深度追加(4 个案例,不计入 17),全部完成并独立验证。**
 

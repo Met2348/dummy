@@ -36,7 +36,19 @@ def unified_po_loss(log_p_c_actor, log_p_c_ref, log_p_r_actor, log_p_r_ref,
 
 **底层机制/为什么这样设计:**
 
-第一层验证:**开关取值表本身是忠实的。** `learning/dpo-family/lectures/12-rainbowpo.md` Slide 4 给出的 7 变体超参表,在 `use_ref`/`length_norm`/`loss_type`/`add_sft`/`beta` 这 5 列上和代码里的 `VARIANTS` 字典逐行核对,完全一致——包括一个容易漏看的细节:lecture 表格给 DPOP 那一行的 `loss_type` 列写的是 `sigmoid`,但在最后单独标注了 `(+ hinge)`,像是在提醒"这一行还需要 4 个开关之外的额外东西"。
+第一层验证:**开关取值表本身是忠实的。** `learning/dpo-family/lectures/12-rainbowpo.md` Slide 4 给出的 7 变体超参表,在 `use_ref`/`length_norm`/`loss_type`/`add_sft`/`beta` 这 5 列上和代码里的 `VARIANTS` 字典逐行核对,完全一致——包括一个容易漏看的细节:lecture 表格给 DPOP 那一行的 `loss_type` 列写的是 `sigmoid`,但在最后单独标注了 `(+ hinge)`,像是在提醒"这一行还需要 4 个开关之外的额外东西"。下面直接把 `rainbowpo.py` 第 31-39 行 `VARIANTS` 字典的真实取值摆出来(逐字段抄自源码,不是转述),后面 5 段分析里"哪个配置和 `dpo` 差在哪一列"都可以直接对着这张表核对:
+
+| 配置名 | `use_ref` | `length_norm` | `loss_type` | `add_sft` | `beta` | `lambda_sft` | 和 `dpo` 逐字段相同? |
+|---|---|---|---|---|---|---|---|
+| `dpo` | `True` | `False` | `sigmoid` | `False` | `0.1`(默认) | `1.0`(默认,未生效) | — 作为基准 |
+| `ipo` | `True` | `False` | `squared` | `False` | `0.1`(默认) | `1.0`(默认,未生效) | 只有 `loss_type` 不同 |
+| `orpo` | `False` | `False` | `sigmoid` | `True` | `1.0` | `10.0` | 4 列不同 |
+| `simpo` | `False` | `True` | `sigmoid` | `False` | `2.5` | `1.0`(默认,未生效) | 3 列不同 |
+| `cpo` | `False` | `False` | `sigmoid` | `True` | `0.1`(默认) | `2.0` | 3 列不同 |
+| `kto` | `True` | `False` | `sigmoid` | `False` | `0.1`(默认) | `1.0`(默认,未生效) | **逐字段完全相同**(仅 `name` 不同) |
+| `dpop` | `True` | `False` | `sigmoid` | `False` | `0.1`(默认) | `1.0`(默认,未生效) | **逐字段完全相同**(仅 `name` 不同) |
+
+`lambda_sft` 标"未生效"的几行不是笔误——`unified_po_loss` 里 `L_total = L_pref + cfg.lambda_sft * sft_loss_chosen if cfg.add_sft else L_pref`,`add_sft=False` 时这一整项根本不会被算进 `L_total`,`lambda_sft` 字段的具体取值(不管是默认的 `1.0` 还是别的数)对结果没有任何影响,只是 dataclass 上一个"挂着但没用上"的字段。表格最右列已经能一眼看出知识点 1 接下来要展开的核心发现:`kto`、`dpop` 两行除了 `name`,其余 6 个字段和 `dpo` 一模一样——这不是巧合,是这两个配置在源码里就是这么写的。
 
 第二层验证:**数值复现只对 `dpo` 精确成立,而且这不是巧合。** 全仓库唯一一条交叉验证 `unified_po_loss` 和某个独立 `*_loss` 函数数值一致的测试就是 `test_rainbowpo_dpo_matches`(`tests/test_six_methods_consistency.py` 第 106-115 行),容差 `1e-5`。本文把其余 5 个配置(`ipo`/`orpo`/`simpo`/`cpo`/`dpop`,`kto` 单独在下面讨论)全部实际算了一遍,和对应独立实现逐一比对,归纳出以下几种不同的偏差模式——**提醒一下阅读节奏:接下来 5 段分析,每段的"偏差性质"都不一样(有的是完全退化、有的是精确的代数缩放、有的是结构性错位、有的只差一个参数、还有一种压根不报错但语义错了),不是同一个问题的 5 个例子,建议每看完一段先停一下、确认这一种和上一种具体哪里不一样,再往下看:**
 

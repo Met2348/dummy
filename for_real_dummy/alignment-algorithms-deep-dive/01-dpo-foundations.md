@@ -60,7 +60,19 @@
 
 对照 `learning/rlhf-classic/lectures/01-instructgpt.md` 里的三段管线(Stage 1 SFT → Stage 2 RM 训练 → Stage 3 PPO + KL),DPO 绕开的是 **Stage 2**(不再需要单独收集偏好数据去训练一个 reward model)和 **Stage 3 里"用 RL 算法在线求解"这部分**(不需要从当前 policy 采样、不需要 PPO 的 clip/GAE 这套机制)。Stage 3 要优化的 **目标本身**(`max E[r] - β·KL(π‖π_ref)`)DPO 完全保留,只是把"用 RL 迭代求解"换成了"直接在离线偏好对上做一次监督式的梯度下降"。Stage 1(SFT)在 DPO 里也还在,只是换了个身份:SFT 之后的模型通常就是这里的 `π_ref`,同时也是 actor 的初始化起点。PPO 的 clip/重要性采样比率这些"怎么用 RL 算法求解在线目标"的细节,属于 `learning/rl-foundations/04-ppo-core.md` 和 `learning/rlhf-classic/04-ppo-for-llm-deep.md` 的内容,这里不重复。
 
-上面这段文字信息量比较密,涉及 5 个模型身份(SFT 模型/reward model/actor/critic/reference)在 3 个阶段里出生、改名、换角色——画成图会直观得多,不需要真的跳去 `learning/rlhf-classic/lectures/01-instructgpt.md` 也能看懂这条时间线:
+上面这段文字信息量比较密,涉及 5 个模型身份(SFT 模型/reward model/actor/critic/reference)在 3 个阶段里出生、改名、换角色——先用一张表把"两条路径各自需要几份模型权重、每份权重扮演什么角色"这个空间结构摆出来,再看下面按时间顺序展开的详细版本:
+
+| 模型身份 | 标准 RLHF(SFT→RM→PPO+KL) | DPO |
+|---|---|---|
+| SFT 模型 | 预训练模型微调后得到,是下面所有"复制品"共同的出生起点 | 同左,起点完全一样 |
+| reward model | Stage 2 单独训练出的一个**独立打分网络**(SFT 模型复制一份,在偏好对 `y_w`/`y_l` 上训练);训练完冻结,只负责给别的模型生成的回答打分,自己不再更新 | **不单独出生**——被知识点 1 的代换直接重新参数化成 `β·log(actor(y|x)/π_ref(y|x))` 这个量,reward 的理论概念保留,只是不再是一份独立的网络权重 |
+| actor | SFT 模型复制一份,Stage 3 里被 PPO 反复更新的策略,初始化 = SFT 模型 | SFT 模型复制一份,被梯度下降反复更新,初始化 = SFT 模型(和标准路径完全一样) |
+| reference | SFT 模型复制一份,冻结,只当 KL 惩罚项里的锚点,初始化 = SFT 模型,永远不参与更新 | SFT 模型复制一份,记作 `π_ref`,同样冻结、同样只当 KL 锚点,初始化 = SFT 模型(和标准路径完全一样) |
+| critic | Stage 3 里额外出生,估计 value baseline,PPO 需要它降低训练方差 | **不出生**——没有在线 RL 采样,不需要 value baseline,训练循环因此长得几乎和普通 SFT 一样 |
+| 同时常驻的模型权重份数 | **4 份**(actor + critic + reward model + reference) | **2 份**(actor + π_ref) |
+| 怎么求解 `max E[r] - β·KL(π‖π_ref)` 这个目标 | 在线 RL(PPO,需要从当前 policy 采样 rollout,配合 reward model 实时打分) | 离线监督式梯度下降(直接在偏好对上对**同一个目标**算 loss 做反传,不采样) |
+
+下面是按时间顺序展开的详细版本,补上表格里省略的"谁在哪一步出生、为什么"这些细节,不需要真的跳去 `learning/rlhf-classic/lectures/01-instructgpt.md` 也能看懂这条时间线:
 
 ```text
 Stage 1 · SFT

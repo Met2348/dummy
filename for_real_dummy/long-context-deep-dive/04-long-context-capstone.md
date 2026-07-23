@@ -195,7 +195,7 @@ def curriculum_max_len(step: int) -> int: ...                                   
 
 - **`inject_yarn` 具体做了什么:** 不是训练出一个新模型,而是"手术式"地改写一个**已经实例化**的 HF 模型对象的两处状态——① `model.config.rope_scaling` 和 `max_position_embeddings`,纯粹是元数据,方便后续 `save_pretrained()` 这类操作把"这个 checkpoint 用了 YaRN"记录下来;② 遍历 `model.model.layers`,把每一层 `self_attn.rotary_emb.inv_freq` 这个 buffer **原地替换**成新算出来的 YaRN `inv_freq`。这是"运行时打补丁"(monkey-patch)式的做法——不改 `transformers` 库代码,直接在模型加载完之后,在 Python 层面篡改已经实例化的对象属性。这类做法有一个真实的风险:如果库内部某处对 `inv_freq` 做了额外缓存,或者 `forward()` 走的是另一条路径重新计算 cos/sin 而不是每次都读 `self.inv_freq` 这个属性,这种运行时替换就会静默失效——这是"直接改一个封装好的库的内部实现细节"这类做法的通病,库一升级,你的补丁完全可能悄悄不起作用而不报任何错误。
 
-- **`setup_lora`:** 标准 `peft.LoraConfig(r=16, lora_alpha=32, target_modules=[q_proj,k_proj,v_proj,o_proj], bias="none", task_type="CAUSAL_LM")`。`lora_alpha/r = 2` 是社区里很常见的一个默认缩放比例;只对 attention 的 4 个投影矩阵注入 LoRA、不动 MLP 层(`gate_proj`/`up_proj`/`down_proj`),是"用更少可训练参数换取可以接受的精度损失"的常见取舍。
+- **`setup_lora`:** 标准 `peft.LoraConfig(r=16, lora_alpha=32, target_modules=[q_proj,k_proj,v_proj,o_proj], bias="none", task_type="CAUSAL_LM")`。这里只用到 LoRA 最外层的接口,不重新展开 LoRA 本身的数学——完整推导(`r` 是低秩分解的秩、`h=base(x)+α/r·BAx` 这个更新公式、为什么 B 要零初始化)见 [peft-deep-dive/01-lora-core.md 知识点 1](../peft-deep-dive/01-lora-core.md),这里只讲这个脚本具体怎么用它:`lora_alpha/r = 2` 是社区里很常见的一个默认缩放比例;只对 attention 的 4 个投影矩阵注入 LoRA、不动 MLP 层(`gate_proj`/`up_proj`/`down_proj`),是"用更少可训练参数换取可以接受的精度损失"的常见取舍。
 
 - **`curriculum_max_len`:** 上一个知识点"课程学习"思想在"按训练 step 决定当前最大序列长度"这个维度的具体应用,和 lecture 13 Slide 8 给出的"step 0-100 用 8k、100-300 用 16k、300-500 用 32k"完全对应。
 
@@ -325,6 +325,8 @@ KV cache 字节数 = n_layers × n_kv_heads × head_dim × 2(K+V) × seq_len × 
 **一句话:** 模型权重的显存占用在训练/加载完之后是一个**常数**(参数量固定了,占用就固定了),但 KV cache 的显存占用是一个随"当前上下文长度"线性增长的**变量**——上下文越长,这个变量就越有可能反超权重本身,这正是长上下文推理里"权重不是显存瓶颈,KV cache 才是"这个反直觉现象的根源。
 
 **底层机制/为什么这样设计:**
+
+**先补一步本节默认你已经知道、但其实需要先讲清楚的前提:KV cache 到底是什么、为什么需要它。** 自回归生成时,模型每一步只吐出 1 个新 token,但要预测这个新 token,attention 需要用到**所有历史 token** 的 K、V(回顾 Q/K/V 到底是什么、attention 怎么算,见 [torch-deep-dive/04-layers-math-and-backward.md 第 8 节](../torch-deep-dive/04-layers-math-and-backward.md))。如果每生成一个新 token 都把"prompt + 已生成的全部历史"重新完整地过一遍模型、重新计算一次所有历史 token 的 K、V,那么生成第 `n` 个 token 时要重算前 `n-1` 个 token 的 K、V,生成一段长度 `L` 的输出总共要做 `1+2+...+L ≈ O(L²)` 次 K/V 投影——这是纯粹的重复劳动,因为**同一个历史 token 的 K、V,只要模型权重不变,每次重新算出来的结果都完全相同**。KV cache 的做法是:某个 token 的 K、V 第一次算出来之后就存起来,后面每一步只需要对**新来的这一个 token** 算一次 K、V、拼进缓存里,再让新 token 的 Q 去和缓存住的全部历史 K、V 做 attention——把 `O(L²)` 的重复计算降到 `O(L)`。这个机制本身、以及它如何让推理的 decode 阶段变成"访存瓶颈而不是算力瓶颈"(decode 每步只新算 1 个 token 的 Q/K/V,但要从显存搬运全部历史 KV cache 做 attention,占大头的是数据搬运时间而不是矩阵乘法时间),[inference-serving-deep-dive/01-inference-engine-core.md 知识点 1](../inference-serving-deep-dive/01-inference-engine-core.md) 有更完整的展开(prefill/decode 两阶段特性对比),这里不重复那边的完整论证,只讲清楚"缓存里存的是什么、为什么要存"这个前提——有了这个前提,下面"这份缓存到底占多大显存"才有意义。
 
 拆开公式里的每一项,每一项都对应一个具体的、不能省略的原因:
 - **`n_layers`(层数):** 每一层 attention 都要维护自己独立的一份 KV cache,层与层之间不共享——层数直接线性放大总量。
