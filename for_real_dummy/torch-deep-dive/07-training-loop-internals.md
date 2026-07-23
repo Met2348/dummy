@@ -170,7 +170,7 @@ with torch.autocast(device_type='cuda', dtype=torch.float16):   # 或 torch.bflo
 
 **底层机制/为什么这样设计:**
 
-**为什么要区别对待,不能整个网络无脑转 fp16:** fp16 用 5 位指数、10 位尾数,数值范围(约 6e-5 到 6.5e4)和精度都远小于 fp32——矩阵乘法/卷积这类算子在 Tensor Core 上用 fp16 计算能获得数倍加速且精度损失通常可接受(因为大量乘加操作的误差会在统计上部分抵消);但 `softmax`/`exp`/`sum`/`layer_norm`/损失函数这类算子,要么涉及大量数值的连续求和(误差会累积,不会抵消)、要么涉及指数运算(输入稍大就容易溢出,呼应 [05-loss-functions-and-numerical-stability.md](05-loss-functions-and-numerical-stability.md) 第 1 节的 log-sum-exp 数值稳定性问题),用 fp16 算这些操作,溢出/精度损失的风险明显更高。`autocast` 的解决方案是维护这份算子分类表,把"用fp16计算收益大、风险小"的算子转 fp16,把"用fp16风险大"的算子强制转回/保持 fp32,两头都要。
+**为什么要区别对待,不能整个网络无脑转 fp16:** fp16 用 5 位指数、10 位尾数,数值范围(约 6e-5 到 6.5e4)和精度都远小于 fp32——矩阵乘法/卷积这类算子在 Tensor Core(现代 NVIDIA GPU 上专门加速矩阵乘加运算的硬件单元,对 fp16/bf16 这类低精度输入吞吐更高,[08-memory-and-performance.md](08-memory-and-performance.md) 第 3 节会展开它偏爱什么样的内存排布)上用 fp16 计算能获得数倍加速且精度损失通常可接受(因为大量乘加操作的误差会在统计上部分抵消);但 `softmax`/`exp`/`sum`/`layer_norm`/损失函数这类算子,要么涉及大量数值的连续求和(误差会累积,不会抵消)、要么涉及指数运算(输入稍大就容易溢出,呼应 [05-loss-functions-and-numerical-stability.md](05-loss-functions-and-numerical-stability.md) 第 1 节的 log-sum-exp 数值稳定性问题),用 fp16 算这些操作,溢出/精度损失的风险明显更高。`autocast` 的解决方案是维护这份算子分类表,把"用fp16计算收益大、风险小"的算子转 fp16,把"用fp16风险大"的算子强制转回/保持 fp32,两头都要。
 
 **现场验证这份"名单"确实分开处理不同算子(不是转述文档):**
 
@@ -500,6 +500,40 @@ for epoch in range(total_epochs):
             optimizer.zero_grad(set_to_none=True)                        # 第1节
 
     scheduler.step()   # epoch级调度器(OneCycleLR则要放进内层、每个batch后调,06篇第9节已强调)
+```
+
+把上面这段代码的控制流画成一张图更容易看清"哪些步骤每个 batch 都做、哪些步骤只在攒够 `accumulation_steps` 时才做":
+
+```text
+dataloader 每吐出一个 batch,下面这条路径都会走一次:
+
+  autocast 前向(第3节) ──► loss = criterion(...) / accumulation_steps
+        │
+        ▼
+  scaler.scale(loss).backward()(第4节,.grad 里此刻累加的是被放大 scale 倍的梯度)
+        │
+        ▼
+  (i+1) % accumulation_steps == 0 ?
+     │否 ────────────────────────────► 直接回去读下一个 batch(不做下面任何一步)
+     │是
+     ▼
+  ① scaler.unscale_(optimizer)            —— 梯度先除回真实尺度
+        │
+        ▼
+  ② clip_grad_norm_(max_norm=1.0)(06篇第10节) —— 必须排在①之后!
+        │                                     顺序颠倒 = 裁的是放大过 scale 倍的梯度,
+        │                                     等效阈值被错误压缩到 max_norm/scale
+        ▼
+  ③ scaler.step(optimizer)                —— 内部再查一次 inf/nan,没问题才真正更新参数
+        │
+        ▼
+  ④ scaler.update()                       —— 按这一步有没有溢出,调整下一步的 scale
+        │
+        ▼
+  ⑤ optimizer.zero_grad(set_to_none=True)(第1节)
+
+每个 epoch 结束后,在最外层循环单独执行一次:
+  scheduler.step()(06篇第9节;OneCycleLR 例外,要挪进上面这条路径内部、每个 batch 都调一次)
 ```
 
 **这一节唯一的"新知识点"、也是最容易被忽略的一处顺序陷阱:`clip_grad_norm_` 必须在 `scaler.unscale_(optimizer)` **之后**调用,不能直接对 `scaler.scale(loss).backward()` 产生的梯度做裁剪。**

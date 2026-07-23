@@ -31,6 +31,24 @@ torch.cuda.empty_cache()                    # 把缓存池里当前没有 tensor
 
 **底层机制/为什么这样设计:** `cudaMalloc`/`cudaFree` 涉及和 GPU 驱动的同步通信,是重量级调用——如果训练循环里每个中间 tensor 的产生和释放都真实触发一次 driver 调用,性能会非常差。下面会用实测量化这个"重"到底有多重。PyTorch 的解法是自己管理一个"显存池":第一次需要显存时,以较大粒度(实测:向上取整到 **2MB** 的整数倍,例子里会验证)向 driver 申请一大块;之后同大小的显存请求直接从池子里"切"出来复用,tensor 被释放时,这块内存"还给池子"而不是还给 driver。`nvidia-smi` 是从操作系统/驱动视角统计"这个进程从 driver 要走了多少显存",它看到的自然是 `reserved`(池子总大小),不是 `allocated`(池子里当前真正被引用的部分)——这就是"我明明 `del` 了一堆 tensor,`nvidia-smi` 里显存却没降"的真正原因,不是内存泄漏,是缓存生效了。
 
+用一张图把下面『可运行例子』里现场量出来的 4 个状态串起来(`[ ]` 是从 driver 那里攥着的 `reserved` 区域,`■` 是这块区域里正被某个 tensor 引用的 `allocated` 部分,`░` 是缓存着、当前没有 tensor 用、但还没还给 driver 的部分):
+
+```text
+① 基线(还没申请过显存池)          reserved=0MB    allocated=0MB
+   [                                ]
+
+② x = torch.randn(...)  (~382MB)   reserved=382MB  allocated=382MB
+   [■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■]   ■ = 正被 x 引用
+
+③ del x(还没调 empty_cache)        reserved=382MB  allocated=0MB
+   [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   ░ = 缓存着没人用,但没还给 driver
+
+④ y = torch.randn(...)  (同尺寸)   reserved=382MB  allocated=382MB
+   [■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■]   直接复用③里的░,没有新的 cudaMalloc 调用
+```
+
+`nvidia-smi` 只看得到方框的总宽度(`reserved`),分不清里面究竟是 `■` 还是 `░`——这正是"数字对不上"的根源。
+
 **AI 研究场景:** 排查"两个实验之间切换,显存好像没完全释放"时,第一反应应该是查 `memory_reserved()` vs `memory_allocated()`,而不是只看 `nvidia-smi`——如果 `allocated` 已经很低但 `reserved` 还很高,说明只是缓存没还给 driver,不是真的泄漏(真泄漏见第5节,`empty_cache()` 何时真的有用见第6节);反过来如果 `allocated` 本身在持续上涨,才是需要认真排查的信号。
 
 **可运行例子:**

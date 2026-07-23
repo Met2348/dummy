@@ -83,6 +83,22 @@ assert np.allclose(loaded_keras(x).numpy(), y_ref, atol=1e-6)
 print("raw tf.saved_model.load 与 tf.keras.models.load_model 结果都和原模型一致")
 ```
 
+**上面 `os.listdir()` 打印出来的内容,画成目录树看得更直接**——`model.save(sm_dir)` 产出的从来不是一个文件,而是一整个目录:
+
+```text
+sm_dir/
+├── saved_model.pb                        ← 追踪出的计算图(protobuf):ConcreteFunction 集合 + 签名(第5节)
+├── keras_metadata.pb                     ← 仅当保存的是 Keras 模型才有:get_config() 重建信息,供 load_model() 用
+└── variables/
+    ├── variables.data-00000-of-00001     ← 权重的真实数值
+    └── variables.index                    ← 权重索引(哪个变量存在数据文件的什么位置)
+
+tf.saved_model.load(sm_dir)         只读 saved_model.pb + variables/,完全不需要 keras_metadata.pb
+tf.keras.models.load_model(sm_dir)  额外读一份 keras_metadata.pb,重建出"看起来和原来一样"的 Keras 对象
+```
+
+漏传/漏拷贝 `variables/` 这整个子目录,常见坑一节会讲到:图依然能加载,只是权重全部退回初始化状态,而且不会报错。
+
 第二个例子验证"完全不依赖原始类"这个说法到底有多彻底——用一个**没有注册**的自定义 Layer:
 
 ```python
@@ -312,6 +328,25 @@ status.assert_consumed()                  # 显式检查:是否完全匹配
 **底层机制/为什么这样设计:**
 
 TF1 时代的 `tf.train.Saver` 是"基于变量名字符串"存取的(和 torch `state_dict()` 的扁平 key 思路更接近),但 TF1 的变量名是由当时的 `variable_scope`/`name_scope` 拼接出来的,代码稍微重构一下作用域名字就变了、checkpoint 就废了,这是 TF1 用户的一个长期痛点。TF2 引入 `tf.train.Checkpoint` 时换了一套完全不同的思路——**不看变量叫什么名字,看这个变量在你的 Python 对象图里挂在哪条属性路径下**(`Trackable` 基类会自动记录"我被赋值给了谁的哪个属性名",`tf.Module`/`Layer`/`Optimizer` 都继承了这套机制)。这带来一个直接后果:只要你恢复时构造出的对象图**结构**(属性名、嵌套关系)和保存时一致,变量数值就能对上号,不要求你手写任何字符串 key 映射;但代价是这套匹配完全不做"名字模糊匹配"或"形状推断",一旦你重命名了某个属性(比如 `self.backbone` 改成 `self.encoder`),路径就断了,机制上和 torch `state_dict()` 里"改名导致 key 对不上"是同一类根因(标识符变了),但发生的层面不同——一个是 Python 属性名,一个是 dotted string key。
+
+**把"沿属性路径递归"这句话画成图**——下面例子里 `tf.train.Checkpoint(model=model, optimizer=optimizer, step=step_counter)` 递归出来的 `Trackable` 依赖图长这样:
+
+```text
+Checkpoint(根)
+ ├─ "model"     ──► model (Sequential)
+ │                    └─ "layers" ──► [dense1, dense2, ...]
+ │                          dense1 ──► "kernel"、"bias"   ← 真正存数值的叶子 tf.Variable
+ ├─ "optimizer" ──► optimizer (Adam)
+ │                    └─ 每个被优化的变量各一份 slot 变量(一阶动量 m、二阶动量 v)
+ └─ "step"      ──► step_counter (用户自定义 tf.Module)
+                       └─ "value" ──► tf.Variable(7)
+
+保存: 每个叶子 tf.Variable 的数值,连同它在这棵树里的路径(如 model/layers/0/kernel)一起写盘
+恢复: 重新构造一棵"属性名、嵌套关系都一样"的树,按路径逐一对号——路径对不上(比如 model 改名成
+      renamed_model,对应下面第二个例子),这个变量就静默地找不到归宿,restore() 本身不会报错
+```
+
+这张图也是 PyTorch `state_dict()` 那种"扁平字符串 key"(`"backbone.layer1.weight"` 这样一整条拼好的字符串)和这里"一层层 Python 属性嵌套"的直观区别——前者匹配靠字符串整体相等,后者匹配靠沿着树逐层走到同一个位置,下面代码会分别验证"结构匹配"和"属性改名导致路径断裂"两种情况。
 
 另一个和 torch10 第 4 节直接相关的差异点:`tf.train.Checkpoint` 序列化的是"沿着 `Trackable` 图能走到的变量值",天然不涉及"这是哪个 Python 类、需要 `import` 什么模块"这类信息——它不重建架构,只灌数值进你已经用代码构造好的对象——这意味着它没有 pickle 那种"反序列化可能执行任意代码"的攻击面,安全性质上更接近 torch 的 `state_dict()`(纯数据),而不是 `torch.save(model)`(整个对象连同类信息一起 pickle)。
 

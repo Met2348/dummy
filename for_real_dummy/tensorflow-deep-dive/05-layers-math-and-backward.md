@@ -590,9 +590,52 @@ tf.keras.layers.MultiHeadAttention(
 
 **差异 1:三个独立 `EinsumDense` 子层,不是一个融合矩阵。** 已现场内省真实层的内部结构:`mha._query_dense`/`_key_dense`/`_value_dense`/`_output_dense` 都是 `tf.keras.layers.EinsumDense` 的实例(一种"自带 einsum 表达式的 Dense"),而不是 PyTorch 那种拼在一起的单个 `(3*embed_dim,embed_dim)` 大矩阵。`_query_dense` 的 `.equation` 属性直接就是 `'abc,cde->abde'`——`a,b,c` 对应输入的 `(batch,seq,embed_dim)`,`c,d,e` 对应 kernel 的 `(embed_dim,num_heads,head_dim)`,`c` 这个字母在两个输入里重复但不出现在输出里,被求和收缩掉(numpy06 第 15 节讲过的"重复字母收缩"规则,不是新知识);输出 `abde` 保留了 `(batch,seq,heads,head_dim)` 四个维度——**一次 einsum 调用同时完成了"投影 + reshape 成多头形状"两件事**,对比 torch04 第 8 节 PyTorch 手写实现里"先 `F.linear` 投影、再手动 `.view().transpose()` 拆头"的两步走,是同一个数学操作的不同工程实现路径。已现场验证:虽然实现结构不同,Q+K+V 三个 `EinsumDense` 的参数总量,和 PyTorch 融合矩阵 `3*embed_dim*embed_dim` 的参数量**完全相等**——只是"要不要把三个矩阵拼成一个"的存储实现选择,不影响数学和参数量。
 
+**用一张图看懂 `'abc,cde->abde'` 这一次 einsum 调用具体在做什么**(以上面代码验证过的 `_query_dense` 为例,字母和真实 shape 逐一对应,不是抽象举例):
+
+```text
+输入 x                            kernel Wq(_query_dense.kernel)
+(batch, seq, embed_dim)           (embed_dim, num_heads, head_dim)
+   a     b       c                      c         d           e
+                  \                    /
+                   \                  /
+              字母 c 在两个输入里都出现、但不出现在输出里——
+              这正是 matmul 在 embed_dim 这一维上做内积求和的"收缩"记号
+
+              einsum('abc,cde->abde', x, Wq)
+                          │
+                          ▼
+              输出 q ——已经是"多头形状"
+              (batch, seq, num_heads, head_dim)
+                 a     b        d          e
+```
+
+`c`(`embed_dim`)是唯一"消失"的字母,对应的正是"和 kernel 做矩阵乘法、把 `embed_dim` 这一维乘加求和掉"这个动作;`a,b`(`batch,seq`)和 `d,e`(`heads,head_dim`)全部原样保留在输出里,只是被重新排列组合成了一个新的四维 shape——这就是"一次 einsum 调用同时完成投影 + reshape 成多头形状"这句话的具体样子。对比 PyTorch 那种"先 `F.linear` 投影、再手动 `.view().transpose()` 拆头"的两步走:第一步同样是把 `embed_dim` 乘加求和掉,第二步只是对结果的 shape 做一次纯粹的重新解释(不涉及任何新的乘加运算)——TF 这里把这两步合并成了一次 einsum 调用,数学结果完全一样,只是省掉了中间那个显式的 `.view().transpose()`。
+
 **差异 2:`key_dim`/`value_dim` 可以独立设置,PyTorch 的 Q/K/V 被迫共享同一个 `head_dim`。** PyTorch 的 `nn.MultiheadAttention` 只接受一个 `embed_dim`,`head_dim=embed_dim/num_heads` 是唯一值,Q/K/V 三者的每头维度必须相等。TF 允许 `key_dim`(Q 和 K 的每头维度)和 `value_dim`(V 的每头维度,默认等于 `key_dim`,但可以单独指定)独立设置——已现场验证 `key_dim=4,value_dim=6` 可以同时工作:`_query_dense`/`_key_dense` 的 kernel 最后一维是 4,`_value_dense` 的 kernel 最后一维是 6,`_output_dense` 负责把拼接后的多头 value(总维度 `num_heads*value_dim`)重新投影回目标输出维度,形状能对上是因为 attention score 的计算只依赖 Q/K 的维度(两者要一致才能做点积),不依赖 V 的维度,V 的维度只在最后加权求和、拼接、输出投影这几步里起作用——这是 Transformer 原始论文里 `d_k`/`d_v` 本来就是两个独立超参数的自由度,PyTorch 的实现选择把它们锁死为相等,TF 保留了这个自由度。
 
 **差异 3:`output_shape` 独立于输入 `embed_dim`,`attention_axes` 是纯 TF 特有能力。** PyTorch 的输出维度永远等于输入的 `embed_dim`(因为 `out_proj` 固定是方阵)。TF 允许显式指定 `output_shape`,让输出投影到任意维度——已现场验证 `embed_dim=8` 的输入配合 `output_shape=16` 能正常工作,输出最后一维是 16 不是 8。`attention_axes` 则解决了一个 PyTorch 完全没有对应能力的问题:输入如果是图像/视频这类高维张量(比如 `(batch,H,W,C)`),只想在某一个空间轴(比如 `W`)上做 attention、其他轴保持独立,PyTorch 的 `nn.MultiheadAttention` 只理解"一个序列维度",必须手动 reshape/permute 把想要的维度捏成三维 `(batch,seq,embed)` 才能塞进去;TF 直接传 `attention_axes=(2,)` 就能表达"只在第 2 维上做 attention"——已现场验证:`(2,4,6,8)` 的 4D 输入(可以理解成 `batch=2,H=4,W=6,C=8`),`attention_axes=(2,)` 之后输出形状保持 `(2,4,6,8)` 不变,返回的 attention 权重形状是 `(2,4,2,6,6)`(`batch,H,heads,W,W`)——`H` 这一维被当成了额外的批量维,只有 `W` 这一维真正参与了 attention 的 `query x key` 组合,这是 PyTorch 原生 API 结构性做不到、必须手写 reshape 才能实现的能力。
+
+**用一张图看懂 `attention_axes=(2,)` 在四维输入上到底改变了什么**(下面两组 shape 都已用真实代码验证,不是推测——`attention_axes=(2,)` 是上面段落已验证的结果,`attention_axes=None` 是同一份 `(2,4,6,8)` 输入额外补的对照实验):
+
+```text
+输入 x_img: (batch=2, H=4, W=6, C=8) —— 可以理解成 2 张"图",每张 4 行(H)×6 列(W),每个位置 8 个通道(C)
+
+★ attention_axes=(2,):只在第 2 维(W)上做 attention
+  batch=2 和 H=4 被当成"互不相干的批量维"打包在一起——相当于 2*4=8 个独立的、
+  长度为 W=6 的序列各自做自己的 attention,互相看不见对方
+  返回的 attention 权重形状: (batch=2, H=4, heads=2, W=6, W=6)
+                                              └───┬───┘
+                                     query 位置 × key 位置的组合,只在 W 这一维展开(6×6)
+
+★ 对比默认值 attention_axes=None:除 batch 外的所有维度都参与同一次 attention
+  H=4 和 W=6 被合并看成一个整体("每个位置由(行,列)两个数字确定",而不是只由"第几列"确定)
+  返回的 attention 权重形状: (batch=2, heads=2, H=4, W=6, H=4, W=6)
+                                              └─────┬─────┘  └─────┬─────┘
+                                            query 位置(H,W)     key 位置(H,W)
+                                            两者都要展开成完整的 (H,W) 组合
+```
+
+两组权重的维度个数,恰好对应"query 位置和 key 位置各自需要几个数字才能确定"这件事:`attention_axes=(2,)` 时,位置只需要"第几列"一个数字就能确定,权重形状里对应的就是一对 `W`;不指定时位置需要"第几行、第几列"两个数字才能确定,权重形状里对应的就是两对 `(H,W)`——这正是"`H` 这一维被当成额外批量维,只有 `W` 真正参与 attention"这句话在 shape 上留下的真实痕迹。
 
 **可运行例子:**
 ```python
@@ -636,6 +679,13 @@ mha_axes = tf.keras.layers.MultiHeadAttention(num_heads=2, key_dim=4, attention_
 out_axes, weights_axes = mha_axes(x_img, x_img, x_img, return_attention_scores=True)
 assert out_axes.shape == (2, 4, 6, 8)             # 形状不变
 assert weights_axes.shape == (2, 4, 2, 6, 6)        # (batch, H, heads, W, W) -- 只在W轴上做了attention
+
+# 对照:同一份4D输入不传attention_axes(默认None),H和W会被合并成一个整体参与attention,
+# 权重形状里H、W各自出现两次(query位置一次、key位置一次),而不是像上面那样只出现W
+mha_noaxes = tf.keras.layers.MultiHeadAttention(num_heads=2, key_dim=4)
+out_noaxes, weights_noaxes = mha_noaxes(x_img, x_img, x_img, return_attention_scores=True)
+assert out_noaxes.shape == (2, 4, 6, 8)                     # 形状同样不变
+assert weights_noaxes.shape == (2, 2, 4, 6, 4, 6)             # (batch, heads, H, W, H, W) -- H和W都参与了attention
 
 # ---- einsum 交叉验证:手写复现层内部的等价计算,和真实层输出数值吻合(不重讲einsum语法,只用它) ----
 Wq, bq = mha._query_dense.kernel.numpy(), mha._query_dense.bias.numpy()
