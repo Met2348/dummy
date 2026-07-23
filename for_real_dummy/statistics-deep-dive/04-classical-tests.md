@@ -432,8 +432,12 @@ for _ in range(n_null_trials):
     null_b = rng.normal(0, 1, 12)  # 同分布, H0真实成立
     obs = null_b.mean() - null_a.mean()
     comb = np.concatenate([null_a, null_b])
-    pd = np.array([np.random.default_rng(1000 + _).permutation(comb)[12:].mean() - np.random.default_rng(1000 + _).permutation(comb)[:12].mean() for _ in range(500)])
-    p_null = np.mean(np.abs(pd) >= np.abs(obs))
+    n_a = len(null_a)
+    perm_diffs_null = np.empty(500)
+    for j in range(500):
+        shuffled = rng.permutation(comb)
+        perm_diffs_null[j] = shuffled[n_a:].mean() - shuffled[:n_a].mean()
+    p_null = np.mean(np.abs(perm_diffs_null) >= np.abs(obs))
     if p_null < 0.05:
         false_positives += 1
 

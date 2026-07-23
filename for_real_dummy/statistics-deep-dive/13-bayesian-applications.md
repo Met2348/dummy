@@ -196,6 +196,10 @@ theta_mle = k / n
 log_lik_mle = k * np.log(theta_mle) + (n - k) * np.log(1 - theta_mle)
 log_lik_null = k * np.log(0.5) + (n - k) * np.log(0.5)
 lr_stat = 2 * (log_lik_mle - log_lik_null)
+# Wilks定理(渐进结果, 这里只用结论不展开证明): 比较两个"嵌套"模型(M0是M1固定住某些参数后的特例)时,
+# 2*(对数似然之差)在原假设下渐进服从卡方分布, 自由度=两个模型自由参数个数之差——
+# 这里M1(theta自由)比M0(theta固定=0.5)多1个自由参数, 所以df=1;
+# 这和04类知识点3"k个近似正态项平方求和给出卡方(k-1)"是同一个"卡方=正态平方和"的渐进机制, 只是这里"正态项"换成了对数似然比
 lr_pvalue = 1 - stats.chi2.cdf(lr_stat, df=1)
 assert lr_pvalue < 0.05, f"likelihood ratio test should also reject theta=0.5, got p={lr_pvalue:.4f}"
 
