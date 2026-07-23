@@ -80,6 +80,62 @@ r = mt.reshape(12)
 assert not np.shares_memory(mt, r)   # 被迫复制了一份新内存,而不是 view
 ```
 
+**再往下一层——"内存是否连续"到底是什么,用 `.strides` 亲眼验证,不是死记硬背的黑箱规则:**
+
+C 程序员最熟悉的模型正好是这里的答案。一个 numpy 数组的数据,底层就是**一段摊平的一维内存**——`.shape` 只是告诉你"按什么形状切开看待"这段内存,真正决定"下标 `[i, j]` 对应内存里第几个字节"的是另一个属性:`.strides`(**单位是字节**,不是元素个数,这是容易踩的一个细节)。`a.strides[k]` 的意思是:"沿着第 `k` 维挪动一步(下标 `+1`),要在这段一维内存里跨过多少字节"——和 C 里手算 `*(base + i*4 + j)` 这种指针偏移量,是完全同一个思路,只是 numpy 把"每一维跨多少"预先算好存进了 `.strides`。
+
+```python
+import numpy as np
+
+m = np.arange(12, dtype=np.int64).reshape(3, 4)   # 3行4列,每个元素8字节(int64)
+assert m.strides == (32, 8)
+# 第0维(行)每挪一步跨32字节 = 4个元素(一行的宽度);第1维(列)每挪一步跨8字节 = 1个元素
+
+# 用 strides 手动验证 m[i,j] 的地址公式:和 C 的 *(base + i*4 + j) 是同一个思路,
+# 只是 numpy 给的是字节偏移,要除以 itemsize 才能换算回"摊平后的第几个元素"
+i, j = 2, 3
+byte_offset = i * m.strides[0] + j * m.strides[1]
+assert byte_offset // m.itemsize == 11
+assert m.flatten()[byte_offset // m.itemsize] == m[i, j]
+
+# 单位确实是字节,不是元素个数:换成 float32(每个元素4字节),数值跟着变
+mf = m.astype(np.float32)
+assert mf.strides == (16, 4)          # 4元素*4字节=16,1元素*4字节=4——同样的形状,不同的字节数
+```
+
+摊平开看,这块内存自始至终只有一份,`shape`/`strides` 只是"怎么切开解读"它的说明书:
+
+```
+底层一维内存(物理上真实存在,下标0~11,从头到尾没有"行/列"这个概念):
+[ 0][ 1][ 2][ 3][ 4][ 5][ 6][ 7][ 8][ 9][10][11]
+
+m 的 shape=(3,4)、strides=(32,8) 告诉 numpy 这样切开看待同一段内存:
+  行0 -> [ 0][ 1][ 2][ 3]
+  行1 -> [ 4][ 5][ 6][ 7]
+  行2 -> [ 8][ 9][10][11]
+```
+
+有了这一层,上面坑3 里"转置后 reshape 被迫复制"就不再是死记硬背的规则,而是能推导出来的结论:
+
+```python
+import numpy as np
+
+m = np.arange(12, dtype=np.int64).reshape(3, 4)
+mt = m.T
+
+assert mt.shape == (4, 3)
+assert mt.strides == (8, 32)              # strides 顺序跟着整体倒过来,和 shape 一样
+assert np.shares_memory(m, mt)             # 但底层是同一块内存,转置没有搬动一个字节
+assert mt.flags['C_CONTIGUOUS'] is False   # 不再是"标准行优先顺序"
+assert mt.flags['F_CONTIGUOUS'] is True    # 但从"列优先"的角度看,它反而是连续的
+
+# 坑3 里 mt.reshape(12) 为什么必须复制:摊平成一维要按这个跳跃顺序取数,
+# 不是简单的"每次跳固定字节数",没有任何一组 strides 能表达这种顺序
+assert list(mt.flatten()) == [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]
+```
+
+`.T` 之所以几乎零成本,是因为它只是把 `strides` 这两个数字倒过来、重新解释同一块内存,一个字节都不用搬——这正是"reshape 默认尽量返回 view"这句话背后的机制。而坑3 里 `mt.reshape(12)` 会被迫复制,原因也在这里:想要的"按新形状摊平成一维"这个结果,在 `mt` 现在的内存排布下,任何一组**固定步长**(也就是任何一个 `strides`)都表达不出来——上面最后一个 assert 已经验证过,摊平后要按 `[0,4,8,1,5,9,2,6,10,3,7,11]` 这种跳跃顺序取数,不是"每次跳固定字节数"。`strides` 这套机制的表达能力就是"每一维固定步长",遇到这种跳跃顺序无能为力,numpy 没有别的办法,只能先老老实实按新顺序复制一份数据,`reshape` 才能继续用简单的 strides 切出你要的形状。
+
 ---
 
 ## 2. `.T` / `np.transpose`

@@ -263,6 +263,7 @@ safe = original[2:5].copy()
 assert not np.may_share_memory(original, safe)
 
 # 6. 旁注:显式的 .view() 方法 —— 重新解释同一块内存的 dtype(不是数值转换,是重新解释比特!)
+# C 背景的话,这就是 union 或者指针强转 *(int32_t*)&f 的同一套路:内存原封不动,只是换一种类型的"眼镜"去读同一段比特
 f = np.array([1.0], dtype=np.float32)
 as_int = f.view(np.int32)
 assert as_int[0] != 1     # 不是数值1,是 float32 数值 1.0 的比特模式被当 int32 读出来的怪数字

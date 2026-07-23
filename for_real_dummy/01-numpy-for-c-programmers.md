@@ -154,11 +154,14 @@ result = mat + bias        # shape: (3, 4)
 **理解规则（从右对齐，逐维匹配）：**
 
 ```
-mat:   (3, 4)
-bias:     (4,)   ← 右对齐
-              ↑ 维度相同，OK
-           ↑ bias 这里没有维度，自动扩展成 3
+mat:    (3, 4)
+bias:   (   4)   ← 右对齐:最后一维 4 和 4 对齐、相等,OK;
+                   bias 只有1维,左边"缺的"那一维自动补成1,变成 (1,4),
+                   这个 1 被拉伸成 3,和 mat 对上——不是真的复制出3份数据,只是"看起来"变成3行
+result: (3, 4)
 ```
+
+想把广播规则钻得更深（比如三维以上、两边同时被拉伸这些更容易搞混的情况），见 [numpy-deep-dive/08-broadcasting-and-ufunc.md](numpy-deep-dive/08-broadcasting-and-ufunc.md) 第 1 节——那里有 5 个从易到难的例子，每一个都画出了对齐过程。
 
 **仓库里会见到的常见广播：**
 
@@ -280,7 +283,9 @@ scores = np.array([2.0, 1.0, 0.1])
 
 ## 下一步
 
-完成本教程后，继续看 [02-pytorch-basics.md](02-pytorch-basics.md)。
+本文的目标只是"看懂仓库里的 numpy 代码"，属于最小可用速览，很多细节点到为止（比如 dtype 的坑、view/copy 的规则、`argmax`/`einsum`/`svd` 这类没提到的函数）。如果想更系统地把 numpy 过一遍——大约 120 个函数分 11 篇，每个函数都配可运行例子、AI 研究场景和常见坑——见 [numpy-deep-dive/00-roadmap.md](numpy-deep-dive/00-roadmap.md)；不是必须先看完才能往下走，但后面 torch/其他系列经常会引用回那一套更深的讲解。
+
+想直接继续的话，看 [02-pytorch-basics.md](02-pytorch-basics.md)。
 PyTorch 的 Tensor 操作和 numpy **几乎完全一样**，只是多了 GPU 支持和自动求导。
 
 ---
