@@ -58,6 +58,8 @@ def attention_flash(Q: list[list[float]], K: list[list[float]],
 ```
 (源码见 `learning/kernel-engineering/src/flash_attention.py:27-62`,核心递推在 `40-61` 行;`m`/`l`/`o` 分别是"目前见过的最大分数""目前的归一化分母""目前的未归一化输出累加值"这三个 running state,注意源码里没有单独的 `m_new`/`l_new`/`o_new` 变量对——`l`、`o` 是直接原地更新覆盖旧值,只有 `m_new` 在赋给 `m` 之前短暂存在。)
 
+这段代码里 `Q[i][k] * K[j][k]` 这个点积、`scale = 1/sqrt(d)` 这个缩放、以及最后要对结果做 softmax,合起来就是标准 scaled dot-product attention 那套公式本身——如果还没搞清楚 Q/K/V 到底是什么、点积为什么能衡量"相似度"、为什么偏偏要除以 `sqrt(d)`,见 [torch-deep-dive/04-layers-math-and-backward.md](../torch-deep-dive/04-layers-math-and-backward.md) 第 8 节"在讲拆分之前"那一段从零建立的内容(Python 字典查询的类比、3 个 token 的可验证玩具例子)。本节和姊妹系列 `long-context-deep-dive` 一样,直接假设你已经懂 attention 本身,只讲这套计算"怎么分块、还能保证结果精确不变"这一层新东西,不重复推导 attention 公式本身。
+
 **一句话:** 逐个 K/V block 扫过去,每看完一个新 block 就用三步刷新状态——`m_new = max(m, max(s_block))` 把"目前见过的最大值"更新到位,`rescale = exp(m - m_new)` 算出"旧的累积值现在应该按什么系数收缩"(因为它们当初是按旧的、偏小的 `m` 做的指数),`l`/`o` 先乘上这个 `rescale` 再加上新 block 的贡献——全程只需要同时装得下 1 个 block 的 `s_block`,从不需要在内存里铺开整行的分数。
 
 **底层机制/为什么这样设计:** 先问一个最笨的问题——标准 softmax 为什么要减去一个 `max`?纯粹是数值稳定性:`softmax(s)_i = exp(s_i-m)/Σexp(s_j-m)` 对任意常数 `m` 恒成立(分子分母同时乘 `exp(-m)`,比值不变),选 `m=max(s)` 只是让指数的输入永远 `<=0`,不会上溢。这个恒等式的关键在于"`m` 可以是任意常数",于是第一个天然的问题就来了:如果还没扫完整行,不知道最终的全局最大值是多少,怎么办?

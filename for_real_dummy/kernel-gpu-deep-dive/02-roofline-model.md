@@ -109,7 +109,31 @@ def roofline_flops(spec: GPUSpec, ai: float, dtype: str = "bf16") -> float:
 
 **一句话:** ridge point(脊线/山脊点)= `peak_FLOPS / peak_bandwidth`,单位是 FLOP/byte——它是一条分界线:算子的 AI 没跨过这个数,不管这块 GPU 标称算力多强,都会先被内存带宽耗尽;跨过了,内存就绰绰有余,算力封顶。
 
-**底层机制/为什么这样设计:** 上一节推出了 `achievable = min(peak_FLOPS, peak_BW × AI)`。把这两个分支画在以 AI 为横轴、achievable FLOPS 为纵轴的 log-log 图上,是两条线:一条水平线 `y = peak_FLOPS`(算力屋顶),一条过原点的斜线 `y = peak_BW × AI`(带宽屋顶,斜率就是带宽)。两条线的交点满足 `peak_FLOPS = peak_BW × AI_ridge`,解出 `AI_ridge = peak_FLOPS / peak_BW`——这正是"ridge"(屋脊)这个名字的来源:两片屋顶相交的那条线。AI 落在 ridge 左边,斜线更低、起决定作用(memory-bound);AI 落在 ridge 右边,水平线更低、起决定作用(compute-bound)。这套公式不是 GPU 专属的——[`roofline_original_minimal.py`](../../learning/gpu-architecture/src/roofline_original_minimal.py) 原样复现了 2009 年原论文里两台真实 AMD 服务器(Opteron X2/X4)的 ridge point,数字量级和 GPU 完全不同(个位数 FLOP/byte,而不是几百),但公式一模一样,说明 roofline 是"任何有独立计算单元和独立内存带宽的系统"通用的性能模型,GPU 只是这套模型今天最常见的应用场景。
+**底层机制/为什么这样设计:** 上一节推出了 `achievable = min(peak_FLOPS, peak_BW × AI)`。把这两个分支画在以 AI 为横轴、achievable FLOPS 为纵轴的 log-log 图上,是两条线:一条水平线 `y = peak_FLOPS`(算力屋顶),一条过原点的斜线 `y = peak_BW × AI`(带宽屋顶,斜率就是带宽)。两条线的交点满足 `peak_FLOPS = peak_BW × AI_ridge`,解出 `AI_ridge = peak_FLOPS / peak_BW`——这正是"ridge"(屋脊)这个名字的来源:两片屋顶相交的那条线。
+
+光靠文字描述这两条线不够直观,画出来是这样(纵横两轴都是对数刻度,`achievable = min(peak_FLOPS, peak_BW×AI)` 这条折线本身就是"roofline"这个名字字面对应的形状——像屋顶一样,一段斜坡爬到顶,之后就封顶变平):
+
+```
+achievable
+ FLOPS
+ (log轴)
+   ^
+   |                         ______________________________
+   |                        /      <- 算力屋顶(水平线,平顶部分):y = peak_FLOPS
+   |                       /           AI 再怎么涨,achievable 也被钉死在这条线上,
+   |                      /            这个区域是 compute-bound(算力是天花板)
+   |                     *  <- ridge point:两片屋顶的交点,AI = peak_FLOPS / peak_BW
+   |                    /
+   |                   /   <- 带宽屋顶(斜坡部分):y = peak_BW × AI
+   |                  /        AI 每往右一格,achievable 跟着线性往上涨,
+   |                 /         这个区域是 memory-bound(带宽是天花板)
+   |                /
+   +----------------+-----------------------------------------> AI = flops/bytes (log轴)
+              ridge point 在这里
+      (左边:AI小,memory-bound)      (右边:AI大,compute-bound)
+```
+
+这张图把"AI 和 ridge point 谁大谁小"这个纯数字比较,翻译成了"这个算子的坐标点落在斜坡上还是平顶上"——斜坡上(左边)意味着这个算子哪怕给它再强的算力也没用,因为它自己都还没跑到能喂饱这块算力的数据搬运速度;平顶上(右边)意味着数据搬运早就绰绰有余,是算力这一侧先见顶。AI 落在 ridge 左边,斜线更低、起决定作用(memory-bound);AI 落在 ridge 右边,水平线更低、起决定作用(compute-bound)。这套公式不是 GPU 专属的——[`roofline_original_minimal.py`](../../learning/gpu-architecture/src/roofline_original_minimal.py) 原样复现了 2009 年原论文里两台真实 AMD 服务器(Opteron X2/X4)的 ridge point,数字量级和 GPU 完全不同(个位数 FLOP/byte,而不是几百),但公式一模一样,说明 roofline 是"任何有独立计算单元和独立内存带宽的系统"通用的性能模型,GPU 只是这套模型今天最常见的应用场景。
 
 **AI 研究/工程场景:** 拿到一块新 GPU 的参数表,第一件事算出它的 ridge point,能立刻建立一个"分界直觉"——不用真的把每个算子都跑一遍 benchmark,先看算子的 AI 落在 ridge 哪一侧,就能预判优化该往哪使劲:AI 远小于 ridge,该做的是减少 HBM 流量(融合算子、量化、改数据布局);AI 远大于 ridge,该做的是提升计算效率(更大的 tile、tensor core 利用率、减少 warp divergence)。这也是为什么 `GPUSpec` 里这个方法特意叫 `ridge_point_bf16` 带精度后缀——换一档精度(FP8/FP4),`peak_FLOPS` 会变,ridge point 也会跟着变,不是 GPU 的单一固定属性。
 
