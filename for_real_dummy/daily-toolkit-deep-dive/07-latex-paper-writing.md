@@ -479,7 +479,7 @@ LaTeX Warning: There were undefined references.
 ```text
 \relax
 \citation{rafailov2023dpo}
-\citation{ouyang2022inststruct}
+\citation{ouyang2022instructgpt}
 \bibstyle{plain}
 \bibdata{references}
 \gdef \@abspage@last{1}
