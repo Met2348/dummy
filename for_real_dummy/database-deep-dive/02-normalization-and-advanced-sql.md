@@ -260,7 +260,7 @@ cur.execute("SELECT id, customer_name, amount FROM orders_denorm")
 assert len(cur.fetchall()) == 2  # 不需要JOIN就拿到了名字
 
 # 反范式化的真实代价: Alice改名,如果漏改了一行,同一个customer_id出现两个不同名字
-# (和02/03类演示的是完全同一种异常,只是这次是"主动选择承担"而不是"设计失误")
+# (和本类知识点2/3演示的是完全同一种异常,只是这次是"主动选择承担"而不是"设计失误")
 cur.execute("UPDATE orders_denorm SET customer_name='Alicia' WHERE id=1")
 conn.commit()
 cur.execute("SELECT DISTINCT customer_name FROM orders_denorm WHERE customer_id=1")

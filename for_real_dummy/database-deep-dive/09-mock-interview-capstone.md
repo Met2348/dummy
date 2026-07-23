@@ -178,6 +178,11 @@ lock = threading.Lock()
 # 变化的库存值——这不是真实bug,只是时序噪声掩盖了bug。用barrier强制全部5个
 # 线程都完成SELECT(即都已建立"remaining=1"这个快照)之后才允许任何一个继续
 # 往下走,这样才是对"5个人同时查到库存=1"这个真实事故场景的准确复现。
+# threading.Barrier(5)是本类第一次用到的新同步原语,和前面几类反复用的threading.Event
+# 不是一回事:Event是"一个信号,等的人可以有任意多个";Barrier(5)是"5个参与者互相等齐"
+# ——每个线程执行到.wait()就阻塞住,直到全部5个线程都到达了各自的.wait(),才会被同时
+# 一起放行继续往下执行。Event表达不出"必须凑齐N个都准备好"这种更强的同步语义,这正是
+# 这里换用Barrier而不是继续用Event的原因。
 snapshot_barrier = threading.Barrier(5)
 
 def claim_coupon_buggy(user_id):

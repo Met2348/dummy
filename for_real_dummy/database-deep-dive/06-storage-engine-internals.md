@@ -557,7 +557,7 @@ print(f"LSM-tree compaction verified: {total_entries_before} raw entries (with d
 
 - Q:compaction的过程中,如果这时候有新的读请求进来,会不会读到不一致的数据?
   - 追问1:compaction通常怎么和正在进行的读写操作并发协调?
-    - 深挖追问(区分度较高):这和B+树的并发控制(比如03/05类讨论过的锁/MVCC机制)相比有什么不同的设计考量(答案方向:LSM-tree的SSTable一旦生成就是不可变的[immutable],compaction创建新的合并后SSTable、原子性地切换"当前有效的SSTable列表"指针,旧SSTable在没有任何读请求还在使用它之前才被真正删除——这种"不可变数据+原子指针切换"的并发策略比B+树"原地修改需要精细锁"的策略简单得多,是LSM-tree架构在并发控制这个维度上相对B+树的一个设计优势,compaction可以完全在后台异步进行,不需要阻塞前台读写)。
+    - 深挖追问(区分度较高):这和B+树的并发控制(比如05类讨论过的锁/MVCC机制)相比有什么不同的设计考量(答案方向:LSM-tree的SSTable一旦生成就是不可变的[immutable],compaction创建新的合并后SSTable、原子性地切换"当前有效的SSTable列表"指针,旧SSTable在没有任何读请求还在使用它之前才被真正删除——这种"不可变数据+原子指针切换"的并发策略比B+树"原地修改需要精细锁"的策略简单得多,是LSM-tree架构在并发控制这个维度上相对B+树的一个设计优势,compaction可以完全在后台异步进行,不需要阻塞前台读写)。
 
 **常见坑**
 
