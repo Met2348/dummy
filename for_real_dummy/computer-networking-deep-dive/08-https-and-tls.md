@@ -147,7 +147,10 @@ assert received == BULK
 print(f"cipher={cipher_name} proto={proto} handshake={  (handshake_done-t0)*1000:.1f}ms transfer(4MiB)={(transfer_done-handshake_done)*1000:.1f}ms")
 
 # 密码套件名称本身就拆解了分工:ECDHE(非对称密钥交换)+ RSA(非对称身份认证) 只用于握手,
-# AES256-GCM(对称密码) 用于上面传输的全部 4 MiB 数据。
+# AES256-GCM(对称密码) 用于上面传输的全部 4 MiB 数据——这个词本身还能再拆一层:
+# AES256 = 用 256 位密钥的 AES 加密算法,负责"加密";
+# GCM = Galois/Counter Mode,一种分组密码工作模式,负责在加密的同时提供"完整性认证"(能检测数据是否被篡改);
+# 二者合起来是"用 AES256 加密 + 用 GCM 模式做认证",AES256-GCM 不是一个不可拆分的整体名词。
 parts = cipher_name.split("-")
 assert "ECDHE" in parts and "RSA" in parts
 assert "AES256" in cipher_name and "GCM" in cipher_name
