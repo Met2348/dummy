@@ -63,6 +63,25 @@ info = scan_cache_dir()   # 扫描本机 ~/.cache/huggingface/hub 目录
 
 **底层机制/为什么这样设计:** Hub 上的每个仓库本质是一个 git 仓库,`revision` 可以是分支名(`main`)、标签、或者具体的 commit sha。缓存系统用 `blobs`(按内容哈希存储实际文件数据,不同 revision 如果有完全相同的文件内容,会共享同一份物理存储,不重复占用磁盘)+ `snapshots`(每个 revision 一个目录,里面是指向 blobs 的符号链接,构成这个 revision 该有的完整文件树)这套结构实现"多版本共存但不重复存储相同内容"。**在 Windows 上,如果没有开发者模式/管理员权限,符号链接创建不了**,缓存系统会退化成直接拷贝文件(而不是链接),仍然能正确工作,只是失去了"内容去重"这个磁盘节省效果。
 
+这套目录结构只用文字描述容易记混,画出来更直接(本机 `TinyLlama` 缓存的真实目录树,`tree`/`ls` 现场核实过):
+
+```
+models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/
+├── refs/
+│   └── main                    ← 纯文本文件,内容就是一个commit sha,
+│                                  "main这个名字现在指向哪个revision"
+├── snapshots/
+│   └── fe8a4ea1.../             ← 以revision(commit sha)命名的目录,一个revision一个
+│       ├── config.json          ← 正常情况(Linux/开了开发者模式的Windows)下是指向
+│       ├── model.safetensors      blobs/里某个文件的符号链接,不是文件本体
+│       └── tokenizer.json
+└── blobs/
+    └── <按文件内容哈希命名>       ← 真正占磁盘字节的地方;不同revision如果某个文件
+                                    内容完全一样,共享同一份blob,不重复存储
+```
+
+本机(Windows,未开开发者模式)现场 `ls` 核实到的真实情况,和知识点 1 的警告文本吻合:`blobs/` 目录里确认是空的(0 个文件),`snapshots/.../config.json` 是一个普通文件(权限位 `-rw-r--r--`,不是符号链接的 `lrwxrwxrwx`)——符号链接建不了之后,缓存系统整个退化成"每个 revision 目录里放真实文件拷贝",不是上面这张理想情况的图,而是"blobs 这一层被跳过,snapshots 直接装满整份拷贝"。
+
 **AI 研究/工程场景:** 长期在同一台机器上做实验,缓存目录会持续增长(尤其是频繁切换不同模型/不同 revision 做对比实验时),理解这套目录结构能让你在磁盘紧张时有针对性地清理(`huggingface-cli delete-cache` 命令,或者直接用 `scan_cache_dir()` 返回的对象编程式地清理),而不是不清楚哪些能删就直接删掉整个缓存目录。
 
 **可运行例子:**
@@ -158,7 +177,7 @@ AutoTokenizer.from_pretrained(MODEL, revision="fe8a4ea1ffedaf415f4da2f062534de36
 
 **一句话:** 不传 `revision` 默认等价于 `revision="main"`——**这意味着同一份代码,如果模型仓库的 `main` 分支后续被作者更新了权重/配置,你下次运行拿到的可能不是当初调试时用的那个版本**,`revision` 参数就是解决这个"版本漂移"问题的机制。
 
-**底层机制/为什么这样设计:** 和 02 类"缓存机制"讲过的 blobs/snapshots 结构直接对应——`revision` 参数最终就是知识点 2 提到的"哪个 revision 目录"这个选择。pin 到具体的 40 位 commit sha 是最严格的锁定方式(这个 sha 对应的文件内容永远不会变,git 的内容寻址特性保证了这一点);pin 到 tag(如果仓库作者发布了版本标签)是稍宽松但依然明确的锁定方式。
+**底层机制/为什么这样设计:** 和 02 类"缓存机制"讲过的 blobs/snapshots 结构直接对应——`revision` 参数最终就是知识点 2 提到的"哪个 revision 目录"这个选择。pin 到具体的 40 位 commit sha 是最严格的锁定方式(这个 sha 对应的文件内容永远不会变,git 的**内容寻址**特性保证了这一点——commit sha 不是一个随便分配的编号,而是根据这次提交的完整内容算出来的哈希值,内容变了,算出来的 sha 必然跟着变,反过来同一个 sha 就必然对应同一份不会再变的内容,这也是知识点 2 缓存目录里 `blobs/` 能"按内容哈希去重"的同一个底层原理);pin 到 tag(如果仓库作者发布了版本标签)是稍宽松但依然明确的锁定方式。
 
 **AI 研究/工程场景:** 写论文/做正式实验报告时,复现性要求你能明确说清楚"用的是这个模型的哪个确切版本"——只写模型名字(不带 revision)在严谨的研究场景下是不够的,如果原作者之后更新了仓库内容,你的实验结果可能变得无法复现,pin 具体 commit sha 是对这个问题的标准解法。
 

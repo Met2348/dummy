@@ -52,6 +52,59 @@ tok.tokenize("unbelievability")  # -> ['▁un', 'bel', 'iev', 'ability']
 
 **底层机制/为什么这样设计:** 传统"整词切分"遇到没在词表里出现过的词(out-of-vocabulary,OOV)只能标 `<unk>`,信息全部丢失;纯字符级切分能覆盖任意词,但序列长度爆炸、语义单元太碎。BPE 是这两者的折中:训练阶段统计语料里所有相邻符号对的共现频率,每轮把频率最高的一对合并成新符号,重复数万次;最终词表里既有常见整词(如`"the"`)也有高频子词片段(如`"ing"`/`"tion"`),生僻词会被拆成几个子词的组合而不是变成 `<unk>`。TinyLlama 用的是 SentencePiece 风格,词首会加一个 `▁`(U+2581)前缀标记"这是一个新词的开始"(把空格也编码进 token 本身,而不是单独处理空格字符)。
 
+**上面这段"统计频率 → 合并最高频对 → 重复"是文字描述,容易停留在抽象层面——下面用一个和 tokenizer 训练同源的最小例子把这套贪心算法真正跑一遍。注意这和下面"可运行例子"不是同一件事:下面的例子是拿 TinyLlama **已经训练好**的 tokenizer 做分词(推理阶段);这里是往前退一步,演示"分词规则本身是怎么被训出来的"(训练阶段):**
+
+```python
+import re
+from collections import Counter
+
+# 玩具语料:词 -> 出现频率(数字刻意选得很小,方便手工核对,不是真实语料)
+corpus = {"low": 5, "lower": 2, "newest": 6, "widest": 3}
+
+# 第0步:每个词拆成"单字符序列 + 词尾标记 </w>"
+# (</w> 用来区分"词尾的t"和"词中的t",否则不同词里的同一个字符会被无差别对待)
+vocab = {" ".join(list(word)) + " </w>": freq for word, freq in corpus.items()}
+
+def get_pair_counts(vocab):
+    """统计当前词表里,每一种"相邻符号对"一共出现了多少次(按词频加权求和)。"""
+    pairs = Counter()
+    for word, freq in vocab.items():
+        symbols = word.split()
+        for i in range(len(symbols) - 1):
+            pairs[(symbols[i], symbols[i + 1])] += freq
+    return pairs
+
+def merge_vocab(pair, vocab):
+    """把词表里所有出现这个相邻对的地方,合并成一个新符号。"""
+    bigram = re.escape(" ".join(pair))
+    pattern = re.compile(r"(?<!\S)" + bigram + r"(?!\S)")
+    merged = "".join(pair)
+    return {pattern.sub(merged, word): freq for word, freq in vocab.items()}
+
+merge_history = []
+for _ in range(4):
+    pairs = get_pair_counts(vocab)
+    best_pair = max(pairs, key=pairs.get)        # 贪心:每轮只合并当前共现频率最高的那一对
+    merge_history.append((best_pair, pairs[best_pair]))
+    vocab = merge_vocab(best_pair, vocab)
+
+assert merge_history[0] == (('e', 's'), 9)         # newest(freq6)和widest(freq3)都含"es",6+3=9,当前最高
+assert merge_history[1] == (('es', 't'), 9)        # 上一轮刚合出的es,紧接着又和t合并
+assert merge_history[2] == (('est', '</w>'), 9)    # est再和词尾标记合并
+assert merge_history[3] == (('l', 'o'), 7)         # 前3轮都在合并newest/widest共有的部分,第4轮才轮到low/lower
+print("OK: 4轮贪心合并顺序 =", merge_history)
+```
+实测(纯 Python 标准库,不依赖任何 tokenizer 库,CPU 瞬间跑完):4 轮合并顺序精确是 `[(('e','s'),9), (('es','t'),9), (('est','</w>'),9), (('l','o'),7)]`——**第一轮该合并谁,看的是整个语料的共现总数,不是单个词内部的频率**:`newest` 和 `widest` 各自只出现 6 次和 3 次,但两个词都含有"es"这个相邻对,`(e,s)` 的共现次数是两者相加的 `9`,比"看起来更直觉"的 `(l,o)`(只在 low/lower 里出现,7 次)更高,所以先被合并——这也是为什么 BPE 训练出来的子词,经常是"横跨多个不同词、但共享某段拼写"的片段,不是按单个词的直觉去猜的。
+
+**这 4 轮合并,`newest` 这个词的符号序列是怎么一步步变短的(第4轮合并的是`l,o`,`newest`里没有这两个字符,不受影响,停在第3轮的结果):**
+```
+n e w e s t </w>          第0步:7个符号(6个字符+1个词尾标记)
+n e w [es] t </w>         第1轮 (e,s)->es  :变成6个符号
+n e w [est] </w>          第2轮 (es,t)->est :变成5个符号
+n e w [est</w>]           第3轮 (est,</w>)->est</w> :变成4个符号
+```
+"BPE 把最高频的字符/子词对反复合并"这句话,具体到 `newest` 这一个词上,就是上面这 3 次"两个相邻符号变成一个新符号"的操作——合并次数越多,这个词被切分成的 token 就越少(越接近"整词"),这正是"常见片段被合并、生僻片段保留原样(拆得更碎)"这个机制的最小可验证例子。真实的 tokenizer 训练(比如 TinyLlama 用的 SentencePiece)在几十万字符的真实语料上重复这个"统计 → 合并"过程数万次,规模不同,但每一轮"找最高频相邻对、合并、重复"的算法逻辑和上面这个玩具版本完全一样。
+
 **AI 研究/工程场景:** 理解 BPE 直接决定了你能不能读懂模型的"有效上下文长度"——同样 1000 个英文单词,不同 tokenizer 编码出的 token 数可能相差 30% 以上,这直接影响 `max_length` 该设多少、API 按 token 计费的账单、以及为什么生僻专业词汇(化学分子名、小众编程语言关键字)会被切得特别碎、模型理解起来更吃力。
 
 **可运行例子:**
@@ -93,7 +146,7 @@ tok_slow = AutoTokenizer.from_pretrained(MODEL, use_fast=False)
 
 **一句话:** 历史上 `PreTrainedTokenizerFast`(基于 Rust `tokenizers` 库,速度快)和 `PreTrainedTokenizer`(纯 Python 实现,速度慢但依赖少)是两条并行的类继承体系;**实测在 5.10.2 版本,`AutoTokenizer` 对 Llama、BERT 这些主流模型,无论 `use_fast=True` 还是 `False`,返回的对象 `is_fast` 都是 `True`**——也就是说对这些常见模型,`use_fast=False` 在当前版本已经不能再产出一个真正的纯 Python 实现了。
 
-**底层机制/为什么这样设计:** 实测确认基类层面区分依然存在——`PreTrainedTokenizer` 现在的真实实现是 `transformers.tokenization_python.PythonBackend`,`PreTrainedTokenizerFast` 是 `transformers.tokenization_utils_tokenizers.TokenizersBackend`,两者是不同的类(`PreTrainedTokenizer is PreTrainedTokenizerFast` 为 `False`)。但对 `LlamaTokenizer`/`BertTokenizer` 这些具体模型类而言,**它们的 `from_pretrained` 在当前版本内部统一走向了 `TokenizersBackend`**(`LlamaTokenizer` 的 MRO 里能看到 `TokenizersBackend`),`use_fast=False` 这个参数对它们已经名存实亡。这反映了 transformers 库的一个真实演进趋势:早期"每个模型手写一个纯 Python tokenizer + 一个对应的 Fast 版本"的双轨维护成本越来越高,库正在朝着"绝大多数模型统一走 Rust 后端,只保留极少数没有 Rust 实现的模型走 Python 后端"收敛。旧教程里"fast 比 slow 快 N 倍"的性能对比 demo,在这些主流模型上已经无法复现——不是 benchmark 写错了,是被对比的对象事实上已经是同一个东西。
+**底层机制/为什么这样设计:** 实测确认基类层面区分依然存在——`PreTrainedTokenizer` 现在的真实实现是 `transformers.tokenization_python.PythonBackend`,`PreTrainedTokenizerFast` 是 `transformers.tokenization_utils_tokenizers.TokenizersBackend`,两者是不同的类(`PreTrainedTokenizer is PreTrainedTokenizerFast` 为 `False`)。但对 `LlamaTokenizer`/`BertTokenizer` 这些具体模型类而言,**它们的 `from_pretrained` 在当前版本内部统一走向了 `TokenizersBackend`**(`LlamaTokenizer` 的 MRO 里能看到 `TokenizersBackend`——MRO 即方法解析顺序,[torch-deep-dive/03](../torch-deep-dive/03-nn-module-internals.md) 已经讲过 Python 按什么顺序在多重继承的父类里依次查找属性/方法,这里直接复用不重复讲),`use_fast=False` 这个参数对它们已经名存实亡。这反映了 transformers 库的一个真实演进趋势:早期"每个模型手写一个纯 Python tokenizer + 一个对应的 Fast 版本"的双轨维护成本越来越高,库正在朝着"绝大多数模型统一走 Rust 后端,只保留极少数没有 Rust 实现的模型走 Python 后端"收敛。旧教程里"fast 比 slow 快 N 倍"的性能对比 demo,在这些主流模型上已经无法复现——不是 benchmark 写错了,是被对比的对象事实上已经是同一个东西。
 
 **AI 研究/工程场景:** 写涉及 tokenizer 选择的代码时,不要再假设 `use_fast=False` 能拿到一个"更兼容但更慢"的降级选项去规避 Rust 后端的某个 bug——至少对主流模型家族,这条退路在新版本里可能已经不存在了,真遇到 Rust 后端的兼容性问题,该去 transformers/tokenizers 的 issue 追踪,而不是切 `use_fast=False` 掩盖问题。
 
@@ -375,7 +428,7 @@ model.resize_token_embeddings(len(tok))
 
 **一句话:** Tokenizer 的词表和模型的 embedding 矩阵是两个独立存储的东西,靠"行数必须一致"这个隐式契约绑在一起,新增 token 必须两边同步更新,只改一边会导致索引越界。
 
-**底层机制/为什么这样设计:** 模型的 embedding 层本质是一个 `[vocab_size, hidden_size]` 的查找表矩阵,`input_ids` 里的每个整数就是这个矩阵的行索引。`add_tokens` 只是往 tokenizer 自己维护的"字符串 → id"映射表里插入新条目,分配的新 id 通常紧接在原 `vocab_size` 后面(本例中 `32000`);但模型的 embedding 矩阵行数还是原来的 `vocab_size`,没人告诉它"词表变大了"。`resize_token_embeddings(new_size)` 做的事情就是把 embedding 矩阵(以及最后输出层的 lm_head,如果没有 tie weights 的话)扩容到新的行数,新增的行用随机初始化或者某种启发式方式填充——**这也是为什么新增 special token 之后,模型对这个新 token 的理解是从随机初始化开始学的,不是自带语义,需要用一定量的微调数据"教会"模型这个新符号该怎么用**。
+**底层机制/为什么这样设计:** 模型的 embedding 层本质是一个 `[vocab_size, hidden_size]` 的查找表矩阵,`input_ids` 里的每个整数就是这个矩阵的行索引。`add_tokens` 只是往 tokenizer 自己维护的"字符串 → id"映射表里插入新条目,分配的新 id 通常紧接在原 `vocab_size` 后面(本例中 `32000`);但模型的 embedding 矩阵行数还是原来的 `vocab_size`,没人告诉它"词表变大了"。`resize_token_embeddings(new_size)` 做的事情就是把 embedding 矩阵(以及最后输出层的 lm_head,如果没有 tie weights 的话——tie weights 即权重共享/权重绑定,让 embedding 层和输出层的 `.weight` 指向同一个 `nn.Parameter` 对象,[torch-deep-dive/03](../torch-deep-dive/03-nn-module-internals.md) 第10点已经讲过这个机制,这里不重复)扩容到新的行数,新增的行用随机初始化或者某种启发式方式填充——**这也是为什么新增 special token 之后,模型对这个新 token 的理解是从随机初始化开始学的,不是自带语义,需要用一定量的微调数据"教会"模型这个新符号该怎么用**。
 
 **AI 研究/工程场景:** 给基座模型新增领域专属的特殊标记(比如给代码模型加 `<FIM_HOLE>` 这类 fill-in-the-middle 标记,或者给对话模型加自定义的工具调用标记)是真实的工程需求,这个"tokenizer 加词表 + 模型 resize embedding + 用数据微调让模型学会新 token 的含义"三部曲缺一不可。
 

@@ -175,7 +175,7 @@ from trl import DPOTrainer, DPOConfig
 trainer = DPOTrainer(model=model, args=dpo_config, train_dataset=preference_dataset)
 # preference_dataset每条数据形如 {"prompt": ..., "chosen": ..., "rejected": ...}
 ```
-和 `SFTTrainer` 平行的另一个 `Trainer` 子类,用于偏好优化训练(DPO)。**本知识点只讲工程接口,不讲 DPO loss 数学**,算法本身见 `learning/dpo-family`。
+和 `SFTTrainer` 平行的另一个 `Trainer` 子类,用于偏好优化训练(DPO)。**本知识点只讲工程接口,不讲 DPO loss 数学**——如果还没接触过 RLHF 三阶段(SFT→RM→PPO)、KL 散度惩罚项、Bradley-Terry 偏好模型这几个 DPO 数学推导依赖的前置概念,建议先读 [`alignment-algorithms-deep-dive/01-dpo-foundations.md`](../alignment-algorithms-deep-dive/01-dpo-foundations.md)——那篇是专门给零基础读者写的完整 preamble+推导,不需要先跳去别处补课;更多 DPO 变体(IPO/KTO/ORPO/SimPO 等)的横向对比见 `learning/dpo-family`。
 
 **一句话:** `DPOTrainer` 同样是 `Trainer` 子类,复用 05 类的全部训练循环基础设施,工程上和 `SFTTrainer` 的核心区别在于**数据格式**——需要成对的"更好的回答(chosen)"和"更差的回答(rejected)",而不是单一的监督目标文本。
 

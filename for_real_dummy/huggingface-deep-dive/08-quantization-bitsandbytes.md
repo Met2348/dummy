@@ -63,6 +63,26 @@ config = BitsAndBytesConfig(
 
 **底层机制/为什么这样设计:** 4bit 存储的权重不能直接参与浮点矩阵乘法运算,每次前向计算时需要先把 4bit 值反量化(dequantize)回一个可计算的浮点精度——这就是 `bnb_4bit_compute_dtype` 的作用域,它和"权重在显存里以什么格式静止存储"是分开配置的两件事。`bnb_4bit_use_double_quant=True`(双重量化)是对"量化过程本身产生的缩放系数(scale)"再做一次量化压缩——量化不是无损的,需要额外存储一些元数据(比如每个block的缩放系数)才能正确反量化,这些元数据本身也占空间,双重量化就是进一步压缩这部分元数据的开销,在 QLoRA 论文里被证明能省下有意义的显存(尤其在大模型上更明显)。
 
+"打包"和"block"这两个词只用文字容易一晃而过,画出来更直接:
+
+```
+一个 uint8 字节(8 bits)打包两个 4bit 数值(knowledge point可运行例子里q_proj.weight.dtype
+是torch.uint8、但语义上是"4bit"量化的原因就在这里):
+┌────────────────┬────────────────┐
+│  高4位(bit7~4)  │  低4位(bit3~0)  │
+│   数值 A(0~15)  │   数值 B(0~15)  │
+└────────────────┴────────────────┘
+
+"每个block的缩放系数"里的block:整个权重矩阵不是共用一个缩放系数,而是打平成一维后
+按固定大小(bitsandbytes/QLoRA默认block_size=64)切成一段一段:
+[ w0 ... w63 | w64 ... w127 | w128 ... w191 | ... ]
+    block 0        block 1         block 2
+每一段各自算一个绝对值最大值(absmax)当自己的缩放系数——避免"一个数值尺度特别大的
+block,把缩放系数拉得很大,连累其余数值尺度小的block在反量化后精度被稀释掉"这个问题。
+```
+
+block-wise absmax 量化的具体代码实现(`nf4_quantize`)、以及"block 越小精度越高但元数据开销越大"这个 trade-off 的真实误差对比数字,见 [peft-deep-dive/02-quantized-lora.md 知识点1](../peft-deep-dive/02-quantized-lora.md)——这里只讲 `BitsAndBytesConfig` 这一层暴露出来的参数,block-wise 量化本身的数学和代码在那篇里已经讲透,不重复。
+
 **AI 研究/工程场景:** 09 类 QLoRA 微调的核心配置就是这几个参数,`bnb_4bit_compute_dtype=torch.bfloat16` 这个选择直接关系到 00-roadmap.md 环境声明里"必须bf16、不留fp32"这条纪律——量化+训练场景下,计算精度的选择同样受那条纪律约束。
 
 **可运行例子:**
