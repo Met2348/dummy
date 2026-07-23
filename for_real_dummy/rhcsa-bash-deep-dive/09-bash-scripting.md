@@ -133,7 +133,25 @@ until [ cond ]; do ...; done               # 条件为真才停止(和 while 相
 
 **为什么 RHCSA 真考 / 生产会用到:** 批量处理文件、逐行读日志、轮询等待服务启动完成,都是 RHCSA 实操和真实运维里的高频场景,几乎每个自动化脚本都会用到至少一种循环。
 
-**从最容易犯错的做法讲起:** 用 `while read line` 逐行读文件,最容易忘的是要写 `IFS= read -r line`——不加 `IFS=` 会吃掉每行首尾的空白,不加 `-r` 会把行内的反斜杠当转义符处理,悄悄改变数据内容:
+**插一句,`read` 命令是什么(下面这条"最容易犯错的做法"会直接用到,这里先建立基础,不然会不知道 `IFS=`/`-r` 到底在修正什么):** `read` 是 bash 内建命令,作用是"从标准输入读一行,存进指定的变量里"——`while read line; do ...; done < file` 这个组合的意思是:反复执行"读一行到 `line` 变量、跑一遍循环体",直到文件读完(`read` 读到文件末尾会返回非 0 状态码,`while` 因此自然停止,不需要另外写判断结束的条件)。**问题在于 `read` 默认的"读一行"这个动作,并不是原样照抄这一行**——它会按 `IFS`(Internal Field Separator,内部字段分隔符,默认包含空格/Tab/换行)的规则自动裁剪掉行首尾的空白,同时默认还会把反斜杠 `\` 当成转义字符处理、吃掉下一个字符的原始含义。这两个默认行为在逐行处理文件内容时几乎从来都不是你想要的效果(谁都不希望内容被悄悄改写),`IFS=`(清空分隔符,不做任何裁剪)和 `-r`(raw,不处理转义)就是专门用来关掉这两个默认行为的开关。
+
+**从最容易犯错的做法讲起:** 用 `while read line` 逐行读文件,最容易忘的是要写 `IFS= read -r line`——不加 `IFS=` 会吃掉每行首尾的空白,不加 `-r` 会把行内的反斜杠当转义符处理,悄悄改变数据内容,不是猜测,本机现场对比过具体差异:
+```bash
+printf '  a leading-space line  \n' > /tmp/read_demo.txt
+while read line; do echo "[无 IFS=]      [$line]"; done < /tmp/read_demo.txt
+while IFS= read -r line; do echo "[IFS= read -r] [$line]"; done < /tmp/read_demo.txt
+# [无 IFS=]      [a leading-space line]        —— 首尾空格被悄悄吃掉了
+# [IFS= read -r] [  a leading-space line  ]    —— 原样保留,这才是文件里真实的内容
+
+printf 'a\\tb\n' > /tmp/read_demo2.txt    # printf 的格式串里 \\ 才是一个字面反斜杠,这里存进文件的是字面的反斜杠+t两个字符,不是真的Tab
+while read line2; do echo "[无 -r] [$line2]"; done < /tmp/read_demo2.txt
+while IFS= read -r line2; do echo "[有 -r] [$line2]"; done < /tmp/read_demo2.txt
+# [无 -r] [atb]     —— 反斜杠被当成转义符处理掉,\t 变成了 t,内容被悄悄改写
+# [有 -r] [a\tb]    —— 原样保留
+
+rm -f /tmp/read_demo.txt /tmp/read_demo2.txt
+```
+本机实测(WSL2 Rocky Linux 和 Git Bash 交叉验证,两边结果完全一致——这是 bash 语言本身的行为,和具体发行版无关):上面注释里的输出是现场跑出来的真实结果,不是预期描述。日常写逐行处理脚本,`while` 循环体里能正确统计行数(下面这段是本节原本就有的例子,现在建立在"为什么必须这么写"的基础上了):
 ```bash
 printf 'line1\nline2\nline3\n' > /tmp/lines.txt
 count=0

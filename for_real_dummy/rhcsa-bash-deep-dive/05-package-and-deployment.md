@@ -27,7 +27,20 @@ dnf history info <id>       # 查看某次事务的具体改动
 
 **为什么 RHCSA 真考 / 生产会用到:** RHCSA 官方技能列表明确要求"安装/卸载软件包和包组",几乎每道涉及部署服务的大题第一步都是 `dnf install`;生产环境的补丁管理、回滚事故变更也都要靠 `dnf history` 而不是凭记忆手动反向操作。
 
-**从最容易犯错的做法讲起:** 拿到一个来源不明的 `.rpm` 文件,图省事直接 `rpm -ivh pkg.rpm` 安装——`rpm` 本身**只做依赖检查,不做依赖解决**,遇到依赖缺失会直接拒绝安装并报错退出,不会自动去仓库里找缺的部分。本机用真实的 `tcpdump` 包做了这组对比(`tcpdump` 依赖 `libpcap`,测试前用 `rpm -q libpcap` 确认过当时确实没装):
+**从最容易犯错的做法讲起:** 拿到一个来源不明的 `.rpm` 文件,图省事直接 `rpm -ivh pkg.rpm` 安装——`rpm` 本身**只做依赖检查,不做依赖解决**,遇到依赖缺失会直接拒绝安装并报错退出,不会自动去仓库里找缺的部分。本机用真实的 `tcpdump` 包做了这组对比(`tcpdump` 依赖 `libpcap`,测试前用 `rpm -q libpcap` 确认过当时确实没装),依赖关系画出来是这样一条链:
+
+```
+你只请求安装:  tcpdump
+                  │
+                  │ tcpdump 运行需要 libpcap.so.1
+                  ▼
+               libpcap        ← dnf 自动发现并加入安装计划(第1层依赖)
+                  │
+                  │ 本机这个 libpcap 构建时链接了 InfiniBand 抓包支持
+                  ▼
+              libibverbs       ← dnf 继续往下追一层,同样自动加入(第2层/间接依赖)
+```
+`rpm -ivh` 只检查"tcpdump 需要 libpcap.so.1"这一条,发现缺了就直接拒绝安装,不会往下追、也不会自动去仓库里补;`dnf` 才会把整条链路自动走完,这就是下面命令实际做的事:
 
 ```
 $ dnf download tcpdump          # 只下载 tcpdump 自己,不下载依赖
@@ -657,6 +670,19 @@ assert_ok bash -c 'timeout 30 podman run --rm quay.io/podman/hello 2>&1 | grep -
 assert_eq "$(podman ps -a --format '{{.Names}}' | wc -l)" "0"
 ```
 本机实测:全部 `assert_eq`/`assert_ok` 输出 `OK`。`docker.io` 探测的真实报错是 `dial tcp 154.83.15.20:443: i/o timeout`(重试 3 次后放弃),`quay.io`/`registry.access.redhat.com` 探测均正常返回 HTTP 状态码——这是本机网络环境对不同镜像仓库连通性不同导致的,不是 podman 本身的问题,如实记录、换一个确认可达的仓库继续验证,而不是被卡住。
+
+**在深入诊断之前:rootless 依赖的"user namespace + UID 映射"是什么(下面马上会出现 `subuid`/`subgid`/`newuidmap` 这几个词,本篇之前从未提到过,这里先补上,不然后面的报错和排查过程会看不懂):**
+
+Linux 内核的 **user namespace**(用户命名空间)允许一个进程在"自己的命名空间内部"看到一套独立的 UID 编号——同一个真实账号(比如下面新建的 `rhcsa05podman`),在容器里可以显示成 UID 0(也就是"容器内的 root"),但内核在幕后把这个"容器内 UID 0"**映射**到宿主机上一个完全不同、真正没有特权的 UID。容器进程"自认为是 root"、能在容器内部为所欲为,但对宿主机内核来说它其实还是那个毫无特权的普通账号——这就是 rootless 容器"容器里是 root,宿主机上什么特权都没有"这套安全模型的核心机制:
+
+```
+容器进程视角(namespace 内部看到的 UID):     宿主机内核视角(真正的 UID):
+      UID 0(容器内的"root")     ←映射→      UID 524288(rhcsa05podman 本人,宿主机上毫无特权)
+      UID 1000(容器内某个用户)   ←映射→      UID 525288(= 524288 + 1000)
+      ...最多可以映射 65536 个连续 UID...
+```
+
+`/etc/subuid`(subordinate UID,"从属 UID")就是给每个被允许创建 user namespace 的宿主机用户,预先分配一段专属的、和其他用户不重叠的 UID 区间——下面 `rhcsa05podman:524288:65536` 的意思是"这个用户被授权把 524288~589823(524288+65536-1)这 65536 个宿主机 UID,映射进它创建的 user namespace 里使用";`/etc/subgid` 是完全相同的机制,只是针对 GID。真正执行"把这段 UID 区间写进某个 namespace 的映射表"这个动作的程序,就是下面报错信息里的主角 `newuidmap`/`newgidmap`——出于安全考虑,普通用户不能随便把任意 UID 映射进自己创建的 namespace,必须通过这两个专门的、需要额外特权的小工具来做,这也是为什么它们的权限位是否正常(setuid/文件能力)会直接决定 rootless 容器能不能跑起来。
 
 **rootless 部分——现场真实失败,附完整诊断过程(这是本项最有价值的部分,请完整阅读):**
 
