@@ -123,7 +123,7 @@ def run_scenario():
         elapsed = time.perf_counter() - start
         with finished_lock:
             still_pending = [n for n in all_request_names if n not in finished_names]
-        if elapsed > 0.5:  # SLA: 0.5秒还没处理完就判定为"疑似卡住",上游触发重试(真实网关/客户端的常见行为)
+        if elapsed > 0.5:  # SLA(Service Level Agreement,服务承诺的响应时间上限):0.5秒还没处理完就判定为"疑似卡住",上游触发重试(真实网关/客户端的常见行为)
             for name in still_pending:
                 retry_queue.append({'retry_of': name, 'payload': bytearray(64 * 1024)})  # 每次重试的追踪对象占64KB
             dispatch_log.append((round(elapsed, 2), len(still_pending), len(retry_queue), sum(len(r['payload']) for r in retry_queue)))
