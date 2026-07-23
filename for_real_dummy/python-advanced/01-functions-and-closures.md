@@ -226,6 +226,45 @@ assert counter() == 2
 assert counter() == 3        # count 被"记住"了,一直在累加
 ```
 
+**"记住"这两个字具体在说什么,一步步拆开看:** `count` 不是被"复制"进 `increment` 里的。`make_counter()` 每执行一次,就在内存里开一个只属于**这一次调用**的"格子"存 `count`;`increment` 记住的是**这个格子的引用**,不是格子里当时的值。正常情况下,`make_counter()` 函数体跑完之后,它的局部变量应该被销毁——但因为 `increment` 还"抓着"这个格子不放,Python 就不会回收它。这正是"闭包"这个名字的含义:**内层函数把外层的变量"包"在自己身上,带着一起走。**
+
+| 步骤 | 发生了什么 | `count` 这个格子里的值 | `counter` 指向谁 |
+|---|---|---|---|
+| `counter = make_counter()` | `make_counter()` 执行一次:新建一个"格子"存 `count = 0`;定义 `increment`,它的闭包抓住了这个格子的引用;函数返回 `increment`,格子因为被抓住而没有被销毁 | `0` | `increment`(绑定着这一次调用产生的格子) |
+| 第 1 次 `counter()` | 执行到 `nonlocal count; count += 1`——`nonlocal` 声明"这里改的就是外层那个格子",不是新建一个局部变量 | `1` | 同一个 `increment`,格子被原地改了 |
+| 第 2 次 `counter()` | 同上,再改一次同一个格子 | `2` | 同一个 `increment` |
+| 第 3 次 `counter()` | 同上 | `3` | 同一个 `increment` |
+
+这不是靠脑补的比喻——Python 真的把这个"格子"实现成了一个具体对象,叫 `cell`,可以从函数对象的 `__closure__` 属性上直接读出来,眼见为实:
+
+```python
+def make_counter():
+    count = 0
+    def increment():
+        nonlocal count
+        count += 1
+        return count
+    return increment
+
+counter = make_counter()
+cell = counter.__closure__[0]     # increment 只抓了一个自由变量,所以这个 tuple 里只有一个 cell
+assert cell.cell_contents == 0    # 还没调用过,格子里是初始值 0
+
+counter()
+assert cell.cell_contents == 1    # 调用之后,格子里的值被原地改了——从函数对象外部也能读到这次修改
+
+# 关键点:格子是"这一次 make_counter() 调用"独有的,不是所有 increment 共享同一个格子
+counter_a = make_counter()
+counter_b = make_counter()
+counter_a()
+cell_a = counter_a.__closure__[0]
+cell_b = counter_b.__closure__[0]
+assert cell_a is not cell_b       # 两次 make_counter() 调用,产生的是两个不同的格子
+assert cell_a.cell_contents == 1 and cell_b.cell_contents == 0   # 互不干扰
+print("两个 counter 各自抓着自己的格子,互不影响:", cell_a.cell_contents, cell_b.cell_contents)
+```
+下面"可运行例子"里 `counter_a`/`counter_b` 互不干扰,根本原因就是这张表 + 这段 `cell` 验证:每次调用 `make_counter()` 都会新开一个格子,两个 `increment` 分别抓住自己的那一个,不会串。
+
 **AI 研究代码里的真实例子:** 用闭包工厂生成 `forward hook`,捕获指定层的中间激活值——这是 PyTorch 里用 `register_forward_hook` 调试/可视化中间层输出的标准写法:
 ```python
 import torch
@@ -271,7 +310,7 @@ print("counter_a 走到 2,counter_b 还在 1,两者互不干扰")
 
 **常见坑:**
 
-**1. 经典坑:闭包捕获的是变量本身(引用),不是创建那一刻的值。** for 循环里创建多个 `lambda`,它们全部指向同一个循环变量,循环结束后这个变量停在最后一个值,所有闭包读到的都是这个最终值:
+**1. 经典坑:闭包捕获的是变量本身(引用),不是创建那一刻的值。** 用上面的"格子"类比:`for` 循环里的循环变量 `i` 全程只有**一个格子**,不是每轮循环各开一个新格子——所以循环里创建多个 `lambda`,它们抓住的是同一个格子,循环结束后这个格子停在最后一个值,所有闭包读到的都是这个最终值:
 ```python
 funcs = []
 for i in range(3):

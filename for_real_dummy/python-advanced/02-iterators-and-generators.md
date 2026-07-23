@@ -266,6 +266,48 @@ count_up_to 耗尽后正确触发 StopIteration
 
 注意"函数体开始执行"这行打印是在 `next(g)` 被调用之后才出现的,不是在 `noisy_gen()` 调用的那一刻——这就是"调用生成器函数不会立即执行"的直接证据。
 
+**"完整记住当前所有局部变量和执行到了哪一行"具体是什么状态,拿 `count_up_to` 逐次拆开看:**
+
+| 调用 | 函数体执行到哪一行 | 暂停前 `current` 的值 | 交出(yield)的值 | 生成器对象状态 |
+|---|---|---|---|---|
+| `gen = count_up_to(3)` | 还没执行任何一行(调用生成器函数只是造出生成器对象,不执行函数体——上面已经用 `noisy_gen` 验证过这一点) | 不存在(还没跑到 `current = 0` 这一行) | (无) | 刚创建,尚未启动 |
+| 第 1 次 `next(gen)` | 跑到 `current = 0`,进入 `while`,执行到 `yield current`,暂停在这一行 | `0` | `0` | 暂停("挂起"),`current` 连同"暂停在 `yield` 这一行"这个执行位置一起被保留 |
+| 第 2 次 `next(gen)` | 从上次暂停处接着跑:`current += 1` → `1`,回到 `while` 判断,再次执行到 `yield current`,暂停 | `1` | `1` | 暂停,`current=1` |
+| 第 3 次 `next(gen)` | 同上一行的模式,`current` 变成 `2` | `2` | `2` | 暂停,`current=2` |
+| 第 4 次 `next(gen)` | 从暂停处恢复:`current += 1` → `3`,`while 3 < 3` 为假,循环结束,函数体自然运行完 | `3`(但从未被 `yield` 出来) | 无——触发 `StopIteration` | 已耗尽("关闭") |
+
+和第 1 节手写的 `CountUpTo` 类对比一下,这张表在说的事情就很直白了:`CountUpTo.__next__` 里 `self.current` 是显式存在实例属性上的,你自己写代码把它存下来的;这里的 `current` 只是生成器函数体里一个普通的**局部变量**,但生成器对象在背后帮你把这个局部变量原地保留了下来,没有像普通函数那样一执行完就被销毁——这就是"暂停"和"恢复"的全部含义:**保留局部变量 + 记住执行到了哪一行代码**,没有更多魔法。
+
+这也不是只能靠脑补的比喻——生成器对象上真的挂着一个 `gi_frame`(执行帧),局部变量就存在这个帧的 `f_locals` 里,暂停时不会消失,生成器耗尽后才会被释放,眼见为实:
+
+```python
+def count_up_to(limit):
+    current = 0
+    while current < limit:
+        yield current
+        current += 1
+
+gen = count_up_to(3)
+assert gen.gi_frame is not None                    # 还没开始跑,但生成器对象已经带着一个"帧"存在了
+assert "current" not in gen.gi_frame.f_locals       # 帧还没执行到 current = 0 这一行,这个局部变量还不存在
+assert gen.gi_frame.f_locals["limit"] == 3          # 参数在生成器创建时就已经绑定好了
+
+next(gen)
+assert gen.gi_frame.f_locals["current"] == 0        # 暂停在第一次 yield 处,current 这个局部变量真的被保留了下来
+
+next(gen)
+assert gen.gi_frame.f_locals["current"] == 1        # 恢复执行、current += 1、再次暂停,值被原地更新了
+
+next(gen)
+try:
+    next(gen)
+    assert False, "第 4 次 next() 应该触发 StopIteration"
+except StopIteration:
+    pass
+assert gen.gi_frame is None                          # 生成器耗尽后,帧被释放,不再持有任何局部变量
+print("生成器的帧(gi_frame)在暂停期间真的保留着局部变量,耗尽后才被释放——不是比喻,是可以现场读出来的事实")
+```
+
 再验证一次逐行读文件的例子(用临时文件模拟"大文件",本机实测跑通):
 ```python
 import tempfile, os

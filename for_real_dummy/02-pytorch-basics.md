@@ -151,6 +151,9 @@ out = layer(x)           # 调用 layer(x) 会自动执行 forward(x)
 print(out.shape)         # torch.Size([3, 2])
 ```
 
+**为什么必须用 `nn.Parameter` 包一层，不能直接写 `torch.randn(..., requires_grad=True)`？**
+两者在"能不能算梯度"这件事上没有区别——区别在于"模型认不认识它是自己的参数"。`nn.Module.__init__()`（靠 `super().__init__()` 触发）内部会维护一份"这个模型都有哪些参数"的登记表；只有被 `nn.Parameter` 包过的 tensor，赋值给 `self.xxx` 时才会自动登记进这张表，而 `model.parameters()`（`torch.optim.Adam(model.parameters(), ...)` 依赖的正是这个）只会遍历这张登记表，不会去扫描每个属性判断"这个是不是一个会算梯度的 tensor"。如果偷懒直接写 `self.weight = torch.randn(4, 2, requires_grad=True)`，这个 tensor 依然会正确参与反向传播、算出梯度（`requires_grad`/`.backward()` 本身不关心你有没有用 `nn.Parameter` 包装），但它**不会出现在 `model.parameters()` 里**——优化器压根不知道有这个参数存在，`optimizer.step()` 永远不会更新它，而且不会有任何报错或警告，训练能正常跑、loss 甚至可能还在下降（其它参数在正常更新），只有这一个参数在"陪跑"，是非常隐蔽的坑。记住一条规矩就够了：**模型自己的可训练参数，只要是直接赋给 `self.xxx` 的 tensor，一律用 `nn.Parameter` 包起来。**
+
 **C 类比：**
 `nn.Module` 就像 C 里的 struct + 函数指针：
 - 成员变量（`weight`、`bias`）= struct 里的字段

@@ -22,11 +22,11 @@
 
 | # | 分类 | 文件 | 知识点数 | 状态 |
 |---|------|------|---------|------|
-| 01 | 推导式与函数式基础 | [01-comprehensions-and-functional.md](01-comprehensions-and-functional.md) | 7 | ✅ 已完成(已验证,44个代码块独立子进程复验全部通过) |
-| 02 | 解包与迭代惯用法 | [02-unpacking-and-iteration.md](02-unpacking-and-iteration.md) | 7 | ✅ 已完成(已验证,53个代码块独立子进程复验全部通过) |
-| 03 | 容器与标准库惯用法 | [03-containers-and-stdlib.md](03-containers-and-stdlib.md) | 7 | ✅ 已完成(已验证,含1处多级排序手算修正+6处非连续引用改text围栏) |
-| 04 | 字符串与现代语法惯用法 | [04-strings-and-modern-syntax.md](04-strings-and-modern-syntax.md) | 5 | ✅ 已完成(已验证,含1处match-case编译期陷阱发现) |
-| 05 | 进阶深度追加:5 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 5案例(不计入26) | ✅ 已完成(已验证,10/10代码块独立进程复验全部通过;基于dsa-deep-dive/peft-deep-dive已验证的5条追问轴线撰写——①EAFP vs LBYL到TOCTOU竞态真实复现(工程约束递增轴核心;用threading.Event精确卡时机分别复现文件版和dict版竞态,LBYL检查通过后被并发删除真实崩溃,EAFP始终优雅处理)、②推导式vs生成器表达式的规模与复用取舍(规模递增轴核心;tracemalloc实测250,000行日志场景list比生成器多耗398.7倍峰值内存,并验证生成器二次消费静默返回空列表这一决策依据)、③namedtuple vs dataclass"更省内存"结论的前提(决策依据追问轴核心;现场证伪单实例sys.getsizeof朴素外推的2.25倍预期,200,000条记录实测聚合差距仅13.7%,溯源到CPython key-sharing dict优化(PEP 412)并现场构造"打破key-sharing"对照组验证内存反弹2.98倍,另附dataclass(slots=True)反超namedtuple 9.1%、可哈希性与可变性互斥两条新发现)、④"pythonic化性能声称"诚实拆解(真实性验证轴核心;timeit分环节实测deque/join两处为12.7x/23.7x数量级差异,推导式/defaultdict两处仅1.11x/1.33x基本不变,证明"pythonic不等于fast")、⑤sorted key=多级排序到functools.cmp_to_key(方案批判迭代轴核心;现场构造两趟排序顺序搞反的具体错误结果、验证key=函数签名无法表达头对头这类成对关系、实测cmp_to_key比key=慢7.3倍的真实代价)) |
+| 01 | 推导式与函数式基础 | [01-comprehensions-and-functional.md](01-comprehensions-and-functional.md) | 7 | ✅ 已完成(已验证,44个代码块独立子进程复验全部通过;2026-07-24 P/T/L/V/D 可读性审计:通读未发现需修复的 gap,未改动) |
+| 02 | 解包与迭代惯用法 | [02-unpacking-and-iteration.md](02-unpacking-and-iteration.md) | 7 | ✅ 已完成(已验证,53个代码块独立子进程复验全部通过;2026-07-24 P/T/L/V/D 可读性审计:通读未发现需修复的 gap,未改动) |
+| 03 | 容器与标准库惯用法 | [03-containers-and-stdlib.md](03-containers-and-stdlib.md) | 7 | ✅ 已完成(已验证,含1处多级排序手算修正+6处非连续引用改text围栏;2026-07-24 P/T/L/V/D 可读性审计:通读未发现需修复的 gap,未改动) |
+| 04 | 字符串与现代语法惯用法 | [04-strings-and-modern-syntax.md](04-strings-and-modern-syntax.md) | 5 | ✅ 已完成(已验证,含1处match-case编译期陷阱发现;2026-07-24 P/T/L/V/D 可读性审计:通读未发现需修复的 gap,未改动) |
+| 05 | 进阶深度追加:5 个多级追问链案例 | [05-advanced-interview-depth.md](05-advanced-interview-depth.md) | 5案例(不计入26) | ✅ 已完成(已验证,10/10代码块独立进程复验全部通过;基于dsa-deep-dive/peft-deep-dive已验证的5条追问轴线撰写——①EAFP vs LBYL到TOCTOU竞态真实复现(工程约束递增轴核心;用threading.Event精确卡时机分别复现文件版和dict版竞态,LBYL检查通过后被并发删除真实崩溃,EAFP始终优雅处理)、②推导式vs生成器表达式的规模与复用取舍(规模递增轴核心;tracemalloc实测250,000行日志场景list比生成器多耗398.7倍峰值内存,并验证生成器二次消费静默返回空列表这一决策依据)、③namedtuple vs dataclass"更省内存"结论的前提(决策依据追问轴核心;现场证伪单实例sys.getsizeof朴素外推的2.25倍预期,200,000条记录实测聚合差距仅13.7%,溯源到CPython key-sharing dict优化(PEP 412)并现场构造"打破key-sharing"对照组验证内存反弹2.98倍,另附dataclass(slots=True)反超namedtuple 9.1%、可哈希性与可变性互斥两条新发现)、④"pythonic化性能声称"诚实拆解(真实性验证轴核心;timeit分环节实测deque/join两处为12.7x/23.7x数量级差异,推导式/defaultdict两处仅1.11x/1.33x基本不变,证明"pythonic不等于fast")、⑤sorted key=多级排序到functools.cmp_to_key(方案批判迭代轴核心;现场构造两趟排序顺序搞反的具体错误结果、验证key=函数签名无法表达头对头这类成对关系、实测cmp_to_key比key=慢7.3倍的真实代价));2026-07-24 P/T/L/V/D 可读性审计:通读未发现需修复的 gap,未改动——进阶案例定位本就假设读者已掌握 01-04,信息密度符合该定位 |
 
 **合计:26 个知识点,4 篇 + 1 篇进阶深度追加(5 个案例,不计入 26),全部完成并独立验证。**
 
