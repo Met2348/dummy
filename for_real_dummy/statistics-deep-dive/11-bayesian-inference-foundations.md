@@ -56,10 +56,48 @@ observed_freq = k_success / n_trials
 assert prior_mean < posterior_mean < observed_freq, \
     f"posterior mean should sit between prior mean and observed frequency: {prior_mean} < {posterior_mean:.4f} < {observed_freq}"
 
+# 额外验证"形状"本身的变化(不只是均值这一个数字): 后验应该比先验更"集中"(峰值更高), 且峰值位置往观测频率方向偏移
+theta_ticks = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+prior_ticks = beta_pdf(theta_ticks, alpha_prior, beta_prior)
+posterior_ticks = beta_pdf(theta_ticks, alpha_post, beta_post)
+assert prior_ticks.max() < posterior_ticks.max(), "posterior peak density should be taller (more concentrated) than the prior's"
+assert theta_ticks[np.argmax(posterior_ticks)] > theta_ticks[np.argmax(prior_ticks)], \
+    "posterior peak should sit at a larger theta than the prior peak (pulled toward the observed frequency)"
+
 print(f"analytical posterior = Beta({alpha_post}, {beta_post}), mean = {posterior_mean:.4f}")
 print(f"prior mean = {prior_mean}, observed freq = {observed_freq}, posterior mean = {posterior_mean:.4f}")
 print(f"max diff between numerical grid posterior and analytical pdf = {max_diff:.2e}")
+print(f"prior density at theta=0.1..0.9:     {np.round(prior_ticks, 3).tolist()}")
+print(f"posterior density at theta=0.1..0.9: {np.round(posterior_ticks, 3).tolist()}")
 ```
+
+把上面`prior_ticks`/`posterior_ticks`这次真实运行的密度值画成柱状图(柱长∝密度值,数字和上面print的完全对应),"后验更集中、且往观测频率方向偏移"这句话对应的形状变化一眼就能看到:
+
+```
+先验 Beta(2,2) —— 以theta=0.5对称, 比较扁平:
+  theta=0.1 |█████                (0.54)
+  theta=0.2 |██████████           (0.96)
+  theta=0.3 |█████████████        (1.26)
+  theta=0.4 |██████████████       (1.44)
+  theta=0.5 |███████████████      (1.50)  ← 先验峰值在0.5
+  theta=0.6 |██████████████       (1.44)
+  theta=0.7 |█████████████        (1.26)
+  theta=0.8 |██████████           (0.96)
+  theta=0.9 |█████                (0.54)
+
+后验 Beta(17,7) —— 峰值明显更高更窄, 且整体偏移到右边:
+  theta=0.1 |                     (0.00)
+  theta=0.2 |                     (0.00)
+  theta=0.3 |                     (0.00)
+  theta=0.4 |                     (0.03)
+  theta=0.5 |████                 (0.41)
+  theta=0.6 |████████████████████ (1.98)
+  theta=0.7 |██████████████████████████████████████████ (4.16)  ← 后验峰值在0.7附近, 比先验峰值高得多
+  theta=0.8 |███████████████████████████████ (3.09)
+  theta=0.9 |███                  (0.32)
+```
+
+先验是围绕0.5对称的"扁平"曲线(观测数据之前,认为θ在0和1之间怎么取都差不多可能);后验的峰又高又窄、还整体挪到了观测频率0.75附近——密度峰值从1.50涨到4.16,说明后验对θ的"确定程度"比先验高得多,这正是"用20次观测里15次成功这份数据,把一个模糊的先验信念收紧成一个更精确的后验信念"这句话在图形上的样子。
 
 **面试怎么问+追问链**(决策依据追问轴):
 - Q:"为什么贝叶斯更新用Beta先验配二项似然,后验还是Beta分布,这是巧合吗?"
@@ -68,7 +106,7 @@ print(f"max diff between numerical grid posterior and analytical pdf = {max_diff
 
 **常见坑:**
 - 把"后验参数是α+k, β+n-k"这个公式当成需要死记硬背的黑箱公式,而不理解它是"先验的核×似然的核,合并同类项"这个直接代数运算的自然结果。
-- 混淆先验Beta(α,β)本身和观测到的成功、失败次数在更新公式里的角色——一个常见的记忆技巧是把先验Beta(α,β)理解成"虚拟的α-1次先验成功和β-1次先验失败",这样后验就是"真实数据和虚拟先验数据直接相加"这么直观。
+- 混淆先验Beta(α,β)本身和观测到的成功、失败次数在更新公式里的角色——一个常见的记忆技巧是把先验Beta(α,β)直接理解成"虚拟的α次先验成功和β次先验失败"(注意不是α-1、β-1:后验参数是α+k、β+(n-k),只有虚拟计数直接用α、β本身,"真实数据和虚拟先验数据直接相加"才严格成立,减1后再相加会和上面的后验公式对不上)。
 
 ---
 
@@ -354,6 +392,23 @@ P(病\|阳性) = P(阳性\|病)P(病) / [P(阳性\|病)P(病)+P(阳性\|无病)P
 ≈ 0.0902
 
 即使敏感度和特异度都高达99%,一个检测呈阳性的人,真正患病的概率也只有约9%——绝大多数阳性结果其实是假阳性,原因是"无病人群基数极大(99.9%的人)",即使假阳性率只有1%,乘以巨大的无病人群基数,产生的假阳性绝对人数依然远超"有病人群里的真阳性人数"。
+
+把这些条件概率换算成"自然频数"(natural frequency,直接数人头,不算比例)画成一棵树,比死记贝叶斯公式直观得多——按基础比率精确拆分1,000,000人(期望人数,和下面代码里`analytical_ppv`的计算完全对应):
+
+```
+1,000,000 人
+├─ 1,000 人真的有病 (基础比率0.1%)
+│    ├─ 990 人检测阳性 (敏感度99%)   ← 真阳性
+│    └─  10 人检测阴性
+└─ 999,000 人没病
+     ├─ 9,990 人检测阳性 (假阳性率1%)  ← 假阳性
+     └─ 989,010 人检测阴性
+
+检测阳性总人数 = 990(真阳性) + 9,990(假阳性) = 10,980 人
+P(有病 | 阳性) = 990 / 10,980 ≈ 0.0902
+```
+
+树的两条"阳性"分支粗细差距一眼就能看出来问题在哪:"有病"这条分支总共只有1,000人打底,再乘99%也就990人阳性;"没病"这条分支有999,000人打底,哪怕只漏过1%,假阳性绝对人数(9,990)还是990的10倍——问题不出在检测准不准,出在"没病"这个分支的人群基数从一开始就压倒性地大。
 
 **底层机制/为什么这样设计:** 为什么人的直觉在这类问题上系统性地失灵?直觉倾向于只关注"检测方法本身有多准"(P(阳性\|病)这个条件概率),而贝叶斯定理要求的是反过来的条件概率P(病\|阳性),两者之间的转换必须通过基础比率P(病)这个因子——人类直觉天然不擅长在头脑中正确执行贝叶斯定理这种"反转条件概率方向"的运算,这个系统性认知偏差在认知心理学文献里有大量实证研究,不是个别人粗心,是普遍存在的思维模式局限。
 
