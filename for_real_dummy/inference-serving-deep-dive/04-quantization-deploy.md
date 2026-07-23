@@ -82,6 +82,30 @@ def quantize_per_group(x: torch.Tensor, group_size: int = 128, n_bits: int = 4) 
 ```
 (`int8_basics.py:35-45`)
 
+**画出来看:同一个 4×8 权重矩阵,三种粒度怎么分配 scale(`s0`/`s1`/... 是各自独立算出来的浮点数,同一个字母代表"共用同一个 scale"):**
+
+```
+per-tensor(整个矩阵共用 1 个 scale):          per-channel(每行/每个输出通道 1 个 scale):
+┌───────────────────────────────┐           ┌───────────────────────────────┐
+│ s0 s0 s0 s0 s0 s0 s0 s0        │ row0      │ s0 s0 s0 s0 s0 s0 s0 s0        │ row0
+│ s0 s0 s0 s0 s0 s0 s0 s0        │ row1      │ s1 s1 s1 s1 s1 s1 s1 s1        │ row1
+│ s0 s0 s0 s0 s0 s0 s0 s0        │ row2      │ s2 s2 s2 s2 s2 s2 s2 s2        │ row2
+│ s0 s0 s0 s0 s0 s0 s0 s0        │ row3      │ s3 s3 s3 s3 s3 s3 s3 s3        │ row3
+└───────────────────────────────┘           └───────────────────────────────┘
+        共 1 个 scale 数字                            共 4 个 scale 数字(= out_features)
+
+per-group(group_size=4,每行再切成 2 段,各段独立算 scale):
+┌───────────────────────────────┐
+│ s0a s0a s0a s0a s0b s0b s0b s0b │ row0 -> 前4列用 s0a,后4列用 s0b
+│ s1a s1a s1a s1a s1b s1b s1b s1b │ row1 -> 前4列用 s1a,后4列用 s1b
+│ s2a s2a s2a s2a s2b s2b s2b s2b │ row2
+│ s3a s3a s3a s3a s3b s3b s3b s3b │ row3
+└───────────────────────────────┘
+        共 8 个 scale 数字(= out_features × in_features/group_size = 4×2)
+```
+
+同一个矩阵里,如果第 3 行(row3)恰好有一个离群值,per-tensor 会让这一个离群值拖累全部 32 个数字共用的那一个 `s0`;per-channel 只拖累 row3 自己那 8 个数字(其余 3 行的 `s0/s1/s2` 不受影响);per-group 进一步把伤害范围缩小到 row3 里离群值所在的那一段(`s3a` 或 `s3b`,另一段不受影响)——scale 数量从 1 涨到 4 再涨到 8,换来的是"一个离群值能连累多少个其他数字"这个范围不断缩小。
+
 **一句话:** 三个量化函数的核心区别只在于"一个 scale 覆盖多大范围的数":`quantize_per_tensor` 整个张量共用 1 个 scale(最粗、最快、精度最差),`quantize_per_channel` 每个输出通道一个 scale,`quantize_per_group` 把每一行再切成若干个 `group_size` 大小的小段、每段一个 scale(最细、scale 数量最多、精度最高但存储/计算开销也最大)。
 
 **底层机制/为什么这样设计:** 从最笨的想法讲起——对称量化的核心公式很简单:找到这批数里绝对值最大的那个 `max(|x|)`,除以量化范围能表示的最大整数 `qmax`(int8 是 127),得到 `scale`,量化就是把每个数除以 `scale` 再四舍五入。这个公式的精度完全取决于 `scale` 覆盖的这批数里"最大值和大多数值差多远"——如果一批数里绝大多数集中在 `[-1,1]`,但有一个孤立的 `100`,那 `scale` 就要被这个 `100` 撑大(`scale=100/127≈0.79`),这时候原本在 `[-1,1]` 范围内的数经过 `round(x/0.79)` 大概率全部量化成 `0` 或 `±1`,信息几乎全丢了——这就是"离群值撑大 scale、拖累其余大多数正常值精度"这个 02 号文件(sglang 系列)以来反复出现的"一粒老鼠屎坏一锅粥"式问题在量化领域的具体表现。`quantize_per_channel` 把"一批数"的范围从"整个矩阵"缩小到"一行/一列",如果离群值只集中在某几个通道,不会拖累其他通道;`quantize_per_group` 再把"一行"继续切细,进一步缩小"一个 scale 要覆盖的数值范围"。粒度越细,越能把离群值的破坏范围限制在越小的区域内,代价是要存的 `scale` 数量线性增长(per-tensor 存 1 个数,per-channel 存 `out_features` 个数,per-group 存 `out_features × in_features/group_size` 个数),而且 kernel 实现也更复杂(要按 group 分别处理,不能整块一次性算完)。

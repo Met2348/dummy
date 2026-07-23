@@ -433,6 +433,35 @@ app = make_app()
 
 **底层机制/为什么这样设计(再看这处真实缺陷的根因):** 上面这些协议逻辑全部正确,问题出在**它们怎么被接进一个真实运行的 FastAPI 服务**这一步。这份代码的文件顶部有 `from __future__ import annotations`(PEP 563,"延迟注解求值"——这个声明生效后,函数签名里所有类型注解在运行时**不再是真正的类型对象,而是字符串**,比如 `def chat(req: Request)` 里的 `Request` 在运行时实际上是字符串 `"Request"`,不是那个从 `fastapi` 导入的类)。FastAPI 依赖字符串注解能被正确"解析回"真正的类型对象,才能判断"这个参数是不是特殊的 `Request` 类型、需要注入原始请求对象,而不是当成一个需要从 query string/body 解析的普通参数"——这个解析过程依赖 Python 标准库在**函数所属模块的全局命名空间**(`chat.__globals__`)里查找名字 `"Request"` 对应的真实对象。这份代码把 `from fastapi import FastAPI, Request` **写在 `make_app()` 函数内部**(局部作用域),`Request` 这个名字只存在于 `make_app()` 自己的局部变量里,从来没有进入模块的全局命名空间——所以当 FastAPI 试图解析 `chat` 函数(它定义在 `make_app()` 内部,但 `chat.__globals__` 依然指向**模块级**全局命名空间,不是 `make_app()` 的局部作用域)的注解字符串 `"Request"` 时,在模块全局命名空间里找不到这个名字,解析静默失败,FastAPI 退回到把 `req` 当成一个**普通参数**处理——由于请求体是 JSON、不是 query string,FastAPI 默认把这个无法识别成"请求体模型"的普通参数当成**query 参数**,而真实请求从来不会在 URL 上带 `?req=...`,于是 FastAPI 报告"缺少必需的 query 参数 req",返回 `422`。本知识点写了一个**完全独立、比原文件简化得多**的最小复现(同样的"`from __future__ import annotations` + 函数局部导入 `Request` + 用它标注一个内层路由函数的参数"这个结构模式,不是照抄原文件的任何一行),确认了这个 422 完全可以脱离这份具体业务逻辑复现,是一个纯粹由"延迟注解求值 + 局部导入"这个组合触发的通用 FastAPI 陷阱;然后验证了修复方式——只需要把 `from fastapi import FastAPI, Request` 挪到**模块顶层**(不改变 `from __future__ import annotations` 这一行,也不改变任何业务逻辑),同样的路由就能正确返回 `200`。
 
+**画出来看:两张命名空间表,`chat.__globals__` 只认第一张,不管 `chat` 词法上嵌套得多深:**
+
+```
+openai_api_server.py 模块顶层命名空间(chat.__globals__ 永远指向这里):
+┌──────────────────────────────────────────┐
+│ dataclass, field, Any, Dict, ...(typing)   │
+│ json, time, uuid                          │
+│ (没有 FastAPI,没有 Request——一行 fastapi   │
+│  相关的 import 都不在模块顶层)              │
+└──────────────────────────────────────────┘
+
+make_app() 函数体的局部作用域(只在 make_app() 执行期间存在):
+┌──────────────────────────────────────────┐
+│ from fastapi import FastAPI, Request       │ ← Request 只活在这里
+│ from fastapi.responses import ...          │
+│                                            │
+│   @app.post("/v1/chat/completions")       │
+│   async def chat(req: Request): ...        │ ← chat 在这里被定义(词法上嵌套在 make_app 内部)
+└──────────────────────────────────────────┘
+
+FastAPI 判断"chat 的 req 参数是不是需要注入原始请求的特殊 Request 类型"时:
+  1. from __future__ import annotations 让 req 的注解在运行时是字符串 "Request",不是真类型对象
+  2. FastAPI 要把这个字符串解析回真类型,查的是 chat.__globals__(第一张表)
+  3. __globals__ 只认"函数定义在哪个模块文件里",不认"词法上套在哪一层函数内部"——
+     不管 chat 嵌套多深,__globals__ 永远指向模块顶层那张表,不会去 make_app() 的局部变量里找
+  4. 第一张表里没有 "Request" 这个名字 → 解析失败 → FastAPI 放弃"这是特殊类型"这个判断
+  5. 退化成把 req 当普通参数处理 → 请求体是 JSON、不是 query string → 报 422("缺少 query 参数 req")
+```
+
 **AI 研究场景:** 这处发现直接呼应 08 号文件量化 04 号文件"GPTQ 的 damp 参数""fp8 表最大值"这类"代码在大多数情况下看起来能跑,但存在一个具体、可复现的条件会让它失效"的模式——区别在于:GPTQ/fp8 的问题需要专门构造边界测试数据才会暴露,而这一处只需要**真实按 README 的说明起一次服务、发一个最普通的请求**就会立刻撞上,是本系列目前发现的、最贴近"用户实际会不会踩到"这个标准的一处缺陷。这也说明本文标题反复强调的"独立复验不能只信纯函数层面的单元测试通过"这条纪律有多重要——`validate_chat_request`/`build_completion_response` 这些函数各自的单元测试(本知识点前半段以及仓库自己 `tests/` 目录下的测试)全部会通过,因为它们从来没有真的经过 FastAPI 的路由参数解析这一层,只有真的发一个 HTTP 请求、走完整的 ASGI 请求-响应周期,才能暴露这个问题。
 
 **可运行例子:**

@@ -450,6 +450,16 @@ assert abs(cosine(opp_a, opp_b) - (-1.0)) < 1e-9
 
 **底层机制/为什么这样设计:** 为什么 circuit breaker 需要一个 half-open 中间态,不能直接从 open(熔断)跳回 closed(正常)?因为 half-open 的作用是**试探性恢复**——只放行少量真实请求去验证下游是否真的恢复了;如果直接从 open 跳回 closed,一旦下游还没真正恢复,会立刻被新一波全量流量二次打垮,之前"暂停该 worker"争取到的恢复时间就白费了。同理,exponential backoff(指数退避)不是随便选一个增长曲线——它需要在"重试足够快、不让用户等太久"和"不在系统本就有压力时用高频重试雪上加霜"之间取平衡,指数增长 + 上限封顶(cap)正是这个折中的标准解法。
 
+下面这张表把 `closed`/`open`/`half_open` 三个状态在 `call()` 被调用时分别会发生什么、调用结束后落到哪个新状态列出来,配合代码看更容易跟上:
+
+| `call()` 被调用时的当前状态 | 这一次调用做什么 | 调用结束后的新状态 |
+|---|---|---|
+| `closed`(正常) | 直接尝试执行 `fn()` | 成功→仍是 `closed`;失败但 `fail_count` 未达 `fail_threshold`→仍是 `closed`;失败且达到阈值→`open` |
+| `open`,且 `call_count_since_open` 还没到 `half_open_after` | 直接拒绝,`fn()` 根本不会被执行,抛 `RuntimeError` | 仍是 `open`(计数器 `+1`,继续等) |
+| `open`,且 `call_count_since_open` 刚好到 `half_open_after` | 状态先标记成 `half_open`,**同一次调用里紧接着就去真实执行 `fn()`**(这就是"试探") | 试探成功→`closed`(且 `fail_count` 清零);试探失败→打回 `open`(计数器清零重新等待) |
+
+容易看错的一点:`half_open` **不是**一个会独立"停留"、专等下一次调用来验证的状态——从上表最后一行能看到,进入 `half_open` 和"拿这次调用去做试探"是在同一次 `call()` 内部前后脚发生、又在同一次调用返回前就被解决掉(变回 `closed` 或 `open`)的,不会出现"再调用一次,发现 `state` 还停在 `half_open`"这种情况(下方"可运行例子"里连续第 5 次调用就是这个"进入又离开"过程的真实演示)。
+
 **AI 研究场景:** 大模型容器化部署的真实运维场景——canary/blue-green 发布策略在生产大模型服务里同样适用(新模型版本先接 5% 流量观察输出质量和延迟,没问题再逐步放量);vLLM/SGLang 这类推理引擎面对 GPU OOM 时的 preempt+recompute 机制(和 01 号文件调度策略知识点里的抢占概念是同一件事在容错场景下的应用);商业 API 依赖方(如果自建服务依赖某个第三方模型 API)必须处理"上游服务不可用时如何降级"的容错设计。
 
 **可运行例子:**
@@ -572,6 +582,8 @@ def effective_goodput(scores: Iterable[CandidateScore], request_rate_rps: float)
 ```
 
 模块自己的 docstring 明确写"inspired by DistServe goodput"——这里的 `effective_goodput` 正是 05 号文件知识点 8(Disaggregated Prefill/Decode)提到的 DistServe 论文核心指标在毕业评分场景下的具体应用:不看请求数量本身,只看"SLO 达标"的那部分请求数量。
+
+**一处容易和 01 号文件定义混淆的地方:** `score_report` 里 `ttft_ms`/`tpot_ms` 这两个名字,和 01 号文件知识点 1 严格定义的 TTFT(`t_first_token - t_admit`,真实的"首 token 出现前等了多久")、ITL(逐 token 间隔)不是同一回事——这份 mock 的 `report` 结构里每条记录只有**一个笼统的 `latency_ms`**,没有真实拆分出"prefill 阶段"和"decode 阶段"分别花了多久,所以代码直接把 `ttft_ms` 赋值成这唯一的延迟数字,`tpot_ms = ttft_ms / tokens` 也只是把这同一个数字摊平到每个 token 上,并不是"decode 阶段单独计时、再除以生成的 token 数"这种更严格的算法。这不是本文档的过度解读——模块源码自己的 docstring 就诚实写着这两个字段是`"TTFT-like latency gate"`/`"TPOT-like per-token latency gate"`(**-like**,近似,不是字面意义的真实分段测量)。理解这一点,才不会在看到"`ttft=80ms`"这类数字时,误以为它精确对应 01 号文件里那个需要真实时间戳差值才能算出的 TTFT。
 
 **一句话:** 一个 serving 方案的"好不好"不能只看它能不能正确回答、也不能只看它跑得多快,必须同时满足正确性和延迟门槛才算一次"有效"的服务,goodput 就是在衡量这个"有效"的比例。
 

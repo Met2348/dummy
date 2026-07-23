@@ -132,6 +132,29 @@ def exact_one_step_output_distribution(p: list[float], q: list[float]) -> list[f
 ```
 (`speculative_original_minimal.py:51-57`)
 
+**画出来看:每个被 draft 出来的 token,要经过这个判定才知道是被接受,还是被拒绝、改从残差分布重新采样:**
+
+```
+draft 已经用 q 采样出了 token x
+              │
+              ▼
+   target 算出 p(x)(x 在 target 眼里的概率)
+              │
+              ▼
+      抛一个 r ~ Uniform[0, 1)
+              │
+              ▼
+      r < min(1, p(x)/q(x)) ?
+       是 ↙            ↘ 否
+        │                │
+        ▼                ▼
+    接受 x           从残差分布重新采样一个新 token:
+  (直接输出,        residual(y) = norm(max(0, p(y) - q(y)))
+   不用改)           (在 p 比 q "多给"的地方补偿采样)
+```
+
+`p(x)/q(x)` 越大(target 比 draft 更看好这个具体 token),接受概率越高,`min(1, ...)` 这个 clamp 保证接受概率永远落在合法的 `[0,1]` 区间(哪怕 `p(x)>q(x)` 让比值超过 1)。拒绝之后不是简单地"重新问 target 要一个新 token"就完事——必须从这个专门构造的残差分布里采样,只有接受和拒绝重采样这两部分的概率质量加起来,才能精确重建出 `p`(下方"一句话"和"底层机制"给出这个恒等式本身)。
+
 **一句话:** `rejection_sample` 是投机解码算法的心脏——以 `min(1, p(x)/q(x))` 的概率接受草稿 token `x`,拒绝时改从"残差分布" `norm(max(0, p-q))` 里重新采样,`speculative_original_minimal.py` 用**解析枚举**(不采样,直接算出精确的输出概率分布)独立证明了这套规则的结果严格等于 `p`。
 
 **底层机制/为什么这样设计:** 从最笨的想法讲起——为什么不能直接"draft 猜的对不对,对就用,不对就调用 target 重新生成"这么简单粗暴地做?因为这样会引入 bias:如果只在"猜错"时才调用 target,那些 draft 更容易猜对的 token(比如高概率 token)会被系统性地过度呈现,输出分布会偏向"draft 和 target 都容易生成的部分",不再是 target 的真实分布。正确的做法必须让每个 token 的"最终被采出的概率"精确等于 `p(x)`,而不只是"看起来合理"。数学上这样构造:`accept_part(x) = min(p(x), q(x))` 是"直接接受"贡献的概率质量,`reject_mass = 1 - sum(accept_part)` 是"被拒绝、需要重采样"的总概率,`residual_distribution(x) = norm(max(0, p(x)-q(x)))` 是"如果被拒绝,应该按这个分布重新采样"——把两部分加起来 `accept_part(x) + reject_mass * residual(x)`,精确等于 `p(x)`(这是一个可以纯代数验证的恒等式,不依赖任何采样过程)。`rejection_sample` 函数是这套解析结果的**采样版实现**:先做接受判定(`r < p/q`),不接受就从残差分布里采;`speculative_original_minimal.py::exact_one_step_output_distribution` 反过来是**不采样、直接解析算出"如果无限次重复这个过程,最终各 token 出现的概率是多少"**——两者从两个不同角度(蒙特卡洛 vs 解析枚举)验证同一个数学结论,这也是为什么本知识点特意把两个文件放在一起讲。
