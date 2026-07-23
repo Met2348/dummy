@@ -94,7 +94,7 @@ class NaiveRangeArray:
 d = DiffArrayOnlyUpdate(10)
 d.range_add(2, 5, 3)
 d.range_add(4, 7, 2)
-assert d.range_sum(0, 9) == 3 * 4 + 2 * 4   # 和暴力版本的[0,3,3,5,5,2,2,0,0]... 应该一致
+assert d.range_sum(0, 9) == 3 * 4 + 2 * 4   # 和暴力版本的真实数组[0,0,3,3,5,5,2,2,0,0]求和应该一致
 naive_check = NaiveRangeArray(10)
 naive_check.range_add(2, 5, 3)
 naive_check.range_add(4, 7, 2)
@@ -228,10 +228,12 @@ prefix_sum(i) = Σ_{j=0}^{i} diff[j] * (i - j + 1)
 
 ## 第四步:实现双 BIT 差分树状数组(0:35 – 0:44)
 
+下面开始把"BIT"当成"树状数组"的另一个名字直接使用——**BIT 是 Binary Indexed Tree 的缩写**,和 [17 类](17-segment-tree-and-fenwick-tree.md)里的"树状数组(Fenwick Tree)"是同一个数据结构的三个不同叫法,只是英文简称在业界代码/论文里出现得非常频繁,这里提前点名一下,避免和"位运算(bit)"这个词面上完全无关但字面撞在一起的另一个含义混淆。
+
 ```python
 class RangeBIT:
     """
-    维护两棵树状数组实现区间更新+区间查询:
+    维护两棵树状数组(BIT, 即Binary Indexed Tree)实现区间更新+区间查询:
     bit1维护diff[j]的前缀和, bit2维护diff[j]*j的前缀和
     prefix_sum(i) = (i+1) * bit1.prefix(i) - bit2.prefix(i)
     """
