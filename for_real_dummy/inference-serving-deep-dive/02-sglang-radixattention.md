@@ -136,6 +136,25 @@ class Node:
 ```
 (`radix_tree.py:14-25`)
 
+**画出来看:插入 `[1,2,3]` 和 `[1,2,8]` 之后,`parent`/`children` 具体是怎么指的:**
+
+```
+  root (Node, token_ids=[])
+   │
+   │ children[1]  ← key 是子节点 token_ids 的第 1 个值
+   ▼
+  Node "1,2"  (token_ids=[1,2], parent=root)
+   │                        │
+   │ children[3]            │ children[8]
+   ▼                        ▼
+  Node "3"                 Node "8"
+  (token_ids=[3],          (token_ids=[8],
+   parent=Node"1,2",        parent=Node"1,2",
+   children={})              children={})
+```
+
+每个节点存的是"自己这一段"的 `token_ids`(不是从 root 到这里的完整路径),`parent` 指回上一层(split 时原地改内容也能保证沿着这个指针正确走到 root,知识点 3 会展开这一点),`children` 是一个字典——key 是"这个子节点 `token_ids` 的第一个 token 值",这样 `match()` 里 `child = node.children.get(prefix[i])` 才能一步跳到该走哪个分支,不需要遍历全部子节点逐一比较。
+
 ```python
 def match(self, prefix: List[int]) -> Tuple[Node, int]:
     """Walk as far as `prefix` matches the tree.
@@ -291,6 +310,41 @@ def insert(self, prefix: List[int]) -> Tuple[Node, int]:
 (`radix_tree.py:99-127`,`...` 处省略了新叶子节点的具体构造,不影响所示的分裂判断逻辑)
 
 **一句话:** `_split()` 在前缀匹配到某个节点中间时,把这个节点从 offset 处切成 head(公共前段)和 tail(分叉后段)两个节点,用"原地修改原节点变成 tail、只新建一个节点当 head"的方式重新挂好父子关系;`insert()` 先 `match()` 找到匹配点,如果匹配点落在某个节点内部就调 `_split()`,最后把没匹配上的剩余 token 挂成新叶子。
+
+**画出来看:before/after 对比(复用下方"可运行例子"里已经验证过的具体数字——先 `insert([1,2,3,4,5])` 并 `acquire` 拿到 `leaf1`,再 `insert([1,2,3,8,9])`):**
+
+```
+BEFORE(插入 [1,2,3,4,5] 后,leaf1 = 这个叶子的引用):
+
+  root
+   └── children[1] ──► Node A   ← leaf1 指向这个对象
+                        token_ids = [1,2,3,4,5]
+                        parent    = root
+                        children  = {}        (叶子)
+                        refcount  = 1          (leaf1 已 acquire)
+
+AFTER(调用 insert([1,2,3,8,9]),内部先 _split(A, at=3) 再挂新分支 [8,9]):
+
+  root
+   └── children[1] ──► Node HEAD  ← _split() 唯一新建的对象
+                        token_ids = [1,2,3]
+                        parent    = root
+                        refcount  = 1            (从 A 复制而来)
+                        children:
+                          ├─ children[4] ──► Node A   ← 还是同一个 Python 对象!原地被
+                          │                   token_ids = [4,5]     _split() 改成了 tail,
+                          │                   parent    = HEAD       leaf1 这个引用完全
+                          │                   children  = {}         不用更新就自动跟随
+                          │                   refcount  = 1          ← leaf1.refcount 全程没变
+                          │
+                          └─ children[8] ──► Node B   ← insert() 紧接着新建的叶子,
+                                              token_ids = [8,9]        不是 _split() 自己建的
+                                              parent    = HEAD
+                                              children  = {}
+                                              refcount  = 0
+```
+
+`_split()` 自己只负责"HEAD/A 这一半"——一个节点 `A` 拆成 `HEAD`+`A` 两个节点,`A` 这个 Python 对象原地变身成 tail(`token_ids` 从 `[1,2,3,4,5]` 改成 `[4,5]`),`HEAD` 是唯一新建的对象;`children[8]→B` 这条新分支是 `_split()` 返回之后,`insert()` 把没匹配上的剩余 token `[8,9]` 挂上去的下一步,不属于 `_split()` 的职责。这张图直接对应下方"可运行例子"里验证过的断言:`leaf1.token_ids==[4,5]`、`leaf1.refcount==1`(没变)、`head.token_ids==[1,2,3]`、`head.refcount==1`——**对象身份保留**正是这里的核心:`leaf1` 在 split 前后一直是同一个 Python 对象,沿着它的 `.parent` 继续往上走,会自动、正确地穿过新生成的 `HEAD` 到达 `root`,调用方完全不需要知道发生过 split。
 
 **底层机制/为什么这样设计:** `_split()` 有一个容易被忽略但设计得很讲究的细节——它**没有**新建两个节点替换旧节点,而是保留原 `node` 对象、只修改它的 `token_ids`/`kv_slots`/`parent`(让它变成 tail),另外新建一个 `head` 对象接过原节点在父节点里的位置。这个"对象身份保留"的写法不是随手为之:如果某个请求在 split 发生**之前**已经通过 `acquire()` 拿到了这个节点的引用(比如一个正在等待 decode 的请求持有着它命中的 leaf),split 发生之后,这个引用对象本身没有变(还是同一个 Python 对象),只是它的内容变成了 tail 部分——调用方完全不需要知道发生过 split,沿着这个引用的 `.parent` 继续往上走,会自动、正确地穿过新生成的 `head` 节点到达 root。如果 `_split()` 换成"新建两个对象、丢弃旧对象"的写法,任何已经持有旧节点引用的调用方都会立刻读到过期数据。`insert()` 里 `into = matched - (depth - len(node.token_ids))` 这一行是在算"匹配点具体落在 `node.token_ids` 的第几个位置"——因为 `match()` 返回的 `matched` 是从 root 算起的绝对 token 数,而 `_split()` 要的 `at` 是相对于 `node` 自己这个 segment 的局部偏移,`_depth(node)` 先算出 `node` 底部对应的绝对深度,再倒推局部偏移,这是一处容易在"绝对位置"和"节点内相对位置"之间搞混的地方。
 

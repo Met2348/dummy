@@ -31,7 +31,7 @@ def chinchilla_optimal_split(C: float) -> tuple:
 
 **一句话:** 给定固定的算力预算(FLOPs),Chinchilla scaling law 告诉你"模型参数量 N 和训练 token 数 D 应该按什么比例分配才能让 loss 最小"——原始论文给出的最优比例是 D/N≈20,但工业界(Llama-3 等)故意偏离这个"算力最优点",转而选择远超 20 倍的 D/N(over-train),因为推理成本要考虑进总拥有成本。
 
-**底层机制/为什么这样设计:** `chinchilla_loss` 的公式形式 `E + A·N^-α + B·D^-β` 本身是从上百次不同 (N, D) 组合的实际训练实验里拟合出的经验公式,不是理论推导——`E` 是不可约损失(哪怕参数/数据无限大也存在的熵下界),`A·N^-α` 是模型容量不足带来的损失,`B·D^-β` 是数据量不足带来的损失,两项都随各自的变量增大而趋于零但永远不为零。`chinchilla_optimal_split` 反过来用这个经验公式求偏导数=0 的驻点,得到"给定总 FLOPs=6ND 时,N 和 D 怎么分配使 loss 最小"的闭式解,算出来的最优比例约为 1:20。
+**底层机制/为什么这样设计:** `chinchilla_loss` 的公式形式 `E + A·N^-α + B·D^-β` 本身是从上百次不同 (N, D) 组合的实际训练实验里拟合出的经验公式,不是理论推导——`E` 是不可约损失(哪怕参数/数据无限大也存在的熵下界),`A·N^-α` 是模型容量不足带来的损失,`B·D^-β` 是数据量不足带来的损失,两项都随各自的变量增大而趋于零但永远不为零。`chinchilla_optimal_split` 反过来用这个经验公式求偏导数=0 的驻点,得到"给定总 FLOPs=6ND 时,N 和 D 怎么分配使 loss 最小"的闭式解,算出来的最优比例约为 1:20。**诚实说明一点:这行代码本身并没有现场做这次偏导数推导**——`chinchilla_optimal_split` 直接硬编码了 `N_opt_ratio=20.0` 这个数字,不是在运行时对 `chinchilla_loss` 求导算出来的;≈20 这个具体数值,是 Chinchilla 论文用实验数据拟合出 `α`/`β` 这两个指数(以及 `A`/`B` 两个系数)之后,代入"偏导数=0"这个理论闭式解算出来的一个具体结果,本知识点不重新推导这个"拟合系数→代入闭式解"的过程,只是直接使用论文已经算好的结果——`N_opt_ratio=20.0` 是"抄论文的答案",不是"这份代码自己现场推导出的答案"。
 
 **AI 研究场景:** 这是任何"从零训一个模型"项目最先要回答的问题——决定模型架构参数(层数/宽度)之前,必须先基于目标算力预算算出大致的目标参数量,Chinchilla 论文(2022)之前业界普遍训得"参数量过大、数据量相对不足"(如原始 GPT-3),该论文发布后 Llama-1 等模型明确采用了更接近 1:20 的配比。
 
@@ -271,6 +271,39 @@ class TpMlp(nn.Module):
 
 **一句话:** Megatron-LM 张量并行的核心技巧是"第一个线性层按列切、第二个线性层按行切",这样中间的 activation(激活函数输出)天然就是"每卡各算各的、互不需要通信",只有最后 MLP 输出时才需要一次 all-reduce 求和——把原本"切一刀就要通信一次"降低到"两层只需要通信一次"。
 
+**画出来看(用下方"可运行例子"里 `d=64, d_ff=256, tp=4` 这组具体数字,和 [inference-serving-deep-dive/05](../inference-serving-deep-dive/05-distributed-inference.md) 知识点 2 画法同源):**
+
+```
+① MockColumnLinear(fc1,列切分)—— 权重 [d=64, d_ff=256] 沿"列"切成 4 条竖条,每条 [64,64]:
+
+        fc1.W (64×256) 被列切成 4 条竖条,分给 4 个 rank:
+        ┌──────────┬──────────┬──────────┬──────────┐
+        │   W_0    │   W_1    │   W_2    │   W_3    │   每条竖条形状 [64,64]
+        └──────────┴──────────┴──────────┴──────────┘
+          rank0        rank1        rank2        rank3
+
+   x(完整输入,每个 rank 都有相同副本)分别乘自己那一条竖条:
+     rank0: x@W_0=h0[*,64]     rank1: x@W_1=h1[*,64]
+     rank2: x@W_2=h2[*,64]     rank3: x@W_3=h3[*,64]
+   各算各的,互不依赖,不需要通信
+                        │
+                        ▼  relu(h):逐元素运算,在"切开"状态下独立做,同样不需要通信
+                        │
+② MockRowLinear(fc2,行切分)—— 权重 [d_ff=256, d=64] 沿"行"切成 4 条横条,每条 [64,64],
+   和 relu(h0..h3) 天然一一对应,直接作为各 rank 的局部输入:
+
+     rank0: relu(h0)@W'_0=out0[*,64]   (只是"完整结果"的一部分贡献量,不是最终答案)
+     rank1: relu(h1)@W'_1=out1[*,64]
+     rank2: relu(h2)@W'_2=out2[*,64]
+     rank3: relu(h3)@W'_3=out3[*,64]
+                    └──────┬──────┘
+                           ▼
+③ all-reduce: out0+out1+out2+out3 = out[*,64]  ← 全程唯一一次通信(源码注释 `# 实际多卡: dist.all_reduce(out)`,
+                                                   本教学代码单进程用 `gather_tp_outputs()`=sum() 模拟这一步)
+```
+
+这张图和下方"可运行例子"的 fc1/fc2 参数(`fc1_params_per_rank = d*(d_ff//tp) = 64*64 = 4096`)、`gather_tp_outputs` 一一对应——③处的"一次 all-reduce"正是"可运行例子"里 `gather_tp_outputs(local_outs)` 这一步在真实多卡环境下的样子。
+
 **底层机制/为什么这样设计:** 关键在于列切+行切的**配合**:`MockColumnLinear` 把 `d_out` 维度切成 `tp` 份,每张卡算出的是完整 `d_in` 维度上、部分 `d_out` 维度的结果——这部分结果不需要跨卡通信就能直接送入激活函数(逐元素运算,互不依赖);`MockRowLinear` 反过来把 `d_in` 维度切开,每张卡用自己那一份(刚好是上一层对应卡产出的那部分激活值)算出一个"部分和",这些部分和加总(all-reduce sum)才是最终的完整输出。如果只用列切或只用行切,中间就需要额外的通信,Megatron 论文这套"列-行配对"的设计正是为了把整个 MLP block 的通信量压缩到最少(一次 forward 只需 1 次 all-reduce,而不是 2 次)。
 
 **AI 研究场景:** 这是训练 100B+ 参数模型(单层权重矩阵本身可能就有几十 GB,单卡装不下)时唯一的解法——ZeRO 系列(知识点 2/3)分片的是"每卡的状态副本",TP 分片的是"单次矩阵乘法本身",两者不冲突、可以叠加使用,大模型训练的标准 3D 并行(DP+TP+PP)里 TP 通常只在同一物理节点内的卡之间使用(因为 all-reduce 频率高、对带宽要求最苛刻,节点内 NVLink 带宽远高于跨节点)。
@@ -321,6 +354,18 @@ def interleaved_bubble(n_stage: int, n_micro: int, n_chunk: int = 4) -> float:
 (`pipeline_parallel_demo.py:8-15`)
 
 **一句话:** 流水线并行把模型切成 n_stage 段分布到不同卡,但任何一张卡在整个训练 step 里都有"等待上下游"的空闲时间(bubble)——bubble 占比随微批数(micro-batch,即把一个大 batch 切成多少个小块流水线送入)增加而下降,Megatron-LM 的 interleaved 1F1B 通过让每张卡负责不连续的多段模型(而非连续一段)进一步把 bubble 压低 `n_chunk` 倍。
+
+**画出来看:一张真实的时间线网格(`n_stage=4, n_micro=4`,和 [inference-serving-deep-dive/05](../inference-serving-deep-dive/05-distributed-inference.md) 知识点 3 用的是同一组参数、同一张网格,两边的独立验证在这一点上完全吻合):**
+
+```
+stage ↓ \ 时间步 t →   0    1    2    3    4    5    6
+stage 0               F1   F2   F3   F4    ·    ·    ·
+stage 1                ·   F1   F2   F3   F4    ·    ·
+stage 2                ·    ·   F1   F2   F3   F4    ·
+stage 3                ·    ·    ·   F1   F2   F3   F4
+```
+
+`Fm` = 这个 stage 在这个时间步正在做第 `m` 个 micro-batch 的前向,`·` = 这个 stage 空闲(bubble)。左上角三角区是灌注期(stage 越靠后、要等前面的 micro-batch 流过来等得越久)、右下角三角区是排空期(stage 越靠前、越早没活干)、中间对角线状忙碌带是稳态。总共 `4×7=28` 格,`·` 占 `12` 格,`12/28≈42.9%`——代入本知识点的公式 `(n_stage-1)/(n_stage+n_micro-1)=(4-1)/(4+4-1)=3/7≈42.9%`,和数格子的结果精确一致(这里的 `gpipe_bubble` 公式本身就是"严谨版",不是 [inference-serving-deep-dive/05](../inference-serving-deep-dive/05-distributed-inference.md) 知识点 3 里发现的那个低估真实占比的 `gpipe_bubble()`,两份代码同名函数、公式并不相同,不要混淆)。
 
 **底层机制/为什么这样设计:** 直观理解 `(n_stage-1)/(n_stage+n_micro-1)` 这个公式:一条 n_stage 级流水线处理 n_micro 个微批总共需要 `n_stage+n_micro-1` 个时间片(前 n_stage-1 个时间片是"流水线灌注"阶段,只有部分卡有活干;之后才是稳态,所有卡都在忙碌;最后 n_stage-1 个时间片是"流水线排空"阶段)——分子的 `n_stage-1` 正是这段"灌注+排空"总长度里必然浪费的部分(简化到两段合并计算),分母是总时间片数,比值就是空闲时间占比。当 `n_micro` 远大于 `n_stage` 时,稳态运行时间远超灌注/排空开销,bubble 占比趋近于零;`n_micro` 太小(比如等于 1)时,几乎全程都在灌注/排空,bubble 占比逼近 100%。
 

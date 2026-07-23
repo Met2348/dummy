@@ -37,7 +37,7 @@ def time_to_send(bytes_total: int, link: Link) -> float:
 
 **一句话:** 任何一次数据传输的耗时都是"固定延迟+数据量/带宽"这个最基本的公式,`LINKS` 表把 7 种真实存在的互联技术(卡内 NVLink、节点内 PCIe、节点间 InfiniBand/RoCE/以太网)的真实带宽/延迟数量级摆在一起,数字本身就是"为什么大模型训练要用 NVLink+IB 而不是普通以太网"这个问题最直接的证据。
 
-**底层机制/为什么这样设计:** `time_to_send` 公式里 `latency_us`(固定开销,和数据量无关)和 `transfer_us`(随数据量线性增长)是两个独立的项——这意味着传小消息时延迟项主导(带宽再高也没用,因为数据量太小体现不出带宽优势),传大消息时带宽项主导(此时延迟的那零点几微秒可以忽略不计)。7 条链路的具体数字差距揭示了硬件层级的现实:NVLink(卡间直连,450GB/s)比 IB NDR(节点间网络,50GB/s)带宽高 9 倍,延迟也更低(0.5μs vs 1.5μs)——这不是厂商随意定价,是物理走线距离和协议栈复杂度的直接体现:NVLink 是同一台服务器内部的专用高速互联,IB 需要经过网卡、交换机等更长的物理路径和更复杂的协议处理。
+**底层机制/为什么这样设计:** `time_to_send` 公式里 `latency_us`(固定开销,和数据量无关)和 `transfer_us`(随数据量线性增长)是两个独立的项——这意味着传小消息时延迟项主导(带宽再高也没用,因为数据量太小体现不出带宽优势),传大消息时带宽项主导(此时延迟的那零点几微秒可以忽略不计)。7 条链路的具体数字差距揭示了硬件层级的现实:NVLink(卡间直连,450GB/s)比 IB NDR(节点间网络,50GB/s)带宽高 9 倍,延迟也更低(0.5μs vs 1.5μs)——这不是厂商随意定价,是物理走线距离和协议栈复杂度的直接体现:NVLink 是同一台服务器内部的专用高速互联,IB 需要经过网卡、交换机等更长的物理路径和更复杂的协议处理。即便物理路径更长,IB(以及后面知识点会提到的 RoCE)的延迟依然远低于普通以太网 TCP/IP,原因是两者都实现了 RDMA(Remote Direct Memory Access,远程直接内存访问)——网卡直接读写远程主机的内存,数据搬运绕过对方的 CPU 和操作系统内核网络协议栈,不需要像普通 TCP/IP 那样经过内核多次拷贝和上下文切换,这正是 RDMA 类链路(IB、RoCE)比普通以太网延迟低一个数量级的核心原因,也是知识点 5 SHARP 交换机内聚合技术能够成立的前提之一——没有 RDMA 这种"网卡/交换机直接访问内存"的能力,就没办法把规约计算下沉到网络设备里、绕开 CPU 参与。
 
 **AI 研究场景:** 这张表是任何"应该把哪些并行策略放在哪个通信层级"决策的数据基础——02 号文件讨论的张量并行(TP)对通信延迟极度敏感,只能放在 NVLink 直连的同节点内(见知识点 2 会展开这个具体权衡),数据并行的梯度同步可以容忍节点间 IB 网络的更高延迟,这个层级划分的物理原因就是这张表里的数字差距。
 
@@ -73,6 +73,8 @@ print(f"100B传输: NVLink={tiny_nvlink:.2f}us  IB={tiny_ib:.2f}us  比值={rati
 ---
 
 ## 2. All-Reduce 算法家族:Ring / Tree / Halving-Doubling(`allreduce_algos.py`)—— 三种算法的步数公式,以及为什么大消息场景 HD 总是赢
+
+**承接 torch-deep-dive/09,不重新讲地基:** 为什么分布式训练需要"同步梯度"这件事本身,以及 ring all-reduce 具体怎么用"环形拓扑 + scatter-reduce/allgather 两阶段"把通信量摊平到和 N 基本无关,[torch-deep-dive/09](../torch-deep-dive/09-distributed-training-basics.md) 知识点 3(all-reduce 梯度同步机制)已经讲过并用纯 Python 手写验证过——这里直接承接那份已经验证过的理解,不重新讲一遍"为什么需要同步"和"ring 算法本身怎么运作",只往下展开 Ring/Tree/Halving-Doubling **三种**算法之间步数、单步传输量的性能特征对比,以及大规模集群场景下该怎么选。
 
 **是什么:**
 ```python
@@ -168,6 +170,31 @@ class FatTree:
 
 **一句话:** Bisection 带宽(把整个集群切成两半,两半之间能同时传输的总带宽)是衡量一个网络拓扑"够不够胖"的核心指标——理想情况下(oversubscription=1.0,即"full bisection")这个值是"一半节点数×单链路带宽",Fat-Tree 拓扑通过三层交换机(leaf/spine/core)组织起来,理论上能做到这个理想值,但真实部署为了省钱经常引入 oversubscription(用更少的上联链路服务更多下联节点),这时候 bisection 带宽会按 oversubscription 比例打折。
 
+**画出来看:三层交换机长什么样(以下方例子 `FatTree(n_nodes=1024, radix=64)` 为例;`n_switches_3tier()` 用 `.venv` 实跑算出 `{'leaf': 32, 'spine': 32, 'core': 17}`——leaf=32 这一项和下方"实测"给出的"32 台 leaf 交换机"一致,spine/core 是同一次调用返回字典里的另外两项):**
+
+```
+core 层 —— 17 台交换机,只连 spine,是流量跨越不同"pod"(leaf+spine 构成的子树)时的最高层中转
+┌────────┬────────┬────────┬───────────┬─────────┐
+│ core0  │ core1  │ core2  │    ⋯⋯      │ core16  │
+└───┬────┴───┬────┴───┬────┴───────────┴────┬────┘
+    └────────┴────────┴─────────┬────────────┘
+                                 │  (每台 spine 上联到全部/部分 core)
+spine 层 —— 32 台交换机,上联全部 core、下联全部 leaf
+┌────────┬────────┬────────┬───────────┬─────────┐
+│ spine0 │ spine1 │ spine2 │    ⋯⋯      │ spine31 │
+└───┬────┴───┬────┴───┬────┴───────────┴────┬────┘
+    └────────┴────────┴─────────┬────────────┘
+                                 │  (每台 leaf 上联到全部 spine)
+leaf 层 —— 32 台交换机,radix=64 个端口里一半(32)朝下接服务器、一半(32)朝上接 spine
+┌────────┬────────┬────────┬───────────┬─────────┐
+│ leaf0  │ leaf1  │ leaf2  │    ⋯⋯      │ leaf31  │
+└───┬────┴───┬────┴───┬────┴───────────┴────┬────┘
+    │        │        │                     │
+  32台服务器 32台服务器 32台服务器   ⋯⋯    32台服务器   ← 1024 节点 = 32 leaf × 32 服务器/leaf
+```
+
+从下往上看,"胖"的含义就是:leaf 层已经把 1024 台服务器聚合到 32 台交换机上,spine/core 层再逐级往上聚合——只要每一层的上联带宽总量不小于下联带宽总量(即 oversubscription=1.0),任意两台服务器之间,不管物理上隔着几层交换机,理论上都能以线速通信,这就是"full bisection"这个理想状态在拓扑图上的直观样子;知识点 3 讨论的 oversubscription>1.0,对应的正是"上联链路数比下联链路数更少"这个图上会体现出来的不对称结构。
+
 **底层机制/为什么这样设计:** `bisection_gb_s` 的公式 `(n_nodes/2)*link_bw_gb_s / oversubscription` 背后的直觉是:把 N 个节点切成两半,每一半有 `N/2` 个节点,如果网络"足够胖"(full bisection),这 `N/2` 个节点可以同时以各自的全速链路带宽向另一半发送数据而互不阻塞,理想总带宽就是 `(N/2)*单链路带宽`;`oversubscription=2.0` 意味着"设计上允许 2:1 超订"——比如每个 leaf 交换机连接的下联(服务器)端口数是上联(去 spine 层)端口数的 2 倍,这意味着如果下面所有服务器同时想跑满带宽向外发送,上面的链路只能提供一半的带宽,必然有一半的流量被挤压,这就是为什么 oversubscription 精确对分带宽(不是任意比例)——超订比例本身就是"能承诺的带宽"和"理论峰值需求"之间的精确折算系数。`n_switches_3tier` 用 `n_nodes/(radix/2)` 算 leaf 层交换机数,这个公式假设每个 leaf 交换机一半端口朝下(接服务器)一半朝上(接 spine),`radix/2` 就是每个 leaf 能服务的服务器数量。
 
 **AI 研究场景:** 集群网络设计里"要不要接受 oversubscription、接受多大的比例"是一个直接的成本-性能权衡决策——full bisection(oversubscription=1.0)网络能保证任意通信模式下都不会因为拓扑本身成为瓶颈,但需要的交换机和线缆数量(进而是成本)显著更高,真实工业界大规模集群(如训练 GPT 级别模型的集群)几乎都会在某个层级引入适度的 oversubscription 来控制成本,只要应用层的通信模式(如本文知识点 2 的 all-reduce)能被验证不会触发最坏情况的拥塞。
@@ -234,7 +261,7 @@ def all_to_all(n_gpus: int, bytes_per_pair: int, link: Link) -> float:
 ```
 (`nccl_collectives.py:7-36`,节选)
 
-**一句话:** AllReduce、ReduceScatter、AllGather、Broadcast、AllToAll 是分布式训练里最常用的 5 个通信原语,其中最重要的一条关系是 **AllReduce 的通信成本约等于 ReduceScatter + AllGather 两者之和**——这不是巧合,是 Ring AllReduce 算法本身的实现方式决定的(知识点 2 提到过,Ring AllReduce 内部就是先做 reduce-scatter 再做 all-gather 两阶段)。
+**一句话:** NCCL(全称 NVIDIA Collective Communications Library,NVIDIA 官方提供的多 GPU/多节点集合通信库,本文其余知识点反复提到的"真实 NCCL"都是指这个库)对外暴露的核心能力,就是 AllReduce、ReduceScatter、AllGather、Broadcast、AllToAll 这分布式训练里最常用的 5 个通信原语,其中最重要的一条关系是 **AllReduce 的通信成本约等于 ReduceScatter + AllGather 两者之和**——这不是巧合,是 Ring AllReduce 算法本身的实现方式决定的(知识点 2 提到过,Ring AllReduce 内部就是先做 reduce-scatter 再做 all-gather 两阶段)。
 
 **底层机制/为什么这样设计:** ReduceScatter 让每个 GPU 只保留"自己那一份"规约后的结果(不是完整的全局和,是全局和的 1/N 切片),AllGather 则相反——每个 GPU 已经各自持有不同的数据切片,把它们汇总广播给所有人拿到完整拼接结果;把这两个操作串起来(先 ReduceScatter 把梯度规约、切片分布到各卡,再 AllGather 把切片拼回完整梯度),数学效果和一次 AllReduce 完全等价,这也是为什么真实框架(如 DeepSpeed ZeRO,02号文件已经讨论过)会把"AllReduce"拆成"ReduceScatter+AllGather"两步分别处理——拆开后可以在 ReduceScatter 完成后就立即开始用那一份切片做优化器更新(不需要等 AllGather 完成),实现计算和通信的进一步重叠。`all_to_all` 的成本模型不同于其他四个——它是"每个 GPU 都要给其余 N-1 个 GPU 各发一份不同的数据"(不是所有卡协作产出同一份结果),这种模式下每张卡的**出口带宽**($(N-1)\times$每对数据量)成为瓶颈,和其他集合通信"总带宽在 N 张卡间分摊"的性质完全不同。
 
