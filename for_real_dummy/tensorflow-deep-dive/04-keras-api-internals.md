@@ -285,6 +285,30 @@ print("同一层被复用两次,_inbound_nodes 各自独立记录:", len(shared.
 print("Section 3 OK")
 ```
 
+**用一张图看懂"层被复用两次"这个反直觉现象:** 上面代码里 `shared` 这一个 `Dense` 层实例,被 `a_in`、`b_in` 两个不同的 `KerasTensor` 分别调用了一次,`len(shared._inbound_nodes) == 2` 这个断言背后,DAG 长这样:
+
+```text
+Input "a" (KerasTensor)               Input "b" (KerasTensor)
+   a_in: shape=(None,4)                  b_in: shape=(None,4)
+        │                                      │
+        │ 第1次调用: shared(a_in)               │ 第2次调用: shared(b_in)
+        ▼                                      ▼
+   ┌──────────────────────────────────────────────────┐
+   │       层实例 shared = Dense(5, name="shared")        │  ← 只有一份权重(kernel/bias),
+   │       全程只被创建了一次,两次调用之间没有任何复制         │     两次调用共享同一份权重
+   └──────────────────────────────────────────────────┘
+        │                                      │
+        ▼                                      ▼
+ _inbound_nodes[0]                      _inbound_nodes[1]
+   input_tensors = a_in                   input_tensors = b_in
+   outputs       = a_out                  outputs       = b_out
+        │                                      │
+        ▼                                      ▼
+ a_out (KerasTensor)                    b_out (KerasTensor)
+```
+
+关键是中间那个"层实例"框只画了一个——`shared` 确确实实只有一个 Python 对象、一份权重,`.summary()` 里也只会看到一份 `shared` 的参数量,不会把它错误地统计成两份。但网络的**连接关系**(DAG)里,这个层出现了两次:每一次调用都会在 `shared._inbound_nodes` 里追加一个新的 `Node` 对象,记录"这次调用的输入 KerasTensor 是谁、输出 KerasTensor 是谁"——`_inbound_nodes[0]` 记的是 `a_in→a_out` 这条边,`_inbound_nodes[1]` 记的是 `b_in→b_out` 这条边,两条边**独立存在**,不会互相覆盖,也不会因为是同一层就被去重成一条。这正是"层复用"在 DAG 语义下的真实含义:节点数(`Node` 的个数)和层实例数(`Layer` 的个数)是两个不同的计数——一个层实例可以对应多个 `Node`,但永远只对应一份权重,这也是为什么 Siamese 网络两个分支共享同一个 `encoder` 层时,`.summary()` 里只会看到一份 `encoder` 的参数量,但 `plot_model()` 画出来的连接图里,`encoder` 这个节点会有两条独立的输入/输出边。
+
 **面试怎么问 + 追问链:**
 - **Q:** "Functional API 的 `.summary()` 为什么能打印出完整的层级连接拓扑,而 Subclassing API 不行?"—— 期望答出"Functional 下 `keras.Input()` 产生的是 KerasTensor,层作用在它上面时会走符号构图路径,记录下真实的层连接 DAG;Subclassing 的 `call()` 是任意 Python 代码,框架不知道内部的调用顺序和连接关系"。
 - **追问 1(区分度很高):** "`Dense(8)(some_keras_tensor)` 这一行代码执行的时候,`Dense` 层的 `call()` 方法真的被调用了吗?权重真的被创建了吗?"—— 很多人会以为符号构图"只是记录了个形状,没有真正跑代码",期望答出"两者都是真的——`build()` 真的创建了 `tf.Variable`,`call()` 也真的执行了一次,只是输入换成了一个在临时图里的占位 tensor,不是你的真实数据"。

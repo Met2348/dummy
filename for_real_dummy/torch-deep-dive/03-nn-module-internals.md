@@ -111,7 +111,7 @@ def __getattr__(self, name: str) -> Union[Tensor, "Module"]:
         f"'{type(self).__name__}' object has no attribute '{name}'"
     )
 ```
-`__getattr__`(注意不是 `__getattribute__`)是 Python 属性查找协议里的"兜底方法"——只有在常规查找(`self.__dict__`、类属性、MRO 上的描述符……)全部失败之后,Python 才会调用它。因为 `__setattr__` 把 `linear` 从 `__dict__` 里搬走了,常规查找必然失败,于是 `__getattr__` 被触发,依次去 `_parameters`→`_buffers`→`_modules` 里手动查——这两个方法是完全对称设计的一对:一个负责"写的时候分类存",一个负责"读的时候按同样的分类顺序找回来"。
+`__getattr__`(注意不是 `__getattribute__`)是 Python 属性查找协议里的"兜底方法"——只有在常规查找(`self.__dict__`、类属性、MRO 上的描述符……)全部失败之后,Python 才会调用它。(这里顺带展开一句,不深入:**MRO** 全称 Method Resolution Order「方法解析顺序」,是 Python 多重继承时决定"按什么顺序依次去各个父类里查找同名方法/属性"的规则;**描述符**指实现了 `__get__`/`__set__` 协议的特殊类,能在属性被读取/赋值的瞬间插入自定义逻辑——这两个词这里只需要知道大概指什么就够了,描述符协议本身不是这一节的重点,不影响下面的主线。)因为 `__setattr__` 把 `linear` 从 `__dict__` 里搬走了,常规查找必然失败,于是 `__getattr__` 被触发,依次去 `_parameters`→`_buffers`→`_modules` 里手动查——这两个方法是完全对称设计的一对:一个负责"写的时候分类存",一个负责"读的时候按同样的分类顺序找回来"。
 
 **AI 研究场景:** 调试模型时如果发现某个属性"明明赋值了",却在 `model.parameters()`、`model.to(device)` 之后表现得像"根本不存在"——第一反应应该是检查这个属性有没有真的被三个内部字典之一收编(`"xxx" in model._parameters` 之类),而不是怀疑赋值语句本身写错了。这正是第 8 节 `nn.ModuleList` vs 普通 `list` 那个经典陷阱的根源:普通 `list` 不是 `Module` 也不是 `Parameter`,`__setattr__` 只会把它当成普通属性存进 `__dict__`,列表里那些 `nn.Linear` 层因此从来没有被登记过。
 
