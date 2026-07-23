@@ -43,12 +43,18 @@
 | # | 分类 | 文件 | 状态 |
 |---|------|------|------|
 | 01 | VSCode 日常开发操作(不含 Jupyter,见 04 号文件) | [01-vscode-editor-workflow.md](01-vscode-editor-workflow.md) | ✅ 已完成(6 节均按 6 步模板;调试器一节用真实写并跑过的 bug 脚本 `_assets/01-debug-demo.py`,多文件导航一节用仓库里真实存在的 `parse_action` 调用关系;VSCode 版本/已装扩展/debugpy 配置 schema 均现场核实,图形界面点击类内容如实标注未做自动化验证) |
-| 02 | Linux 日常生产力操作(区别于 rhcsa-bash 考试向) | [02-linux-daily-workflow.md](02-linux-daily-workflow.md) | ⏳ 撰写中 |
-| 03 | SSH 与远程 GPU 服务器实操 | [03-ssh-and-remote-servers.md](03-ssh-and-remote-servers.md) | ⏳ 撰写中 |
-| 04 | Git/GitHub 日常协作实操 | [04-git-collaboration-workflow.md](04-git-collaboration-workflow.md) | ⏳ 撰写中 |
-| 05 | Python 环境管理实操(venv/conda/依赖排查) | [05-python-environment-management.md](05-python-environment-management.md) | ⏳ 撰写中 |
-| 06 | 命令行监控与调试实操(nvidia-smi/htop/日志/pdb) | [06-monitoring-and-debugging.md](06-monitoring-and-debugging.md) | ⏳ 撰写中 |
-| 07 | LaTeX 论文写作实操(直接服务 ICLR 投稿) | [07-latex-paper-writing.md](07-latex-paper-writing.md) | ⏳ 撰写中 |
+| 02 | Linux 日常生产力操作(区别于 rhcsa-bash 考试向) | [02-linux-daily-workflow.md](02-linux-daily-workflow.md) | ✅ 已完成(7 节均按 6 步模板;全部在 rhcsa-bash-deep-dive 已装好的 WSL2 Rocky Linux 10.2 环境现场验证,`.bashrc`/PATH 类有状态实验在专门新建、验证完已 `userdel -r` 删除的 `dtdemo`/`freshdemo` 临时账号上做,没碰过真实 root 的 `.bashrc`;tmux "断线不丢任务"这条核心结论用一把临时生成、验证完已删除的 SSH 密钥,通过两条真实独立的 SSH 连接断开重连验证,不是推测;"删了文件但 `df` 空间没释放"用真实 300MB 文件+持有 fd 的后台进程完整复现;文本处理一节用真实生成的 404 行训练 log 做 grep/awk 组合拳素材。如实记录两处现场真实撞到、不遮掩的环境限制:WSL2 虚拟机闲置会自动重启(与真实远程服务器行为无关)、这次用到的 git 快照版本 tmux 在 `capture-pane` 上有真实可复现的服务端崩溃(内核日志为证),两者均已在对应"常见坑"标注绕开方式) |
+| 03 | SSH 与远程 GPU 服务器实操 | [03-ssh-and-remote-servers.md](03-ssh-and-remote-servers.md) | ✅ 已完成(7 节均按 6 步模板;复用 rhcsa-bash-deep-dive 的 WSL2 Rocky Linux 10.2 作为"远程服务器"角色,密钥生成/部署/真实登录/`~/.ssh/config` 别名/端口转发/`scp`/tmux 断线重连全部真实端到端验证,均用临时生成、验证完已清理的密钥;`rsync` 如实记录 Windows 客户端不自带、改用 Rocky 内部真实 SSH 回环验证差量同步(8MB 文件改 4KB,真实传输量从 100% 降到 0.2%);端口转发一节如实记录 WSL2 mirrored 网络模式共享 loopback 导致的巧合,并用杀隧道/建隧道的因果实验绕开这个巧合给出严谨证据;`ssh-copy-id` 在 root 无密码账号上真实撞到一个"误报已安装"的陷阱,已如实记录并读源码解释原因;撰写过程中发现 Claude Code 工具链里 Bash 工具的 `$HOME` 和 Read/Write/PowerShell 工具看到的真实 Windows 用户目录不是同一个路径,一度险些用 Write 工具覆盖真实的 `~/.ssh/config`,被工具的改前必读保护拦下(只发生一次只读读取,零写入),之后全程改在沙箱路径和独立 `/tmp` 临时目录操作,文末逐文件字节数+时间戳核对确认真实 `C:\Users\ericp\.ssh\` 全程未被触碰) |
+| 04 | Git/GitHub 日常协作实操 | [04-git-collaboration-workflow.md](04-git-collaboration-workflow.md) | ✅ 已完成(6 节均按 6 步模板;所有 git 操作——含真实构造并解决的 merge conflict、`git reflog` 找回"丢失"的 commit——全部在隔离的临时演示仓库完成,全程未触碰当前仓库 e:\Workspace\dummy 的真实历史,收尾用 `git -C` 二次确认真实仓库状态未被改动) |
+| 05 | Python 环境管理实操(venv/conda/依赖排查) | [05-python-environment-management.md](05-python-environment-management.md) | ✅ 已完成(5 节均按 6 步模板;venv 创建/激活/依赖冲突演示全部在新建临时目录完成,收尾确认仓库根目录真实 `.venv` 未被改动;`pip check` 的排查流程用真实制造的版本冲突验证退出码语义) |
+| 06 | 命令行监控与调试实操(nvidia-smi/htop/日志/pdb) | [06-monitoring-and-debugging.md](06-monitoring-and-debugging.md) | ✅ 已完成(5 节均按 6 步模板;边界声明与 kernel-gpu-deep-dive 01 号文件分工,只讲 nvidia-smi 操作层面不重复 GPU 硬件原理。nvidia-smi 一节全部真实在本机 RTX 3080 Ti Laptop GPU 上跑过,`_assets/06-gpu-load-demo.py` 真实制造负载,拿到空闲/负载中/杀进程后确认释放三态对照,现场撞到并记录了这个驱动版本(595.97)`-c` 参数其实是 `--compute-mode`、不是"刷新次数"这个和网传教程不同的真实坑,以及一次因 wmic 命令行模糊搜索误差点导致批量 taskkill 有风险的真实教训。ps/htop 一节先现场证明这台机器 Git Bash 自带的 `ps` 是 Cygwin 移植版、和 Linux `ps aux` 不等价,再切到 02 号文件已验证的 WSL2 Rocky Linux 环境用 `_assets/06-fake-training-loop.py` 真实跑通 `ps aux`/`htop`(`htop` 用 `-n 1 -C` 拿确定性单帧快照,手动清理 ANSI 转义后确认数值真实)。tail -f 一节用真实、全程套 `timeout` 限时的实时写入 + 过滤演示,`[WARNING]` 行真实在写入那一刻才被 `grep --line-buffered` 输出,不是排版效果。pdb 一节用 `printf` 管道非交互驱动 `_assets/06-pdb-demo.py` 真实跑通完整 `l`/`p`/`s`/`n`/`c` 会话,原样记录了第一次因手工推算 `s`/`n` 步数出错、没能真正停进循环内部的真实波折,以及后续用真实运行结果修正命令序列的过程。断线重连一节把前 4 节工具串成一份可执行的检查清单,不重新验证 SSH/tmux 本身。撰写过程中真实发现并修复了 `06-pdb-demo.py`/`06-fake-training-loop.py` 里两处中文字符在这台机器编码环境下(`pdb` 的 `l` 命令、标准输出重定向进文件)会显示乱码的问题,已改成纯 ASCII;所有"持续监控"类命令全部用 `timeout` 或工具自带的次数限制参数保证有限时间退出,撰写过程中没有出现 Bash 工具调用挂起不退出的情况) |
+| 07 | LaTeX 论文写作实操(直接服务 ICLR 投稿) | [07-latex-paper-writing.md](07-latex-paper-writing.md) | ✅ 已完成(7 节均按 6 步模板;全篇几乎每一节都用本机 MiKTeX 真实编译出 PDF 验证,产物见 `_assets/07-latex-demos/`——最小骨架、DPO loss 公式排版(用学生自己已学过的 alignment-algorithms-deep-dive 公式作真实例子)、图表三线表、BibTeX 完整 4 遍编译(xelatex→bibtex→xelatex→xelatex)、3 种常见报错的真实触发(缺 `$`/未定义引用/缺宏包),错误场景刻意展示"没有产出 PDF"本身就是教学内容而非遗漏) |
+
+---
+
+## 完成小结
+
+7 个分类全部完成并独立验证(2026-07-23)。这条系列和"深挖系列"最大的不同验证标准是:图形界面点击类内容(VSCode 菜单、断点红点样式)如实标注为"已核实当前版本菜单路径,但未做自动化验证",不冒充和命令行/代码同等的验证颗粒度;所有涉及真实凭据/真实仓库历史/真实系统配置的操作(SSH 密钥、git 历史、`.venv`、`.bashrc`)一律先确认隔离环境或临时账号,收尾用哈希/字节数/`git status` 等硬证据确认真实环境零改动,不是空口承诺"应该没事"。撰写过程中一处最值得记住的教训:03 号文件(SSH)撰写时发现 Claude Code 工具链里 `Bash` 工具的 `$HOME` 和 `Read`/`Write`/`PowerShell` 工具解析到的真实 Windows 用户目录不是同一个路径,涉及 `~/.ssh` 这类家目录相对路径的操作,后续必须对每个工具分别确认它到底在操作哪个真实位置,不能想当然认为所有工具看到的"当前用户目录"是同一个地方。
 
 ---
 
