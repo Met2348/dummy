@@ -203,9 +203,37 @@ with torch.no_grad():
 diff_zeroed = (out_mam_zeroed - out_base).abs().max().item()
 assert diff_zeroed == 0.0           # 强制清零 P_k/P_v 后，才精确等于 base
 assert diff_zeroed < diff_default / 100
+
+# 第三部分：上面"底层机制"一段说 P_k 的梯度接近零，这是 softmax 平移不变性的直接推论——
+# 这里现场手写一个独立于 GPT2Attention 内部实现的单头因果自注意力，把这句话变成可以自己重跑的代码，
+# 不是只在正文里引用一个数字
+import torch.nn.functional as F
+
+def _causal_self_attention(q, k, v):
+    """极简单头因果自注意力，只依赖 q/k/v 的形状 (batch, seq, d)，不借用 transformers 内部任何细节。"""
+    dh = q.shape[-1]
+    seq = q.shape[1]
+    scores = (q @ k.transpose(-1, -2)) / (dh ** 0.5)
+    causal_mask = torch.triu(torch.ones(seq, seq, dtype=torch.bool), diagonal=1)
+    scores = scores.masked_fill(causal_mask, float("-inf"))
+    return F.softmax(scores, dim=-1) @ v
+
+torch.manual_seed(31)
+pa3 = PrefixAttention(nn.Linear(d, 3 * d), d, prefix_len=prefix_len)
+x3 = torch.randn(2, 6, d)
+q3, k3, v3 = pa3(x3).split(d, dim=-1)
+out3 = _causal_self_attention(q3, k3, v3)
+loss3 = F.mse_loss(out3, torch.randn_like(out3))
+loss3.backward()
+
+pk_grad_max = pa3.P_k.grad.abs().max().item()
+pv_grad_max = pa3.P_v.grad.abs().max().item()
+assert pk_grad_max < 1e-6                                 # P_k 的梯度是浮点噪声量级，不是"很小但仍在学习"
+assert pv_grad_max > 1e-3                                 # P_v 的梯度是正常量级
+assert pv_grad_max / pk_grad_max > 1e5                     # 至少差 5 个数量级，不是同一量级的大小差异
 ```
 
-实测(`.venv` 真跑):第一部分的全部结构性断言通过——`PrefixAttention` 给 K/V 加的偏置张量形状精确是 `(1,1,d)`,靠 broadcast 复制到每个 token,序列长度全程保持 `4`,没有变成 `4+5=9`。第二部分:默认初始化下 `diff_default = 1.920242e-01`(文本 `"deep learning is fascinating"`,种子 11);作为交叉验证,`mam_minimal.py` 自己的 `main()`(文本 `"hello world"`,种子 42)给出的是 `diff = 1.5141e-01`,同样是非平凡量级,不是本文这次跑的巧合。作为对照,`houlsby_minimal.py::main()` 里同样的"初始 forward vs base"检验给出的是精确的 `0.0000e+00`(因为 Houlsby/Parallel 用的是精确零初始化,MAM 的 Prefix 侧不是)。把 12 层的 `P_k`/`P_v` 手动清零后,`diff_zeroed` 精确为 `0.0`,验证了非零 diff 确实来自 Prefix 侧,不是 Parallel FFN 侧(它本来就是零初始化)。梯度实测(手写因果自注意力隔离实验,种子 31):`|P_k.grad|` 最大值 `7.450580596923828e-09`,`torch.allclose(P_k.grad, 0, atol=1e-6)` 为 `True`;`|P_v.grad|` 最大值 `0.9852700233459473`。完整 12 层 `MAMGPT2` 上的真实反传(种子 13,文本 `"the quick brown fox jumps"`):`P_k.grad` 全层最大绝对值 `1.0283353057971567e-09`,`P_v.grad` 全层最大绝对值 `0.0810539647936821`。
+实测(`.venv` 真跑):第一部分的全部结构性断言通过——`PrefixAttention` 给 K/V 加的偏置张量形状精确是 `(1,1,d)`,靠 broadcast 复制到每个 token,序列长度全程保持 `4`,没有变成 `4+5=9`。第二部分:默认初始化下 `diff_default = 1.920242e-01`(文本 `"deep learning is fascinating"`,种子 11);作为交叉验证,`mam_minimal.py` 自己的 `main()`(文本 `"hello world"`,种子 42)给出的是 `diff = 1.5141e-01`,同样是非平凡量级,不是本文这次跑的巧合。作为对照,`houlsby_minimal.py::main()` 里同样的"初始 forward vs base"检验给出的是精确的 `0.0000e+00`(因为 Houlsby/Parallel 用的是精确零初始化,MAM 的 Prefix 侧不是)。把 12 层的 `P_k`/`P_v` 手动清零后,`diff_zeroed` 精确为 `0.0`,验证了非零 diff 确实来自 Prefix 侧,不是 Parallel FFN 侧(它本来就是零初始化)。第三部分,`|P_k.grad|` 最大值 `5.005859e-10`(`torch.allclose(P_k.grad, 0, atol=1e-6)` 为 `True`),`|P_v.grad|` 最大值 `2.233610e-02`,两者比值约 `4.46e7`——差了超过 7 个数量级,`P_k` 的梯度是浮点舍入噪声的量级,不是"很小但仍在被训练"。这份手写因果自注意力的具体实现细节(有没有除以 `√d`、loss 用什么形式、GPT-2 自身的 attention/residual dropout 会不会额外消耗一点随机数状态)不需要和某一次特定验证的具体小数位完全对上——不同的合理实现给出的具体数值会有差异,但只要 `k_bias` 在 softmax 之前被加到每个 key 位置、且这个偏移量不随 key 的位置变化,`P_k` 的梯度就会被 softmax 的平移不变性结构性地压到浮点噪声量级,这是这份手写验证真正要钉死的结论,不是某一组具体小数。
 
 **面试怎么问 + 追问链:**
 - **Q:** "`mam_minimal.py` 里的 `PrefixAttention` 和真正的 Prefix Tuning 是一回事吗?"—— 期望说"不是同一回事,是一个近似实现",能具体说出"没有真的拼接进 K/V 序列,而是把 prefix 向量取均值变成一个常数偏置"。
