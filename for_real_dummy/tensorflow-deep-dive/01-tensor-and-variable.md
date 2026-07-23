@@ -435,6 +435,32 @@ rt.to_tensor(default_value=...)   # 转成补齐(pad)后的规整Tensor
 
 关键是很多 elementwise 运算(`+`、`*`、`tf.reduce_mean(..., axis=1)` 等)在 `RaggedTensor` 上**直接支持运算符重载和 ragged-aware 实现**,不需要先手动 `to_tensor()` 补齐——比如 `tf.reduce_mean(rt, axis=1)` 会正确地"只在每行自己实际拥有的元素上"求平均,不会被 pad 出来的 0 污染均值,这正是"变长序列不想为了对齐而补 0 破坏统计量"这个诉求的直接解法。但两个 `row_splits` 结构不同的 `RaggedTensor` 直接相加会失败——实测报 `InvalidArgumentError: Condition x == y did not hold`,并把两边 `row_splits` 的差异点打印出来,这是"运算符重载不代表可以随便乱加,底层还是要求两边的参差结构完全对齐"这一事实的证据。
 
+**用一张图看懂 `values`+`row_splits` 具体怎么拼出"参差"这个形状**(以下面"可运行例子"里验证过的 `[[1, 2, 3], [4, 5], [6]]` 为例,数值和下面的 `assert` 逐一对应,不是抽象举例):
+
+```text
+原始参差数据(每"行"长度不同):   [[1, 2, 3], [4, 5], [6]]
+                                     行0        行1    行2
+
+rt.values —— 拍平成一维的规整 tensor,没有补0,单纯首尾相接:
+  [1, 2, 3, 4, 5, 6]
+   └───┬───┘ └─┬─┘ └┬┘
+     行0的3个   行1的2个 行2的1个
+       元素        元素      元素
+
+rt.row_splits —— 长度固定是"行数+1",记录每一行在 values 里的起止下标:
+  [0,         3,         5,    6]
+   ↑          ↑          ↑     ↑
+  行0起点    行0止点/    行1止点/  行2止点
+             行1起点     行2起点
+
+第 i 行 = values[row_splits[i] : row_splits[i+1]]
+  行0 = values[0:3] = [1, 2, 3]
+  行1 = values[3:5] = [4, 5]
+  行2 = values[5:6] = [6]
+```
+
+`row_splits` 之所以要比行数多存一个数(3 行存 4 个数),是因为每一段区间需要"起点+终点"两个边界,相邻两行共享同一个边界值(行0的终点 3 恰好就是行1的起点 3)——这也是"参差不齐"被完全转移到 `row_splits` 这一个规整的一维索引 tensor 上、`values` 本身不用关心任何"这是第几行"信息的直接体现。
+
 **AI 研究/工程场景:** NLP 里一个 batch 内的句子 token 数量天然不同,`tf.ragged.constant` 能让你在真正喂进 `Embedding` 层之前,先用 ragged 原生的 `row_lengths()`/`reduce_mean(axis=1)` 之类的操作做统计或简单池化,不必提前决定一个"padding 到多长"的超参数;到了真正要进 RNN/Transformer 这类要求规整输入的层时,再显式 `.to_tensor(default_value=0)` 补齐,并且通常还要配合一个"这一位是不是 padding 出来的"mask(常见做法是 `tf.sequence_mask(rt.row_lengths())`)。
 
 **可运行例子:**

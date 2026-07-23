@@ -3,7 +3,7 @@
 > 总览见 [00-roadmap.md](00-roadmap.md)
 > **这是全系列权重最高的一批之一。** 本篇和 03(`tf.function`/AutoGraph)合计占全系列五分之一权重——这不是平均分配出来的数字:TF2 相对 PyTorch 真正的心智负担,不是"自动微分"这个概念本身(两边概念上都是 reverse-mode AD,很像),而是"这行 eager 代码到底会不会被记录、记录之后这条路径能不能求出梯度"这件事在 TF2 里不是 tensor 与生俱来的属性,需要你主动理解 tape 的记录规则——这正是本篇要打开的黑箱。面试聊到"TensorFlow 底层机制",十有八九会落在 GradientTape 上,而且经常不是"`.gradient()` 怎么调"这种问法,而是"你能不能解释清楚,这里的梯度为什么是 `None`——是没被 watch,是路径断了,还是这个 op 本来就不可导"。
 
-**关于 01 篇的前置知识:** 本系列 01(Tensor 基础与 tf.Variable)按路线图规划尚未成稿,但本篇要用到的前置知识很单薄,这里直接说清楚:`tf.Variable` 是可变的、持有存储句柄的"长期对象"(模型参数的标准载体,有 `trainable` 属性);`tf.Tensor`(包括 `tf.constant` 和任何运算产生的中间结果)是不可变的"一次性值对象",没有 `trainable` 这个概念。这个区别是第 2 节"自动 watch 规则"成立的物理基础——先记住这一句,后面会反复用到。
+**关于 01 篇的前置知识:** [01 篇(Tensor 基础与 tf.Variable)第 1 节](01-tensor-and-variable.md)已经详细讲过 `tf.constant`/`tf.Variable` 的区别和 `ResourceVariable` 的底层实现(resource handle、`ReadVariableOp` 这些细节),这里不重新展开,只把本篇要反复用到的这一句结论提前摆出来:`tf.Variable` 是可变的、持有存储句柄的"长期对象"(模型参数的标准载体,有 `trainable` 属性);`tf.Tensor`(包括 `tf.constant` 和任何运算产生的中间结果)是不可变的"一次性值对象",没有 `trainable` 这个概念。这个区别是第 2 节"自动 watch 规则"成立的物理基础——先记住这一句,后面会反复用到。
 
 本文所有代码例子已在 WSL2 `~/tf-venv`(TensorFlow **2.21.0**,GPU 可用,环境细节见 [00-roadmap.md](00-roadmap.md) 第 0 节)下实际跑通验证。所有报错信息都是现场触发后原样抄录,不是转述文档或凭经验断言;所有数值结果都经过手算或多种方式交叉验证。"AI 研究/工程场景"段落如实写场景化例子,但仓库 `learning/` 目录下没有 TensorFlow 代码可引用——这是本系列统一声明过的诚实边界(见 00-roadmap.md),后文不再逐条重复。
 
@@ -321,7 +321,7 @@ d2y_dx2 = outer.gradient(dy_dx, x)   # 对"一阶导数"这个tensor再求一次
 
 有一个已验证的关键约束:**两层 tape 都需要各自"看到" `x`**。如果 `x` 是 trainable Variable,两层会各自自动 watch(第 2 节的自动 watch 规则是逐个 tape 独立生效的,不会"传染"给外层或内层);如果 `x` 是普通 tensor,内层和外层都要各自显式 `watch(x)`——只在内层 watch、忘了外层,会导致外层 `gradient()` 拿到 `None`(因为外层的角度看,`dy_dx` 虽然是从 `x` 算出来的,但外层从来没把 `x` 纳入监听范围,反向遍历不到这条路径的终点)。这是实践中最容易踩的坑,已经用代码触发验证过。
 
-**AI 研究/工程场景:** 元学习(MAML 等算法,呼应 torch-deep-dive/02 第 8 节讲的同一类场景)需要对"内层任务适应一步梯度更新"这个过程本身再求梯度,来更新外层的元参数;物理仿真/PINN(physics-informed neural network)里损失函数直接包含对输入的二阶偏导数(比如 PDE 里的拉普拉斯算子 ∂²u/∂x²),需要嵌套 tape 现算;二阶优化方法(比如需要 Hessian 或 Hessian-vector product 的场景)同样以此为基础(第 7 节 `jacobian` 配合嵌套 tape 就能求出完整 Hessian 矩阵)。
+**AI 研究/工程场景:** 元学习(MAML 等算法,呼应 torch-deep-dive/02 第 8 节讲的同一类场景)需要对"内层任务适应一步梯度更新"这个过程本身再求梯度,来更新外层的元参数;物理仿真/PINN(physics-informed neural network)里损失函数直接包含对输入的二阶偏导数(比如 PDE 里的拉普拉斯算子 ∂²u/∂x²),需要嵌套 tape 现算;二阶优化方法(比如需要 Hessian——把损失函数对参数的所有二阶偏导数排成的方阵,直观理解就是"梯度的梯度",描述的是损失曲面的曲率——或 Hessian-vector product 的场景)同样以此为基础(第 7 节 `jacobian` 配合嵌套 tape 就能求出完整 Hessian 矩阵)。
 
 **可运行例子:**
 ```python

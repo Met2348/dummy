@@ -185,7 +185,7 @@ print("apply_gradients 之后 w =", w.numpy())
 - 把"部分梯度是 `None` 会被静默跳过"错误推广成"`None` 梯度永远安全",忽略"全部是 `None` 会直接报 `ValueError`"这条不同的路径。
 - 部分梯度为 `None` 时真实触发的 WARNING 原文(已现场触发抄录):`WARNING:tensorflow:Gradients do not exist for variables ['Variable:0'] when minimizing the loss. If you're using \`model.compile()\`, did you forget to provide a \`loss\` argument?`——这条文案的措辞历史上是给 `compile()`/`minimize()` 路径写的,即使你根本没用过 `compile()`,直接调 `apply_gradients` 触发的也是同一条通用文案,不要被"`model.compile()`"字样误导,以为自己一定是用错了别的 API。
 - 全部梯度为 `None` 时真实触发的 `ValueError` 原文(已现场触发抄录):`ValueError: No gradients provided for any variable: (['Variable:0'],). Provided \`grads_and_vars\` is ((None, <tf.Variable 'Variable:0' shape=(1,) dtype=float32, numpy=array([1.], dtype=float32)>),).`
-- 忘记 `GradientTape` 默认只自动 watch **trainable 的 `tf.Variable`**(下一篇 GradientTape 专题详细展开),普通 `tf.constant` 或 `trainable=False` 的 Variable 不会被自动追踪,`tape.gradient` 对应位置会直接返回 `None`,容易和"变量确实没参与计算"这种情况混淆,排查方向完全不同。
+- 忘记 `GradientTape` 默认只自动 watch **trainable 的 `tf.Variable`**(02 篇 GradientTape 专题已经详细展开过),普通 `tf.constant` 或 `trainable=False` 的 Variable 不会被自动追踪,`tape.gradient` 对应位置会直接返回 `None`,容易和"变量确实没参与计算"这种情况混淆,排查方向完全不同。
 
 ---
 
