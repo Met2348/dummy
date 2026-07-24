@@ -87,6 +87,26 @@ database-deep-dive 是"职业发展与需求"四部曲第 3 部,范围广度(关
 
 ---
 
+## 论文发表系列(从写作到社区回响)
+
+2026-07-25,导师(Weikai Lin)转达两轮反馈:第一轮要求补充科研写作/学术绘图/论文投递相关的手把手教程;第二轮明确点名要再加 rebuttal(重点强调)、参会指南、oral、camera ready、release code、poster、presentation、hugface release、interact with community、deal with reject。这是 for_real_dummy 里第一次出现"研究判断力/学术生存技能"类内容——和"深挖系列"(函数/机制是什么)、"操作类系列"(工具怎么操作)都不同,回答的是"论文这件事从写到发表到被社区看见,应该怎么做"。设计文档见 [`docs/superpowers/specs/2026-07-25-paper-publication-series-design.md`](../docs/superpowers/specs/2026-07-25-paper-publication-series-design.md)。
+
+按内容性质拆成 5 个独立系列(不是揉进一个大文件集,原因是写作/视觉设计/流程策略/临场表达/发布运营是差异很大的技能类型,合并会互相稀释深度),每个系列自己"由浅入深",不强行报一个大知识点总数——这类内容天然是原则+范例结构,统一按"分类数"呈现,延续 numpy-deep-dive"材料相对薄弱、诚实收敛不强行凑"的先例。
+
+| 系列 | 内容 | 规模 | 状态 |
+|------|------|------|------|
+| [research-writing-deep-dive/](research-writing-deep-dive/00-roadmap.md) | 科研写作:叙事结构与电梯演讲(C-C-C/Motivation-Gap-Contribution、SPJ"先写论文再做研究"哲学)→Introduction段落写作与Related Work定位→Method/实验呈现逻辑(结果先行/Figure 1该放什么/消融三件套/bake-off陷阱)→句子层面学术英语(被动语态/zombie nouns/引用是脚注不是名词)→局限性诚实自曝→多轮修改方法论与AI辅助边界→审稿人视角红旗拆解→**Rebuttal写作技巧**(响应导师点名强调),8个分类,收尾1篇[模拟审稿+rebuttal攻防capstone](research-writing-deep-dive/09-mock-review-rebuttal-capstone.md)。新设计"六步写作判断力模板"(常见误区反例→逐处修改对照→可操作检查清单→能量化的部分写真实代码验证→审稿人会怎么挑刺+反驳链→常见坑),复用五轴追问链方法论的评审对抗版。**亮点**:能量化的判断力(被动语态占比/句长分布/关键词重叠度等)全部写真实Python代码验证而不是空谈;真实撞见并诚实记录多处坑,如`et al.`污染朴素句子切分器、`Figure 1:`图号数字污染正则规则误判有量化结果 | 8个分类+1篇capstone | ✅ 全部完成并验证 |
+| [research-figures-deep-dive/](research-figures-deep-dive/00-roadmap.md) | 学术绘图:图表类型选择→颜色与感知设计(Okabe-Ito色盲友好调色板/为什么不能用jet colormap)→多面板排版工程(matplotlib gridspec/字体线宽DPI三件套/矢量图vs位图)→架构图与流程图(TikZ/draw.io/PowerPoint适用场景判断)→图注写作规范→常见反模式(Tufte chartjunk/双y轴陷阱/3D饼图),6个分类,复用深挖系列标准七步模板(面试怎么问换成"审稿人/读者会怎么挑刺"),收尾1篇[手把手教程体](research-figures-deep-dive/07-build-a-mini-publication-figure.md)(画一张完整投稿级核心结果图)。**验证方法论差异**(仓库第一次系统性产出图片文件而非纯文本assert):检查文件真实生成+尺寸/DPI元数据符合预期,能算的设计判断(如jet/viridis感知亮度单调性)真算,不假装能对图片内容做像素级assert。**亮点**:真实测出`fig.savefig(dpi=300)`读回DPI元数据是`299.9994`不是精确`300.0`(PNG格式浮点圆整误差);真实测出"墨水像素占比"和"信息密度"是两件不同的事,一个64pt大数字反而比八行小字占用更多像素面积 | 6个分类+1篇教程体 | ✅ 全部完成并验证 |
+| [paper-submission-deep-dive/](paper-submission-deep-dive/00-roadmap.md) | 投稿与评审:Venue选择与fit度判断(JMLR vs IEEE TNNLS影响因子迷思)→双盲匿名化与OpenReview投稿系统操作(含真实可用的[匿名化检查脚本](paper-submission-deep-dive/_assets/02-anon-checker/check_anonymity.py),8类信号检测)→Rebuttal时间与协作管理(ICLR真实数据开篇:分数提升论文录用率55.7%-57.6%,不变的只有7.8%-12.4%)→**Deal with Reject深挖**(响应导师点名强调,独立分类不被"decision分支"笼统带过)→Camera-ready与Supplementary组织,5个分类,复用daily-toolkit已验证的6步操作类模板,收尾1篇[投稿全流程复盘capstone](paper-submission-deep-dive/06-mock-submission-journey-capstone.md)(首投被拒→冷静拆解→调整重投→录用)。**亮点**:匿名化检查脚本真实检出15类身份泄露信号,0误报;引用2025-11-27 OpenReview平台真实发生的匿名信息泄露事故(利用泄露信息=直接拒稿+多年禁令) | 5个分类+1篇capstone | ✅ 全部完成并验证 |
+| [academic-presentation-deep-dive/](academic-presentation-deep-dive/00-roadmap.md) | 学术演讲与参会:Oral Presentation结构与讲述节奏(SPJ姊妹讲座"How to Give a Great Research Talk")→Slides设计原则(区别于论文图表,slide是给耳朵听的)→Poster设计与摆摊讲解(`#betterposter`运动)→现场Q&A应对技巧(CAP结构:Acknowledge-Answer-Perspective)→会议参会实用指南(日程冲突检测/networking分层策略),5个分类,复用写作系列的六步判断力模板(第⑤步换成"听众/评委会怎么问"),收尾1篇[会议日capstone](academic-presentation-deep-dive/06-conference-day-capstone.md)(5分钟spotlight准备→连续4轮追问当场应对)。**亮点**:用matplotlib真实渲染slide/poster版式好坏对照(`get_window_extent`真实测量文字包围盒,不是画风格示意图);真实测出"墨水像素占比"这一项和直觉不完全一致(好例子的64pt大数字占用像素面积反而略高于坏例子,但认知负担明显更低) | 5个分类+1篇capstone | ✅ 全部完成并验证 |
+| [research-release-deep-dive/](research-release-deep-dive/00-roadmap.md) | 成果发布与社区:开源代码发布规范(README/依赖锁定/随机种子方差/License/DOI,和daily-toolkit的Git协作章节划清边界)→HuggingFace Release(Model Card/Dataset Card/上传前检查)→学术社区互动(挂号渠道/宣传帖/GitHub issue/邮件回应),3个分类(规模诚实偏小,不强行凑),收尾1篇[发布清单串讲](research-release-deep-dive/04-release-checklist-walkthrough.md)(拿真实项目`research/world-model-imagination-controller/`走一遍真实审计,不是空对空复述清单)。**亮点**:本机确认无真实HuggingFace账号/token,诚实分三层验证颗粒度(本地可验证/一次性真实网络校验不纳入自动化范围/完全没做的真实上传);真实发现`ModelCardData`的`tags`/`datasets`两个字段传入裸字符串时静默失败方式不一样(读源码确认) | 3个分类+1篇清单串讲 | ✅ 全部完成并验证 |
+
+**5 个系列并行构建过程中期撞上一次 API 5 小时限额中断**(4/5 路成功,1 路[research-figures-deep-dive]在收尾自查阶段被切断)——按 [[feedback-api-ratelimit-recovery-protocol]] 既有协议核实真实完成度,发现该系列实际已经写完全部内容(7 篇正文+全部图片资产),只差最后一步"重新扫描确认干净"未完成,不需要重派,直接由主会话接手完成收尾自查。**这次自查额外发现一个跨 3 个系列共 90 余处的真实问题**:部分可运行代码块的 `print()` 语句字符串字面量混用了中文,这类内容按仓库既定纪律("Windows-GBK `print()` 必须纯 ASCII")本该在撰写阶段避免——`_verify_md.py` 只检查有没有 Python 异常、不检查文字是否可读,所以即使输出会在这台机器的 GBK 控制台编码下显示成乱码,验证脚本依然会判定"[ok]"。已逐一核实并修复(数值断言逻辑完全不变,只改字符串字面量),修复后全部代码块重新验证通过。
+
+5 个系列均已独立核实(git diff 核对范围、重跑 `_verify_md.py`、抽查内容质量),不是单纯采信 agent 自报。
+
+---
+
 ## 专题精读系列(直接对应 `learning/` 下具体专题模块的精读伴读笔记)
 
 和上面"深挖系列"的关键差异:上面六条补的是"读懂 `learning/` 代码需要的通用框架/语言技能"(numpy/torch/HF 库机制本身,不绑定具体研究专题);这里每一条都**直接对应 `learning/` 下一个具体专题模块**,讲的是**同一份代码**,只是换成更适合初学者/面试备考的讲解深度(7 步结构,从最笨的想法讲起,面试怎么问+追问链),不是重复造轮子——定位类似"这份 PhD 级代码,配一份大二学生看得懂、还能扛住面试的精读笔记"。
@@ -203,6 +223,34 @@ for_real_dummy/
 │   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 6步操作类模板说明 + 验证环境声明 + 完成小结
 │   ├── 01~07-*.md                     ← VSCode→Linux日常→SSH远程→Git协作→Python环境管理→监控调试→LaTeX论文写作
 │   └── _assets/                       ← 各章节真实验证用的辅助脚本/LaTeX编译产物(含真实生成的PDF)
+├── research-writing-deep-dive/        ← 论文发表系列:科研写作(8分类+1篇capstone,六步写作判断力模板,含Rebuttal写作技巧,全部完成)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 六步模板说明 + 验证纪律
+│   ├── 01~08-*.md                     ← 叙事结构→Introduction/Related Work→Method/结果呈现→学术英语→局限性→修改方法论→审稿人视角→Rebuttal写作
+│   ├── 09-mock-review-rebuttal-capstone.md ← 模拟审稿+rebuttal攻防capstone(非知识点列表)
+│   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
+├── research-figures-deep-dive/        ← 论文发表系列:学术绘图(6分类+1篇教程体,深挖系列标准七步模板,全部完成)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 验证方法论差异声明(图片文件验证) + 环境声明
+│   ├── 01~06-*.md                     ← 图表类型→颜色感知→多面板排版→架构图工具→图注规范→常见反模式
+│   ├── 07-build-a-mini-publication-figure.md ← 手把手教程体:画一张完整投稿级核心结果图
+│   ├── _assets/                       ← 各知识点真实渲染的图片资产(PNG/PDF/SVG)
+│   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
+├── paper-submission-deep-dive/        ← 论文发表系列:投稿与评审(5分类+1篇capstone,6步操作类模板,含真实匿名化检查脚本,全部完成)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 验证声明
+│   ├── 01~05-*.md                     ← Venue选择→双盲匿名化与OpenReview→Rebuttal时间协作管理→Deal with Reject→Camera-ready
+│   ├── 06-mock-submission-journey-capstone.md ← 投稿全流程复盘capstone(首投被拒→重投→录用,非知识点列表)
+│   ├── _assets/02-anon-checker/       ← 真实可用的双盲匿名化检查脚本 check_anonymity.py + 测试用.tex样例
+│   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
+├── academic-presentation-deep-dive/   ← 论文发表系列:学术演讲与参会(5分类+1篇capstone,六步判断力模板,全部完成)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 验证声明
+│   ├── 01~05-*.md                     ← Oral结构节奏→Slides设计→Poster设计摆摊→现场Q&A→会议参会指南
+│   ├── 06-conference-day-capstone.md  ← 会议日capstone(spotlight准备→现场追问应对,非知识点列表)
+│   ├── _assets/                       ← 真实渲染的slide/poster版式对照图片
+│   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
+├── research-release-deep-dive/        ← 论文发表系列:成果发布与社区(3分类+1篇清单串讲,6步操作类模板,全部完成)
+│   ├── 00-roadmap.md                  ← 总规划 + 进度表 + 验证环境的诚实分级声明
+│   ├── 01~03-*.md                     ← 开源代码发布规范→HuggingFace Release→学术社区互动
+│   ├── 04-release-checklist-walkthrough.md ← 发布清单串讲(拿真实项目world-model-imagination-controller走一遍审计)
+│   └── _verify_md.py                  ← 独立提取并执行每个代码块的验证脚本
 ├── my-cheatsheet.md                   ← 你自己维护的速查表(持续增长)
 ├── practice/                          ← 你自己动手写代码验证的 notebook
 │   └── 00-getting-started.ipynb       ← 现成的起步文件,含环境自检 + 练习模板
@@ -216,4 +264,4 @@ for_real_dummy/
 
 ---
 
-*最后更新:2026-07-23*
+*最后更新:2026-07-25*
