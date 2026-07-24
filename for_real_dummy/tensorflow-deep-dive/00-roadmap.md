@@ -56,10 +56,13 @@
 | 12 | 序列化与部署基础 | [12-serialization-and-deployment.md](12-serialization-and-deployment.md) | 8 | ✅ 已完成(已验证,13/13代码块) |
 | 13 | 调试与常见报错精解 | [13-debugging-and-common-errors.md](13-debugging-and-common-errors.md) | 9 | ✅ 已完成(已验证,27/27代码块,含AutoGraph机制修正,系列收尾) |
 | 14 | 进阶深度追加:5 个多级追问链案例 | [14-advanced-interview-depth.md](14-advanced-interview-depth.md) | 5案例(不计入100) | ✅ 已完成(已验证,10/10代码块独立通过;基于真实WebSearch调研的5条追问轴线撰写——retracing性能陷阱诊断链(现场证明`reduce_retracing=True`对Python标量退化完全无效、对Tensor shape变化真实有效,并额外隔离出"optimizer首次创建slot变量导致多trace一次"这一独立机制,25步真实训练step量化出5.41倍速度差异)、GPU显存贪婪分配决策依据(双OS进程真实共享一张物理GPU实测,发现"默认贪婪邻居已占84.7%显存"后另一进程申请8-13GB仍能成功这一调研阶段未预料到的真实现象,继而现场定界出"组合占用被收在物理16384MiB容量内、且请求量推高到15000MiB确实会真实OOM"的具体边界)、训练规模递增分布式决策(真实计算量化eager下MirroredStrategy.run比tf.function包裹慢5.28倍;并现场测出2个虚拟副本吞吐反而是单设备的0.48倍,量化验证"虚拟设备不能评估真实多卡收益"这条边界)、部署格式选型方案批判迭代(SavedModel/.h5/.keras/TFLite五种交付形态体积实测对比,以及"isinstance在SavedModel重载后失效"导致fine-tuning脚本静默冻结0层而非1层的真实bug复现)、Keras 2/3环境声明真实性验证边界(现场证明"tf.keras解析正确"不代表裸`import keras`也是Keras 2,且同一根因在Layer混用时报错清晰、在Callback混用时报错高度隐晦,诊断难度不在一个量级)) |
+| 15 | 手把手实战:从零搭一个迷你自定义训练循环 | [15-build-a-mini-custom-training-loop.md](15-build-a-mini-custom-training-loop.md) | 4阶段(不计入100) | ✅ 已完成(已验证,6/6代码块独立通过;阶段1从裸`tf.Variable`手写GradientTape一步更新(`assign_sub`)入手,现场证明和`optimizer.apply_gradients`在朴素SGD下逐比特相同;阶段2手工切分batch跑15轮,如实记录loss并非逐轮单调下降(mini-batch噪声导致中间轮次反复,如epoch3→4从0.2322涨到0.2398)、最终收敛水平接近数据噪声方差理论下限(noise std=0.5→var=0.25,实测loss稳定在0.23~0.24);阶段3现场验证了09类只给出签名未展开测试的`shuffle`默认`reshuffle_each_iteration`行为(同一dataset两次独立完整迭代,首批次内容确实不同),再用`tf.data.Dataset`管道替换手工切分,15轮训练效果与阶段2同量级收敛;阶段4对照`model.compile()+model.fit()`,最终W/b/loss相差在0.01量级内,如实说明"接近但非逐比特相同"的真实原因(两条路径shuffle消费的随机数流不同,不是bug)) |
 
-**合计:100 个知识点,13 篇 + 1 篇进阶深度追加(5 个案例,不计入 100),全部完成并独立验证。**
+**合计:100 个知识点,13 篇 + 1 篇进阶深度追加(5 个案例,不计入 100)+ 1 篇教程体(4 阶段,不计入 100),全部完成并独立验证。**
 
 02(GradientTape)+ 03(tf.function/AutoGraph)合计 20 项,占全系列五分之一,这个权重是有意为之:torch-deep-dive 的"重中之重"是 Autograd 一个类目,但 TF2 相比 PyTorch 最大的心智负担不是自动微分本身(两边概念上很像),而是"eager 代码什么时候会被悄悄 trace 成图、trace 之后哪些 Python 语义会变"——这恰好是 02+03 两个类目共同覆盖的内容。
+
+**关于 15 类的方法论说明:** dsa-deep-dive 系列试点验证过"教程体"这种新内容形态(读者动手从空文件开始敲代码、每写一段就跑一次看真实效果,而不是像 14 类那样旁观一条推理链条被讲完)之后,推广到 tensorflow-deep-dive 是这个格式第一次跨系列复用。运行环境直接沿用 00-roadmap.md 第 0 节声明的 WSL2 `~/tf-venv`(TensorFlow 2.21.0,`TF_USE_LEGACY_KERAS=1`),没有引入新环境;数据规模刻意压到几百个样本、纯 CPU 玩具量级,不依赖本系列其余知识点会用到的 GPU 专属机制,换到纯 CPU 环境同样能跑。内容设计上做了一个和 dsa-deep-dive/21"横向拼接三个独立技能(倒排索引+Trie+堆)"不同的选择——**纵向下钻**:08 类第 3 节已经讲过基于 `tf.keras.Sequential` 模型的手写训练循环,15 类退到更原始的裸 `tf.Variable` 层面从零重新搭一遍(不经过任何 Keras 模型抽象),阶段 4 再用同样的数据跑一遍 `model.fit()` 做对照,验证两条路径在数学上是同一件事——不是对 08.3 的重复,是同一机制两个抽象层级之间的显式桥接。撰写过程复用了上一路 agent 撞 API 日限额前留下的 `_scratch_stage1~4.py`/`_scratch_equiv.py` 临时脚本:逐一在 WSL2 里重新跑过,确认代码逻辑和数值结果依然成立后,把已验证的实现原样迁入正文(阶段1的等价性验证额外做了一次改写,把手填的近似梯度数字换成 `GradientTape` 现场算出的真实梯度,避免正文出现无法追溯来源的"魔法数字"),临时脚本本身不是交付物,验证通过后已清理。
 
 ---
 
@@ -106,4 +109,4 @@ SavedModel格式 HDF5(`.h5`)格式 新版`.keras`格式 `tf.train.Checkpoint` vs
 
 ---
 
-*更新:2026-07-13(13篇知识点 + 14号进阶深度追加共5案例,全部完成并独立验证)*
+*更新:2026-07-24(13篇知识点 + 14号进阶深度追加共5案例 + 15号教程体"从零搭一个迷你自定义训练循环"共4阶段,全部完成并独立验证)*
