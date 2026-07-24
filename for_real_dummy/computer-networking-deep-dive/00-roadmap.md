@@ -60,8 +60,11 @@
 | 11 | V 现代网络与工程场景 | 网络编程与IO模型 | [11-network-programming-and-io-models.md](11-network-programming-and-io-models.md) | 7 | ✅ 已完成(5个`.venv`代码块通过,1点[KP6]为`python-wsl2`标记[Windows loopback无法复现真实背压阻塞,WSL2已单独验证],1点[KP7]为真实tcpdump抓包逐行解读,不含代码块;[KP5]附WSL2 strace真实系统调用证据) |
 | 12 | V | 现代网络专题 | [12-modern-networking-topics.md](12-modern-networking-topics.md) | 6 | ✅ 已完成(5个`.venv`代码块通过,1点[KP6]为`python-wsl2`标记[真实network namespace+veth pair隔离与跨namespace TCP通信,WSL2已单独验证];KP2/KP4/KP6均按边界声明交叉引用而非重复推导。板块V全部完成,12个分类文件全部完成) |
 | 13 | 收尾 | 模拟终面capstone | [13-mock-interview-capstone.md](13-mock-interview-capstone.md) | —(不计入合计) | ✅ 已完成(连接池打满引发P99延迟陡增,1个`.venv`代码块通过[独立重跑4次确认稳定],跨04/05/06/11共4个分类文件5处知识点,覆盖5条追问轴线) |
+| 14 | 收尾 | 手把手实战:从零搭一个迷你HTTP服务器 | [14-build-a-mini-http-server.md](14-build-a-mini-http-server.md) | 4阶段(不计入合计) | ✅ 已完成(5个`.venv`代码块独立通过;串联04类知识点7 socket编程基础→接连接解析请求行、07类KP1/KP2/KP7 HTTP协议格式与Keep-Alive→路由与持久连接、05类知识点7 TCP字节流粘包根源→Content-Length正确性,四阶段组装成能被标准库`http.client`真实连上的迷你服务器,只连`127.0.0.1`+端口0自动分配,不依赖写死端口、不访问外部网络。阶段3现场真实复现"body长度不同导致粘包错位"这个bug,不是空谈Content-Length重要性) |
 
-**目标合计:约 80 个知识点,12 个分类文件 + 1 篇模拟终面 capstone。** 精确数字以全库自查阶段的逐文件核对为准。
+**目标合计:约 80 个知识点,12 个分类文件 + 1 篇模拟终面 capstone + 1 篇教程体(4 阶段,不计入合计)。** 精确数字以全库自查阶段的逐文件核对为准。
+
+**关于 14 类的方法论说明:** "教程体"格式最早在 [dsa-deep-dive/21-build-a-mini-search-engine.md](../dsa-deep-dive/21-build-a-mini-search-engine.md) 试点验证,这是推广到本系列的落地——区别于 13 类模拟终面capstone"读者旁观、跟着推理链条走"的叙事体,这一篇要求读者从空文件开始亲手敲代码、每写一段就跑一次看到真实字节收发。刻意不用 `http.server`/Flask 等现成框架,因为框架恰好把"怎么从原始字节解析出 HTTP 请求"这一步封装隐藏了,这正是本篇要拆开讲的部分。是否继续推广到本系列其余知识点或其他系列,留给后续单独决定。
 
 ---
 
